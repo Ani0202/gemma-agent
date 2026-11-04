@@ -57,8 +57,8 @@ each correction in `ops/journal.md`.
   (`tests/`, `conftest.py`, `pytest.ini`, `setup.cfg`, `pyproject.toml`). Then the hidden
   `test_patch` is applied and `python3 -m pytest` must exit 0.
 - **12 hours total**, including sandbox setup and vLLM startup, with tasks run sequentially.
-  Going over reportedly errors the whole submission. **[verify]** the current host ruling on
-  scoring unfinished tasks as 0. The default 60 min per task would blow the budget; about 5–6
+  Going over reportedly errors the whole submission. No official ruling on the overrun
+  outcome (see RULES_FINDINGS.md); we assume worst case. The default 60 min per task would blow the budget; about 5–6
   minutes per task fits.
 - **[verify]** whether the private LB uses multiple runs to reduce variance (there's an open
   discussion thread).
@@ -110,7 +110,7 @@ See docs/RULES_FINDINGS.md. Still [verify] (official pages unreadable by tooling
 
 ## Official-source update (2026-11-04; see docs/RULES_FINDINGS.md, decision 004-002-001)
 - **No repo overlap:** none of the training repos appear in the hidden test set (staff, thread 747248); all hidden tasks validate 100% with the gold patch. This supersedes the "[verify] hidden set composition" note above: generalize to unseen repos.
-- **Timeout:** no partial credit for unfinished tasks (staff, thread 749597); an overrun is a failed submission. Supersedes the 12h [verify].
+- **Timeout:** no official ruling on overrun outcome; staff (thread 749597) only said setting unfinished tasks to 0 "could lead to inconsistent results" and they'd look for other ways. Third-party reports: overrun fails the submission. We assume worst case. See RULES_FINDINGS.md.
 - **Timeline:** entry/merge deadline Nov 25; final deadline Dec 2 23:59 UTC.
 - **Prizes:** main $37k/$18k/$10k; E2B/E4B bonus $10k; separate **Paper Submission Award $35k** (competition `gemma-4-developer-agent-paper`, deadline Nov 12 23:59 UTC; Aniket decides whether to enter, escalation E2).
 - Private-LB multiple runs: unknown; plan for one run.

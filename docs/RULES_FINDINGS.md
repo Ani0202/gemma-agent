@@ -13,8 +13,11 @@ Sources: Kaggle CLI (`kaggle competitions pages list --content --format json gem
     "Competition Use and Commercial Apache 2.0". §2.4.b forbids giving Competition Data to non-participants.
     Hosted LLM APIs: OPEN (thread 755542, no staff answer). Practice: no new third-party services for task data.
 (c) **Scorer timeout.** Evaluation page: 12 h covers all tasks incl. sandbox setup, excludes validation.
-    Staff (Ryan Holbrook, thread 749597, 2026-10-15) declined to score unfinished tasks as 0. No partial credit:
-    treat overrun as a failed submission. 11 h bound and p90 timing rule stay.
+    Staff (Ryan Holbrook, thread 749597, 2026-10-15): naively setting unfinished tasks to 0 "could lead to
+    inconsistent results on the public and private leaderboards"; he would "try to think of other ways" to let
+    teams use the 12 hours better. That is NOT a ruling on the overrun outcome. Third-party reports say an overrun
+    fails the whole submission. **No official ruling on overrun outcome; we assume worst case (failed submission).**
+    11 h bound and p90 timing rule stay. (Corrects dec 004(c), per dec 008.)
 (d) **No repo overlap.** Staff (Ryan Holbrook, thread 747248, 2026-10-09): none of the training-task repos are in
     the test set; every hidden task validates 100% with the gold patch. Generalization to unseen repos is the game.
 (e) **Private LB multiple runs:** no staff answer (thread 754295). Plan for a single run.

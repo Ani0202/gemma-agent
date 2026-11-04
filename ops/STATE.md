@@ -1,4 +1,4 @@
-# STATE (2026-11-04, cycle 16 / Phase 0)
+# STATE (2026-11-04, cycle 20 (dec 008 done: overrun doc fix) / Phase 0)
 Best bundles: none validated. v000 packed + static PASS + codex static OK (repo SHA a12f0b7):
  31b dist/31b-v000.zip sha256=4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161
  e4b dist/e4b-v000.zip sha256=cc647bfb28bc6d2db0e3ec816df084f23a91230786d8fea177e2d63d2a6940e2
