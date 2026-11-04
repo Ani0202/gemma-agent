@@ -8,3 +8,5 @@ Owner GPU policy (decision 001): Kaggle first; spot + cheapest; requests <=$10; 
 Open: spot rates still null (on-demand ceilings recorded: l4x1 0.85, l4x2 2.00, l4x4 4.00, a100 5.03, cpu8 0.27 $/h); rules scout running -> docs/RULES_FINDINGS.md, PRIOR_ART.md. GCP cumulative spend $0.
 Running jobs: none.
 Next 3: (1) review+merge codex/gold-kernel, push Kaggle CPU gold-calibration kernel, fetch output -> clean list+splits; (2) E4B smoke+timing kernel (L4x4) per plan 001; (3) verify GCP spot rates. Data downloaded+flattened (snapshots 129, wheels 124). GCP spend $0.
+GCP quota (dec 003): 1 GPU total, no A100; only l4x1 spot + cpu8 usable; l4x2/l4x4/a100 marked "unavailable" in config/gpu_profiles.json. bin/gpu does not read that flag (my edit to it was blocked) but all rates are null so it refuses every profile anyway. Multi-GPU -> Kaggle.
+OPEN (Director reminder, due 2026-11-06T23:02Z): Director sends Aniket the GCP quota re-request line (GPUs all regions=2 then 4; preemptible L4 us-central1=4). Keep until a decision marks done.

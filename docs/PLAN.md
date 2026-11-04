@@ -26,7 +26,7 @@ Follow `docs/KICKOFF.md`.
 ## P2: Post-training (Nov 12–25)
 - Collect trajectories on dev tasks (never holdout).
 - Use rejection-sampling SFT, plus scripted trajectories built from the reference patches.
-- Train LoRA for E4B first, then 31B on an A100.
+- LoRA: no A100 on GCP (decision 003). Cost out E4B LoRA on Kaggle L4x4 or GCP l4x1 spot, and whether 31B LoRA is feasible at all, in a report before Phase 2.
 - Run 1–2 rounds of expert iteration.
 - Ship only if it wins paired on dev **and** holdout, in the exact vLLM base.
 
@@ -48,7 +48,7 @@ Follow `docs/KICKOFF.md`.
 | CPU x86 VM for gold calibration and Phase-2 checks | $5 |
 | E4B on 1×L4 (spot) | $30 |
 | 31B on 4×L4 (spot) | $65 |
-| LoRA training (A100/H100 spot, few hours) | $30 |
+| LoRA training (no A100 on GCP for now; see decision 003) | TBD |
 | Reserve | $20 |
 
 Kaggle L4x4 gives about 15 h/week, reserved for exact-environment smoke tests and timing.
