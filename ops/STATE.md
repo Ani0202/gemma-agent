@@ -1,7 +1,9 @@
-# STATE (2026-11-04, cycle 1 / Phase 0)
-Best bundles: none yet (31B v000, E4B v000 not built).
-Env: this VM is **x86_64** (not ARM as PLAN assumed), 106G free, 11G RAM (~1G free + cache). kaggle/gcloud/codex/jq/tmux all present. GCP project gemma-agent-839566, zone us-central1-a.
-Done: step 1 (env); step 2 partial: data/raw/{HARNESS_README.md,tasks.jsonl,docker/} downloaded; docs/HARNESS_NOTES.md written.
-Running jobs: none. GPU spend $0. Kaggle quota used 0h.
-Open: gpu_profiles.json rates null (need verified rates); COMPLIANCE.md not started; rules pages not yet read; 12B is listed as allowed.
-Next 3: (1) read rules/discussion (WebFetch/scout), fix COMPETITION.md, start COMPLIANCE.md; (2) fetch sample_submission + download snapshots/wheels; check whether sandbox runs locally on x86 (docker? pip swegemma?); (3) build 31B v000, delegate bin/pack to codex-build, report 001.
+# STATE (2026-11-04, cycle 2 / Phase 0)
+Best bundles: none validated. Drafts: bundles/31b/v000, bundles/e4b/v000 (sample submission minus dummy adapters, caps 5min/40 calls). Not packed/reviewed yet.
+Env: x86_64 VM, 106G free, 11G RAM. GCP project gemma-agent-839566, zone us-central1-a.
+Data: data/raw has HARNESS_README, tasks.jsonl, docker/, sample_submission/, sandbox/setup.py. Snapshots(129)/graphs(59)/embeddings(127)/wheels(124) NOT downloaded (decide location).
+Note: sample eval_config caps are tiny (1 min, 10 calls) - not a usable baseline.
+Running jobs: codex-pack (bin/pack + tests, branch codex/pack).
+GPU spend $0. Kaggle quota 0h.
+Open: gpu_profiles.json rates null; COMPLIANCE.md not started; rules pages unread (scout/WebFetch); is the public-best 31B config known? (need PRIOR_ART).
+Next 3: (1) review+merge codex/pack, run pack on both bundles, codex-review, report 001 (SUBMIT 31B v000); (2) rules/discussion read -> COMPETITION.md, COMPLIANCE.md; PRIOR_ART; (3) gpu profiles + $5 cpu8 request; gold calibration.
