@@ -1,0 +1,4 @@
+- Changed `bin/pack` to enforce the requested validation and limits, exclude `MANIFEST.md` from shipped bytes, and added tests and precise documentation.
+- Tests: **341 passed, 1 expected skip**. Both unchanged v000 bundles **PASS**. `git diff --check` passed.
+- Open issues: v000 requires PyYAML; harness runtime acceptance remains unverified.
+- Sandbox blocked uv cache writes; cached dependencies allowed offline testing. Nothing remains blocked. No commit created.
