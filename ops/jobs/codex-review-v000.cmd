@@ -1,0 +1,1 @@
+bin/codex-review bin/pack\,\ docs/PACK.md\,\ eval/tests\,\ and\ bundles/31b/v000\ +\ bundles/e4b/v000\ against\ data/raw/HARNESS_README.md\ bundle\ rules\ \(includes\,\ size\,\ extensions\,\ timing\ cap\ math\,\ eval_config\) 
