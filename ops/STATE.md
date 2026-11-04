@@ -1,5 +1,5 @@
 # STATE (2026-11-04, cycle 2 / Phase 0)
-Best bundles: none validated. v000 packed+PASS (bin/pack): dist/31b-v000.zip sha256=fef263b4c7ae1dd65808baf14b2248d8ac87624c8547b032f740d47b1ba09bae ; dist/e4b-v000.zip sha256=e544bd922652a02fa572968c9b6766e6f5e6200f7e98c3721265e5a411b29710. Sub-agent includes inlined (.. is blocked). Awaiting codex-review.
+Best bundles: none validated. v000 packed+PASS (bin/pack): dist/31b-v000.zip sha256=4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161 ; dist/e4b-v000.zip sha256=cc647bfb28bc6d2db0e3ec816df084f23a91230786d8fea177e2d63d2a6940e2. Sub-agent includes inlined (.. is blocked). Awaiting codex-review.
 Env: x86_64 VM, 106G free, 11G RAM. GCP project gemma-agent-839566, zone us-central1-a.
 Data: data/raw has HARNESS_README, tasks.jsonl, docker/, sample_submission/, sandbox/setup.py. Snapshots(129)/graphs(59)/embeddings(127)/wheels(124) NOT downloaded (decide location).
 Note: sample eval_config caps are tiny (1 min, 10 calls) - not a usable baseline.
@@ -18,3 +18,5 @@ Codex pack-hardening handoff (2026-11-04T22:28Z):
 - No zip rebuilt, evaluation run, GPU/cloud spend or submission. Existing zip hashes above remain unchanged.
 - Next: Builder review of bin/pack, eval/tests/test_pack.py and docs/PACK.md; wrapper commits; harness compilation/runtime checks remain separate.
 - Source review/README read from main checkout because this worktree has an empty review file and no data/raw directory.
+
+[cycle 5] pack-harden merged (a12f0b7), v000 zips re-packed (shas above, current). Next: final codex-review of re-packed bundles, report 001, rules/COMPLIANCE reading.
