@@ -28,6 +28,8 @@ Follow `docs/KICKOFF.md`.
 - Use rejection-sampling SFT, plus scripted trajectories built from the reference patches.
 - LoRA: no A100 on GCP (decision 003). Cost out E4B LoRA on Kaggle L4x4 or GCP l4x1 spot, and whether 31B LoRA is feasible at all, in a report before Phase 2.
 - Run 1–2 rounds of expert iteration.
+- Lever (unscheduled): open-weight teacher distillation (licence must permit training other models). Needs GPUs we lack or a paid API (Aniket approval); cost out only when LoRA work starts (decision 003 item 3).
+- Ship rule (decision 004-002-001): leave-one-repo-out is mandatory for every ship decision; repo-specific prompt content is rejected; weight the four public repos equally.
 - Ship only if it wins paired on dev **and** holdout, in the exact vLLM base.
 
 **Gate 2:** for each track, decide adapter vs no adapter.

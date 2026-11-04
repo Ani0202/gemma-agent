@@ -107,3 +107,10 @@ each correction in `ops/journal.md`.
 
 ## Phase 0 verification update (2026-11-04)
 See docs/RULES_FINDINGS.md. Still [verify] (official pages unreadable by tooling): 12h overrun ruling, private-LB multiple runs, pending-submission cap, E4B validator acceptance. Third-party sources agree on: 4 allowed models, 1 sub/day, notebook-output submission, hidden set likely private repos.
+
+## Official-source update (2026-11-04; see docs/RULES_FINDINGS.md, decision 004-002-001)
+- **No repo overlap:** none of the training repos appear in the hidden test set (staff, thread 747248); all hidden tasks validate 100% with the gold patch. This supersedes the "[verify] hidden set composition" note above: generalize to unseen repos.
+- **Timeout:** no partial credit for unfinished tasks (staff, thread 749597); an overrun is a failed submission. Supersedes the 12h [verify].
+- **Timeline:** entry/merge deadline Nov 25; final deadline Dec 2 23:59 UTC.
+- **Prizes:** main $37k/$18k/$10k; E2B/E4B bonus $10k; separate **Paper Submission Award $35k** (competition `gemma-4-developer-agent-paper`, deadline Nov 12 23:59 UTC; Aniket decides whether to enter, escalation E2).
+- Private-LB multiple runs: unknown; plan for one run.

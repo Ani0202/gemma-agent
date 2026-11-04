@@ -1,11 +1,24 @@
-# Rules findings (2026-11-04, scout). SECONDARY SOURCES ONLY: Kaggle pages are JS-rendered and were unreadable.
-Main source: reconscribe.com/gemma-4-developer-agent-competition-2026 (third-party). Everything is UNCONFIRMED until read on Kaggle.
+# Rules findings (2026-11-04, from OFFICIAL sources; supersedes the earlier third-party version)
+Sources: Kaggle CLI (`kaggle competitions pages list --content --format json gemma-4-developer-agent`,
+`kaggle competitions topics list/show`). Authority: Director decision ops/decisions/004-002-001-v000-baseline-runtime-gate.md.
 
-1. External data/models: allowed if public at no cost or "Reasonableness Standard". Runtime: only the chosen Gemma model, no internet. No stated ruling on LLM-generated training data (as of 17 Oct). Our Hard rule 2 is stricter; keep it. Teams <=5; merge/entry deadline Nov 25, finals Dec 2. Winners' code must be Apache-2.0 (startupgrantsindia). UNCONFIRMED.
-2. Models: 31B, 12B, E4B, E2B QAT-w4a16-ct all listed as allowed (multiple third-party sources). Bonus is E2B/E4B only (not 12B). 12B needs vLLM hf-overrides. Validator acceptance of E4B NOT proven; only our pack + starter validator cell can show it.
-3. Submission: notebook writing /kaggle/working/submission.zip; 1 submission/day, wait for previous to finish; select up to 2 finals (Kaggle auto-picks if none). Queue waits >15h reported; pending cap number unknown.
-4. 12h overrun: reportedly errors the whole submission. Staff said scoring unfinished tasks as 0 was "being reconsidered" (early Oct). No final ruling. Keep 11h cap.
-5. Hidden set: ~120 tasks "from private repositories", split evenly public/private LB. Likely not the 4 public repos -> do leave-one-repo-out. Low-medium confidence.
-6. Private LB multiple runs: unknown (open thread). Plan for a single run.
+(a) **LLM-generated training data.** Staff (Ashley Oldacre, thread 742807, 2026-09-29): external-model outputs
+    are usable if the model's own licence terms allow it and the result doesn't conflict with the competition
+    licence (winner licence OSI-approved, e.g. Apache-2.0). Claude/GPT/Codex terms forbid training competing
+    models, so Hard rule 2 stays. Permissively licensed open-weight teachers whose licence allows training
+    other models are rules-legal.
+(b) **External data/models.** Rules §2.6: allowed if publicly available and equally accessible at no/minimal
+    cost (Reasonableness Standard). Runtime limited to the four QAT-w4a16-ct Gemma 4 variants, same model for
+    every agent, PEFT LoRA in adapters/, harness tools only. L4 sessions have no internet. Data licence:
+    "Competition Use and Commercial Apache 2.0". §2.4.b forbids giving Competition Data to non-participants.
+    Hosted LLM APIs: OPEN (thread 755542, no staff answer). Practice: no new third-party services for task data.
+(c) **Scorer timeout.** Evaluation page: 12 h covers all tasks incl. sandbox setup, excludes validation.
+    Staff (Ryan Holbrook, thread 749597, 2026-10-15) declined to score unfinished tasks as 0. No partial credit:
+    treat overrun as a failed submission. 11 h bound and p90 timing rule stay.
+(d) **No repo overlap.** Staff (Ryan Holbrook, thread 747248, 2026-10-09): none of the training-task repos are in
+    the test set; every hidden task validates 100% with the gold patch. Generalization to unseen repos is the game.
+(e) **Private LB multiple runs:** no staff answer (thread 754295). Plan for a single run.
+(f) **Paper track:** separate competition `gemma-4-developer-agent-paper`, $35,000 Paper Submission Award,
+    deadline Nov 12 2026 23:59 UTC (Timeline page). Escalated to Aniket (E2); no drafting until a decision.
 
-Follow-ups needing a browser/human: Rules and Data tabs; threads on multiple runs, unfinished tasks, LLM-data; starter validator cell for E4B.
+Still unverified: E4B validator acceptance (needs our pack + starter validator cell), pending-submission cap.
