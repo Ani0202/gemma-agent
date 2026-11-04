@@ -18,3 +18,4 @@
 >>>>>>> codex/gold-kernel
 2026-11-04T23:25Z | merged codex gold-kernel; pushed Kaggle CPU kernel aniket0202/gemma-gold-patch-calibration (running) | eval/kaggle/
 2026-11-04T23:30Z | gold kernel v1 failed (wheel install, filename +cu128 fix missing); fixed per starter, pushed v2 | eval/kaggle/gold_calibration.py
+2026-11-04T23:35Z | gold kernel v2 failed (cp312 wheels on py3.13 CPU image); v3 installs pure wheels only | eval/kaggle/gold_calibration.py

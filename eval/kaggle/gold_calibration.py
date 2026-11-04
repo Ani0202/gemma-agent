@@ -127,7 +127,8 @@ def install_harness():
     staged = Path('/tmp/wheelhouse')
     staged.mkdir(parents=True, exist_ok=True)
     for w in WHEELHOUSE.glob('*.whl'):
-        if 'cutlass' in w.name.lower():
+        # CPU image is Python 3.13; wheelhouse binaries are cp312, so take pure wheels only.
+        if 'cutlass' in w.name.lower() or not w.name.endswith('-none-any.whl'):
             continue
         # Kaggle dataset upload strips '+' from local version tags (e.g. cu128).
         name = w.name.replace('cu128', '+cu128') if 'cu128' in w.name and '+' not in w.name else w.name
