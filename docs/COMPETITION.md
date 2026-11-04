@@ -104,3 +104,6 @@ each correction in `ops/journal.md`.
   and one account per person.
 - Winners must license their code under Apache-2.0 or an OSI license and provide reproducible code
   plus a write-up.
+
+## Phase 0 verification update (2026-11-04)
+See docs/RULES_FINDINGS.md. Still [verify] (official pages unreadable by tooling): 12h overrun ruling, private-LB multiple runs, pending-submission cap, E4B validator acceptance. Third-party sources agree on: 4 allowed models, 1 sub/day, notebook-output submission, hidden set likely private repos.

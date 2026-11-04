@@ -7,3 +7,10 @@ we use them.
 - Competition Data never leaves our VMs, Kaggle, and the coding tools. `data/` and `runs/` are
   gitignored.
 - One Kaggle account (Aniket's). No private sharing.
+
+## Rules status (2026-11-04) — see docs/RULES_FINDINGS.md (secondary sources, UNCONFIRMED)
+- External data/models: allowed if public/free or "Reasonableness Standard". No external data used yet; log each source here BEFORE use.
+- LLM-generated training data: no official ruling found; we still forbid Claude/GPT/proprietary outputs as training targets (Hard rule 2).
+- Reused code: only with a verified Apache-2.0/MIT LICENSE file + docs/ATTRIBUTION.md entry. Unlicensed repos (jwj1342, sagarml4949): ideas only.
+- Winners must supply Apache-2.0 code/docs (third-party report): keep bundle contents ours or Apache/MIT.
+- TODO (needs browser/human): read official Rules tab + threads on multiple runs, unfinished tasks, LLM data.
