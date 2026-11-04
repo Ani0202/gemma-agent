@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import inspect
@@ -123,12 +124,28 @@ def install_harness():
         return
     except ImportError:
         pass
-    wheels = sorted(str(p) for p in WHEELHOUSE.glob('*.whl') if 'cutlass' not in p.name.lower())
+    staged = Path('/tmp/wheelhouse')
+    staged.mkdir(parents=True, exist_ok=True)
+    for w in WHEELHOUSE.glob('*.whl'):
+        if 'cutlass' in w.name.lower():
+            continue
+        # Kaggle dataset upload strips '+' from local version tags (e.g. cu128).
+        name = w.name.replace('cu128', '+cu128') if 'cu128' in w.name and '+' not in w.name else w.name
+        target = staged / name
+        if not target.exists():
+            try:
+                os.symlink(w, target)
+            except OSError:
+                shutil.copyfile(w, target)
+    wheels = sorted(str(p) for p in staged.glob('*.whl'))
     if not wheels:
         raise RuntimeError('Harness unavailable; attach metric/gemma-4-developer-agent-wheelhouse')
-    subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-index', '--no-deps',
-                    '--disable-pip-version-check', *wheels], check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '--no-index', '--no-deps',
+                           '--force-reinstall', '--disable-pip-version-check', *wheels],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if proc.returncode:
+        # pip diagnostics only (no task data); keep the tail for debugging.
+        raise RuntimeError('wheel install failed: ' + proc.stderr[-1500:].replace(str(WHEELHOUSE), '<wh>'))
 
 
 def choose_sandbox():
