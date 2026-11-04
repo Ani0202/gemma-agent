@@ -1,0 +1,12 @@
+# Harness notes (from data/raw/HARNESS_README.md, read 2026-11-04)
+- Tools: run_command (5k char out cap, 300s cmd timeout), read_file (<=150 lines/10k chars), edit_file(old_string,new_string,allow_multiple), write_file, submit_patch (free, ends loop), get_status (free), get_code_neighbors, search_similar_code, get_code_subgraph, skill tools.
+- Budgets via eval_config.yaml `evaluation:` {timeout_seconds,max_tool_calls,max_time_minutes,max_turns}. Defaults 60 min / 100 calls(inference.py) / 500 turns. Setup time is NOT counted in the agent budget, but the 12h total includes it.
+- Compaction: interval 15, token_threshold 14336, retention 5. Caching min_tokens 2048.
+- Nudges: max 3 consecutive; non-empty source diff is graded even without submit_patch (git add -N . + git diff vs _swegemma_baseline; test/config files stripped).
+- Phase 2: fresh container, agent patch (4-pass apply), reset tests, apply test_patch, pytest exit 0; 300s timeout.
+- Gen config: thinking_budget 0..32768 (default 4096); max_output_tokens <=32768 (default 16384). With LoRA omit thinking_level; use include_thoughts + thinking_budget.
+- vLLM scorer: TP=4, gpu_mem_util 0.90, max_model_len 32768, gemma4 tool/reasoning parsers; LoRA: max_lora_rank from adapters.
+- Limits: <3GiB unpacked; ext whitelist yaml/yml/md/txt/py/json/safetensors.
+- Local CLI: `swegemma eval --tasks --snapshots-dir --submission-dir --results-dir --sandbox docker|subprocess --concurrency N`.
+- Traps: tool_call truncation on big edits; scratch files in /tmp; don't touch pytest.ini/conftest.py.
+- Model list in README: 31b, 12b, e4b, e2b qat-w4a16-ct all permitted (12B is allowed - consider as a middle track; verify with validator).
