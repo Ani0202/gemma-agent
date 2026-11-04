@@ -4,3 +4,4 @@
 2026-11-04T22:30Z | codex-review v000: 3 blocking (pack validation x2, /tmp rule in prompts); prompts fixed in 31b/e4b v000 (needs re-pack), codex-build pack-harden launched | ops/codex/review-20261104T222145.md
 2026-11-04T22:28Z | Codex hardened pack schema/structural limits and shipped-byte accounting; offline tests 341 passed, 1 skipped; both v000 PASS | bin/pack, eval/tests/test_pack.py, docs/PACK.md
 2026-11-04T22:40Z | merged pack-harden, re-packed v000 zips (4a23e14a.., cc647bfb..) | bundles/*/v000/MANIFEST.md
+22:35 | launched review-v000; spot-rate lookup inconclusive | ops/STATE.md

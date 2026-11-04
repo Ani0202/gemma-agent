@@ -20,3 +20,5 @@ Codex pack-hardening handoff (2026-11-04T22:28Z):
 - Source review/README read from main checkout because this worktree has an empty review file and no data/raw directory.
 
 [cycle 5] pack-harden merged (a12f0b7), v000 zips re-packed (shas above, current). Next: final codex-review of re-packed bundles, report 001, rules/COMPLIANCE reading.
+
+[cycle 6] Running: review-v000 (codex-review of re-packed bundles). GCP cumulative spend $0. Spot rates NOT filled: web search gave no verified spot numbers (on-demand g2-standard-48 ~ $4.00/h unverified); need cloud pricing page fetch/gcloud SKU lookup. Next: read review -> fix -> report 001; rules reading; rates.
