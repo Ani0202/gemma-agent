@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Director-only: record a decision. Usage:  bin/decide <item-path> <<'EOF' ... EOF   (decision text on stdin)
+# Validates the 5-line header, writes ops/decisions/NNN-<item>.md, applies GPU allowance (capped),
+# sends escalation/digest, and mails the Builder.
+set -euo pipefail
+cd "$(dirname "$0")/.."; source ./config.env
+[ "${GEMMA_ROLE:-}" = "director" ] || { echo "REFUSED: only the Director may record decisions"; exit 3; }
+item=${1:?item path}; text=$(cat)
+for h in DECISION SUBMIT GPU_ALLOWANCE ESCALATE DIGEST; do
+  echo "$text" | grep -q "^$h:" || { echo "REFUSED: missing header line '$h:'"; exit 4; }
+done
+echo "$text" | head -1 | grep -qE '^DECISION: (approve|approve-with-changes|reject|need-info)' || { echo "REFUSED: first line must be DECISION: ..."; exit 4; }
+mkdir -p ops/decisions ops/escalations
+n=$(( $(ls ops/decisions | wc -l) + 1 ))
+dec="ops/decisions/$(printf %03d "$n")-$(basename "$item" .md).md"
+printf '%s\n' "$text" > "$dec"
+g=$(echo "$text" | grep -m1 '^GPU_ALLOWANCE:' | sed -nE 's/^GPU_ALLOWANCE:[[:space:]]*\+\$?([0-9]+(\.[0-9]+)?).*/\1/p')
+if [ -n "$g" ]; then
+  python3 - "$g" "$GPU_HARD_CAP_USD" <<'PY'
+import sys,pathlib
+p=pathlib.Path("ops/budget/allowance_usd"); cur=float(p.read_text().strip() or 0)
+new=min(cur+float(sys.argv[1]), float(sys.argv[2])); p.write_text(f"{new:.2f}\n"); print(f"GPU allowance {cur:.2f} -> {new:.2f}")
+PY
+fi
+e=$(echo "$text" | grep -m1 '^ESCALATE:' | sed -E 's/^ESCALATE:[[:space:]]*//')
+if [ -n "$e" ] && [ "$e" != "none" ]; then
+  en=$(( $(ls ops/escalations | grep -c '^E[0-9]' || true) + 1 ))
+  printf '# E%s (%s)\n\n%s\n\nDecision: %s\n\n## Answer\n' "$en" "$(date -u +%FT%TZ)" "$e" "$dec" > "ops/escalations/E$en.md"
+  bin/notify high "Gemma question E$en" "$e  (Answer in the gemma-director session, or reply 'E$en: <answer>' on the -reply topic)"
+  echo "escalated as E$en"
+fi
+d=$(echo "$text" | grep -m1 '^DIGEST:' | sed -E 's/^DIGEST:[[:space:]]*//')
+[ -n "$d" ] && [ "$d" != "none" ] && echo "$d" >> ops/digest_pending
+SEND_FROM=director GEMMA_ROLE=director bin/send builder "Decision ready: $dec (re: $item). Read it before anything else." >/dev/null
+echo "recorded $dec; Builder notified"

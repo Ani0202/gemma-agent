@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Budget-enforced cloud VM control (GCP). The ONLY way to create cloud compute in this project.
+
+  bin/gpu up <profile> <hours>     create the VM (refuses if over allowance/cap or rate unverified)
+  bin/gpu down                     delete the VM
+  bin/gpu status                   VM state + spend
+  bin/gpu spent                    dollars spent (conservative estimate)
+  bin/gpu ssh -- <command...>      run a command on the VM
+  bin/gpu scp <src> <dst>          copy (prefix remote paths with 'vm:')
+  bin/gpu reconcile                record VMs that vanished (preempted / max-run-duration)
+
+Cloud-side safety: every VM is created with --max-run-duration=<hours> and
+--instance-termination-action=DELETE, so it dies on time even if this machine is down.
+Ledger: ops/budget/gpu_ledger.jsonl. Rates come from config/gpu_profiles.json x 1.15 safety factor.
+"""
+import json, os, subprocess, sys, time, pathlib, math
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+CFG = json.loads((ROOT / "config/gpu_profiles.json").read_text())
+LEDGER = ROOT / "ops/budget/gpu_ledger.jsonl"
+ALLOW = ROOT / "ops/budget/allowance_usd"
+SAFETY = 1.15
+
+def env_cap():
+    for line in (ROOT / "config.env").read_text().splitlines():
+        if line.startswith("GPU_HARD_CAP_USD="):
+            return float(line.split("=", 1)[1].split()[0])
+    return 150.0
+
+def ledger():
+    if not LEDGER.exists():
+        return []
+    return [json.loads(l) for l in LEDGER.read_text().splitlines() if l.strip()]
+
+def append(ev):
+    LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    with LEDGER.open("a") as f:
+        f.write(json.dumps(ev) + "\n")
+
+def spent(now=None):
+    now = now or time.time()
+    total, open_up = 0.0, None
+    for ev in ledger():
+        if ev["event"] == "up":
+            open_up = ev
+        elif ev["event"] == "down" and open_up:
+            end = min(ev["t"], open_up["t"] + open_up["hours"] * 3600)
+            total += (end - open_up["t"]) / 3600 * open_up["rate"]
+            open_up = None
+    if open_up:
+        end = min(now, open_up["t"] + open_up["hours"] * 3600)
+        total += (end - open_up["t"]) / 3600 * open_up["rate"]
+    return total, open_up
+
+def gcloud(args, check=True, capture=True):
+    r = subprocess.run(["gcloud", *args], text=True, capture_output=capture)
+    if check and r.returncode != 0:
+        sys.exit(f"gcloud failed: {' '.join(args)}\n{r.stderr}")
+    return r
+
+def vm_exists():
+    r = gcloud(["compute", "instances", "list", f"--filter=name={CFG['instance_name']}",
+                "--format=value(name,status)"], check=False)
+    return r.stdout.strip()
+
+def up(profile, hours):
+    hours = float(hours)
+    p = CFG["profiles"].get(profile) or sys.exit(f"unknown profile {profile}")
+    if not CFG.get("zone") or (p["gpu"] and not CFG.get("image_family")):
+        sys.exit("config/gpu_profiles.json: zone/image_family not set (Builder must fill + verify)")
+    if p.get("usd_per_hour") is None or not p.get("rate_source"):
+        sys.exit(f"profile {profile}: usd_per_hour/rate_source not verified yet")
+    if hours <= 0 or hours > 12:
+        sys.exit("hours must be in (0, 12]")
+    total, open_up = spent()
+    if open_up or vm_exists():
+        sys.exit("a VM is already up; run bin/gpu down first (one VM at a time)")
+    rate = p["usd_per_hour"] * SAFETY
+    cost = rate * hours
+    allowance = float(ALLOW.read_text().strip() or 0)
+    cap = env_cap()
+    if total + cost > min(allowance, cap) + 1e-9:
+        sys.exit(f"REFUSED: spent ${total:.2f} + reserve ${cost:.2f} > allowance ${allowance:.2f} (cap ${cap:.0f}). "
+                 "Ask the Director for GPU_ALLOWANCE.")
+    args = ["compute", "instances", "create", CFG["instance_name"], f"--zone={CFG['zone']}",
+            f"--machine-type={p['machine']}", f"--boot-disk-size={p['disk_gb']}GB",
+            f"--provisioning-model={p['provisioning']}", "--instance-termination-action=DELETE",
+            f"--max-run-duration={int(math.ceil(hours * 60))}m", "--maintenance-policy=TERMINATE"]
+    if p["gpu"]:
+        args += [f"--image-family={CFG['image_family']}", f"--image-project={CFG['image_project']}",
+                 "--metadata=install-nvidia-driver=True"]
+    else:
+        args += ["--image-family=ubuntu-2204-lts", "--image-project=ubuntu-os-cloud"]
+    t = time.time()
+    gcloud(args, capture=False)
+    append({"event": "up", "t": t, "profile": profile, "hours": hours, "rate": rate,
+            "machine": p["machine"], "provisioning": p["provisioning"]})
+    print(f"UP {profile} for <= {hours}h at ~${rate:.2f}/h (reserved ${cost:.2f}); spent so far ${total:.2f}")
+
+def down():
+    if vm_exists():
+        gcloud(["compute", "instances", "delete", CFG["instance_name"], f"--zone={CFG['zone']}", "--quiet"], capture=False)
+    _, open_up = spent()
+    if open_up:
+        append({"event": "down", "t": time.time()})
+    print(f"DOWN. spent ${spent()[0]:.2f}")
+
+def reconcile():
+    _, open_up = spent()
+    if open_up and not vm_exists():
+        append({"event": "down", "t": time.time(), "note": "reconciled: VM gone"})
+        print("reconciled")
+
+def main():
+    a = sys.argv[1:]
+    if not a:
+        print(__doc__); return
+    c = a[0]
+    if c == "up" and len(a) == 3: up(a[1], a[2])
+    elif c == "down": down()
+    elif c == "spent": print(f"{spent()[0]:.2f}")
+    elif c == "status":
+        total, open_up = spent()
+        print(f"VM: {vm_exists() or 'none'}\nopen: {json.dumps(open_up) if open_up else 'none'}\n"
+              f"spent ${total:.2f} / allowance ${float(ALLOW.read_text().strip() or 0):.2f} / cap ${env_cap():.0f}")
+    elif c == "ssh":
+        cmd = a[2:] if len(a) > 1 and a[1] == "--" else a[1:]
+        sys.exit(subprocess.call(["gcloud", "compute", "ssh", CFG["instance_name"], f"--zone={CFG['zone']}",
+                                  "--command", " ".join(cmd)]))
+    elif c == "scp" and len(a) == 3:
+        f = lambda x: f"{CFG['instance_name']}:{x[3:]}" if x.startswith("vm:") else x
+        sys.exit(subprocess.call(["gcloud", "compute", "scp", "--recurse", f"--zone={CFG['zone']}", f(a[1]), f(a[2])]))
+    elif c == "reconcile": reconcile()
+    else: print(__doc__); sys.exit(2)
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Pull Aniket's replies from the ntfy reply topic. Commands: STOP, PAUSE, RESUME. Anything else
+# goes to the Director as mail (e.g. "E3: yes"); prefix with "B:" to send it to the Builder instead.
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 1
+f="$HOME/.config/gemma/ntfy.env"; [ -f "$f" ] && source "$f"
+[ -n "${NTFY_TOPIC:-}" ] || exit 0
+since=$(cat ops/.ntfy_since 2>/dev/null || echo "$(date -u +%s)")
+[ -f ops/.ntfy_since ] || echo "$since" > ops/.ntfy_since
+out=$(curl -s -m 20 "https://ntfy.sh/${NTFY_TOPIC}-reply/json?poll=1&since=$since") || exit 0
+[ -n "$out" ] || exit 0
+echo "$out" | while IFS= read -r line; do
+  ev=$(echo "$line" | jq -r '.event // ""'); [ "$ev" = "message" ] || continue
+  msg=$(echo "$line" | jq -r '.message'); t=$(echo "$line" | jq -r '.time')
+  echo "$t" > ops/.ntfy_since.tmp
+  case "$(echo "$msg" | tr '[:lower:]' '[:upper:]' | xargs)" in
+    STOP)   bin/notify default "Gemma" "Stopping the gemma system."; bin/stop >/dev/null ;;
+    PAUSE)  touch ops/PAUSE; bin/notify default "Gemma" "Paused." ;;
+    RESUME) rm -f ops/PAUSE; bin/notify default "Gemma" "Resumed." ;;
+    STATUS) bin/notify default "Gemma status" "$(head -1 ops/status | cut -c1-120) | GPU \$$(bin/gpu spent 2>/dev/null)/\$$(cat ops/budget/allowance_usd)" ;;
+    *)      case "$msg" in
+              [Bb]:*) SEND_FROM=aniket bin/send builder "Aniket (via phone): ${msg#*:}" >/dev/null ;;
+              *)      SEND_FROM=aniket bin/send director "Aniket (via phone): $msg" >/dev/null
+                      id=$(echo "$msg" | grep -oE '^E[0-9]+' || true)
+                      [ -n "$id" ] && [ -f "ops/escalations/$id.md" ] && echo "$msg" >> "ops/escalations/$id.md" ;;
+            esac
+            bin/notify min "Gemma" "Got it: ${msg:0:60}" ;;
+  esac
+done
+if [ -f ops/.ntfy_since.tmp ]; then echo $(( $(cat ops/.ntfy_since.tmp) + 1 )) > ops/.ntfy_since; rm -f ops/.ntfy_since.tmp; fi

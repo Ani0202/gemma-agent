@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Detached long-running jobs that survive the end of a Claude cycle.
+#   bin/job start <name> -- <command...>   bin/job status [name]   bin/job tail <name> [lines]   bin/job kill <name>
+# Writes ops/jobs/<name>.status: "running <pid> <start>" -> "done 0 <end>" / "failed <rc> <end>"
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 1
+mkdir -p ops/jobs
+cmd=${1:-}; shift || true
+case "$cmd" in
+  start)
+    name=$1; shift; [ "${1:-}" = "--" ] && shift
+    [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "bad name"; exit 2; }
+    if grep -q '^running' "ops/jobs/$name.status" 2>/dev/null; then echo "job $name already running"; exit 1; fi
+    printf '%q ' "$@" > "ops/jobs/$name.cmd"
+    nohup bash -c '
+      name=$1; shift
+      echo "running $$ $(date -u +%FT%TZ)" > "ops/jobs/$name.status"
+      nice -n 15 "$@" > "ops/jobs/$name.log" 2>&1; rc=$?
+      if [ $rc -eq 0 ]; then st=done; else st=failed; fi
+      echo "$st $rc $(date -u +%FT%TZ)" > "ops/jobs/$name.status"
+    ' _ "$name" "$@" >/dev/null 2>&1 &
+    sleep 1; echo "started $name: $(cat "ops/jobs/$name.status" 2>/dev/null)";;
+  status)
+    if [ -n "${1:-}" ]; then cat "ops/jobs/$1.status"; else for f in ops/jobs/*.status; do [ -e "$f" ] && echo "$(basename "$f" .status): $(cat "$f")"; done; fi;;
+  tail) tail -n "${2:-40}" "ops/jobs/$1.log";;
+  kill)
+    read -r st pid _ < "ops/jobs/$1.status"
+    [ "$st" = running ] && { pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null; echo "failed killed $(date -u +%FT%TZ)" > "ops/jobs/$1.status"; echo killed; } || echo "not running";;
+  *) echo "usage: bin/job start <name> -- <cmd...> | status [name] | tail <name> [n] | kill <name>"; exit 2;;
+esac
