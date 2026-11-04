@@ -7,5 +7,5 @@ Env: x86_64 VM. GCP project gemma-agent-839566, spend $0. Kaggle quota used 0h. 
 GCP quota (dec 003): only l4x1 spot + cpu8 usable; multi-GPU -> Kaggle.
 Rules (dec 004-002-001): docs/RULES_FINDINGS.md rewritten from official sources; no repo overlap with hidden set; LORO mandatory for ship decisions; no partial credit on timeout.
 Running jobs: gold-wait (Kaggle gold kernel v3, aniket0202/gemma-gold-patch-calibration; earlier v2 failed on wheel install, log in runs/gold-calibration is stale v2).
-Open: (1) E2 paper track ($35k, due Nov 12) awaiting Aniket; no drafting before decision. (2) Director reminder due 2026-11-06T23:02Z: GCP quota re-request line to Aniket; keep until decision marks done. (3) Hosted-LLM-API data question OPEN; no new third-party services.
+Open: (1) E2 resolved (dec 005): paper session owns paper/, do not edit; keep results/ files self-describing (schema + header line). (2) Director reminder due 2026-11-06T23:02Z: GCP quota re-request line to Aniket; keep until decision marks done. (3) Hosted-LLM-API data question OPEN; no new third-party services.
 Next 3: (1) gold output -> clean list + splits; (2) E4B smoke+timing kernel (L4x4) per plan 001; (3) report 002 with baseline SUBMIT.
