@@ -9,3 +9,4 @@
 2026-11-04T22:55Z | on-demand ceiling rates recorded in gpu_profiles.json; spot rates still unfound; rules scout launched | config/gpu_profiles.json
 2026-11-04T23:05Z | scout done: RULES_FINDINGS.md, PRIOR_ART.md written (secondary sources only) | docs/RULES_FINDINGS.md
 2026-11-04T23:15Z | report 001 written; COMPLIANCE/COMPETITION updated | ops/reports/001-v000-baseline-runtime-gate.md
+2026-11-04T23:30Z | decision 002 read; Kaggle CLI access OK; plan 001 written; dl-data job (snapshots 21.5GB + wheels) started | eval/plans/001.md

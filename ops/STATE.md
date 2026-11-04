@@ -7,4 +7,4 @@ Env: x86_64 VM, 106G free. GCP project gemma-agent-839566. Data: data/raw only; 
 Owner GPU policy (decision 001): Kaggle first; spot + cheapest; requests <=$10; allowance $0. GCP spend $0. Kaggle quota 0h.
 Open: spot rates still null (on-demand ceilings recorded: l4x1 0.85, l4x2 2.00, l4x4 4.00, a100 5.03, cpu8 0.27 $/h); rules scout running -> docs/RULES_FINDINGS.md, PRIOR_ART.md. GCP cumulative spend $0.
 Running jobs: none.
-Next 3: (1) await Director on report 001 (Kaggle access, rules read); (2) verify GCP spot rates; (3) prepare Kaggle gold-calibration+timing notebook. GCP spend $0.
+Next 3: (1) dl-data job finishes -> flatten data/raw/{snapshots,wheels}/ nested dirs; (2) gold calibration on this VM via bin/job (no docker; swegemma not installed; check pip wheels/subprocess sandbox), then splits; (3) Kaggle E4B smoke+timing per plan 001. GCP spend $0.
