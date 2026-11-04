@@ -1,7 +1,7 @@
 # 31b v000
 - parent: none (derived from official sample_submission, data/raw/sample_submission)
-- changes: dummy LoRA adapters removed; eval_config caps set to max_time_minutes=5, max_tool_calls=40, max_turns=50 (worst case 5*125+30=655 min); prompts/sampling unchanged from sample
-- git SHA / zip sha256: pending bin/pack (codex-build pack) + codex-review
+- changes: dummy LoRA adapters removed; eval_config caps set to max_time_minutes=5, max_tool_calls=40, max_turns=50 (worst case 5*125+30=655 min); sampling unchanged from sample; prompts edited after codex-review: scratch files only in /tmp, submit_patch last after diff check
+- git SHA / zip sha256: repo SHA a12f0b7 (packed); codex-review 2026-11-04 passed static checks; runtime/timing check on harness still pending
 - status: UNVALIDATED, not yet proposed for submission
 
 zip sha256 (re-packed after pack-harden, repo SHA a12f0b7): 4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161

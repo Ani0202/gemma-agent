@@ -1440,3 +1440,492 @@ total 8
 -rw------- 1 ubuntu ubuntu 4083 Nov  4 22:29 31b-v000.zip
 -rw------- 1 ubuntu ubuntu 4082 Nov  4 22:29 e4b-v000.zip
 
+codex
+The source changes address the prior static-validation and prompt findings. I’m checking that the ZIP contents match those sources. The declared budget is 655 minutes, but runtime enforcement and concurrency-1 timing remain unverified.
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import hashlib, pathlib, zipfile, stat, runpy
+p=runpy.run_path('bin/pack')
+for track in ('31b','e4b'):
+ root=pathlib.Path('bundles')/track/'v000'; bundle=p['Bundle'](root); size=bundle.validate()
+ zpath=pathlib.Path('dist')/f'{track}-v000.zip'
+ with zipfile.ZipFile(zpath) as z:
+  names=z.namelist(); expected={f.relative_to(root).as_posix() for f in bundle.files}
+  assert len(names)==len(set(names)) and set(names)==expected
+  assert z.testzip() is None
+  for i in z.infolist():
+   assert not stat.S_ISLNK(i.external_attr>>16)
+   assert '..' not in pathlib.PurePosixPath(i.filename).parts
+   assert z.read(i)==(root/i.filename).read_bytes()
+  print(track, 'PASS', 'files=',len(names),'unpacked=',size,'zip=',zpath.stat().st_size,'sha256=',hashlib.sha256(zpath.read_bytes()).hexdigest())
+  print('members:', ', '.join(names))
+PY" in /home/ubuntu/work/gemma
+ exited 1 in 0ms:
+Traceback (most recent call last):
+  File "<stdin>", line 7, in <module>
+  File "/usr/lib/python3.12/pathlib.py", line 682, in relative_to
+    raise ValueError(f"{str(self)!r} is not in the subpath of {str(other)!r}")
+ValueError: '/home/ubuntu/work/gemma/bundles/31b/v000/agent.yaml' is not in the subpath of 'bundles/31b/v000'
+
+exec
+/bin/bash -lc "nl -ba eval/tests/test_pack.py | sed -n '315,590p'; nl -ba CLAUDE.md | sed -n '118,145p'; rg --files -g '"'!data/**'"' -g '"'!ops/decisions/**'"' -g '"'!ops/logs/**'"' -g '"'!ops/mail/**'"' -g '"'!*.log'"' -g '"'!DIRECTOR.md'"' | head -100" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   315	
+   316	
+   317	def json_agent(bundle, **fields):
+   318	    import json
+   319	    add(bundle, 'agent.yaml', json.dumps(agent_config(**fields)))
+   320	
+   321	
+   322	@pytest.mark.parametrize('value', [None, '', ' ', 12, [], {}])
+   323	def test_agent_name_required(bundle, value):
+   324	    import json
+   325	    config = agent_config()
+   326	    if value is not None:
+   327	        config['name'] = value
+   328	    else:
+   329	        del config['name']
+   330	    add(bundle, 'agent.yaml', json.dumps(config))
+   331	    invalid(bundle, 'name required')
+   332	
+   333	
+   334	@pytest.mark.parametrize('location', ['tools', 'sub_agents'])
+   335	def test_nested_name_required(bundle, location):
+   336	    json_agent(bundle, **{location: [dict(model=MODEL)]})
+   337	    invalid(bundle, 'name required')
+   338	
+   339	
+   340	def test_harness_registry(bundle):
+   341	    assert pack.TOOLS == {'run_command', 'submit_patch', 'get_status', 'read_file',
+   342	                          'edit_file', 'write_file', 'get_code_neighbors',
+   343	                          'search_similar_code', 'get_code_subgraph'}
+   344	    json_agent(bundle, tools=sorted(pack.TOOLS))
+   345	    assert pack.Bundle(bundle).validate()
+   346	
+   347	
+   348	@pytest.mark.parametrize('tools', [['unknown'], ['load_skill'], {}, 'run_command', [42],
+   349	                                   [{'name': 'run_command'}]])
+   350	def test_bad_tools(bundle, tools):
+   351	    json_agent(bundle, tools=tools)
+   352	    invalid(bundle, 'tool|model')
+   353	
+   354	
+   355	@pytest.mark.parametrize('field', ['http_options', 'tools', 'system_instruction',
+   356	                                 'safety_settings', 'response_schema', 'unknown'])
+   357	def test_forbidden_generation_fields(bundle, field):
+   358	    json_agent(bundle, generate_content_config={field: None})
+   359	    invalid(bundle, 'generate_content_config')
+   360	
+   361	
+   362	@pytest.mark.parametrize('config', [[], 'bad', 4])
+   363	def test_generation_mapping(bundle, config):
+   364	    json_agent(bundle, generate_content_config=config)
+   365	    invalid(bundle, 'must be a mapping')
+   366	
+   367	
+   368	@pytest.mark.parametrize('skills', [['../outside'], ['/tmp'], [r'a\..\outside'],
+   369	                                    [r'C:\outside'], ['bad\0path'], [42], 'skills', {}])
+   370	def test_unsafe_skills(bundle, skills):
+   371	    json_agent(bundle, skills=skills)
+   372	    invalid(bundle, 'path|skills')
+   373	
+   374	
+   375	def test_missing_skill(bundle):
+   376	    json_agent(bundle, skills=['skills/example'])
+   377	    invalid(bundle, 'missing skill')
+   378	    (bundle / 'skills/example').mkdir(parents=True)
+   379	    invalid(bundle, 'SKILL.md')
+   380	
+   381	
+   382	def test_skill_count_boundary(bundle):
+   383	    add(bundle, 'skills/example/SKILL.md', '# Example')
+   384	    json_agent(bundle, skills=['skills/example'] * 1000)
+   385	    assert pack.Bundle(bundle).validate()
+   386	    json_agent(bundle, skills=['skills/example'] * 1001)
+   387	    invalid(bundle, 'max_skills')
+   388	
+   389	
+   390	def test_skill_size_boundary(bundle, monkeypatch):
+   391	    add(bundle, 'skills/example/SKILL.md', '# Example')
+   392	    resource = add(bundle, 'skills/example/resources/help.txt', 'help')
+   393	    size = len('# Examplehelp')
+   394	    monkeypatch.setattr(pack, 'MAX_SKILL_BYTES', size)
+   395	    json_agent(bundle, skills=['skills/example'])
+   396	    assert pack.Bundle(bundle).validate()
+   397	    resource.write_text('help!')
+   398	    invalid(bundle, 'skill size')
+   399	
+   400	
+   401	@pytest.mark.parametrize('key', ['timeout_seconds', 'max_tool_calls', 'max_turns'])
+   402	@pytest.mark.parametrize('value', ['0', '-1', 'true', '1.5', '"1"', 'null', '[]', '{}'])
+   403	def test_eval_positive_integer_invalid(bundle, key, value):
+   404	    add(bundle, 'eval_config.yaml', f'evaluation:\n  max_time_minutes: 5\n  {key}: {value}\n')
+   405	    invalid(bundle, key)
+   406	
+   407	
+   408	def test_eval_positive_integer_boundary(bundle):
+   409	    add(bundle, 'eval_config.yaml', 'evaluation:\n  max_time_minutes: 5\n'
+   410	        '  timeout_seconds: 1\n  max_tool_calls: 1\n  max_turns: 1\n')
+   411	    assert pack.Bundle(bundle).validate()
+   412	
+   413	
+   414	@pytest.mark.parametrize('value', [0, 501, True, 1.5, '2', None])
+   415	def test_loop_iterations_invalid(bundle, value):
+   416	    json_agent(bundle, agent_class='LoopAgent', max_iterations=value)
+   417	    invalid(bundle, 'max_iterations')
+   418	
+   419	
+   420	@pytest.mark.parametrize('value', [1, 500])
+   421	def test_loop_iterations_boundary(bundle, value):
+   422	    json_agent(bundle, agent_class='LoopAgent', max_iterations=value)
+   423	    assert pack.Bundle(bundle).validate()
+   424	
+   425	
+   426	def test_loop_default(bundle):
+   427	    json_agent(bundle, agent_class='LoopAgent')
+   428	    assert pack.Bundle(bundle).validate()
+   429	
+   430	
+   431	@pytest.mark.parametrize('field', ['sub_agents', 'tools'])
+   432	def test_agent_count_boundary_with_repeated_reference(bundle, field):
+   433	    import json
+   434	    add(bundle, 'child.yaml', json.dumps(agent_config(instruction='x')))
+   435	    reference = {'config_path': 'child.yaml'}
+   436	    if field == 'tools':
+   437	        reference = {'agent_tool': reference}
+   438	    json_agent(bundle, **{field: [reference] * 499})
+   439	    validator = pack.Bundle(bundle)
+   440	    assert validator.validate()
+   441	    assert validator.agent_count == 500
+   442	    json_agent(bundle, **{field: [reference] * 500})
+   443	    invalid(bundle, 'max_agents')
+   444	
+   445	
+   446	@pytest.mark.parametrize('field', ['sub_agents', 'tools'])
+   447	def test_agent_depth_boundary(bundle, field):
+   448	    import json
+   449	
+   450	    def tree(depth):
+   451	        value = agent_config()
+   452	        for _ in range(depth):
+   453	            child = {'agent_tool': value} if field == 'tools' else value
+   454	            value = agent_config(**{field: [child]})
+   455	        return value
+   456	
+   457	    add(bundle, 'agent.yaml', json.dumps(tree(50)))
+   458	    assert pack.Bundle(bundle).validate()
+   459	    add(bundle, 'agent.yaml', json.dumps(tree(51)))
+   460	    invalid(bundle, 'agent depth')
+   461	
+   462	
+   463	def test_referenced_agent_depth_boundary(bundle):
+   464	    import json
+   465	    for index in range(52):
+   466	        config = agent_config()
+   467	        if index < 51:
+   468	            config['sub_agents'] = [{'config_path': f'{index+1}.yaml'}]
+   469	        add(bundle, f'{index}.yaml', json.dumps(config))
+   470	    # Start at 1: fifty edges, with a separate standalone document containing no agent.
+   471	    add(bundle, '0.yaml', '{}')
+   472	    json_agent(bundle, sub_agents=[{'config_path': '2.yaml'}])
+   473	    assert pack.Bundle(bundle).validate()
+   474	    json_agent(bundle, sub_agents=[{'config_path': '1.yaml'}])
+   475	    invalid(bundle, 'agent depth')
+   476	
+   477	
+   478	def test_instruction_boundary_and_combined_fields(bundle):
+   479	    json_agent(bundle, instruction='x' * 1000000)
+   480	    assert pack.Bundle(bundle).validate()
+   481	    json_agent(bundle, instruction='x' * 1000000, global_instruction='x')
+   482	    invalid(bundle, 'instruction chars')
+   483	
+   484	
+   485	def test_total_instruction_boundary(bundle):
+   486	    import json
+   487	    add(bundle, 'child.yaml', json.dumps(agent_config(instruction='x' * 1000000)))
+   488	    json_agent(bundle, sub_agents=[{'config_path': 'child.yaml'}] * 10)
+   489	    validator = pack.Bundle(bundle)
+   490	    assert validator.validate()
+   491	    assert validator.instruction_chars == 10000000
+   492	    json_agent(bundle, instruction='x', sub_agents=[{'config_path': 'child.yaml'}] * 10)
+   493	    invalid(bundle, 'total instruction chars')
+   494	
+   495	
+   496	@pytest.mark.parametrize('constant,extra,match', [
+   497	    ('MAX_FILE_COUNT', 'extra.txt', 'max_file_count'),
+   498	    ('MAX_YAML_FILES', 'extra.yml', 'max_yaml_files'),
+   499	])
+   500	def test_file_count_boundaries(bundle, monkeypatch, constant, extra, match):
+   501	    # Exercise exact inclusive comparisons with small limits rather than 10k disk writes.
+   502	    monkeypatch.setattr(pack, constant, 2)
+   503	    assert pack.Bundle(bundle).validate()
+   504	    add(bundle, extra, '{}')
+   505	    invalid(bundle, match)
+   506	
+   507	
+   508	def test_yaml_size_boundary(bundle, monkeypatch):
+   509	    json_agent(bundle)
+   510	    size = (bundle / 'agent.yaml').stat().st_size
+   511	    monkeypatch.setattr(pack, 'MAX_YAML_BYTES', size)
+   512	    assert pack.Bundle(bundle).validate()
+   513	    with (bundle / 'agent.yaml').open('a') as stream:
+   514	        stream.write(' ')
+   515	    invalid(bundle, 'YAML size')
+   516	
+   517	
+   518	def test_cumulative_include_size_boundary(bundle, monkeypatch):
+   519	    add(bundle, 'data.txt', 'x' * 100)
+   520	    source = 'first: !include data.txt\nsecond: !include data.txt\n'
+   521	    add(bundle, 'included.yaml', source)
+   522	    size = len(source.encode()) + 200
+   523	    monkeypatch.setattr(pack, 'MAX_YAML_BYTES', size)
+   524	    assert pack.Bundle(bundle).validate()
+   525	    monkeypatch.setattr(pack, 'MAX_YAML_BYTES', size - 1)
+   526	    invalid(bundle, 'cumulative !include')
+   527	
+   528	
+   529	def test_nested_include_expansion(bundle, monkeypatch):
+   530	    add(bundle, 'data.txt', 'x' * 100)
+   531	    child = 'first: !include data.txt\nsecond: !include data.txt\n'
+   532	    add(bundle, 'child.yaml', child)
+   533	    parent = 'first: !include child.yaml\nsecond: !include child.yaml\n'
+   534	    add(bundle, 'included.yaml', parent)
+   535	    size = len(parent) + 2 * (len(child) + 200)
+   536	    monkeypatch.setattr(pack, 'MAX_YAML_BYTES', size)
+   537	    assert pack.Bundle(bundle).validate()
+   538	    monkeypatch.setattr(pack, 'MAX_YAML_BYTES', size - 1)
+   539	    invalid(bundle, 'cumulative !include')
+   540	
+   541	
+   542	def test_manifest_does_not_count_as_shipped_bytes_or_file(bundle, monkeypatch):
+   543	    current = pack.Bundle(bundle).validate()
+   544	    add(bundle, 'MANIFEST.md', 'x' * 10000)
+   545	    monkeypatch.setattr(pack, 'LIMIT', current + 1)
+   546	    monkeypatch.setattr(pack, 'MAX_FILE_COUNT', 2)
+   547	    assert pack.Bundle(bundle).validate() == current
+   548	    monkeypatch.setattr(pack, 'LIMIT', current)
+   549	    invalid(bundle, 'unpacked size')
+   550	
+   551	
+   552	def test_limit_constants():
+   553	    assert (pack.MAX_FILE_COUNT, pack.MAX_YAML_FILES, pack.MAX_YAML_BYTES,
+   554	            pack.MAX_SKILL_BYTES, pack.MAX_INSTRUCTION_CHARS,
+   555	            pack.MAX_TOTAL_INSTRUCTION_CHARS, pack.MAX_AGENTS, pack.MAX_DEPTH,
+   556	            pack.MAX_SKILLS) == (10000, 1000, 50 * 1024**2, 50 * 1024**2,
+   557	                                1000000, 10000000, 500, 50, 1000)
+   558	
+   559	
+   560	def test_existing_v000_bundles():
+   561	    if pack.yaml is None:
+   562	        pytest.skip('v000 uses multiline quoted YAML, which requires PyYAML')
+   563	    for track in ('31b', 'e4b'):
+   564	        assert pack.Bundle(SCRIPT.parent.parent / 'bundles' / track / 'v000').validate()
+   565	
+   566	
+   567	def test_instruction_include_character_boundary(bundle):
+   568	    # UTF-8 bytes and decoded character counts are deliberately different.
+   569	    add(bundle, 'prompt.txt', 'é' * 1000000)
+   570	    add(bundle, 'agent.yaml', f'name: main\nmodel: {MODEL}\ninstruction: !include prompt.txt\n')
+   571	    assert pack.Bundle(bundle).validate()
+   572	    add(bundle, 'prompt.txt', 'é' * 1000001)
+   573	    invalid(bundle, 'instruction chars')
+   574	
+   575	
+   576	def test_yaml_alias_agent_occurrences(bundle, backend):
+   577	    if pack.yaml is None:
+   578	        pytest.skip('aliases require PyYAML')
+   579	    source = f'name: main\nmodel: {MODEL}\nsub_agents:\n'
+   580	    source += f'  - &child\n    name: child\n    model: {MODEL}\n'
+   581	    source += '  - *child\n' * 498
+   582	    add(bundle, 'agent.yaml', source)
+   583	    validator = pack.Bundle(bundle)
+   584	    assert validator.validate()
+   585	    assert validator.agent_count == 500
+   586	    append(bundle, '  - *child\n')
+   587	    invalid(bundle, 'max_agents')
+   588	
+   589	
+   590	def test_standalone_reference_cycle(bundle):
+   118	- Never read, modify, restart or stop anything belonging to Etho: `~/work/etho`, its tmux sessions,
+   119	  processes, services, cron lines, Tailscale/Funnel config or ports.
+   120	- Don't install or upgrade system packages, and never use `sudo`.
+   121	- Keep at least **15 GB** of disk free at all times. Put large data on the GPU VM, not here.
+   122	- Run heavy local work through `bin/job`, which runs it at low priority, and keep RAM use under
+   123	  about 4 GB so Etho's app stays responsive.
+   124	
+   125	## Evaluation discipline
+   126	- **Calibrate first.** Apply each task's gold patch in our sandbox. Tasks that fail with the gold
+   127	  patch (a known case is about 27 fastapi tasks missing `inline_snapshot`/`dirty_equals`) are excluded
+   128	  from the clean list. Record the list and its hash.
+   129	- **Splits.** Stratify the clean tasks by repo into `dev` (for tuning) and `holdout` (ship decisions
+   130	  only, with Director approval; count every use). Freeze them in `eval/splits/` and journal the
+   131	  hashes. Never tune on holdout.
+   132	- **Generalization.** The hidden set may come from different repos than the four public ones
+   133	  (sources disagree). Before shipping, run a leave-one-repo-out check. No repo-specific prompt
+   134	  hacks.
+   135	- **Paired comparisons.** Compare on the same tasks and seeds, with k ≥ 2 samples per task where
+   136	  affordable. Report discordant pairs and an exact sign test. A swing of ±3 tasks on about 30 is
+   137	  noise.
+   138	- **Timing is a cliff.** Every bundle's `eval_config.yaml` hard caps must guarantee a worst case of
+   139	  `cap_minutes × 125 + 30` ≤ **660 minutes** (11 h). Measure real per-task wall time at
+   140	  concurrency 1 on 4×L4 (a GCP g2-standard-48 or a Kaggle L4x4). Concurrent local runs measure
+   141	  quality, not time. Keep tokens/sec per task within ~20% of scorer conditions, or use call/turn
+   142	  caps for quality runs, and record which.
+   143	- **Pre-register** every experiment in `eval/plans/NNN.md` before running it.
+   144	
+   145	## Compute and budget
+CLAUDE.md
+bin/start
+bin/kaggle-submit
+bin/install-autostart
+bin/job
+bin/hook-prompt
+bin/decide
+bin/gpu
+bin/codex-ask
+bin/status
+bin/stop
+bin/notify-poll
+bin/send
+bin/router
+bin/notify
+bin/codex-build
+bin/pack
+bin/hook-stop
+bin/session
+bin/codex-review
+ops/jobs/review-v000.status
+ops/jobs/codex-pack.cmd
+ops/jobs/codex-pack-harden.cmd
+ops/jobs/review-v000.cmd
+ops/jobs/codex-review-v000.status
+ops/jobs/codex-review-v000.cmd
+ops/jobs/codex-pack-harden.status
+ops/jobs/codex-pack.status
+ops/journal.md
+ops/digest_pending
+ops/STATE.md
+ops/status
+ops/COMPLIANCE.md
+ops/budget/kaggle.md
+ops/budget/allowance_usd
+ops/codex/build-pack.md
+ops/codex/build-pack-harden.spec
+ops/codex/build-pack.spec
+ops/codex/review-20261104T222145.md
+ops/codex/build-pack-harden.md
+ops/codex/review-20261104T223524.md
+ops/codex/build-pack.sh
+ops/codex/build-pack-harden.sh
+SETUP.md
+setup_vm.sh
+README.md
+eval/tests/test_pack.py
+AGENTS.md
+config/gpu_profiles.json
+docs/KICKOFF.md
+docs/ATTRIBUTION.md
+docs/PACK.md
+docs/COMPETITION.md
+docs/HARNESS_NOTES.md
+docs/PLAN.md
+bundles/e4b/v000/eval_config.yaml
+bundles/e4b/v000/MANIFEST.md
+bundles/e4b/v000/configs/sampling.yaml
+bundles/e4b/v000/agent.yaml
+bundles/e4b/v000/sub_agents/code_analyzer.yaml
+bundles/e4b/v000/prompts/system.md
+bundles/e4b/v000/prompts/analyzer.md
+bundles/31b/v000/eval_config.yaml
+bundles/31b/v000/MANIFEST.md
+bundles/31b/v000/configs/sampling.yaml
+bundles/31b/v000/agent.yaml
+bundles/31b/v000/sub_agents/code_analyzer.yaml
+bundles/31b/v000/prompts/system.md
+bundles/31b/v000/prompts/analyzer.md
+config.env
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import hashlib,pathlib,zipfile,stat,runpy
+p=runpy.run_path('bin/pack')
+for track in ('31b','e4b'):
+ root=(pathlib.Path('bundles')/track/'v000').resolve(); b=p['Bundle'](root); size=b.validate(); zp=pathlib.Path('dist')/f'{track}-v000.zip'
+ with zipfile.ZipFile(zp) as z:
+  names=z.namelist(); assert len(names)==len(set(names)); assert set(names)=={f.relative_to(root).as_posix() for f in b.files}; assert z.testzip() is None
+  for i in z.infolist():
+   assert stat.S_ISREG(i.external_attr>>16); assert '..' not in pathlib.PurePosixPath(i.filename).parts; assert z.read(i)==(root/i.filename).read_bytes()
+  print(track,'PASS',len(names),'files;',size,'unpacked bytes;',zp.stat().st_size,'zip bytes;',hashlib.sha256(zp.read_bytes()).hexdigest())
+ root_config=b.load(root/'agent.yaml')
+ import copy
+ for label, mutate in [('unknown tool',lambda c:c.update(tools=['not_a_harness_tool'])),('missing name',lambda c:c.pop('name')),('forbidden generation',lambda c:c.update(generate_content_config={'http_options':{}})),('unsafe skill',lambda c:c.update(skills=['../outside'])),('instruction limit',lambda c:c.update(instruction='x'*1000001))]:
+  probe=p['Bundle'](root); probe.validate(); c=copy.deepcopy(root_config); mutate(c)
+  try:
+   probe.walk(c,'probe'); probe.agent(c,'probe')
+  except p['Invalid'] as e: print('negative check rejected:',label)
+  else: raise AssertionError(label)
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+31b PASS 6 files; 6354 unpacked bytes; 4083 zip bytes; 4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161
+negative check rejected: unknown tool
+negative check rejected: missing name
+negative check rejected: forbidden generation
+negative check rejected: unsafe skill
+negative check rejected: instruction limit
+e4b PASS 6 files; 6354 unpacked bytes; 4082 zip bytes; cc647bfb28bc6d2db0e3ec816df084f23a91230786d8fea177e2d63d2a6940e2
+negative check rejected: unknown tool
+negative check rejected: missing name
+negative check rejected: forbidden generation
+negative check rejected: unsafe skill
+negative check rejected: instruction limit
+
+exec
+/bin/bash -lc 'nl -ba ops/codex/build-pack-harden.md | head -80; nl -ba docs/ATTRIBUTION.md; nl -ba ops/STATE.md | tail -12; cmp bundles/31b/v000/prompts/system.md bundles/e4b/v000/prompts/system.md' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	- Changed `bin/pack` to enforce the requested validation and limits, exclude `MANIFEST.md` from shipped bytes, and added tests and precise documentation.
+     2	- Tests: **341 passed, 1 expected skip**. Both unchanged v000 bundles **PASS**. `git diff --check` passed.
+     3	- Open issues: v000 requires PyYAML; harness runtime acceptance remains unverified.
+     4	- Sandbox blocked uv cache writes; cached dependencies allowed offline testing. Nothing remains blocked. No commit created.
+     1	# Attribution
+     2	Public code and ideas reused from competition participants (Apache-2.0 unless noted). Each entry
+     3	gives the source URL, what we reused, and the date.
+    13	
+    14	[cycle 4] codex-review done: prompts fixed (/tmp rule, submit last) -> bundles v000 edited, zips in dist/ are STALE until re-pack. Running: codex-build pack-harden. Next: merge pack-harden, re-pack + re-review, report 001.
+    15	Codex pack-hardening handoff (2026-11-04T22:28Z):
+    16	- Implemented review BLOCKING 1–2 and non-blocking 1,3 in bin/pack; docs/PACK.md defines static validation guarantees.
+    17	- Offline pack tests: 341 passed, 1 expected fallback-alias skip; both unchanged v000 bundles PASS (6057 shipped bytes each).
+    18	- No zip rebuilt, evaluation run, GPU/cloud spend or submission. Existing zip hashes above remain unchanged.
+    19	- Next: Builder review of bin/pack, eval/tests/test_pack.py and docs/PACK.md; wrapper commits; harness compilation/runtime checks remain separate.
+    20	- Source review/README read from main checkout because this worktree has an empty review file and no data/raw directory.
+    21	
+    22	[cycle 5] pack-harden merged (a12f0b7), v000 zips re-packed (shas above, current). Next: final codex-review of re-packed bundles, report 001, rules/COMPLIANCE reading.
+    23	
+    24	[cycle 6] Running: review-v000 (codex-review of re-packed bundles). GCP cumulative spend $0. Spot rates NOT filled: web search gave no verified spot numbers (on-demand g2-standard-48 ~ $4.00/h unverified); need cloud pricing page fetch/gcloud SKU lookup. Next: read review -> fix -> report 001; rules reading; rates.
+
+codex
+BLOCKING
+
+1. **Runtime budget safety remains unverified; static arithmetic passes.** Both bundles declare five minutes per task, giving `5 × 125 + 30 = 655 ≤ 660` ([31b eval_config.yaml:5](bundles/31b/v000/eval_config.yaml#L5), [e4b eval_config.yaml:5](bundles/e4b/v000/eval_config.yaml#L5)). However, pack explicitly does not prove runtime enforcement ([docs/PACK.md:70](docs/PACK.md#L70)), and the build handoff leaves harness acceptance unverified ([build-pack-harden.md:3](ops/codex/build-pack-harden.md#L3)). Before recommending SUBMIT as budget-safe, record harness compilation and concurrency-1 timing on 4×L4, including timeout cancellation, analyzer calls and fallback diff extraction. This is required by [CLAUDE.md:138](CLAUDE.md#L138).
+
+Non-blocking
+
+1. **Manifests contain stale provenance.** Both say prompts are unchanged and packaging is pending, despite the prompt fixes and recorded repack hashes ([31b MANIFEST.md:3](bundles/31b/v000/MANIFEST.md#L3), [e4b MANIFEST.md:3](bundles/e4b/v000/MANIFEST.md#L3)). Update the change summary and source SHA before proposing the artifacts.
+
+2. **Attribution is empty.** The manifests identify the official sample as the source, but [docs/ATTRIBUTION.md:1](docs/ATTRIBUTION.md#L1) contains no entry. Add its source URL and reused components.
+
+Prior findings and artifact checks
+
+- **All three prior blocking findings are fixed:** tool/name/skill/generation validation, structural limits, and `/tmp` instructions. Read-only negative probes rejected the previously accepted invalid configurations.
+- Prior non-blocking findings are also fixed: optional budget fields are checked, submission follows the diff check, and excluded manifests no longer count toward shipped size.
+- Both ZIPs match current source bytes exactly: six regular files, **6,354 unpacked bytes** each; root `agent.yaml`; no unsafe paths, symlinks, forbidden extensions or placeholders. Models match within each bundle; no adapters are referenced.
+- ZIP hashes match the manifests:
+  - 31B: `4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161`
+  - E4B: `cc647bfb28bc6d2db0e3ec816df084f23a91230786d8fea177e2d63d2a6940e2`
+
+Questions
+
+1. Is there a harness compilation/timing result outside the reviewed files that closes blocking item 1?
+
+Validation was read-only. I did not rerun the filesystem-writing pytest suite or execute the harness in this sandbox.
+tokens used
+34,013

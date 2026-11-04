@@ -5,3 +5,4 @@
 2026-11-04T22:28Z | Codex hardened pack schema/structural limits and shipped-byte accounting; offline tests 341 passed, 1 skipped; both v000 PASS | bin/pack, eval/tests/test_pack.py, docs/PACK.md
 2026-11-04T22:40Z | merged pack-harden, re-packed v000 zips (4a23e14a.., cc647bfb..) | bundles/*/v000/MANIFEST.md
 22:35 | launched review-v000; spot-rate lookup inconclusive | ops/STATE.md
+2026-11-04T22:45Z | review-v000: static OK, runtime blocker remains; manifests/ATTRIBUTION fixed | ops/codex/review-20261104T223524.md
