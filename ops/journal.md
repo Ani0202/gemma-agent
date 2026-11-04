@@ -21,3 +21,4 @@
 2026-11-04T23:35Z | gold kernel v2 failed (cp312 wheels on py3.13 CPU image); v3 installs pure wheels only | eval/kaggle/gold_calibration.py
 2026-11-04T23:30Z | rules docs rewritten from official sources (dec 004-002-001); STATE conflict markers fixed | docs/RULES_FINDINGS.md
 2026-11-04T23:34:11Z | Decision 005-E2 read: paper track approved, gemma-paper session owns paper/; Builder keeps results/ tidy, answers ≤1 batched request/day | ops/decisions/005-E2.md
+23:42Z | dec 006 read (paper track, builder FYI only, no action) | ops/decisions/006-*
