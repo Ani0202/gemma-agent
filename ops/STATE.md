@@ -7,6 +7,12 @@ Env: x86_64 VM, 106G free. GCP project gemma-agent-839566. Data: data/raw only; 
 Owner GPU policy (decision 001): Kaggle first; spot + cheapest; requests <=$10; allowance $0. GCP spend $0. Kaggle quota 0h.
 Open: spot rates still null (on-demand ceilings recorded: l4x1 0.85, l4x2 2.00, l4x4 4.00, a100 5.03, cpu8 0.27 $/h); rules scout running -> docs/RULES_FINDINGS.md, PRIOR_ART.md. GCP cumulative spend $0.
 Running jobs: none.
+<<<<<<< HEAD
 Next 3: (1) review+merge codex/gold-kernel, push Kaggle CPU gold-calibration kernel, fetch output -> clean list+splits; (2) E4B smoke+timing kernel (L4x4) per plan 001; (3) verify GCP spot rates. Data downloaded+flattened (snapshots 129, wheels 124). GCP spend $0.
 GCP quota (dec 003): 1 GPU total, no A100; only l4x1 spot + cpu8 usable; l4x2/l4x4/a100 marked "unavailable" in config/gpu_profiles.json. bin/gpu does not read that flag (my edit to it was blocked) but all rates are null so it refuses every profile anyway. Multi-GPU -> Kaggle.
 OPEN (Director reminder, due 2026-11-06T23:02Z): Director sends Aniket the GCP quota re-request line (GPUs all regions=2 then 4; preemptible L4 us-central1=4). Keep until a decision marks done.
+=======
+Next 3: (1) dl-data job finishes -> flatten data/raw/{snapshots,wheels}/ nested dirs; (2) gold calibration on this VM via bin/job (no docker; swegemma not installed; check pip wheels/subprocess sandbox), then splits; (3) Kaggle E4B smoke+timing per plan 001. GCP spend $0.
+
+Codex gold kernel implemented: eval/kaggle/gold_calibration.py + metadata/push helper; 13 offline tests PASS. Not pushed/run; verify_task API and CPU wheelhouse need Kaggle smoke check. See docs/GOLD_CALIBRATION.md.
+>>>>>>> codex/gold-kernel

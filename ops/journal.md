@@ -10,5 +10,9 @@
 2026-11-04T23:05Z | scout done: RULES_FINDINGS.md, PRIOR_ART.md written (secondary sources only) | docs/RULES_FINDINGS.md
 2026-11-04T23:15Z | report 001 written; COMPLIANCE/COMPETITION updated | ops/reports/001-v000-baseline-runtime-gate.md
 2026-11-04T23:30Z | decision 002 read; Kaggle CLI access OK; plan 001 written; dl-data job (snapshots 21.5GB + wheels) started | eval/plans/001.md
+<<<<<<< HEAD
 2026-11-04T23:05Z | data downloaded; no docker/swegemma locally -> gold calibration via Kaggle CPU kernel; codex-build gold-kernel launched | ops/codex/build-gold-kernel.spec
 2026-11-04T23:15Z | decision 003: GCP quota 1 GPU; l4x2\/l4x4\/a100 marked unavailable in config; bin\/gpu edit blocked by classifier (rates null already refuse); PLAN.md LoRA lines updated | config/gpu_profiles.json
+=======
+2026-11-04 23:07 UTC | Codex implemented CPU Kaggle gold calibration kernel; 13 offline tests, compile, shell syntax, fake-CLI staging PASS; remote API assumptions unverified; no push/run | docs/GOLD_CALIBRATION.md
+>>>>>>> codex/gold-kernel

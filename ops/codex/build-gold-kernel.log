@@ -1727,3 +1727,721 @@ setup.py
 
 codex
 The README confirms that `verify_task` stages a fresh sandbox and applies `test_patch` itself, but doesn’t give its Python signature. I’ll isolate that call and document the assumptions. Each task will run in a separate worker process, with at most two workers; harness output will be suppressed to keep patches and task text out of logs.
+exec
+/bin/bash -lc "mkdir -p eval/kaggle; cat > eval/kaggle/gold_calibration.py <<'PY'
+\"\"\"Offline Phase 2 gold calibration; no agent or model inference is performed.\"\"\"
+from __future__ import annotations
+
+import argparse
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import inspect
+import json
+import logging
+import math
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+
+DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
+WORKING_DIR = Path('/kaggle/working')
+WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+CONCURRENCY = 2
+
+
+def finished_results(text):
+    \"\"\"Parse a journal, ignoring only a torn final JSON line; last full row wins.
+
+    Both successful verifications and errors are finished attempts. Malformed
+    complete records fail loudly rather than silently removing tasks.
+    \"\"\"
+    results = {}
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            if index == len(lines) - 1 and not line.endswith('\\n'):
+                break
+            raise ValueError(f'Invalid results JSON at line {index + 1}') from None
+        if (not isinstance(row, dict) or not isinstance(row.get('instance_id'), str)
+                or not row['instance_id'] or not isinstance(row.get('repo'), str)
+                or type(row.get('resolved')) is not bool
+                or 'exit_code' not in row or 'error' not in row
+                or (row['exit_code'] is not None and type(row['exit_code']) is not int)
+                or (row['error'] is not None and not isinstance(row['error'], str))
+                or type(row.get('duration_seconds')) not in (float, int)
+                or not math.isfinite(row['duration_seconds']) or row['duration_seconds'] < 0):
+            raise ValueError(f'Invalid result schema at line {index + 1}')
+        results[row['instance_id']] = row
+    return results
+
+
+def pending_tasks(tasks, results):
+    \"\"\"Validate the current task inventory and return unfinished tasks in order.\"\"\"
+    inventory = {task['instance_id']: task['repo'] for task in tasks}
+    if len(inventory) "'!= len(tasks):
+        raise ValueError('"'Duplicate task ids in tasks.jsonl')
+    for task_id, row in results.items():
+        if task_id not in inventory or inventory[task_id] "'!= row['"'repo']:
+            raise ValueError('Resume journal does not match task inventory')
+    return [task for task in tasks if task['instance_id'] not in results]
+
+
+def summarize(tasks, results):
+    \"\"\"Aggregate every input task, including failures and unfinished attempts.\"\"\"
+    pending = pending_tasks(tasks, results)
+    repos = {}
+    passing, failing = [], []
+    for task in tasks:
+        task_id = task['instance_id']
+        counts = repos.setdefault(task['repo'], dict(total=0, finished=0, passed=0, failed=0, pending=0))
+        counts['total'] += 1
+        row = results.get(task_id)
+        if row is None:
+            counts['pending'] += 1
+            continue
+        counts['finished'] += 1
+        if row['resolved']:
+            counts['passed'] += 1
+            passing.append(task_id)
+        else:
+            counts['failed'] += 1
+            reason = row['error'] or f\"verification unresolved (exit_code={row['exit_code']})\"
+            failing.append({'instance_id': task_id, 'reason': reason[:200]})
+    passing.sort()
+    return dict(total=len(tasks), finished=len(results), passed=len(passing),
+                failed=len(failing), pending=len(pending), concurrency=CONCURRENCY,
+                timing_note='Concurrent calibration durations are not scorer timing measurements.',
+                per_repo=dict(sorted(repos.items())), passing_ids=passing,
+                failing_ids=sorted(failing, key=lambda row: row['instance_id']),
+                pending_ids=sorted(task['instance_id'] for task in pending))
+
+
+def resume_journal(path):
+    \"\"\"Repair only an interrupted final append, preserving all complete records.\"\"\"
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding='utf-8')
+    results = finished_results(text)
+    if text and not text.endswith('\\n'):
+        try:
+            json.loads(text.splitlines()[-1])
+        except json.JSONDecodeError:
+            # Remove an incomplete tail before further appends. No completed row is lost.
+            with path.open('r+b') as stream:
+                stream.truncate(len(text[:text.rfind('\\n') + 1].encode('utf-8')))
+        else:
+            with path.open('a', encoding='utf-8') as stream:
+                stream.write('\\n')
+    return results
+
+
+def load_inventory(data_dir):
+    with (data_dir / 'tasks.jsonl').open(encoding='utf-8') as stream:
+        tasks = [json.loads(line) for line in stream if line.strip()]
+    pending_tasks(tasks, {})
+    return tasks
+
+
+def install_harness():
+    \"\"\"Use preinstalled packages or the same offline wheelhouse as the starter.\"\"\"
+    try:
+        import swegemma  # noqa: F401
+        return
+    except ImportError:
+        pass
+    wheels = sorted(str(p) for p in WHEELHOUSE.glob('*.whl') if 'cutlass' not in p.name.lower())
+    if not wheels:
+        raise RuntimeError('Harness unavailable; attach metric/gemma-4-developer-agent-wheelhouse')
+    subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-index', '--no-deps',
+                    '--disable-pip-version-check', *wheels], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def choose_sandbox():
+    \"\"\"Probe actual offline container startup, not merely existence of docker CLI.\"\"\"
+    name = f'gold-calibration-probe-{os.getpid()}'
+    try:
+        probe = subprocess.run(
+            ['docker', 'run', '--pull=never', '--rm', '--name', name,
+             '--network=none', '--memory=4g', '--cpus=2',
+             '--entrypoint', 'python3', 'swebench-sandbox:latest', '-c', 'pass'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        if probe.returncode == 0:
+            return 'docker'
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    finally:
+        try:
+            subprocess.run(['docker', 'rm', '-f', name], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return 'subprocess'
+
+
+async def verify_gold(task, patch, data_dir, sandbox):
+    \"\"\"The only swegemma API adapter; see docs/GOLD_CALIBRATION.md assumptions.
+
+    verify_task owns fresh sandbox staging, baseline setup, and test_patch.
+    Bind explicit parameters from Evaluator resources, failing closed on an
+    unknown required argument rather than guessing positional argument order.
+    \"\"\"
+    from swegemma.config import EvalConfig
+    from swegemma.evaluate import Evaluator
+    from swegemma.harness.verification import verify_task
+
+    with tempfile.TemporaryDirectory(prefix='gold-verify-', dir='/tmp') as scratch:
+        config = EvalConfig(tasks_path=data_dir / 'tasks.jsonl',
+                            snapshots_dir=data_dir / 'snapshots', wheels_dir=data_dir / 'wheels',
+                            results_dir=Path(scratch), submission_dir=data_dir / 'sample_submission',
+                            models={}, sandbox=sandbox, verification_timeout_seconds=300, verbose=False)
+        evaluator = Evaluator(config)
+        context = {name.lstrip('_'): value for name, value in vars(evaluator).items()}
+        context.update(task=task, agent_patch=patch, config=config,
+                       snapshots_dir=config.snapshots_dir, wheels_dir=config.wheels_dir,
+                       timeout_seconds=300, verification_timeout_seconds=300)
+        parameters = inspect.signature(verify_task).parameters
+        if not {'task', 'agent_patch'} <= parameters.keys():
+            raise RuntimeError('Unsupported verify_task signature')
+        kwargs = {name: context[name] for name, p in parameters.items()
+                  if name in context and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD)}
+        inspect.signature(verify_task).bind(**kwargs)
+        result = verify_task(**kwargs)
+        return await result if inspect.isawaitable(result) else result
+
+
+def worker(args):
+    \"\"\"No stdout/stderr from this process is exposed by the coordinator.\"\"\"
+    logging.disable(logging.CRITICAL)
+    start = time.monotonic()
+    raw = next(t for t in load_inventory(args.data_dir) if t['instance_id'] == args.worker)
+    row = dict(instance_id=raw['instance_id'], repo=raw['repo'], resolved=False,
+               exit_code=None, duration_seconds=0.0, error=None, sandbox=args.sandbox)
+    try:
+        from swegemma.models import load_tasks
+        task = next(t for t in load_tasks(args.data_dir / 'tasks.jsonl')
+                    if t.instance_id == args.worker)
+        patch = raw.get('patch')
+        if not isinstance(patch, str) or not patch.strip():
+            row['error'] = 'Missing or empty gold patch'
+        else:
+            result = asyncio.run(verify_gold(task, patch, args.data_dir, args.sandbox))
+            # Assumed result is a mapping or TaskResult-like object, never a bare bool.
+            get = result.get if isinstance(result, dict) else lambda k, d=None: getattr(result, k, d)
+            resolved = get('resolved')
+            exit_code = get('test_exit_code', get('exit_code'))
+            if type(resolved) is not bool or (exit_code is not None and type(exit_code) is not int):
+                raise TypeError('Unsupported verification result')
+            row.update(resolved=resolved, exit_code=exit_code)
+            if not resolved:
+                # Harness exception/error text can embed patches or task source. Never copy it.
+                row['error'] = ('Harness verification error' if get('error') else
+                                f'Phase 2 unresolved (exit_code={exit_code}; includes JUnit validation)')
+    except Exception as exc:
+        row['error'] = f'Verification/setup exception ({type(exc).__name__})'
+    row['duration_seconds'] = round(time.monotonic() - start, 3)
+    args.result.write_text(json.dumps(row) + '\\n', encoding='utf-8')
+
+
+def run_one(task, data_dir, sandbox):
+    start = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix='gold-worker-', dir='/tmp') as scratch:
+        output = Path(scratch) / 'result.json'
+        command = [sys.executable, str(Path(__file__).resolve()), '--worker', task['instance_id'],
+                   '--data-dir', str(data_dir), '--sandbox', sandbox, '--result', str(output)]
+        try:
+            proc = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  timeout=3600)
+            if proc.returncode == 0 and output.exists():
+                row = next(iter(finished_results(output.read_text(encoding='utf-8')).values()))
+                if row['instance_id'] "'!= task['"'instance_id'] or row['repo'] "'!= task['"'repo']:
+                    raise ValueError('Worker result identity mismatch')
+                return row
+            error = f'Worker exited ({proc.returncode})'
+        except subprocess.TimeoutExpired:
+            error = 'Worker timed out after 3600s (setup and verification)'
+        except Exception as exc:
+            error = f'Worker failure ({type(exc).__name__})'
+    return dict(instance_id=task['instance_id'], repo=task['repo'], resolved=False,
+                exit_code=None, duration_seconds=round(time.monotonic() - start, 3),
+                error=error, sandbox=sandbox)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--data-dir', type=Path, default=DATA_DIR)
+    parser.add_argument('--working-dir', type=Path, default=WORKING_DIR)
+    parser.add_argument('--worker', help=argparse.SUPPRESS)
+    parser.add_argument('--result', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--sandbox', choices=('docker', 'subprocess'), help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    os.environ.update(PIP_NO_INDEX='1', HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1',
+                      OTEL_SDK_DISABLED='true', LITELLM_TELEMETRY='False', TMPDIR='/tmp')
+    if args.worker:
+        worker(args)
+        return
+    tasks = load_inventory(args.data_dir)
+    args.working_dir.mkdir(parents=True, exist_ok=True)
+    journal = args.working_dir / 'gold_results.jsonl'
+    results = resume_journal(journal)
+    pending = pending_tasks(tasks, results)
+    if pending:
+        install_harness()
+        sandbox = choose_sandbox()
+        print(f'Gold calibration: total={len(tasks)}, resumed={len(results)}, '
+              f'sandbox={sandbox}, concurrency={CONCURRENCY}', flush=True)
+        with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool, journal.open('a', encoding='utf-8') as stream:
+            futures = [pool.submit(run_one, task, args.data_dir, sandbox) for task in pending]
+            for future in as_completed(futures):
+                row = future.result()
+                stream.write(json.dumps(row, allow_nan=False) + '\\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+                results[row['instance_id']] = row
+                print(f\"Finished {len(results)}/{len(tasks)}: {row['instance_id']} \"
+                      f\"resolved={row['resolved']} exit_code={row['exit_code']}\", flush=True)
+    summary = summarize(tasks, results)
+    encoded = json.dumps(summary, indent=2, sort_keys=True) + '\\n'
+    output = args.working_dir / 'gold_summary.json'
+    temporary = output.with_suffix('.tmp')
+    temporary.write_text(encoded, encoding='utf-8')
+    temporary.replace(output)
+    print(encoded, flush=True)
+
+
+if __name__ == '__main__':
+    main()
+PY" in /home/ubuntu/work/gemma-wt/codex-gold-kernel
+ succeeded in 0ms:
+exec
+/bin/bash -lc "cat > eval/kaggle/gold_calibration_metadata.json <<'JSON'
+{
+  \"id\": \"your-kaggle-username/gemma-gold-calibration\",
+  \"title\": \"Gemma gold patch calibration\",
+  \"code_file\": \"gold_calibration.py\",
+  \"language\": \"python\",
+  \"kernel_type\": \"script\",
+  \"is_private\": true,
+  \"enable_gpu\": false,
+  \"enable_tpu\": false,
+  \"enable_internet\": false,
+  \"dataset_sources\": [\"metric/gemma-4-developer-agent-wheelhouse\"],
+  \"competition_sources\": [\"gemma-4-developer-agent\"],
+  \"kernel_sources\": [],
+  \"model_sources\": []
+}
+JSON
+cat > eval/kaggle/push.sh <<'SH'
+#"'!/usr/bin/env bash
+# Upload a private CPU calibration kernel; this is not a competition submission.
+set -euo pipefail
+if [[ $# != 1 || ! $1 =~ ''^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]]; then
+  echo "Usage: $0 KAGGLE_USERNAME/KERNEL_SLUG" >&2
+  exit 2
+fi
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+stage_dir=$(mktemp -d /tmp/gold-kernel-push.XXXXXX)
+trap '"'rm -rf -- \""'$stage_dir"'"' EXIT
+cp -- \""'$script_dir/gold_calibration.py" "$stage_dir/gold_calibration.py"
+python3 - "$script_dir/gold_calibration_metadata.json" "$stage_dir/kernel-metadata.json" "$1" <<'"'PY'
+import json
+import sys
+from pathlib import Path
+metadata = json.loads(Path(sys.argv[1]).read_text())
+metadata['id'] = sys.argv[3]
+Path(sys.argv[2]).write_text(json.dumps(metadata, indent=2) + '\\n')
+PY
+kaggle kernels push -p \""'$stage_dir"
+SH
+chmod +x eval/kaggle/push.sh
+cat > eval/tests/test_gold_calibration.py <<'"'PY'
+\"\"\"Offline tests: stdlib unittest, no competition data or harness imports.\"\"\"
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+SCRIPT = Path(__file__).resolve().parents[1] / 'kaggle/gold_calibration.py'
+spec = importlib.util.spec_from_file_location('gold_calibration', SCRIPT)
+gold = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gold)
+
+
+def result(task_id='a', repo='org/repo', resolved=True, error=None):
+    return dict(instance_id=task_id, repo=repo, resolved=resolved,
+                exit_code=0 if resolved else 1, duration_seconds=1.5, error=error)
+
+
+class ResumeTests(unittest.TestCase):
+    def test_success_and_failure_are_finished(self):
+        rows = [result(), result('b', resolved=False, error='setup failed')]
+        results = gold.finished_results(''.join(json.dumps(row) + '\\n' for row in rows))
+        tasks = [dict(instance_id=x, repo='org/repo') for x in 'abc']
+        self.assertEqual([t['instance_id'] for t in gold.pending_tasks(tasks, results)], ['c'])
+
+    def test_last_completed_duplicate_wins(self):
+        rows = [result(resolved=False), result()]
+        results = gold.finished_results('\\n'.join(map(json.dumps, rows)) + '\\n')
+        self.assertTrue(results['a']['resolved'])
+        self.assertEqual(len(results), 1)
+
+    def test_partial_tail_repaired_and_append_survives_second_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'results.jsonl'
+            complete = json.dumps(result()) + '\\n'
+            path.write_text(complete + '{\"instance_id\": \"unfinished')
+            self.assertEqual(set(gold.resume_journal(path)), {'a'})
+            self.assertEqual(path.read_text(), complete)
+            with path.open('a') as stream:
+                stream.write(json.dumps(result('b')) + '\\n')
+            self.assertEqual(set(gold.resume_journal(path)), {'a', 'b'})
+
+    def test_complete_last_record_without_newline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'results.jsonl'
+            path.write_text(json.dumps(result()))
+            self.assertEqual(set(gold.resume_journal(path)), {'a'})
+            self.assertTrue(path.read_text().endswith('\\n'))
+
+    def test_missing_file_and_empty_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(gold.resume_journal(Path(directory) / 'absent'), {})
+        self.assertEqual(gold.finished_results(''), {})
+
+    def test_corruption_is_not_silently_dropped(self):
+        for text in ('bad\\n', 'bad\\n' + json.dumps(result()), '{}\\n',
+                     json.dumps(dict(result(), duration_seconds=float('nan'))) + '\\n'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                gold.finished_results(text)
+
+    def test_inventory_mismatch_and_duplicate_ids(self):
+        tasks = [dict(instance_id='a', repo='org/repo')]
+        for inventory, results in ((tasks * 2, {}), (tasks, {'b': result('b')}),
+                                   (tasks, {'a': result(repo='wrong/repo')})):
+            with self.assertRaises(ValueError):
+                gold.pending_tasks(inventory, results)
+
+
+class SummaryTests(unittest.TestCase):
+    def test_all_tasks_counted_by_repo(self):
+        tasks = [dict(instance_id=x, repo=repo) for x, repo in
+                 [('a', 'org/one'), ('b', 'org/one'), ('c', 'org/two'), ('d', 'org/two')]]
+        results = {'a': result('a', 'org/one'),
+                   'b': result('b', 'org/one', False, 'setup failed'),
+                   'c': result('c', 'org/two', False)}
+        summary = gold.summarize(tasks, results)
+        self.assertEqual([summary[k] for k in ('total', 'finished', 'passed', 'failed', 'pending')],
+                         [4, 3, 1, 2, 1])
+        self.assertEqual(summary['passing_ids'], ['a'])
+        self.assertEqual(summary['pending_ids'], ['d'])
+        self.assertEqual(summary['failing_ids'], [
+            dict(instance_id='b', reason='setup failed'),
+            dict(instance_id='c', reason='verification unresolved (exit_code=1)')])
+        self.assertEqual(summary['per_repo']['org/one'],
+                         dict(total=2, finished=2, passed=1, failed=1, pending=0))
+        self.assertEqual(summary['per_repo']['org/two'],
+                         dict(total=2, finished=1, passed=0, failed=1, pending=1))
+
+    def test_empty_summary_and_short_reasons(self):
+        self.assertEqual(gold.summarize([], {})['total'], 0)
+        summary = gold.summarize([dict(instance_id='a', repo='org/repo')],
+                                {'a': result(resolved=False, error='x' * 500)})
+        self.assertEqual(len(summary['failing_ids'][0]['reason']), 200)
+
+    def test_main_fully_resumed_needs_no_harness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'tasks.jsonl').write_text(json.dumps(dict(instance_id='a', repo='org/repo')) + '\\n')
+            (root / 'gold_results.jsonl').write_text(json.dumps(result()) + '\\n')
+            with patch('sys.argv', [str(SCRIPT), '--data-dir', str(root), '--working-dir', str(root)]), \\
+                    patch.object(gold, 'install_harness', side_effect=AssertionError('must not import harness')), \\
+                    patch('builtins.print'):
+                gold.main()
+            self.assertEqual(json.loads((root / 'gold_summary.json').read_text())['passing_ids'], ['a'])
+
+
+if __name__ == '__main__':
+    unittest.main()
+PY
+cat > docs/GOLD_CALIBRATION.md <<'MD'
+# Gold calibration on Kaggle
+
+This private CPU kernel verifies **every** published "'`tasks.jsonl` task using its
+reference `patch` as `agent_patch`. It performs no agent inference and needs no
+model input. Phase 2 owns fresh snapshot/wheel staging, baseline setup, protected
+file resets, application of `test_patch`, pytest, and JUnit validation. A zero
+pytest exit alone is insufficient: the harness'"'s "'`resolved` verdict is retained.
+No task text, patches, pytest output, or raw exception messages are printed.
+
+From the repository root, with the Kaggle CLI already authenticated and the
+competition rules accepted:
+
+```bash
+eval/kaggle/push.sh YOUR_USERNAME/gemma-gold-calibration
+kaggle kernels status YOUR_USERNAME/gemma-gold-calibration
+mkdir -p runs/gold-calibration
+kaggle kernels output YOUR_USERNAME/gemma-gold-calibration -p runs/gold-calibration
+```
+
+The helper stages `gold_calibration.py` and generates the CLI-required filename
+`kernel-metadata.json` from `gold_calibration_metadata.json` in `/tmp`. Its required
+argument supplies the actual owner/slug; the checked-in username is an example.
+It uploads a kernel, and never submits predictions to the competition. The
+metadata requests CPU only, GPU/TPU disabled, internet off, the competition source
+`gemma-4-developer-agent`, and the official starter'"'s
+"'`metric/gemma-4-developer-agent-wheelhouse` dataset. No local data is uploaded.
+The push and remote run must be performed by the operator; neither was run here.
+
+The script uses the competition mount at
+`/kaggle/input/competitions/gemma-4-developer-agent` and installs missing harness
+packages offline from the attached wheelhouse, without a package index. This
+follows the starter'"'s wheel installation pattern but excludes GPU cutlass wheels
+and does not start vLLM. Availability/compatibility of all harness dependencies on
+the CPU image still needs a remote smoke check.
+
+It tries starting the local "'`swebench-sandbox:latest` Docker image with network off
+and without pulling an image. If Docker, its daemon, or the image is unavailable,
+it selects the harness'"'s "'`sandbox='"'subprocess'"'` (the equivalent of CLI
+`--sandbox subprocess`). The subprocess backend is also used by the starter.
+Exactly two task workers may run concurrently; each uses a separate process and
+fresh harness sandbox. All scratch files are under `/tmp`. Verification pytest
+has the official 300-second limit; a worker has an additional 3600-second outer
+limit including setup. Durations include setup and are **not** concurrency-1
+scorer timing measurements.
+
+`/kaggle/working/gold_results.jsonl` receives one fsynced record per completed
+attempt: instance id, repo, resolved, test exit code (null if unavailable), wall
+duration, short safe error, and sandbox backend. Both successes and failures are
+finished ids and skipped on restart. An interrupted final JSON append is removed
+before resuming; malformed complete records, duplicate task ids, and inventory
+mismatches are rejected. Duplicate completed records use the last record.
+
+At completion, `/kaggle/working/gold_summary.json` is written atomically and
+printed. It includes totals, per-repo counts, passing ids, failing ids/reasons,
+and pending ids. There is no task selection or silent exclusion of setup errors.
+A killed session may have only the journal; rerun with it to regenerate the summary.
+
+Kaggle kernel pushes start new working directories: they do **not** automatically
+resume prior output. To resume across sessions, fetch the journal, attach it as a
+private input, and copy it into `/kaggle/working/gold_results.jsonl` before starting
+this script in an interactive session. Preserve the original `tasks.jsonl` and
+harness versions. The same working directory resumes automatically. Do not run
+two coordinators against the same journal. To retry failures, use a separate run
+or explicitly prepare a journal excluding those rows; ordinary restarts preserve
+all completed attempts.
+
+## Harness API assumptions requiring a Kaggle smoke check
+
+References: the competition'"'s "'`HARNESS_README.md` sections 4, 8, 9 and
+[`starter_notebook.ipynb`](starter_notebook.ipynb). The README was read from the
+main checkout because `data/` is absent from this worktree. Neither reference
+provides the complete `verify_task` Python signature, and harness wheels are not
+available locally. The only harness call adapter is `verify_gold`:
+
+- Assumes `swegemma.harness.verification.verify_task` accepts named `task` and
+  `agent_patch` parameters and owns the entire fresh Phase 2 setup/cleanup.
+- Constructs `EvalConfig`/`Evaluator` following the starter, with `models={}`
+  because no Phase 1 or inference is run. Assumes construction needs no model.
+- Binds explicit verification parameters from the evaluator'"'s instance resources
+  (including private attributes with their leading underscore removed), plus
+  "'`config`, snapshot/wheel paths, and the 300-second timeout. Unknown required
+  arguments fail rather than guessing a positional order. If the installed API
+  differs, adjust this one function after inspecting its signature.
+- Accepts a sync or async result, as a mapping or object with `resolved`,
+  `test_exit_code` (or `exit_code`), and optional `error`. Resolution is never
+  inferred from exit code alone. Unsupported signatures/results and setup errors
+  become recorded task failures. Only exception class names are exposed, since
+  arbitrary harness errors can contain task code or patch hunks.
+
+Offline verification (no Kaggle credentials, network, or harness required):
+
+```bash
+python3 -m py_compile eval/kaggle/gold_calibration.py
+python3 -m unittest discover -s eval/tests -p test_gold_calibration.py -v
+bash -n eval/kaggle/push.sh
+```
+MD
+python3 -m py_compile eval/kaggle/gold_calibration.py
+python3 -m unittest discover -s eval/tests -p test_gold_calibration.py -v
+bash -n eval/kaggle/push.sh' in /home/ubuntu/work/gemma-wt/codex-gold-kernel
+ succeeded in 0ms:
+test_complete_last_record_without_newline (test_gold_calibration.ResumeTests.test_complete_last_record_without_newline) ... ok
+test_corruption_is_not_silently_dropped (test_gold_calibration.ResumeTests.test_corruption_is_not_silently_dropped) ... ok
+test_inventory_mismatch_and_duplicate_ids (test_gold_calibration.ResumeTests.test_inventory_mismatch_and_duplicate_ids) ... ok
+test_last_completed_duplicate_wins (test_gold_calibration.ResumeTests.test_last_completed_duplicate_wins) ... ok
+test_missing_file_and_empty_journal (test_gold_calibration.ResumeTests.test_missing_file_and_empty_journal) ... ok
+test_partial_tail_repaired_and_append_survives_second_resume (test_gold_calibration.ResumeTests.test_partial_tail_repaired_and_append_survives_second_resume) ... ok
+test_success_and_failure_are_finished (test_gold_calibration.ResumeTests.test_success_and_failure_are_finished) ... ok
+test_all_tasks_counted_by_repo (test_gold_calibration.SummaryTests.test_all_tasks_counted_by_repo) ... ok
+test_empty_summary_and_short_reasons (test_gold_calibration.SummaryTests.test_empty_summary_and_short_reasons) ... ok
+test_main_fully_resumed_needs_no_harness (test_gold_calibration.SummaryTests.test_main_fully_resumed_needs_no_harness) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.003s
+
+OK
+
+codex
+The kernel, push helper, docs, and 10 offline tests are in place. Compilation, tests, and shell syntax checks pass. I’ll now check worker failure handling and metadata; the remaining runtime uncertainty is the undocumented `verify_task` signature, which is isolated and documented.
+exec
+/bin/bash -lc "python3 - <<'PY'
+p='eval/tests/test_gold_calibration.py'
+s=open(p).read().replace('import importlib.util\\n', 'import argparse\\nimport importlib.util\\n').replace('import tempfile\\n', 'import tempfile\\nimport types\\n')
+anchor=\"\\n\\nif __name__ == '__main__':\"
+insert='''
+
+class WorkerTests(unittest.TestCase):
+    def run_worker(self, verifier):
+        raw = dict(instance_id='a', repo='org/repo', patch='GOLD_PATCH_SECRET',
+                   test_patch='TEST_PATCH_SECRET', problem_statement='TASK_TEXT_SECRET')
+        task = types.SimpleNamespace(instance_id='a')
+        models = types.ModuleType('swegemma.models')
+        models.load_tasks = lambda path: [task]
+        with tempfile.TemporaryDirectory() as directory:
+            args = argparse.Namespace(data_dir=Path(directory), worker='a',
+                                      sandbox='subprocess', result=Path(directory) / 'result.json')
+            with patch.object(gold, 'load_inventory', return_value=[raw]), \\\\
+                    patch.dict('sys.modules', {'swegemma.models': models}), \\\\
+                    patch.object(gold, 'verify_gold', side_effect=verifier):
+                gold.worker(args)
+            return json.loads(args.result.read_text())
+
+    def test_gold_patch_only_and_harness_verdict_preserved(self):
+        async def verify(task, patch_text, data_dir, sandbox):
+            self.assertEqual(patch_text, 'GOLD_PATCH_SECRET')
+            self.assertEqual(sandbox, 'subprocess')
+            # Exit 0 can still fail the harness's required-test/JUnit checks.
+            return dict(resolved=False, test_exit_code=0, error='TEST_PATCH_SECRET')
+        row = self.run_worker(verify)
+        self.assertFalse(row['resolved'])
+        self.assertEqual(row['exit_code'], 0)
+        self.assertNotIn('SECRET', json.dumps(row))
+        self.assertGreaterEqual(row['duration_seconds'], 0)
+
+    def test_exception_text_never_copied_into_result(self):
+        async def verify(*args):
+            raise RuntimeError('GOLD_PATCH_SECRET TASK_TEXT_SECRET')
+        row = self.run_worker(verify)
+        self.assertFalse(row['resolved'])
+        self.assertIsNone(row['exit_code'])
+        self.assertEqual(row['error'], 'Verification/setup exception (RuntimeError)')
+        self.assertNotIn('SECRET', json.dumps(row))
+
+    def test_docker_unavailable_falls_back_without_network_pull(self):
+        with patch.object(gold.subprocess, 'run', side_effect=FileNotFoundError):
+            self.assertEqual(gold.choose_sandbox(), 'subprocess')
+        with patch.object(gold.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)) as run:
+            self.assertEqual(gold.choose_sandbox(), 'docker')
+            self.assertIn('--pull=never', run.call_args_list[0].args[0])
+            self.assertIn('--network=none', run.call_args_list[0].args[0])
+'''
+s=s.replace(anchor,insert+anchor)
+open(p,'w').write(s)
+PY
+python3 -m unittest discover -s eval/tests -p test_gold_calibration.py -v
+python3 -m py_compile eval/kaggle/gold_calibration.py
+bash -n eval/kaggle/push.sh
+git diff --check; git status --short" in /home/ubuntu/work/gemma-wt/codex-gold-kernel
+ succeeded in 15ms:
+test_complete_last_record_without_newline (test_gold_calibration.ResumeTests.test_complete_last_record_without_newline) ... ok
+test_corruption_is_not_silently_dropped (test_gold_calibration.ResumeTests.test_corruption_is_not_silently_dropped) ... ok
+test_inventory_mismatch_and_duplicate_ids (test_gold_calibration.ResumeTests.test_inventory_mismatch_and_duplicate_ids) ... ok
+test_last_completed_duplicate_wins (test_gold_calibration.ResumeTests.test_last_completed_duplicate_wins) ... ok
+test_missing_file_and_empty_journal (test_gold_calibration.ResumeTests.test_missing_file_and_empty_journal) ... ok
+test_partial_tail_repaired_and_append_survives_second_resume (test_gold_calibration.ResumeTests.test_partial_tail_repaired_and_append_survives_second_resume) ... ok
+test_success_and_failure_are_finished (test_gold_calibration.ResumeTests.test_success_and_failure_are_finished) ... ok
+test_all_tasks_counted_by_repo (test_gold_calibration.SummaryTests.test_all_tasks_counted_by_repo) ... ok
+test_empty_summary_and_short_reasons (test_gold_calibration.SummaryTests.test_empty_summary_and_short_reasons) ... ok
+test_main_fully_resumed_needs_no_harness (test_gold_calibration.SummaryTests.test_main_fully_resumed_needs_no_harness) ... ok
+test_docker_unavailable_falls_back_without_network_pull (test_gold_calibration.WorkerTests.test_docker_unavailable_falls_back_without_network_pull) ... ok
+test_exception_text_never_copied_into_result (test_gold_calibration.WorkerTests.test_exception_text_never_copied_into_result) ... ok
+test_gold_patch_only_and_harness_verdict_preserved (test_gold_calibration.WorkerTests.test_gold_patch_only_and_harness_verdict_preserved) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.005s
+
+OK
+?? docs/GOLD_CALIBRATION.md
+?? eval/kaggle/
+?? eval/tests/test_gold_calibration.py
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+p='docs/ATTRIBUTION.md'
+s=open(p).read()
+s+='\\n- Official public competition starter ("'`docs/starter_notebook.ipynb`) and `HARNESS_README.md` sections 4, 8, 9 (Kaggle Gemma 4 Developer Agent competition). Referenced for offline wheelhouse setup, `EvalConfig`/`Evaluator` construction, sandbox selection, and Phase 2 semantics in `eval/kaggle/gold_calibration.py`; no task data copied. 2026-11-04.'"\\n'
+open(p,'w').write(s)
+PY
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+with tempfile.TemporaryDirectory(prefix='gold-push-test-', dir='/tmp') as directory:
+    root=Path(directory)
+    cli=root/'kaggle'
+    cli.write_text('#"'!/usr/bin/env python3'"\\nimport json,os,sys\\nfrom pathlib import Path\\nassert sys.argv[1:4] == [\"kernels\", \"push\", \"-p\"]\\np=Path(sys.argv[4])\\nmetadata=json.loads((p/\"kernel-metadata.json\").read_text())\\nassert metadata[\"id\"] == \"offline-owner/gold-test\"\\nassert metadata[\"enable_gpu\"] is False\\nassert metadata[\"enable_tpu\"] is False\\nassert metadata[\"enable_internet\"] is False\\nassert metadata[\"is_private\"] is True\\nassert metadata[\"competition_sources\"] == [\"gemma-4-developer-agent\"]\\nassert (p/metadata[\"code_file\"]).is_file()\\nprint(\"Offline push-helper staging and metadata: PASS\")\\n')
+    cli.chmod(0o755)
+    env=dict(os.environ, PATH=str(root)+os.pathsep+os.environ['PATH'])
+    subprocess.run(['bash','eval/kaggle/push.sh','offline-owner/gold-test'],env=env,check=True)
+PY" in /home/ubuntu/work/gemma-wt/codex-gold-kernel
+ succeeded in 0ms:
+Offline push-helper staging and metadata: PASS
+
+codex
+All 13 offline tests pass, including checks for crash recovery, failed-task resume behavior, gold-patch isolation, and sanitized errors. A fake Kaggle CLI also verified the push helper’s staged files and CPU-only, internet-off metadata. No Kaggle call was made.
+exec
+/bin/bash -lc "python3 - <<'PY'
+from datetime import datetime, timezone
+from pathlib import Path
+state=Path('ops/STATE.md')
+text=state.read_text()
+text+='\\nCodex gold kernel implemented: eval/kaggle/gold_calibration.py + metadata/push helper; 13 offline tests PASS. Not pushed/run; verify_task API and CPU wheelhouse need Kaggle smoke check. See docs/GOLD_CALIBRATION.md.\\n'
+state.write_text(text)
+with Path('ops/journal.md').open('a') as stream:
+    stream.write(datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')+' | Codex implemented CPU Kaggle gold calibration kernel; 13 offline tests, compile, shell syntax, fake-CLI staging PASS; remote API assumptions unverified; no push/run | docs/GOLD_CALIBRATION.md\\n')
+Path('ops/status').write_text('CONTINUE\\n')
+PY
+python3 -m py_compile eval/kaggle/gold_calibration.py
+python3 -m unittest discover -s eval/tests -p test_gold_calibration.py
+bash -n eval/kaggle/push.sh
+git diff --check
+git diff --stat
+git status --short" in /home/ubuntu/work/gemma-wt/codex-gold-kernel
+ succeeded in 15ms:
+.............
+----------------------------------------------------------------------
+Ran 13 tests in 0.005s
+
+OK
+ docs/ATTRIBUTION.md | 2 ++
+ ops/STATE.md        | 2 ++
+ ops/journal.md      | 1 +
+ ops/status          | 2 +-
+ 4 files changed, 6 insertions(+), 1 deletion(-)
+ M docs/ATTRIBUTION.md
+ M ops/STATE.md
+ M ops/journal.md
+ M ops/status
+?? docs/GOLD_CALIBRATION.md
+?? eval/kaggle/
+?? eval/tests/test_gold_calibration.py
+
+codex
+Implemented the kernel, CPU-only/offline metadata, push helper, resume logic, summary aggregation, and [push/fetch documentation](/home/ubuntu/work/gemma-wt/codex-gold-kernel/docs/GOLD_CALIBRATION.md).
+
+Validation: 13 offline tests passed; Python compilation, shell syntax, metadata staging, and whitespace checks passed.
+
+Open issues: Kaggle execution and the undocumented `verify_task` API remain unverified. Assumptions are isolated in `verify_gold` and documented.
+
+Sandbox prevented: nothing required locally. No Kaggle push/run or git commit performed.
+tokens used
+67,717
