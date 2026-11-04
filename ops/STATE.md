@@ -12,3 +12,9 @@ OWNER GPU POLICY (decision 001): Kaggle first; spot + cheapest profile; requests
 Next: after review -> report 001 (baseline SUBMIT 31B v000 maybe), rules reading, fill spot rates, check gold calibration on CPU/Kaggle.
 
 [cycle 4] codex-review done: prompts fixed (/tmp rule, submit last) -> bundles v000 edited, zips in dist/ are STALE until re-pack. Running: codex-build pack-harden. Next: merge pack-harden, re-pack + re-review, report 001.
+Codex pack-hardening handoff (2026-11-04T22:28Z):
+- Implemented review BLOCKING 1–2 and non-blocking 1,3 in bin/pack; docs/PACK.md defines static validation guarantees.
+- Offline pack tests: 341 passed, 1 expected fallback-alias skip; both unchanged v000 bundles PASS (6057 shipped bytes each).
+- No zip rebuilt, evaluation run, GPU/cloud spend or submission. Existing zip hashes above remain unchanged.
+- Next: Builder review of bin/pack, eval/tests/test_pack.py and docs/PACK.md; wrapper commits; harness compilation/runtime checks remain separate.
+- Source review/README read from main checkout because this worktree has an empty review file and no data/raw directory.
