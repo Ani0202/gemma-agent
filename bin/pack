@@ -26,6 +26,21 @@ except ImportError:
 LIMIT = 3221225472
 EXTENSIONS = {'.yaml', '.yml', '.md', '.txt', '.py', '.json', '.safetensors'}
 MODELS = {f'gemma-4-{size}-it-qat-w4a16-ct' for size in ('31b', '12b', 'e4b', 'e2b')}
+# Snapshot of HARNESS_README sections 2.4 and 6 (SwegemmaContext.create_tools).
+TOOLS = {'run_command', 'submit_patch', 'get_status', 'read_file', 'edit_file',
+         'write_file', 'get_code_neighbors', 'search_similar_code', 'get_code_subgraph'}
+GENERATION_FIELDS = {'temperature', 'top_p', 'top_k', 'max_output_tokens',
+                     'presence_penalty', 'frequency_penalty', 'stop_sequences',
+                     'response_mime_type', 'seed', 'thinking_config'}
+MAX_FILE_COUNT = 10000
+MAX_YAML_FILES = 1000
+MAX_YAML_BYTES = 50 * 1024 * 1024
+MAX_SKILL_BYTES = 50 * 1024 * 1024
+MAX_INSTRUCTION_CHARS = 1000000
+MAX_TOTAL_INSTRUCTION_CHARS = 10000000
+MAX_AGENTS = 500
+MAX_DEPTH = 50
+MAX_SKILLS = 1000
 ROOTS = {'agent.yaml', 'agent.yml', 'root_agent.yaml', 'root_agent.yml'}
 
 
@@ -163,14 +178,20 @@ class Bundle:
         self.cache = {}
         self.loading = []
         self.models = set()
+        self.expanded_bytes = {}
+        self.agent_count = 0
+        self.instruction_chars = 0
+        self.skill_count = 0
+        self.agent_documents = set()
+        self.linted = set()
 
     def target(self, value, base=None):
         safe_path(value)
         path = (base or self.root) / value
         require(path.is_relative_to(self.root), f'path outside bundle: {value}')
         require(path.is_file(), f'missing reference target: {value}')
-        require(path in self.files, f'reference is not a bundle file: {value}')
         require(path != self.root / 'MANIFEST.md', 'MANIFEST.md cannot be referenced: excluded from ZIP')
+        require(path in self.files, f'reference is not a bundle file: {value}')
         return path
 
     def load(self, path):
@@ -180,6 +201,9 @@ class Bundle:
             return self.cache[path]
         self.loading.append(path)
         try:
+            require(path.stat().st_size <= MAX_YAML_BYTES,
+                    f'YAML/include size exceeds {MAX_YAML_BYTES} bytes: {path}')
+            expanded = path.stat().st_size
             source = path.read_text(encoding='utf-8')
             require('\0' not in source, f'null bytes in {path}')
             if path.suffix not in {'.yaml', '.yml'}:
@@ -187,7 +211,13 @@ class Bundle:
                 result = source
             else:
                 def include(value):
-                    return self.load(self.target(value, path.parent))
+                    nonlocal expanded
+                    target = self.target(value, path.parent)
+                    result = self.load(target)
+                    expanded += self.expanded_bytes[target]
+                    require(expanded <= MAX_YAML_BYTES,
+                            f'cumulative !include size exceeds {MAX_YAML_BYTES} bytes: {path}')
+                    return result
                 if yaml is None:
                     result = minimal_yaml(source, include)
                 else:
@@ -204,6 +234,7 @@ class Bundle:
                     Loader.add_constructor('tag:yaml.org,2002:map', mapping)
                     Loader.add_constructor('!include', lambda loader, node: include(loader.construct_scalar(node)))
                     result = yaml.load(source, Loader=Loader)
+            self.expanded_bytes[path] = expanded
             self.cache[path] = result
             return result
         except (ValueError, UnicodeError) as exc:
@@ -228,15 +259,13 @@ class Bundle:
         if isinstance(value, (dict, list)):
             require(id(value) not in ancestors, f'{where}: recursive YAML alias')
             ancestors = (*ancestors, id(value))
+            if id(value) in self.linted:
+                return
+            self.linted.add(id(value))
         if isinstance(value, list):
             for index, item in enumerate(value):
                 self.walk(item, f'{where}[{index}]', ancestors, agent)
         elif isinstance(value, dict):
-            is_agent = agent or bool({'name', 'model', 'agent_class', 'instruction', 'global_instruction', 'tools', 'sub_agents'} & value.keys())
-            if is_agent and 'config_path' not in value and 'agent_tool' not in value:
-                model = value.get('model')
-                require(isinstance(model, str) and model in MODELS, f'{where}: missing or disallowed model: {model!r}')
-                self.models.add(model)
             for key, item in value.items():
                 label = f'{where}.{key}'
                 if key == 'config_path':
@@ -249,6 +278,10 @@ class Bundle:
                             and item != '..', f'{label}: invalid adapter name')
                     for filename in ('adapter_config.json', 'adapter_model.safetensors'):
                         self.target(f'adapters/{item}/{filename}')
+                elif key == 'generate_content_config' and item is not None:
+                    require(isinstance(item, dict), f'{label}: must be a mapping')
+                    require(not item.keys() - GENERATION_FIELDS,
+                            f'{label}: forbidden or unknown fields: {sorted(item.keys() - GENERATION_FIELDS)}')
                 elif key == 'thinking_config':
                     self.thinking(item, label)
                 elif key == 'max_output_tokens':
@@ -256,6 +289,77 @@ class Bundle:
                 if 'instruction' in key or 'prompt' in key:
                     self.prompt(item, label)
                 self.walk(item, label, ancestors, key in {'sub_agents', 'agent_tool'})
+
+    def agent(self, value, where, depth=0, active=()):
+        """Count compiled occurrences, including repeated references and YAML aliases."""
+        require(depth <= MAX_DEPTH, f'{where}: agent depth exceeds {MAX_DEPTH}')
+        require(len(active) <= MAX_DEPTH + 1, f'{where}: config_path depth exceeds {MAX_DEPTH}')
+        require(isinstance(value, dict), f'{where}: agent must be a mapping')
+        if 'agent_tool' in value:
+            require(set(value) == {'agent_tool'}, f'{where}: invalid agent_tool wrapper')
+            return self.agent(value['agent_tool'], where + '.agent_tool', depth, active)
+        if 'config_path' in value:
+            require(not set(value) - {'config_path', 'skip_summarization'},
+                    f'{where}: invalid config reference')
+            target = self.target(value['config_path'])
+            require(target not in active, f'config_path cycle: {target}')
+            self.agent_documents.add(target)
+            return self.agent(self.load(target), str(target), depth, (*active, target))
+        self.agent_documents.update(path for path, doc in self.cache.items() if doc is value)
+        self.agent_count += 1
+        require(self.agent_count <= MAX_AGENTS, f'max_agents exceeds {MAX_AGENTS}')
+        name = value.get('name')
+        require(isinstance(name, str) and name.strip(), f'{where}: agent name required')
+        kind = value.get('agent_class', 'LlmAgent')
+        require(isinstance(kind, str) and kind in {'LlmAgent', 'SequentialAgent', 'ParallelAgent', 'LoopAgent'},
+                f'{where}: unsupported agent_class')
+        # Repository policy requires explicit identical models even on workflows.
+        model = value.get('model')
+        require(isinstance(model, str) and model in MODELS,
+                f'{where}: missing or disallowed model: {model!r}')
+        self.models.add(model)
+        chars = 0
+        for key in ('instruction', 'global_instruction', 'description'):
+            if key in value:
+                require(isinstance(value[key], str), f'{where}.{key}: must be text')
+                if key == 'description':
+                    require(len(value[key]) <= MAX_INSTRUCTION_CHARS,
+                            f'{where}: description too long')
+                else:
+                    chars += len(value[key])
+        require(chars <= MAX_INSTRUCTION_CHARS, f'{where}: instruction chars exceed {MAX_INSTRUCTION_CHARS}')
+        self.instruction_chars += chars
+        require(self.instruction_chars <= MAX_TOTAL_INSTRUCTION_CHARS,
+                f'total instruction chars exceed {MAX_TOTAL_INSTRUCTION_CHARS}')
+        if kind == 'LoopAgent':
+            count = value.get('max_iterations', 500)
+            require(type(count) is int and 1 <= count <= 500,
+                    f'{where}: max_iterations must be integer 1..500')
+        skills = value.get('skills', [])
+        if skills is None:
+            skills = []
+        require(isinstance(skills, list), f'{where}: skills must be a list')
+        self.skill_count += len(skills)
+        require(self.skill_count <= MAX_SKILLS, f'max_skills exceeds {MAX_SKILLS}')
+        for skill in skills:
+            safe_path(skill)
+            directory = self.root / skill
+            require(directory.is_dir(), f'{where}: missing skill directory: {skill}')
+            require(directory / 'SKILL.md' in self.files, f'{where}: skill requires SKILL.md: {skill}')
+            size = sum(p.stat().st_size for p in self.files if p.is_relative_to(directory))
+            require(size <= MAX_SKILL_BYTES, f'{where}: skill size exceeds {MAX_SKILL_BYTES}')
+        tools = value.get('tools', [])
+        require(isinstance(tools, list), f'{where}: tools must be a list')
+        for index, tool in enumerate(tools):
+            label = f'{where}.tools[{index}]'
+            if isinstance(tool, str):
+                require(tool in TOOLS, f'{label}: unknown harness tool: {tool}')
+            else:
+                self.agent(tool, label, depth + 1, active)
+        children = value.get('sub_agents', [])
+        require(isinstance(children, list), f'{where}: sub_agents must be a list')
+        for index, child in enumerate(children):
+            self.agent(child, f'{where}.sub_agents[{index}]', depth + 1, active)
 
     def thinking(self, config, where):
         require(isinstance(config, dict), f'{where}: must be a mapping')
@@ -272,6 +376,7 @@ class Bundle:
     def validate(self):
         require(self.root.is_dir() and not self.root.is_symlink(), f'not a bundle directory (or symlink): {self.root}')
         total = 0
+        yaml_count = 0
         for directory, dirs, files in os.walk(self.root, followlinks=False):
             for name in sorted(dirs + files):
                 path = Path(directory) / name
@@ -281,9 +386,17 @@ class Bundle:
                 require(stat.S_ISDIR(mode) or stat.S_ISREG(mode), f'not a regular file: {path}')
                 if stat.S_ISREG(mode):
                     require(path.suffix in EXTENSIONS, f'extension not allowed: {path}')
+                    if path == self.root / 'MANIFEST.md':
+                        continue
                     total += path.stat().st_size
                     require(total < LIMIT, f'unpacked size must be < {LIMIT} bytes')
                     self.files.append(path)
+                    require(len(self.files) <= MAX_FILE_COUNT, f'max_file_count exceeds {MAX_FILE_COUNT}')
+                    if path.suffix in {'.yaml', '.yml'}:
+                        yaml_count += 1
+                        require(yaml_count <= MAX_YAML_FILES, f'max_yaml_files exceeds {MAX_YAML_FILES}')
+                        require(path.stat().st_size <= MAX_YAML_BYTES,
+                                f'YAML size exceeds {MAX_YAML_BYTES} bytes: {path}')
         self.files.sort()
         require(self.root / 'agent.yaml' in self.files, 'missing agent.yaml at bundle root')
         require(len(ROOTS & {p.name for p in self.files if p.parent == self.root}) == 1, 'multiple root agent configs')
@@ -297,38 +410,64 @@ class Bundle:
                 require('\0' not in source, f'null bytes in {path}')
                 if 'prompts' in path.relative_to(self.root).parts:
                     self.prompt(source, str(path))
-        require(len(self.models) == 1, f'models must be identical across all agents: {sorted(self.models)}')
-        # Follow config references, including unreferenced standalone documents.
-        def refs(value):
+        root = self.root / 'agent.yaml'
+        self.agent_documents.add(root)
+        self.agent(self.load(root), str(root), active=(root,))
+        # Validate standalone agent declarations, but do not count referenced files twice.
+        # Visit referring documents before their dependencies.
+        def references(value, seen=None):
+            if seen is None:
+                seen = set()
+            if isinstance(value, (dict, list)):
+                if id(value) in seen:
+                    return
+                seen.add(id(value))
             if isinstance(value, dict):
                 for key, item in value.items():
                     if key == 'config_path':
                         yield self.target(item)
                     else:
-                        yield from refs(item)
+                        yield from references(item, seen)
             elif isinstance(value, list):
                 for item in value:
-                    yield from refs(item)
+                    yield from references(item, seen)
+        candidates = {}
+        for path, value in self.cache.items():
+            if isinstance(value, dict) and {'name', 'model', 'agent_class', 'instruction',
+                                            'global_instruction', 'tools', 'sub_agents'} & value.keys():
+                candidates[path] = value
         done = set()
-        def visit(path, active):
+        ordered = []
+
+        def visit(path, active=()):
             require(path not in active, f'config_path cycle: {path}')
+            require(len(active) <= MAX_DEPTH, f'config_path depth exceeds {MAX_DEPTH}')
             if path in done:
                 return
-            for target in refs(self.load(path)):
-                child = self.load(target)
-                require(isinstance(child, dict), f'agent config must be a mapping: {target}')
-                self.walk(child, str(target), agent=True)
-                visit(target, active | {path})
+            for target in references(self.load(path)):
+                require(isinstance(self.load(target), dict),
+                        f'agent config must be a mapping: {target}')
+                visit(target, (*active, path))
             done.add(path)
+            ordered.append(path)
+
         for path in list(self.cache):
-            visit(path, set())
-        require(len(self.models) == 1, 'models must be identical across all agents')
+            visit(path)
+        for path in reversed(ordered):
+            if path in candidates and path not in self.agent_documents:
+                self.agent_documents.add(path)
+                self.agent(candidates[path], str(path), active=(path,))
+        require(len(self.models) == 1, f'models must be identical across all agents: {sorted(self.models)}')
         config = self.load(self.target('eval_config.yaml'))
         evaluation = config.get('evaluation') if isinstance(config, dict) else None
         cap = evaluation.get('max_time_minutes') if isinstance(evaluation, dict) else None
         require(type(cap) in (int, float) and math.isfinite(cap) and cap > 0,
                 'evaluation.max_time_minutes: missing or invalid positive cap')
         require(cap * 125 + 30 <= 660, f'evaluation timing FAIL: {cap}*125+30 > 660 minutes')
+        for field in ('timeout_seconds', 'max_tool_calls', 'max_turns'):
+            if field in evaluation:
+                require(type(evaluation[field]) is int and evaluation[field] > 0,
+                        f'evaluation.{field}: must be a positive integer')
         return total
 
 
