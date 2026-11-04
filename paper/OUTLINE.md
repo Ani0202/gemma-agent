@@ -62,3 +62,6 @@ Pre-release scan: grep for task ids/issue text, secrets; codex-review pass. Alte
 
 ## Next
 Nov 5-6: skeleton sections 1-4 in `paper/draft.md` (protocol is already fixed, needs no results); Nov 7-9: fill from results; Nov 10: full draft; Nov 11: compliance pass.
+
+## Update 2026-11-04 (decision 007)
+§7 conditional on 31B files by Nov 9 (else words go to §5/§6). Forum positioning threads fetched: 751487, 753524, 750521, 749597, 747248, 742807. Disclosure paragraph now mentions agents proposing/selecting experiments. Note: thread 749597 staff said only that scoring unfinished tasks as 0 "could lead to inconsistent results" and they'd think of alternatives; RULES_FINDINGS.md "no partial credit" is stronger than the quote, so the draft quotes the staff text only.
