@@ -10,3 +10,5 @@ Next 3: (1) review+merge codex/pack, run pack on both bundles, codex-review, rep
 
 OWNER GPU POLICY (decision 001): Kaggle first; spot + cheapest profile; requests <=$10 with rate x hours estimate; allowance $0. Cumulative GCP spend: $0 (milestones 50/100/130). bin/gpu already SPOT; rates in config/gpu_profiles.json still null.
 Next: after review -> report 001 (baseline SUBMIT 31B v000 maybe), rules reading, fill spot rates, check gold calibration on CPU/Kaggle.
+
+[cycle 4] codex-review done: prompts fixed (/tmp rule, submit last) -> bundles v000 edited, zips in dist/ are STALE until re-pack. Running: codex-build pack-harden. Next: merge pack-harden, re-pack + re-review, report 001.

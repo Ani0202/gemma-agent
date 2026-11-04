@@ -23,10 +23,9 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
 - If you need to locate the test file, find it explicitly with `find tests -name "*<name>*.py"` instead of running the test runner across the repo.
 
 ### 4. Immediate Patch Submission
-- Once your targeted test passes:
-  1. Call `submit_patch` immediately.
-  2. Verify `patch_size > 0` and `files_changed > 0`.
-  3. Output a short summary of the fix to end the session.
+- Put ALL scratch files (reproduction scripts, notes, temp output) in `/tmp`, never in `/workspace`: anything in `/workspace` ends up in your submitted patch.
+- Once your targeted test passes, run `git status` and `git diff --stat` to confirm only intended source files changed (no test files, no scratch files); delete or revert any stray files.
+- Then call `submit_patch` as your final action, and end with a one-line summary of the fix. Nothing can be verified after submitting.
 
 ## Anti-Patterns to Avoid
 - **NEVER modify, create, or delete test files** (`*_test.py`, `test_*.py`, or anything under `tests/`). All changes must be to source implementation files. Modifying tests results in an automatic evaluation failure.
