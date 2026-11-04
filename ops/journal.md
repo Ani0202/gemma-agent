@@ -6,3 +6,4 @@
 2026-11-04T22:40Z | merged pack-harden, re-packed v000 zips (4a23e14a.., cc647bfb..) | bundles/*/v000/MANIFEST.md
 22:35 | launched review-v000; spot-rate lookup inconclusive | ops/STATE.md
 2026-11-04T22:45Z | review-v000: static OK, runtime blocker remains; manifests/ATTRIBUTION fixed | ops/codex/review-20261104T223524.md
+2026-11-04T22:55Z | on-demand ceiling rates recorded in gpu_profiles.json; spot rates still unfound; rules scout launched | config/gpu_profiles.json

@@ -5,6 +5,6 @@ Best bundles: none validated. v000 packed + static PASS + codex-review static OK
 Remaining codex BLOCKING: runtime budget/timing unverified (needs harness compile + concurrency-1 timing on L4x4/Kaggle). Manifests+ATTRIBUTION fixed this cycle.
 Env: x86_64 VM, 106G free. GCP project gemma-agent-839566. Data: data/raw only; snapshots/graphs/wheels NOT downloaded.
 Owner GPU policy (decision 001): Kaggle first; spot + cheapest; requests <=$10; allowance $0. GCP spend $0. Kaggle quota 0h.
-Open: spot rates null in config/gpu_profiles.json; COMPLIANCE.md not started; rules pages unread; PRIOR_ART missing.
+Open: spot rates still null (on-demand ceilings recorded: l4x1 0.85, l4x2 2.00, l4x4 4.00, a100 5.03, cpu8 0.27 $/h); rules scout running -> docs/RULES_FINDINGS.md, PRIOR_ART.md. GCP cumulative spend $0.
 Running jobs: none.
 Next 3: (1) rules/discussion read -> COMPETITION.md, COMPLIANCE.md, PRIOR_ART; (2) fetch GCP spot rates, fill gpu_profiles; (3) report 001: harness compile + Kaggle timing check of v000 (no submit until runtime verified).
