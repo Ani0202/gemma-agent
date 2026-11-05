@@ -37,3 +37,4 @@
 2026-11-05T02:08:40Z | gold-full done: 52/129 clean, splits frozen (dev36/hold16) | eval/splits/MANIFEST.json, results/gold_calibration_per_task.jsonl
 2026-11-05T02:15Z | splits marked provisional; root cause: no wheel injection in subprocess sandbox; diag rerun launched | eval/kaggle/gold_calibration.py, ops/jobs/gold-diag-wait
 2026-11-05T02:57Z | gold-diag causes bucketed (all env; inline_snapshot/dirty_equals absent from wheelhouse); subprocess dep-setup patch, kernel v6, job gold-diag2-wait | results/gold_failure_causes.jsonl, eval/kaggle/gold_calibration.py
+2026-11-05T07:33Z | diag2: 3/77 recovered; fastapi blocked by langsmith pytest plugin; PYTEST_ADDOPTS fix, kernel v7, job gold-diag3-wait | runs/gold-diag2, eval/kaggle/gold_calibration.py
