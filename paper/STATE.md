@@ -6,8 +6,8 @@ Status: draft.md v0.2. §1-4, §8, the disclosure and the references are written
  §5-7 wait on results. Cut §7 if no 31B files exist by Nov 9 (dec 007). Body is about 1,280 words of a 2,800 budget.
 Builder evidence due Nov 9 (dec 007): (a) gold per-task outcomes and causes, satisfied by gold-local v2; (b) E4B timing (kernel not yet run); (c) failure taxonomy (no agent runs yet).
 Constraints: 3,000 words (body <= 2,800, refs excluded; open question), Kaggle Writeup or arXiv-ready PDF link, 5 criteria with equal weight.
-ANIKET CHECKLIST (hard):
- [ ] Join paper competition gemma-4-developer-agent-paper and accept rules (recommended by Nov 10)
+ANIKET CHECKLIST (hard; route any questions about these via the Director, not Aniket):
+ [x] Joined paper competition (Aniket confirmed 2026-11-05)
  [ ] Review AI-disclosure paragraph vs 'own original work' warranty
  [ ] OK public Apache-2.0 code release (list in OUTLINE.md)
  [ ] Click SUBMIT on the Writeup before Nov 12 23:59 UTC (drafts are NOT judged); select final submission
