@@ -38,7 +38,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - NOTE: bin/codex-build always branches from main HEAD; for follow-up rounds create the worktree on the previous commit manually,
   write the spec, sed the previous build-*.sh, and bin/job start codex-<name>.
 
-## 2a (CLOSED by dec 028): cause = harness RECORD strip (container_setup.py:266) + task package in base set; history in journal/report 005-prelim.
 
 ## bin/job, memguard, owner patch (cycles 62-66)
 - Linger=yes since ~18:05Z (dec 025): the scope path (MemoryMax=5G) is normal; Codex works under it.
@@ -51,7 +50,7 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Item 6 / dec 022 item 4 scoped (ops/codex/ask-20261105T181222.md): harness fallback diff covers caps when submit_patch not called;
   empty submit loses everything; draft prompt bundles/drafts/item4-system.md; plan 005 (paired A/B at v002 cap, needs GPU: ask in report 005).
 
-## OOM incident (dec 020/021): suspect unbounded memory in null-patch rich tests (no local per-sandbox cap); sandbox-limits fix covers it. Details: ops/history/STATE-archive.md.
+## 2a CLOSED (dec 028; cause: harness RECORD strip, see journal). OOM incident (dec 020/021): suspect unbounded memory in null-patch rich tests (no local per-sandbox cap); sandbox-limits fix covers it. Details: ops/history/STATE-archive.md.
 
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
