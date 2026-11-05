@@ -100,3 +100,6 @@
 2026-11-05T17:56Z | dec 023 item 1a: ops/patches/bin-job-fallback.diff drafted (linger-gated scope, ulimit -d); scratch smoke OK; codex-review queued | ops/patches/bin-job-fallback.diff
 2026-11-05T17:57Z | dec 023 item 3: starter + "[0.10]" notebook caps recorded (starter defaults 60 min; sample 1 min; [0.10] 4.5 min) | docs/RULES_FINDINGS.md
 2026-11-05T17:58Z | dec 023 items 1b/4: bus+pid check and the 2026-11-09T15:00Z linger reminder added to STATE | ops/STATE.md
+2026-11-05T17:58Z | review-memguard: 6 BLOCKING (allowlist on descendants, pid reuse, orphan/fork survivors, test validity, bin/job stale pgid/setsid escape); codex-build memguard-fix launched | ops/codex/review-20261105T175251.md, ops/codex/build-memguard-fix.spec
+2026-11-05T17:58Z | codex-sandbox-limits built (2c42c7a, 76 pass); review-sandbox-limits launched | ops/codex/build-sandbox-limits.md
+2026-11-05T17:59Z | review-e4b-v001 clean; comment arithmetic nit fixed (646.7 min); re-packed sha256=f2ced9c9... | ops/codex/review-20261105T175327.md, bundles/e4b/v001/MANIFEST.md

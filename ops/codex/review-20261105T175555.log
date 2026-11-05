@@ -790,3 +790,152 @@ Builder on Opus (dec 010: local-first, two-strike).
 3. EV-1 implementation, then the cpu8 gold+null run; then item 4 levers and report 004.
 
 web search: https://man7.org/linux/man-pages/man2/getrlimit.2.html
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import pathlib, re, subprocess, json, shlex
+src=pathlib.Path('bin/job').read_text()
+diff=pathlib.Path('ops/patches/bin-job-fallback.diff').read_text().splitlines(True)
+hunk=diff[3:]
+old=''.join(x[1:] for x in hunk if x[:1] in (' ','-'))
+new=''.join(x[1:] for x in hunk if x[:1] in (' ','+'))
+assert src.count(old)==1
+patched=src.replace(old,new)
+r=subprocess.run(['/bin/bash','-n'],input=patched,text=True,capture_output=True)
+assert r.returncode==0, r.stderr
+print('PASS: patch context matches; patched bash -n')
+assignment=next(x.strip() for x in patched.splitlines() if x.strip().startswith('linger='))
+condition=next(x.strip() for x in patched.splitlines() if x.strip().startswith('if [ \""'$linger"'"'))
+for label,out,rc,missing,socket,probe,expect in [
+ ('yes','yes\\n',0,False,True,0,'scope'),
+ ('no','no\\n',0,False,True,0,'fallback'),
+ ('no-user','',1,False,True,0,'fallback'),
+ ('bus-error','',1,False,True,0,'fallback'),
+ ('missing-binary','',127,True,True,0,'fallback'),
+ ('empty','',0,False,True,0,'fallback'),
+ ('non-yes','Yes\\n',0,False,True,0,'fallback'),
+ ('whitespace','yes \\n',0,False,True,0,'fallback'),
+ ('multiple-lines','yes\\nno\\n',0,False,True,0,'fallback'),
+ ('no-runtime-bus','yes\\n',0,False,False,0,'fallback'),
+ ('scope-probe-failure','yes\\n',0,False,True,1,'fallback'),
+]:
+ setup='set -uo pipefail\\nrt=/synthetic\\nid() { builtin printf testuser; }\\n'
+ setup+='[() { if [[ \""'$1" == -S ]]; then return '"'+('0' if socket else '1')+'; else builtin [ \""'$@"; fi; }'"\\n'
+ setup+='systemd-run() { return '+str(probe)+'; }\\n'
+ if missing: setup+='PATH=/nonexistent\\n'
+ else: setup+='loginctl() { builtin printf %s '+shlex.quote(out)+'; return '+str(rc)+'; }\\n'
+ script=setup+assignment+'\\n'+condition+'\\n builtin printf scope\\nelse\\n builtin printf fallback\\nfi\\n'
+ r=subprocess.run(['/bin/bash','-c',script],text=True,capture_output=True)
+ assert (r.returncode,r.stdout)==(0,expect),(label,r)
+ print('PASS: linger branch',label,'=>',r.stdout)
+pre=next(x.strip() for x in patched.splitlines() if x.strip().startswith('pre=(bash'))
+args=['a b','',\"one'quote\",'"'$(false)'"','*','semi;colon','line\\nbreak','-dash']
+code='import sys,resource,json; print(json.dumps([sys.argv[1:],resource.getrlimit(resource.RLIMIT_DATA)]))'
+r=subprocess.run(['/bin/bash','-c',pre+'\\n\""'${pre[@]}" "$@"'"','_', '/usr/bin/python3','-c',code,*args],text=True,capture_output=True)
+assert r.returncode==0,r.stderr
+actual,limits=json.loads(r.stdout)
+assert actual==args,(actual,args)
+assert limits==[5242880*1024]*2,limits
+print('PASS: fallback argument preservation; hard and soft RLIMIT_DATA =',limits)
+assert patched[patched.index('    # setsid:'):]==src[src.index('    # setsid:'):]
+print('PASS: launch wrapper, process-group kill, and scope-stop path unchanged')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+PASS: patch context matches; patched bash -n
+PASS: linger branch yes => scope
+PASS: linger branch no => fallback
+PASS: linger branch no-user => fallback
+PASS: linger branch bus-error => fallback
+PASS: linger branch missing-binary => fallback
+PASS: linger branch empty => fallback
+PASS: linger branch non-yes => fallback
+PASS: linger branch whitespace => fallback
+PASS: linger branch multiple-lines => fallback
+PASS: linger branch no-runtime-bus => fallback
+PASS: linger branch scope-probe-failure => fallback
+PASS: fallback argument preservation; hard and soft RLIMIT_DATA = [5368709120, 5368709120]
+PASS: launch wrapper, process-group kill, and scope-stop path unchanged
+
+web search: 
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import ctypes, errno, mmap, resource
+limit=32*1024**2
+size=64*1024**2
+libc=ctypes.CDLL(None,use_errno=True)
+libc.sbrk.argtypes=[ctypes.c_ssize_t]
+libc.sbrk.restype=ctypes.c_void_p
+resource.setrlimit(resource.RLIMIT_DATA,(limit,limit))
+assert resource.getrlimit(resource.RLIMIT_DATA)==(limit,limit)
+print('RLIMIT_DATA:',limit,'bytes')
+ptr=libc.sbrk(size)
+assert ptr==ctypes.c_void_p(-1).value and ctypes.get_errno()==errno.ENOMEM,(ptr,ctypes.get_errno())
+print('PASS: brk growth 64 MiB rejected with ENOMEM')
+try:
+    b=bytearray(size)
+except MemoryError:
+    print('PASS: bytearray 64 MiB rejected with MemoryError')
+else:
+    raise AssertionError('bytearray unexpectedly succeeded')
+try:
+    m=mmap.mmap(-1,size,flags=mmap.MAP_PRIVATE|mmap.MAP_ANONYMOUS,prot=mmap.PROT_READ|mmap.PROT_WRITE)
+except OSError as e:
+    assert e.errno==errno.ENOMEM,e
+    print('PASS: private writable anonymous mmap 64 MiB rejected with ENOMEM')
+else:
+    m.close()
+    raise AssertionError('private writable mmap unexpectedly succeeded')
+with mmap.mmap(-1,size) as m:
+    print('LIMITATION: default Python shared anonymous mmap 64 MiB succeeded; no pages touched')
+with mmap.mmap(-1,size,flags=mmap.MAP_PRIVATE|mmap.MAP_ANONYMOUS,prot=0) as m:
+    print('PASS: private PROT_NONE reservation 64 MiB succeeded; no pages touched')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+RLIMIT_DATA: 33554432 bytes
+PASS: brk growth 64 MiB rejected with ENOMEM
+PASS: bytearray 64 MiB rejected with MemoryError
+PASS: private writable anonymous mmap 64 MiB rejected with ENOMEM
+LIMITATION: default Python shared anonymous mmap 64 MiB succeeded; no pages touched
+PASS: private PROT_NONE reservation 64 MiB succeeded; no pages touched
+
+web search: https://raw.githubusercontent.com/torvalds/linux/v6.8/include/linux/mm.h
+exec
+/bin/bash -lc "cat ops/jobs/memguard.status && tail -n 5 ops/logs/memguard.log && git show --stat --oneline b1eedd7 -- bin/job && git diff --numstat b1eedd7 -- bin/job && rg -n 'KillUserProcesses|KillOnlyUsers|KillExcludeUsers|UserStopDelaySec' /etc/systemd/logind.conf /etc/systemd/logind.conf.d /usr/lib/systemd/logind.conf.d 2>/dev/null" in /home/ubuntu/work/gemma
+ exited 2 in 0ms:
+running 7933 2026-11-05T17:48:04Z
+2026-11-05T17:48:04Z start pid=7936 min_available=2.50G max_total=6.00G marker=GEMMA_JOB_CAP roots=['/home/ubuntu/work/gemma', '/tmp'] dry_run=False
+2026-11-05T17:48:04Z beat avail=9.99G targeted_rss=0.00G jobs=0 targets=0
+b1eedd7 bin/job: process-group kill, OOM priority, admission check (dec 021)
+ bin/job | 40 ++++++++++++++++++++++++++++++++--------
+ 1 file changed, 32 insertions(+), 8 deletions(-)
+/etc/systemd/logind.conf:22:#KillUserProcesses=no
+/etc/systemd/logind.conf:23:#KillOnlyUsers=
+/etc/systemd/logind.conf:24:#KillExcludeUsers=root
+/etc/systemd/logind.conf:26:#UserStopDelaySec=10
+
+codex
+The in-memory checks passed: the listed `loginctl` errors and non-`yes` outputs select the fallback, arguments survive the wrapper, and both data limits are set to 5 GiB. One limitation is confirmed: private writable `mmap` allocations hit the limit, but Python’s default shared anonymous mappings bypass it. The dec 021 launch and kill code is unchanged; memguard remains necessary for shared allocations and aggregate job memory.
+codex
+**BLOCKING**
+
+None found for the requested change, with dec 021’s memguard requirement retained.
+
+**Non-blocking**
+
+1. **`RLIMIT_DATA` provides narrower protection than `RLIMIT_AS`.** At [ops/patches/bin-job-fallback.diff:26](/home/ubuntu/work/gemma/ops/patches/bin-job-fallback.diff:26), `ulimit -d 5242880` correctly sets both limits to **5 GiB**. Linux ≥4.7 applies this limit to private writable `mmap` allocations as well as `brk`, so it covers ordinary Python/pytest/vLLM-client heap allocations. It does **not** bound shared mappings, total RSS, or aggregate child memory. See [getrlimit](https://man7.org/linux/man-pages/man2/getrlimit.2.html) and the [kernel’s accounting](https://raw.githubusercontent.com/torvalds/linux/v6.8/mm/mmap.c).
+
+   I confirmed this safely with a 32 MiB limit: 64 MiB `brk`, bytearray, and private writable anonymous mappings failed; Python’s default shared anonymous mapping succeeded without touching pages. Python defaults to [`MAP_SHARED`](https://docs.python.org/3/library/mmap.html). The shared-mapping gap is a protection reduction; the per-process aggregate gap already existed. Retain memguard and document that the fallback caps private data, rather than all process memory ([bin/memguard:15](/home/ubuntu/work/gemma/bin/memguard:15)).
+
+The remaining checks passed:
+
+- **Linger gate and failure handling:** [patch:17–18](/home/ubuntu/work/gemma/ops/patches/bin-job-fallback.diff:17) quotes the username and requires exact `yes`. Mocked missing binary, unknown user/no session, bus error, empty output, and non-`yes` output all selected fallback. `set -uo pipefail` has no `errexit`, so failed assignment does not terminate startup. Missing runtime socket and failed scope probe also selected fallback. The gate matches [systemd’s documented linger lifecycle](https://freedesktop.org/software/systemd/man/latest/systemd-run.html).
+- **Quoting:** [patch:26](/home/ubuntu/work/gemma/ops/patches/bin-job-fallback.diff:26) preserves argument boundaries through `exec "$@"`; empty arguments, spaces, quotes, literal substitutions, wildcards, and newlines passed.
+- **Kill integration:** stale `.unit` removal remains before branch selection; fallback creates none. Existing scope jobs still reach `systemctl --user stop` regardless of current linger state ([bin/job:59](/home/ubuntu/work/gemma/bin/job:59)).
+- **Dec 021:** admission control, OOM priority, detached wrapper, process-group termination, and status handling are unchanged. Patch context and patched `bash -n` passed.
+
+**Questions**
+
+None.
+
+No files edited. Live logout and job-kill behavior were not exercised; validation used read-only inspection and in-memory probes.
+tokens used
+44,704

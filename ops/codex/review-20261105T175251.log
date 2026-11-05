@@ -2346,3 +2346,37 @@ Reviewer own inherited GEMMA_JOB_CAP present: True
 Reviewer own oom_score_adj: 1000
 Dummy-equivalent child inherited oom_score_adj: 1000
 
+codex
+**BLOCKING**
+
+1. **`memguard` signals processes outside the allowlist.** [bin/memguard:190](/home/ubuntu/work/gemma/bin/memguard:190) includes every descendant, without rechecking its marker, RSS, cwd, or session exemption. A marked parent can therefore cause an unmarked, small child with cwd `/` to be killed. A mocked snapshot reproduced this: target set `{500}`, signalled PID `501`. Apply the allowlist to every signal recipient, including descendants and the final root.
+
+2. **PID reuse can redirect signals and OOM adjustments to unrelated processes.** [bin/memguard:168](/home/ubuntu/work/gemma/bin/memguard:168) and [bin/memguard:194](/home/ubuntu/work/gemma/bin/memguard:194) operate on bare PIDs after classification. No process start time or pidfd binds subsequent operations to the inspected process. The root check at [bin/memguard:206](/home/ubuntu/work/gemma/bin/memguard:206) verifies only UID, allowing a replacement, same-UID session process to be killed. Use identity-bound signalling and identity-checked `/proc` access; revalidate eligibility before acting.
+
+3. **Orphans and concurrent forks can survive while the watchdog reports `survivors=[]`.** [bin/memguard:142](/home/ubuntu/work/gemma/bin/memguard:142) groups processes by current ancestry, so an already orphaned marked process becomes a separate job. During killing, [bin/memguard:190](/home/ubuntu/work/gemma/bin/memguard:190) tracks descendants of the original root plus the original `known` list; newly forked children can be reparented before either scan sees them. There is also no rescan after the three-second root grace period. Finally, [bin/memguard:214](/home/ubuntu/work/gemma/bin/memguard:214) checks only PIDs successfully signalled, rather than all job members. A mocked fork/reparent sequence left PID `502` alive with reported survivors `[]`. Persistent job identity, repeated membership discovery, and an independent final survivor inventory are needed.
+
+4. **The wrapper patch trusts stale process-group numbers.** [ops/patches/bin-job-hardening.diff:59](/home/ubuntu/work/gemma/ops/patches/bin-job-hardening.diff:59) reads a stored PGID and signals it without validating the original wrapper’s identity or current group membership. A stale `running` status after a crash/reboot can target an unrelated group when that number is reused. Validate process identity and group ownership before signalling; the three-field fallback needs equivalent PID protection.
+
+5. **Wrapper survivor reporting misses escaped descendants and legacy grandchildren.** [ops/patches/bin-job-hardening.diff:66](/home/ubuntu/work/gemma/ops/patches/bin-job-hardening.diff:66) retains the old direct-child-only kill. Killing wrapper → child leaves a grandchild reparented elsewhere, invisible to the subsequent `pgrep -P`. Likewise, a new job’s descendant that calls `setsid()` escapes the recorded group. [ops/patches/bin-job-hardening.diff:72](/home/ubuntu/work/gemma/ops/patches/bin-job-hardening.diff:72) misses both cases and can report success. Scope-stop errors are also ignored. Preserve descendant identities before terminating parents, check escaped members, and verify scope termination when applicable.
+
+6. **The reported two-pass test result does not validate the hardened deployment.** [eval/tests/test_memguard.py:56](/home/ubuntu/work/gemma/eval/tests/test_memguard.py:56) retains `GEMMA_JOB_CAP`, so the dummy remains eligible for the production watchdog. Moreover, the proposed wrapper makes children inherit `oom_score_adj=1000`, contradicting the assertion of `0` at [eval/tests/test_memguard.py:82](/home/ubuntu/work/gemma/eval/tests/test_memguard.py:82). A tiny dummy-equivalent child launched during this review inherited `1000`. Compare against the inherited baseline and explicitly isolate the dummy from the production marker.
+
+   The survivor assertion at [eval/tests/test_memguard.py:65](/home/ubuntu/work/gemma/eval/tests/test_memguard.py:65) checks only the initial PID list, so it cannot detect later forks or previously orphaned members. Cleanup at [eval/tests/test_memguard.py:85](/home/ubuntu/work/gemma/eval/tests/test_memguard.py:85) kills the wrapper before rediscovering descendants, potentially abandoning allocating children on failure. Retain and clean up all recorded identities, and add deterministic orphan/fork-race cases.
+
+**Non-blocking findings**
+
+- **Status-format compatibility passes.** [bin/router:104](/home/ubuntu/work/gemma/bin/router:104) watches file timestamps; [bin/status:11](/home/ubuntu/work/gemma/bin/status:11) prints status output. No additional field-sensitive job-status parser was found in `eval/`. The new `read` accepts old three-field lines with an empty PGID. [bin/memguard:159](/home/ubuntu/work/gemma/bin/memguard:159) parses wrapper argv, whose layout remains compatible.
+- **Stable-snapshot self-protection and the RSS floor are correct.** Ancestors and the watchdog’s own wrapper tree are excluded at [bin/memguard:133](/home/ubuntu/work/gemma/bin/memguard:133) and [bin/memguard:153](/home/ubuntu/work/gemma/bin/memguard:153). [bin/memguard:269](/home/ubuntu/work/gemma/bin/memguard:269) suppresses MemAvailable-only kills below 256 MiB; aggregate-RSS violations bypass that floor.
+- **OOM-priority implementation is structurally sound, apart from identity races.** Targets are adjusted before trigger evaluation. The wrapper’s builtin write precedes workload creation, so children inherit `1000`. `setsid` followed by `nohup` preserves the wrapper argv, and `systemd-run --scope` inherits the caller’s execution environment. Detached child sessions remain the completeness issue described above.
+- **Mail delivery failure is silent and can stall polling.** [bin/memguard:289](/home/ubuntu/work/gemma/bin/memguard:289) has no timeout and ignores the sender’s exit status. Orphaned marked jobs also lose their job-log association when `job_name()` returns `None`.
+- **The `/proc` access contract is exceeded.** [bin/memguard:161](/home/ubuntu/work/gemma/bin/memguard:161) reads `cmdline`, which decision 021 item 1a does not include in its permitted files.
+- **Admission control conflicts with watchdog restart instructions.** The prescribed name `memguard` fails the `<5 GiB` admission check at [ops/patches/bin-job-hardening.diff:18](/home/ubuntu/work/gemma/ops/patches/bin-job-hardening.diff:18), precisely when restarting protection may matter.
+
+**Questions**
+
+- Should the owner patch add a unique inherited job identifier for orphan association?
+- Should the documented watchdog name become `memguard-light`?
+
+No files changed. Shell/Python syntax checks, patch-format checks, and mocked safety probes completed. The allocating test was not rerun. The working-tree `bin/job` already matches the patch in commit `b1eedd7`.
+tokens used
+53,039

@@ -3266,3 +3266,96 @@ def apply_isolation(hidden_paths, ro_paths):
 1	1	eval/tests/test_eval_fixes.py
 2	0	eval/tests/test_gold_calibration.py
 
+exec
+/bin/bash -lc "python3 - <<'PY'
+p='eval/sandbox_env.py';s=open(p).read().replace('    status, code = None, None\\n', '    status, code = None, None\\n    memory_killed = False\\n').replace(\"                status, code = 'error', 137\\n\", \"                status, code = 'error', 137\\n                memory_killed = True\\n\").replace('        if code == 137:\\n', '        if memory_killed:\\n')
+s=s.replace(\"        # A bin/job fallback may already impose a lower hard AS cap. Raising\\n        # that cap is unprivileged and must never be attempted by prlimit.\", \"        # A bin/job fallback may already impose a lower hard AS cap. Raising\\n        # that cap requires privileges; preserve the tighter inherited limit.\")
+open(p,'w').write(s)
+p='eval/tests/test_sandbox_limits.py';s=open(p).read().replace(\"    (['/bin/bash', '-c', 'exit 3'], {}),\", \"    (['/bin/bash', '-c', 'exit 3'], {}),\\n    (['/bin/bash', '-c', 'exit 137'], {}),\")
+s += '''\\n\\ndef test_without_prlimit(execute, monkeypatch):
+    run, metrics = execute
+    which = sandbox_env.shutil.which
+    monkeypatch.setattr(sandbox_env.shutil, 'which',
+                        lambda name: None if name == 'prlimit' else which(name))
+    result = run(['/bin/bash', '-c', 'echo fallback'])
+    assert result.status == 'ok' and result.stdout == 'fallback\\\\n'
+    assert metrics['peak_rss_bytes'] > 0
+'''
+open(p,'w').write(s)
+p='eval/tests/test_gold_calibration.py';s=open(p).read();needle='    def test_exception_text_never_copied_into_result(self):';i=s.index(needle);s=s[:i]+'''    def test_metrics_propagate_from_async_verifier(self):
+        async def verify(*args, **kwargs):
+            gold.command_metrics.get().update(peak_rss_bytes=123456, mem_kills=1, orphan_kills=2)
+            return dict(resolved=False, test_exit_code=137)
+        row = self.run_worker(verify)
+        self.assertEqual([row[k] for k in ('peak_rss_bytes', 'mem_kills', 'orphan_kills')],
+                         [123456, 1, 2])
+        self.assertIsNone(gold.command_metrics.get())
+
+'''+s[i:];open(p,'w').write(s)
+PY
+bin/job start sandbox-limits-final-light -- /home/ubuntu/gemma-local/venv/bin/python3 /tmp/gemma-sandbox-limits-tests.py
+while read -r state rest < ops/jobs/sandbox-limits-final-light.status && [ \""'$state" = running ]; do sleep 1; done
+cat ops/jobs/sandbox-limits-final-light.log' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 10924ms:
+started sandbox-limits-final-light: running 10 2026-11-05T17:56:43Z [memory cap: ulimit -v 5G per process (no systemd user manager)]
+[bin/job] memory cap: ulimit -v 5G per process (no systemd user manager)
+......................s............................................. [ 88%]
+.........                                                                [100%]
+76 passed, 1 skipped, 4 subtests passed in 8.55s
+
+codex
+The final run passed: 76 passed, 1 skipped, and 4 subtests passed in 8.55 seconds. It also verifies the no-`prlimit` fallback, propagation of metrics from the async verifier, and that an ordinary exit 137 gets no memory-limit note. The live bubblewrap test was skipped, so that path remains unverified here.
+exec
+/bin/bash -lc "python3 - <<'PY'
+import shutil, subprocess
+from eval.sandbox_env import BWRAP_TEMPLATE
+if shutil.which('bwrap'):
+    p = subprocess.run(BWRAP_TEMPLATE[:11] + ['/bin/true'], capture_output=True, text=True)
+    print('bwrap preflight:', p.returncode, p.stderr.strip())
+else:
+    print('bwrap not installed')
+PY
+ git diff --check" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+bwrap preflight: 1 bwrap: loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p = Path('ops/STATE.md')
+s = p.read_text()
+s = s.replace('## Running jobs\\n', '## Running jobs\\n- Codex sandbox-limits implementation: requested offline tests complete (76 passed, 1 skipped, 4 subtests; 8.55s). No gold/null rerun.\\n- memguard is absent in this checkout; live bwrap verification blocked by sandbox NETLINK_ROUTE permissions.\\n', 1)
+s = s.replace('2. Add a prlimit 4 GiB wrapper to the local sandbox runner, then the EV-1 gold+null job (dec 019 item 2) under bin/job.', '2. Review sandbox-limits changes (4 GiB tree RSS, 8 GiB AS backstop, orphan cleanup); verify live bwrap outside Codex before any authorized EV-1 rerun.')
+p.write_text(s)
+with Path('ops/journal.md').open('a') as f:
+    f.write('2026-11-05T17:57Z | Codex implemented dec-020 item 6 / dec-021 item 4 sandbox limits and numeric calibration metrics; only requested three offline test files via bin/job: 76 passed, 1 skipped (bwrap NETLINK_ROUTE denied), 4 subtests passed in 8.55s; no calibration or commit | eval/proctree.py, eval/sandbox_env.py, eval/kaggle/gold_calibration.py\\n')
+Path('ops/status').write_text('CONTINUE\\n')
+# Remove only this implementation session\\'s generated job metadata; logs remain.
+for name in ('sandbox-limits-tests-light', 'sandbox-limits-check-light', 'sandbox-limits-check2-light', 'sandbox-limits-final-light'):
+    for ext in ('cmd', 'status'):
+        Path(f'ops/jobs/{name}.{ext}').unlink(missing_ok=True)
+PY
+ git diff --check
+ git status --short" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+ M eval/kaggle/gold_calibration.py
+ M eval/kaggle/stage_kernel.py
+ M eval/sandbox_env.py
+ M eval/tests/test_eval_fixes.py
+ M eval/tests/test_gold_calibration.py
+ M ops/STATE.md
+ M ops/journal.md
+ M ops/status
+?? eval/proctree.py
+?? eval/tests/test_sandbox_limits.py
+
+codex
+Implemented process-tree tracking, RSS limits, timeout/orphan cleanup, calibration metrics, and `GOLD_CONCURRENCY`. Preserved executor output semantics and updated single-file kernel staging.
+
+Tests: **76 passed, 1 skipped, 4 subtests passed in 8.55s**, using only the three requested files under `bin/job`.
+
+Open issue: live bubblewrap verification remains pending; the sandbox blocked its NETLINK_ROUTE socket.
+
+No calibration run or git commit performed.
+tokens used
+56,282

@@ -1,11 +1,11 @@
-# STATE: snapshot 2026-11-05 17:58Z (cycle 63, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 18:00Z (cycle 64, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - 31b: dist/31b-v000.zip sha256=4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161 (repo a12f0b7; static+codex static OK)
 - e4b: dist/e4b-v000.zip sha256=cc647bfb28bc6d2db0e3ec816df084f23a91230786d8fea177e2d63d2a6940e2 (same)
-- e4b-v001 (dec 022 item 3, cap 5 -> 1.4 only): dist/e4b-v001.zip sha256=4d07af9211879fe0e45d2148457d4a4a7c273539063bb6f7ca6bfda15cb4d7d7, pack PASS; codex-review running; re-time HELD until item 2 concludes.
+- e4b-v001 (dec 022 item 3, cap 5 -> 1.4 only): dist/e4b-v001.zip sha256=f2ced9c97ee1447cb3a78c0ebf65f4ecaff90c84b18313645d5d043c62d277e9 (re-pack, comment fix only), codex-review clean (no BLOCKING); re-time HELD until item 2 concludes.
 - No local pass-rate scores yet. eval-runner-fix MERGED to main 70c0d9f (codex review clean + N1 count-cap fix d13ceac; 421 pass, 3 skip).
   Test cmd: /home/ubuntu/gemma-local/venv/bin/python3 with pyimg cp3.13 site-packages appended to sys.path, pytest eval/tests.
 
@@ -19,9 +19,9 @@ Builder on Opus (dec 010: local-first, two-strike).
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
 ## Running jobs (17:55Z)
-- memguard (pid 7933): running, 0 kills.
+- memguard (pid 7933): running, 0 kills. codex-review ops/codex/review-20261105T175251.md: 6 BLOCKING (descendants not allowlist-checked; pid reuse; orphan/fork survivors; test validity; 2 on the applied bin/job kill path). Fix: codex-build memguard-fix (branch codex/memguard-fix). The bin/job findings (stale pgid, setsid escapes) go in a later owner patch. On restart, admission refuses the name "memguard" when MemAvailable < 5G: use memguard-light then (Director informed).
+- codex-sandbox-limits DONE: 2c42c7a, 76 pass (bwrap live check blocked inside Codex); its ops/ edits must NOT be merged. codex-review job review-sandbox-limits.
 - RELAUNCHED 17:52Z (the first attempts all failed because Codex's tool host crashes under the ulimit -v 5G fallback): review-memguard, codex-sandbox-limits (branch codex/sandbox-limits), ask-setup-210s. All three now run under the systemd scope (the user bus exists since 17:51Z).
-- review-e4b-v001: codex-review of v001.
 - review-job-fallback: codex-review of ops/patches/bin-job-fallback.diff.
 - scout DONE: ops/scout/2026-11-05-timing-caps.md. No public setup figure; the rules text puts setup inside the 12 h; unclear whether it counts against the per-task cap; public caps 4.5/8 min. Dec 023 item 3 DONE: RULES_FINDINGS C1-C3 (starter defaults to 60 min if the key is absent; sample_submission 1 min; "[0.10]" notebook 4.5 min). Weigh C3 as a mean, not a worst case, in report 004.
 
@@ -62,6 +62,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
 ## Next 3
-1. Review/merge codex/sandbox-limits (own review + codex-review); act on review-memguard findings; send the patch path to the Director.
+1. Merge codex/sandbox-limits (eval/ files only) after review-sandbox-limits; merge memguard-fix after its review, then restart memguard; mail the Director bin-job-fallback.diff after review-job-fallback.
 2. Dec 022 item 2: write results/kaggle_timing_e4b_v000_setup_breakdown.json + RULES_FINDINGS from ask-setup-210s/scout, then codex-ask the adversarial take (2d). (v001 packed; act on review-e4b-v001.)
 3. EV-1 implementation, then the cpu8 gold+null run; then item 4 levers and report 004.
