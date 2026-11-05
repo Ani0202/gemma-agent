@@ -110,3 +110,20 @@ Conclusion: explanation (b) (different wheel set) — not an emulation bug in ou
 causes are tagged `scorer_fail=assumed` (code-verified against published harness, not run-verified in the
 real scorer; the hidden scorer image could differ). Known residual emulation difference: docker path runs
 `pip install --no-deps -e /workspace`; subprocess path relies on workspace_paths.pth (gold passers unaffected).
+
+## v2 freeze (2026-11-05, dec 014): null control + wheel shadowing
+- Null-patch control (runs/gold-null -> results/gold_null_control.jsonl): 4/52 gold-passers pass with NO source
+  change (fastapi_14873, requests_7309/7315/7427). Excluded, cause `null_pass`.
+- Import probe (results/gold_import_probe.jsonl): requests and httpx import from the sandbox site-packages; rich and fastapi
+  import from /workspace.
+- Root cause (source read + manual repro, scratch venv): swegemma `container_setup._build_unpacked_wheels_tar`
+  (container_setup.py:266) drops every `*/RECORD` when unpacking wheels into site-packages. sandbox/setup.py then runs
+  `pip install --no-index --no-deps -e /workspace`, which tries to uninstall the existing wheel copy and fails with
+  `uninstall-no-record-file`; the online fallback fails offline. `workspace_paths.pth` entries come after site-packages,
+  so a **src-layout** package (src/httpx, src/requests) resolves to the wheel copy. Flat-layout packages (rich/, fastapi/)
+  win via cwd=/workspace at sys.path[0]. This is the official docker path's behaviour, not an emulation bug, so
+  dec 014 rule 2b applies: requests/httpx are **unmeasurable locally** and dropped from dev/holdout.
+- Clean set v2: 48 (rich 39, fastapi 9); dev 33 / holdout 15. Hashes in eval/splits/MANIFEST.json.
+- Implication for agents (generic, not repo-specific): in any src-layout repo whose package is also in the wheelhouse,
+  the agent's own test runs exercise the wheel, not its edits. Candidate prompt/skill check: confirm `pkg.__file__` is
+  under /workspace before trusting a repro.

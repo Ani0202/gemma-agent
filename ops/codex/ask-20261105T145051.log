@@ -2641,3 +2641,2938 @@ exec
 503:    async def exec_async(
 510:        """Stop and cleanup the sandbox directory and virtual environment."""
 
+codex
+The official Docker path does attempt an editable install, including during `setup.py --fast-path`. The emulation also unpacks wheels again on its second dependency-setup call, while Docker uses a per-container marker. I’m checking whether that second extraction restores wheel code over the editable install, and whether pytest changes the import path after the probe runs.
+exec
+/bin/bash -lc "nl -ba data/raw/sandbox/setup.py | sed -n '1,75p'; nl -ba data/raw/sandbox/setup.py | sed -n '190,400p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py | sed -n '310,505p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	#!/usr/bin/env python3
+     2	"""Sandbox environment setup and dependency installation for public SWE-bench repositories.
+     3	
+     4	This script runs inside the evaluation sandbox container prior to test execution.
+     5	It discovers dependencies from pyproject.toml, setup.cfg, and requirements files,
+     6	resolves compatible pre-baked wheels from /wheels, configures git exclude rules,
+     7	installs the workspace package in editable mode, and configures pytest discovery.
+     8	"""
+     9	
+    10	from __future__ import annotations
+    11	
+    12	import contextlib
+    13	import os
+    14	import re
+    15	import subprocess
+    16	import sys
+    17	from pathlib import Path
+    18	from typing import Any
+    19	
+    20	try:
+    21	    import tomllib
+    22	except ImportError:
+    23	    try:
+    24	        import tomli as tomllib  # type: ignore
+    25	    except ImportError:
+    26	        tomllib = None  # type: ignore
+    27	
+    28	WHEELS_DIR = Path("/wheels")
+    29	
+    30	
+    31	def normalize_pkg_name(name: str) -> str:
+    32	    """Normalizes package name per PEP 503."""
+    33	    return re.sub(r"[-_.]+", "-", name).lower()
+    34	
+    35	
+    36	def is_prebaked_env() -> bool:
+    37	    """Checks if the sandbox environment already has pre-baked wheels installed."""
+    38	    return os.environ.get("SWE_PREBAKED", "").lower() in ("1", "true", "yes")
+    39	
+    40	
+    41	def find_site_packages_dir() -> Path | None:
+    42	    """Finds the primary site-packages directory for the current Python interpreter."""
+    43	    import site
+    44	    packages = site.getsitepackages()
+    45	    for p in packages:
+    46	        candidate = Path(p)
+    47	        if candidate.exists() and os.access(candidate, os.W_OK):
+    48	            return candidate
+    49	    user_site = site.getusersitepackages()
+    50	    if user_site:
+    51	        candidate = Path(user_site)
+    52	        if candidate.exists() and os.access(candidate, os.W_OK):
+    53	            return candidate
+    54	    for p in sys.path:
+    55	        candidate = Path(p)
+    56	        if candidate.name == "site-packages" and candidate.exists() and os.access(candidate, os.W_OK):
+    57	            return candidate
+    58	    return None
+    59	
+    60	
+    61	def parse_wheel_filename(filename: str) -> dict[str, Any] | None:
+    62	    """Parses a wheel filename according to PEP 427."""
+    63	    if not filename.endswith(".whl"):
+    64	        return None
+    65	    stem = filename[:-4]
+    66	    parts = stem.split("-")
+    67	    if len(parts) < 5:
+    68	        return None
+    69	    distribution = parts[0]
+    70	    version = parts[1]
+    71	    pyver = parts[-3]
+    72	    abi = parts[-2]
+    73	    plat = parts[-1]
+    74	    return {
+    75	        "distribution": distribution,
+   190	        print(f"Notice: setup_git_exclude skipped: {e}", file=sys.stderr)
+   191	
+   192	
+   193	def install_editable_package(workspace: Path) -> None:
+   194	    """Installs the workspace repository in editable mode without dependencies."""
+   195	    cmd = [
+   196	        sys.executable,
+   197	        "-m",
+   198	        "pip",
+   199	        "install",
+   200	        "--no-index",
+   201	        f"--find-links={WHEELS_DIR}",
+   202	        "--no-build-isolation",
+   203	        "--no-deps",
+   204	        "-e",
+   205	        str(workspace),
+   206	    ]
+   207	    try:
+   208	        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+   209	        if res.returncode != 0:
+   210	            fallback = [sys.executable, "-m", "pip", "install", "--no-deps", "-e", str(workspace)]
+   211	            subprocess.run(fallback, capture_output=True, text=True, check=False)
+   212	    except Exception as e:
+   213	        print(f"Notice: install_editable_package skipped: {e}", file=sys.stderr)
+   214	
+   215	
+   216	def configure_workspace_pytest_ini(workspace: Path) -> None:
+   217	    """Configures pytest.ini in the workspace root for robust test discovery."""
+   218	    ini_path = workspace / "pytest.ini"
+   219	    existing = ""
+   220	    if ini_path.exists():
+   221	        try:
+   222	            existing = ini_path.read_text(encoding="utf-8", errors="replace")
+   223	        except Exception:
+   224	            existing = ""
+   225	
+   226	    default_addopts = "--import-mode=importlib -p no:anyio"
+   227	    norecursedirs_val = ".* build dist venv"
+   228	
+   229	    if "[pytest]" in existing:
+   230	        lines = []
+   231	        has_addopts = False
+   232	        has_norecursedirs = False
+   233	        for line in existing.splitlines():
+   234	            if line.strip().startswith("addopts"):
+   235	                has_addopts = True
+   236	                curr_opts = line.split("=", 1)[1] if "=" in line else ""
+   237	                for opt in default_addopts.split():
+   238	                    if opt not in curr_opts:
+   239	                        line = line.rstrip() + " " + opt
+   240	                lines.append(line)
+   241	            elif line.strip().startswith("norecursedirs"):
+   242	                has_norecursedirs = True
+   243	                for d in norecursedirs_val.split():
+   244	                    if d not in line:
+   245	                        line = line.rstrip() + " " + d
+   246	                lines.append(line)
+   247	            else:
+   248	                lines.append(line)
+   249	        if not has_addopts:
+   250	            lines.append(f"addopts = {default_addopts}")
+   251	        if not has_norecursedirs:
+   252	            lines.append(f"norecursedirs = {norecursedirs_val}")
+   253	        content = "\n".join(lines) + "\n"
+   254	    else:
+   255	        content = f"""[pytest]
+   256	addopts = {default_addopts}
+   257	norecursedirs = {norecursedirs_val}
+   258	python_classes = Test* *Test
+   259	python_files = test_*.py *_test.py
+   260	filterwarnings =
+   261	    ignore::DeprecationWarning
+   262	    ignore::UserWarning
+   263	""" + (("\n" + existing) if existing.strip() else "")
+   264	
+   265	    try:
+   266	        ini_path.write_text(content, encoding="utf-8")
+   267	    except Exception as e:
+   268	        print(f"Warning: could not write {ini_path}: {e}", file=sys.stderr)
+   269	
+   270	
+   271	def configure_workspace_conftest(workspace: Path) -> None:
+   272	    """Configures conftest.py in the workspace root to assist test discovery."""
+   273	    conftest_path = workspace / "conftest.py"
+   274	    existing = ""
+   275	    if conftest_path.exists():
+   276	        try:
+   277	            existing = conftest_path.read_text(encoding="utf-8", errors="replace")
+   278	        except Exception:
+   279	            existing = ""
+   280	
+   281	    hook_header = "# Standard test discovery hook for SWE-gemma public benchmark\n"
+   282	    if hook_header.strip() not in existing:
+   283	        new_content = hook_header + (existing + "\n" if existing else "")
+   284	        try:
+   285	            conftest_path.write_text(new_content, encoding="utf-8")
+   286	        except Exception as e:
+   287	            print(f"Warning: could not write {conftest_path}: {e}", file=sys.stderr)
+   288	
+   289	
+   290	def execute_fast_path(
+   291	    workspace: Path | None = None,
+   292	    repo: str = "",
+   293	    site_packages_dir: Path | None = None,
+   294	) -> None:
+   295	    """Fast-path dependency injection: injects workspace paths (< 0.05s)."""
+   296	    ws = workspace if workspace is not None else (Path("/workspace") if Path("/workspace").exists() else Path.cwd())
+   297	    ws_resolved = ws.resolve()
+   298	
+   299	    sp_dir = site_packages_dir or find_site_packages_dir()
+   300	    if sp_dir is None:
+   301	        print("Warning: No site-packages directory found.", file=sys.stderr)
+   302	        return
+   303	
+   304	    with contextlib.suppress(Exception):
+   305	        sp_dir.mkdir(parents=True, exist_ok=True)
+   306	
+   307	    # Configure workspace_paths.pth in site-packages
+   308	    target_pth = sp_dir / "workspace_paths.pth"
+   309	    paths_to_add = [str(ws_resolved)]
+   310	    if ws_resolved.exists() and ws_resolved.is_dir():
+   311	        for sub in ws_resolved.iterdir():
+   312	            if sub.is_dir() and not sub.name.startswith("."):
+   313	                paths_to_add.append(str(sub))
+   314	    try:
+   315	        target_pth.write_text("\n".join(paths_to_add) + "\n")
+   316	    except Exception as e:
+   317	        print(f"Warning: could not write {target_pth}: {e}", file=sys.stderr)
+   318	
+   319	    configure_workspace_pytest_ini(ws_resolved)
+   320	    configure_workspace_conftest(ws_resolved)
+   321	
+   322	
+   323	def main(
+   324	    repo: str | None = None,
+   325	    fast_path: bool | None = None,
+   326	    workspace: Path | str | None = None,
+   327	) -> None:
+   328	    args = list(sys.argv[1:])
+   329	    parsed_repo = repo
+   330	    parsed_fast_path = fast_path
+   331	    parsed_workspace = Path(workspace) if workspace else None
+   332	
+   333	    i = 0
+   334	    while i < len(args):
+   335	        arg = args[i]
+   336	        if arg in ("--fast-path", "-f"):
+   337	            parsed_fast_path = True
+   338	        elif arg == "--no-fast-path":
+   339	            parsed_fast_path = False
+   340	        elif arg in ("--workspace", "-w") and i + 1 < len(args):
+   341	            parsed_workspace = Path(args[i + 1])
+   342	            i += 1
+   343	        elif not arg.startswith("-") and parsed_repo is None:
+   344	            parsed_repo = arg
+   345	        i += 1
+   346	
+   347	    if parsed_repo is None:
+   348	        parsed_repo = ""
+   349	
+   350	    ws = parsed_workspace if parsed_workspace is not None else (Path("/workspace") if Path("/workspace").exists() else Path.cwd())
+   351	
+   352	    setup_git_exclude(ws)
+   353	    install_editable_package(ws)
+   354	
+   355	    should_fast_path = parsed_fast_path if parsed_fast_path is not None else is_prebaked_env()
+   356	
+   357	    if should_fast_path:
+   358	        print(f"Executing fast-path dependency injection for repo={parsed_repo} in {ws}...")
+   359	        execute_fast_path(ws, repo=parsed_repo)
+   360	        print("Fast-path dependency injection complete.")
+   361	        return
+   362	
+   363	    # Slow path: resolve available wheels and install
+   364	    available = get_available_packages()
+   365	    print(f"Available wheels: {len(available)} packages")
+   366	
+   367	    all_deps: list[str] = []
+   368	    pyproject_path = ws / "pyproject.toml"
+   369	    if pyproject_path.exists():
+   370	        all_deps.extend(collect_from_pyproject(pyproject_path))
+   371	    all_deps.extend(collect_from_requirements_files(ws))
+   372	
+   373	    to_install: list[Path] = []
+   374	    for dep in set(all_deps):
+   375	        norm = normalize_pkg_name(dep)
+   376	        if norm in available:
+   377	            to_install.append(WHEELS_DIR / available[norm])
+   378	
+   379	    if to_install:
+   380	        print(f"Installing {len(to_install)} resolved wheels via pip...")
+   381	        cmd = [
+   382	            sys.executable,
+   383	            "-m",
+   384	            "pip",
+   385	            "install",
+   386	            "--no-index",
+   387	            f"--find-links={WHEELS_DIR}",
+   388	            "--no-build-isolation",
+   389	        ] + [str(w) for w in to_install]
+   390	        subprocess.run(cmd, check=False)
+   391	
+   392	    execute_fast_path(ws, repo=parsed_repo)
+   393	
+   394	
+   395	if __name__ == "__main__":
+   396	    main()
+   310	
+   311	    def start(self) -> str:
+   312	        """Create a new isolated sandbox working directory and virtual environment."""
+   313	        sandbox_id = str(uuid.uuid4())[:12]
+   314	        if self.base_dir:
+   315	            sandbox_root = self.base_dir / f'swegemma_sandbox_{sandbox_id}'
+   316	            sandbox_root.mkdir(parents=True, exist_ok=True)
+   317	        else:
+   318	            sandbox_root = Path(
+   319	                tempfile.mkdtemp(prefix=f'swegemma_sandbox_{sandbox_id}_')
+   320	            )
+   321	
+   322	        workspace_dir = sandbox_root / 'workspace'
+   323	        tmp_dir = sandbox_root / 'tmp'
+   324	        wheels_dir = sandbox_root / 'wheels'
+   325	        venv_dir = sandbox_root / 'venv'
+   326	
+   327	        workspace_dir.mkdir(parents=True, exist_ok=True)
+   328	        tmp_dir.mkdir(parents=True, exist_ok=True)
+   329	        wheels_dir.mkdir(parents=True, exist_ok=True)
+   330	
+   331	        venv_has_pip = False
+   332	        for use_symlinks in (True, False):
+   333	            try:
+   334	                venv.create(
+   335	                    venv_dir,
+   336	                    system_site_packages=self.system_site_packages,
+   337	                    with_pip=True,
+   338	                    symlinks=use_symlinks,
+   339	                    clear=True,
+   340	                )
+   341	                venv_has_pip = True
+   342	                break
+   343	            except Exception as e:
+   344	                if use_symlinks:
+   345	                    logger.debug(
+   346	                        'venv with_pip+symlinks failed for sandbox %s: %s',
+   347	                        sandbox_id,
+   348	                        e,
+   349	                    )
+   350	                    continue
+   351	                logger.warning(
+   352	                    'ensurepip unavailable in sandbox %s, creating venv without pip: %s',
+   353	                    sandbox_id,
+   354	                    e,
+   355	                )
+   356	
+   357	        if not venv_has_pip:
+   358	            for use_symlinks in (True, False):
+   359	                try:
+   360	                    venv.create(
+   361	                        venv_dir,
+   362	                        system_site_packages=self.system_site_packages,
+   363	                        with_pip=False,
+   364	                        symlinks=use_symlinks,
+   365	                        clear=True,
+   366	                    )
+   367	                    break
+   368	                except Exception:
+   369	                    if not use_symlinks:
+   370	                        raise
+   371	
+   372	            venv_python = venv_dir / 'bin' / 'python3'
+   373	            if venv_python.exists():
+   374	                try:
+   375	                    subprocess.run(
+   376	                        [str(venv_python), '-m', 'pip', '--version'],
+   377	                        capture_output=True,
+   378	                        timeout=30,
+   379	                        check=True,
+   380	                    )
+   381	                    venv_has_pip = True
+   382	                except Exception:
+   383	                    logger.warning(
+   384	                        'pip not available in sandbox %s venv; '
+   385	                        'task package installation may be skipped.',
+   386	                        sandbox_id,
+   387	                    )
+   388	
+   389	        if self.system_site_packages:
+   390	            import sys
+   391	
+   392	            host_site_packages = []
+   393	            for p in sys.path:
+   394	                if 'site-packages' in p and Path(p).exists() and Path(p).is_dir():
+   395	                    host_site_packages.append(p)
+   396	            for sp_dir in venv_dir.glob('lib/python*/site-packages'):
+   397	                pth_file = sp_dir / '_host_env.pth'
+   398	                pth_file.write_text(
+   399	                    '\n'.join(host_site_packages) + '\n', encoding='utf-8'
+   400	                )
+   401	
+   402	        with self._lock:
+   403	            self._sandboxes[sandbox_id] = {
+   404	                'root': sandbox_root,
+   405	                'workspace': workspace_dir,
+   406	                'tmp': tmp_dir,
+   407	                'wheels': wheels_dir,
+   408	                'venv': venv_dir,
+   409	            }
+   410	            if self._default_sandbox_id is None:
+   411	                self._default_sandbox_id = sandbox_id
+   412	        return sandbox_id
+   413	
+   414	    async def start_async(self) -> str:
+   415	        """Start a new sandbox instance asynchronously without blocking the event loop."""
+   416	        return await asyncio.to_thread(self.start)
+   417	
+   418	    def exec(
+   419	        self, sandbox_id: str, command: str, *, timeout: int | None = None
+   420	    ) -> ExecutionResult:
+   421	        """Execute a command in the local sandbox workspace and isolated venv."""
+   422	        with self._lock:
+   423	            if sandbox_id not in self._sandboxes:
+   424	                raise ValueError(f'Unknown sandbox_id: {sandbox_id}')
+   425	            paths = dict(self._sandboxes[sandbox_id])
+   426	        workspace_dir = paths['workspace']
+   427	        tmp_dir = paths['tmp']
+   428	        wheels_dir = paths['wheels']
+   429	        venv_dir = paths['venv']
+   430	        timeout = timeout if timeout is not None else self.timeout_seconds
+   431	
+   432	        root_dir_str = str(paths['root'])
+   433	        sentinel = '__SWEGEMMA_SANDBOX_ROOT__'
+   434	        translated_cmd = command.replace(root_dir_str, sentinel)
+   435	        translated_cmd = re.sub(
+   436	            r'(?<![\w.-])/(?:\.\.?/)+(tmp|workspace|usr/local/bin|wheels)(?![\w.-])',
+   437	            r'/\1',
+   438	            translated_cmd,
+   439	        )
+   440	
+   441	        translated_cmd = re.sub(
+   442	            r'(?<![\w.-])/tmp(?![\w.-])', str(tmp_dir), translated_cmd
+   443	        )
+   444	        translated_cmd = re.sub(
+   445	            r'(?<![\w.-])/workspace(?![\w.-])',
+   446	            str(workspace_dir),
+   447	            translated_cmd,
+   448	        )
+   449	
+   450	        bin_dir = paths['venv'] / 'bin'
+   451	        bin_dir.mkdir(parents=True, exist_ok=True)
+   452	        translated_cmd = re.sub(
+   453	            r'(?<![\w.-])/usr/local/bin(?![\w.-])',
+   454	            str(bin_dir),
+   455	            translated_cmd,
+   456	        )
+   457	
+   458	        if wheels_dir.exists() and any(wheels_dir.glob('*.whl')):
+   459	            active_wheels = wheels_dir
+   460	        else:
+   461	            active_wheels = None
+   462	            for wh_cand in [
+   463	                Path('/kaggle/input/competition-data/wheels'),
+   464	                Path('/kaggle/input/datasets/ryanholbrook/gemma4swe-wheelhouses'),
+   465	                Path('build/wheelhouse'),
+   466	                Path('data/wheels'),
+   467	                Path('wheels'),
+   468	                Path('/tmp/wheelhouse'),
+   469	            ]:
+   470	                if wh_cand.exists() and any(wh_cand.glob('*.whl')):
+   471	                    active_wheels = wh_cand.resolve()
+   472	                    break
+   473	
+   474	        if active_wheels:
+   475	            translated_cmd = re.sub(
+   476	                r'(?<![\w.-])/wheels(?![\w.-])',
+   477	                str(active_wheels),
+   478	                translated_cmd,
+   479	            )
+   480	
+   481	        translated_cmd = translated_cmd.replace(sentinel, root_dir_str)
+   482	
+   483	        venv_bin = venv_dir / 'bin'
+   484	        host_bin = str(Path(sys.executable).parent)
+   485	        extra_env = {
+   486	            'VIRTUAL_ENV': str(venv_dir),
+   487	            'PATH': f'{venv_bin}:{host_bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+   488	            'PYTHONPATH': str(workspace_dir),
+   489	        }
+   490	        env = build_sanitized_env(
+   491	            work_dir=workspace_dir,
+   492	            tmp_dir=tmp_dir,
+   493	            extra_env=extra_env,
+   494	        )
+   495	        return execute_subprocess_command(
+   496	            command=['/bin/bash', '-c', translated_cmd],
+   497	            cwd=workspace_dir,
+   498	            env=env,
+   499	            timeout=timeout,
+   500	            shell=False,
+   501	        )
+   502	
+   503	    async def exec_async(
+   504	        self, sandbox_id: str, command: str, *, timeout: int | None = None
+   505	    ) -> ExecutionResult:
+
+exec
+/bin/bash -lc "rg --files data/raw -g '"'!wheels/**'"' -g '"'!tasks.jsonl'"' | head -70; rg --files runs/gold-probe runs/gold-null | head -40; rg -n 'verify_task|setup_workspace_test_config|install_editable' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/docker.py | sed -n '30,160p'; rg -n 'def exec|working_dir|environment' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/docker.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+data/raw/sandbox/setup.py
+data/raw/HARNESS_README.md
+data/raw/sample_submission/eval_config.yaml
+data/raw/docker/docker/Dockerfile.sandbox
+data/raw/docker/docker/imp.py
+data/raw/docker/docker/Dockerfile.public
+data/raw/sample_submission/configs/sampling.yaml
+data/raw/sample_submission/prompts/system.md
+data/raw/sample_submission/agent.yaml
+data/raw/sample_submission/prompts/analyzer.md
+data/raw/wheels/iniconfig-2.3.0-py3-none-any.whl
+data/raw/wheels/idna-3.18-py3-none-any.whl
+data/raw/wheels/typing_extensions-4.15.0-py3-none-any.whl
+data/raw/wheels/starlette-0.30.0-py3-none-any.whl
+data/raw/wheels/annotated_types-0.8.0-py3-none-any.whl
+data/raw/wheels/starlette-0.47.1-py3-none-any.whl
+data/raw/wheels/starlette-0.24.0-py3-none-any.whl
+data/raw/wheels/colorama-0.4.6-py2.py3-none-any.whl
+data/raw/wheels/sqlalchemy-2.0.51-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+data/raw/wheels/starlette-0.45.2-py3-none-any.whl
+data/raw/wheels/werkzeug-2.3.8-py3-none-any.whl
+data/raw/wheels/packaging-26.2-py3-none-any.whl
+data/raw/wheels/rich-15.0.0-py3-none-any.whl
+data/raw/wheels/starlette-1.3.1-py3-none-any.whl
+data/raw/wheels/typer-0.26.7-py3-none-any.whl
+data/raw/wheels/sqlmodel-0.0.24-py3-none-any.whl
+data/raw/wheels/sqlmodel-0.0.31-py3-none-any.whl
+data/raw/wheels/sqlmodel-0.0.39-py3-none-any.whl
+data/raw/wheels/setuptools-82.0.1-py3-none-any.whl
+data/raw/wheels/starlette-0.27.0-py3-none-any.whl
+data/raw/wheels/starlette-0.38.2-py3-none-any.whl
+data/raw/wheels/httpcore-1.0.9-py3-none-any.whl
+data/raw/wheels/starlette-0.49.0-py3-none-any.whl
+data/raw/wheels/starlette-0.25.0-py3-none-any.whl
+data/raw/wheels/starlette-0.46.2-py3-none-any.whl
+data/raw/wheels/tqdm-4.70.0-py3-none-any.whl
+data/raw/wheels/charset_normalizer-3.5.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+data/raw/wheels/starlette-0.36.0-py3-none-any.whl
+data/raw/wheels/starlette-0.38.0-py3-none-any.whl
+data/raw/wheels/starlette-0.38.1-py3-none-any.whl
+data/raw/wheels/starlette-0.37.0-py3-none-any.whl
+data/raw/wheels/requests-2.33.0-py3-none-any.whl
+data/raw/wheels/urllib3-2.7.0-py3-none-any.whl
+data/raw/wheels/flask-3.1.3-py3-none-any.whl
+data/raw/wheels/flask-2.3.3-py3-none-any.whl
+data/raw/wheels/starlette-0.26.0-py3-none-any.whl
+data/raw/wheels/httpx-0.28.1-py3-none-any.whl
+data/raw/wheels/starlette-0.23.0-py3-none-any.whl
+data/raw/wheels/hatchling-1.30.1-py3-none-any.whl
+data/raw/wheels/sqlalchemy-2.0.52-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+data/raw/wheels/packaging-26.3-py3-none-any.whl
+data/raw/wheels/pydantic_core-2.46.4-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+data/raw/wheels/certifi-2026.7.22-py3-none-any.whl
+data/raw/wheels/starlette-0.43.0-py3-none-any.whl
+data/raw/wheels/markupsafe-3.0.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+data/raw/wheels/starlette-0.46.0-py3-none-any.whl
+data/raw/wheels/sqlalchemy-2.0.51-py3-none-any.whl
+data/raw/wheels/typer-0.16.0-py3-none-any.whl
+data/raw/wheels/starlette-0.38.3-py3-none-any.whl
+data/raw/wheels/starlette-0.52.0-py3-none-any.whl
+data/raw/wheels/starlette-0.31.0-py3-none-any.whl
+data/raw/wheels/starlette-0.41.2-py3-none-any.whl
+data/raw/sample_submission/sub_agents/code_analyzer.yaml
+data/raw/wheels/editables-0.6-py3-none-any.whl
+data/raw/wheels/starlette-0.20.0-py3-none-any.whl
+data/raw/wheels/anyio-4.14.2-py3-none-any.whl
+data/raw/wheels/markdown_it_py-4.2.0-py3-none-any.whl
+data/raw/wheels/fastapi-0.141.1-py3-none-any.whl
+data/raw/wheels/starlette-0.28.0-py3-none-any.whl
+data/raw/wheels/charset_normalizer-3.4.7-py3-none-any.whl
+runs/gold-null/gold_results.jsonl
+runs/gold-null/gold_summary.json
+runs/gold-null/probe.jsonl
+runs/gold-probe/gold_results.jsonl
+runs/gold-probe/gold_summary.json
+runs/gold-probe/probe.jsonl
+    30	
+    31	def resolve_sandbox_image(
+    32	    image_name: str = 'swebench-sandbox:latest',
+    33	    client: Any | None = None,
+    34	) -> str:
+    35	    """Resolves the sandbox image in the Docker daemon, falling back to pre-seeded SDG tags."""
+    36	    try:
+    37	        if client is None:
+    38	            import docker
+    39	
+    40	            client = docker.from_env()
+    41	        try:
+    42	            client.images.get(image_name)
+    43	            return image_name
+    44	        except Exception:
+    45	            pass
+    46	
+    47	        for candidate in SDG_IMAGE_CANDIDATES:
+    48	            try:
+    49	                img = client.images.get(candidate)
+    50	            except Exception:
+    51	                continue
+    52	
+    53	            logger.info(
+    54	                "Found pre-seeded SDG image '%s' for requested '%s'.",
+    55	                candidate,
+    56	                image_name,
+    57	            )
+    58	            try:
+    59	                repo, tag = (
+    60	                    image_name.split(':', 1)
+    61	                    if ':' in image_name
+    62	                    else (image_name, 'latest')
+    63	                )
+    64	                img.tag(repo, tag=tag)
+    65	            except Exception:
+    66	                logger.debug(
+    67	                    "Best-effort re-tag of '%s' -> '%s' skipped (blocked by dockerproxy).",
+    68	                    candidate,
+    69	                    image_name,
+    70	                )
+    71	            return candidate
+    72	    except Exception as e:
+    73	        logger.warning(
+    74	            "Could not query Docker daemon for sandbox image '%s': %s",
+    75	            image_name,
+    76	            e,
+    77	        )
+    78	    return image_name
+    79	
+    80	
+    81	@dataclass
+    82	class ContainerConfig:
+    83	    """Configuration for starting a container."""
+    84	
+    85	    image: str = 'swebench-sandbox:latest'
+    86	    network_mode: str = 'none'  # no network access
+    87	    mem_limit: str = '4g'
+    88	    cpu_period: int = 100_000
+    89	    cpu_quota: int = 200_000  # 2 CPUs
+    90	    working_dir: str = '/workspace'
+    91	    timeout_seconds: int = 300
+    92	    reuse_containers: bool = False
+    93	    environment: dict[str, str] = field(default_factory=lambda: {'TEST_TMPDIR': '/tmp'})
+    94	
+    95	
+    96	class ContainerManager(BaseSandbox):
+    97	    """Manages Docker container lifecycle for evaluations directly conforming to BaseSandbox."""
+    98	
+    99	    def __init__(self, config: ContainerConfig | None = None):
+   100	        self.config = config or ContainerConfig()
+   101	        self._client = None
+   102	        self._image_resolved = False
+   103	        self._active_containers: set[str] = set()
+   104	        self._idle_containers: list[str] = []
+   105	        self._default_container_id: str | None = None
+   106	        self._initial_files: dict[str, str | bytes] = {}
+   107	        self._lock = threading.RLock()
+   108	
+   109	    @property
+   110	    def client(self):
+   111	        if self._client is None:
+   112	            import docker
+   113	
+   114	            self._client = docker.from_env(timeout=300)
+   115	        return self._client
+   116	
+   117	    @property
+   118	    def work_dir(self) -> str:
+   119	        """Working directory inside the sandbox."""
+   120	        return self.config.working_dir
+   121	
+   122	    def initialize(self, files: dict[str, str | bytes] | None = None) -> None:
+   123	        """Start a default container and optionally write initial files."""
+   124	        with self._lock:
+   125	            if (
+   126	                self._default_container_id is None
+   127	                or self._default_container_id not in self._active_containers
+   128	            ):
+   129	                self._default_container_id = self.start()
+   130	        if files is not None:
+   131	            self._initial_files = dict(files)
+   132	            for rel_path, content in files.items():
+   133	                self.write_file(rel_path, content)
+   134	
+   135	    def run_command(
+   136	        self,
+   137	        command: str,
+   138	        timeout: float | None = 300,
+   139	        work_dir: str | None = None,
+   140	    ) -> ExecutionResult:
+   141	        """Execute a shell command in the active container."""
+   142	        if self._default_container_id is None:
+   143	            self.initialize()
+   144	        assert self._default_container_id is not None
+   145	        wd = work_dir or self.work_dir
+   146	        cmd = f'cd {shlex.quote(wd)} && {command}' if wd else command
+   147	        int_timeout = (
+   148	            int(timeout) if timeout is not None else self.config.timeout_seconds
+   149	        )
+   150	        return self.exec(self._default_container_id, cmd, timeout=int_timeout)
+   151	
+   152	    def write_file(self, path: str, content: str | bytes) -> None:
+   153	        """Write a file into the active container workspace."""
+   154	        if self._default_container_id is None:
+   155	            self.initialize()
+   156	        assert self._default_container_id is not None
+   157	        target_path = (
+   158	            path if posixpath.isabs(path) else posixpath.join(self.work_dir, path)
+   159	        )
+   160	        with tempfile.NamedTemporaryFile('wb', delete=False) as tmp:
+90:    working_dir: str = '/workspace'
+93:    environment: dict[str, str] = field(default_factory=lambda: {'TEST_TMPDIR': '/tmp'})
+120:        return self.config.working_dir
+679:            working_dir=self.config.working_dir,
+680:            environment=self.config.environment,
+693:    def exec(
+763:    async def exec_async(
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import json,re
+p='data/raw/tasks.jsonl'
+with open(p) as f:
+ for ln,s in enumerate(f,1):
+  if 'fastapi_14873' not in s: continue
+  t=json.loads(s)
+  if t.get('instance_id')"'!='"'fastapi_14873': continue
+  print('line',ln,'id',t['instance_id'],'keys',list(t))
+  for k in ('patch','test_patch'):
+   v=t.get(k,'')
+   paths=re.findall(r'"'^diff --git a/(.*?) b/(.*?)$'"',v,re.M)
+   print(k,'paths',paths,'hunks',len(re.findall(r'"'^@@'"',v,re.M)))
+  print('test_files',t.get('test_files'))
+  print('patch equals test_patch',t.get('patch')==t.get('test_patch'))
+  break
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+line 27 id fastapi_14873 keys ['instance_id', 'repo', 'base_commit', 'patch', 'test_patch', 'problem_statement', 'hints_text', 'created_at']
+patch paths [] hunks 2
+test_patch paths [] hunks 1
+test_files None
+patch equals test_patch False
+
+exec
+/bin/bash -lc "ls -ld data/raw/snapshots; ls -l data/raw/snapshots/ | head -15; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/deduplication.py | sed -n '1,145p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py | sed -n '85,155p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/docker.py | sed -n '690,755p'; rg --files /home/ubuntu/gemma-local/pyimg | rg '/(site.py|_pytest/(pathlib|config/__init__|main).py|pip/_internal/(req/req_uninstall|metadata/importlib/_dists|operations/install/wheel).py)"'$'"'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+drwxrwxr-x 3 ubuntu ubuntu 4096 Nov  4 23:03 data/raw/snapshots
+total 20993496
+-rw-rw-r-- 1 ubuntu ubuntu 214241984 Oct 13 11:48 fastapi_11194.tgz
+-rw-rw-r-- 1 ubuntu ubuntu 229097851 Oct 13 11:48 fastapi_11355.tgz
+-rw-rw-r-- 1 ubuntu ubuntu 218214164 Oct 13 11:47 fastapi_12942.tgz
+-rw-rw-r-- 1 ubuntu ubuntu 227913371 Oct 13 11:50 fastapi_13207.tgz
+-rw-rw-r-- 1 ubuntu ubuntu 226662828 Oct 13 11:48 fastapi_13537.tgz
+-rw-rw-r-- 1 ubuntu ubuntu 211447276 Oct 13 11:49 fastapi_13713.tgz
+-rw-rw-r-- 1 ubuntu ubuntu 225016644 Oct 13 11:48 fastapi_13786.tgz
+-rw-rw-r-- 1 ubuntu ubuntu 254969544 Oct 13 11:49 fastapi_13920.tgz
+-rw-rw-r-- 1 ubuntu ubuntu 211008588 Oct 13 11:49 fastapi_14077.tgz
+-rw-rw-r-- 1 ubuntu ubuntu 215392126 Oct 13 11:48 fastapi_14099.tgz
+-rw-rw-r-- 1 ubuntu ubuntu 219855457 Oct 13 11:50 fastapi_14186.tgz
+-rw-rw-r-- 1 ubuntu ubuntu 220889275 Oct 13 11:48 fastapi_14246.tgz
+-rw-rw-r-- 1 ubuntu ubuntu 259958390 Oct 13 11:47 fastapi_14258.tgz
+-rw-rw-r-- 1 ubuntu ubuntu 222274864 Oct 13 11:48 fastapi_14262.tgz
+ls: write error: Broken pipe
+     1	"""Snapshot deduplication tooling, binary patch generation, and reconstruction verification."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import dataclasses
+     6	import json
+     7	import logging
+     8	import os
+     9	import re
+    10	import shutil
+    11	import subprocess
+    12	import tarfile
+    13	import tempfile
+    14	from collections import defaultdict
+    15	from collections.abc import Sequence
+    16	from concurrent.futures import ThreadPoolExecutor, as_completed
+    17	from pathlib import Path
+    18	from typing import Any
+    19	
+    20	from swegemma.models.task import Task
+    21	
+    22	logger = logging.getLogger(__name__)
+    23	
+    24	
+    25	def clean_repo_name(repo: str) -> str:
+    26	    """Sanitizes repository slug into a valid filesystem identifier.
+    27	
+    28	    Replaces slashes, backslashes, and hyphens with underscores.
+    29	
+    30	    Examples:
+    31	        'pallets/flask' -> 'pallets_flask'
+    32	        'fastapi/fastapi' -> 'fastapi_fastapi'
+    33	        'Textualize/rich' -> 'Textualize_rich'
+    34	        'psf/requests-oauthlib' -> 'psf_requests_oauthlib'
+    35	    """
+    36	    clean = re.sub(r'[/\\-]+', '_', repo.strip())
+    37	    return clean.strip('_')
+    38	
+    39	
+    40	def get_base_snapshot_filename(repo: str, suffix: str = '.tgz') -> str:
+    41	    """Generates standard base snapshot filename adhering to base_{repo_clean}.tgz convention."""
+    42	    if not suffix.startswith('.'):
+    43	        suffix = f'.{suffix}'
+    44	    clean = clean_repo_name(repo)
+    45	    return f'base_{clean}{suffix}'
+    46	
+    47	
+    48	def get_task_cl(task: dict[str, Any] | Task) -> int | None:
+    49	    """Extracts integer CL or numerical issue/PR ID from a task."""
+    50	    if isinstance(task, Task):
+    51	        iid = task.instance_id
+    52	        cl_val = getattr(task, 'cl', None)
+    53	    elif isinstance(task, dict):
+    54	        iid = str(task.get('instance_id', ''))
+    55	        cl_val = task.get('cl')
+    56	    else:
+    57	        return None
+    58	
+    59	    if cl_val is not None:
+    60	        try:
+    61	            return int(cl_val)
+    62	        except (ValueError, TypeError):
+    63	            pass
+    64	
+    65	    if '_' in iid:
+    66	        last_part = iid.rsplit('_', 1)[-1]
+    67	        if last_part.isdigit():
+    68	            return int(last_part)
+    69	    return None
+    70	
+    71	
+    72	def identify_base_snapshot(
+    73	    tasks: Sequence[dict[str, Any] | Task],
+    74	    repo: str | None = None,
+    75	) -> dict[str, Any] | Task:
+    76	    """Identifies the single earliest base snapshot task for a repository.
+    77	
+    78	    Selection algorithm:
+    79	    1. Filter tasks for repo (if specified).
+    80	    2. Primary sort key: earliest CL (integer) if present.
+    81	    3. Secondary sort key: created_at timestamp string if present.
+    82	    4. Deterministic tiebreaker: instance_id alphabetically.
+    83	
+    84	    Args:
+    85	        tasks: Sequence of task dictionaries or Task model instances.
+    86	        repo: Repository slug to filter by (optional).
+    87	
+    88	    Returns:
+    89	        The selected base task object.
+    90	
+    91	    Raises:
+    92	        ValueError: If no tasks match the repository.
+    93	    """
+    94	    if repo is not None:
+    95	        matched_tasks = [
+    96	            t
+    97	            for t in tasks
+    98	            if (t.repo if isinstance(t, Task) else t.get('repo')) == repo
+    99	        ]
+   100	    else:
+   101	        matched_tasks = list(tasks)
+   102	
+   103	    if not matched_tasks:
+   104	        raise ValueError(f"No tasks found for repository '{repo}'")
+   105	
+   106	    def sort_key(t: dict[str, Any] | Task) -> tuple[int, str, str]:
+   107	        cl = get_task_cl(t)
+   108	        cl_val = cl if cl is not None else 999_999_999_999
+   109	        if isinstance(t, Task):
+   110	            created_at = t.created_at or ''
+   111	            iid = t.instance_id
+   112	        else:
+   113	            created_at = str(t.get('created_at', ''))
+   114	            iid = str(t.get('instance_id', ''))
+   115	        return (cl_val, created_at, iid)
+   116	
+   117	    return min(matched_tasks, key=sort_key)
+   118	
+   119	
+   120	def identify_base_snapshots(
+   121	    tasks: Sequence[dict[str, Any] | Task],
+   122	) -> dict[str, dict[str, Any] | Task]:
+   123	    """Identifies base snapshots for all unique repositories in the task sequence.
+   124	
+   125	    Args:
+   126	        tasks: Sequence of task dicts or Task instances.
+   127	
+   128	    Returns:
+   129	        Dict mapping repo name -> base task object.
+   130	    """
+   131	    repo_to_tasks: dict[str, list[dict[str, Any] | Task]] = defaultdict(list)
+   132	    for t in tasks:
+   133	        repo = t.repo if isinstance(t, Task) else str(t.get('repo', ''))
+   134	        if repo:
+   135	            repo_to_tasks[repo].append(t)
+   136	
+   137	    base_snapshots: dict[str, dict[str, Any] | Task] = {}
+   138	    for repo, r_tasks in sorted(repo_to_tasks.items()):
+   139	        base_snapshots[repo] = identify_base_snapshot(r_tasks, repo)
+   140	
+   141	    return base_snapshots
+   142	
+   143	
+   144	def clean_circular_symlinks(directory: Path | str) -> list[Path]:
+   145	    """Detects and removes circular, broken, or escaping symlinks in directory.
+    85	
+    86	    def write_file(self, path: str, content: str | bytes) -> None:
+    87	        """Write a file into the active sandbox workspace."""
+    88	        if self._default_sandbox_id is None:
+    89	            self.initialize()
+    90	        assert self._default_sandbox_id is not None
+    91	        paths = self._sandboxes[self._default_sandbox_id]
+    92	        root_dir = paths['root'].resolve()
+    93	        ws_dir = paths['workspace'].resolve()
+    94	        if not posixpath.isabs(path):
+    95	            target_dest = ws_dir / path
+    96	            allowed_root = ws_dir
+    97	        elif path == '/workspace' or path.startswith('/workspace/'):
+    98	            rel = path[len('/workspace/') :] if path.startswith('/workspace/') else ''
+    99	            target_dest = ws_dir / rel
+   100	            allowed_root = ws_dir
+   101	        elif path.startswith(str(root_dir)):
+   102	            target_dest = Path(path)
+   103	            allowed_root = root_dir
+   104	        else:
+   105	            target_dest = root_dir / path.lstrip('/')
+   106	            allowed_root = root_dir
+   107	
+   108	        target_resolved = target_dest.resolve()
+   109	        if not target_resolved.is_relative_to(allowed_root):
+   110	            raise ValueError(
+   111	                f'Path traversal detected: {path} escapes sandbox root {allowed_root}'
+   112	            )
+   113	
+   114	        target_resolved.parent.mkdir(parents=True, exist_ok=True)
+   115	        if isinstance(content, str):
+   116	            target_resolved.write_text(content, encoding='utf-8')
+   117	        else:
+   118	            target_resolved.write_bytes(content)
+   119	
+   120	    def read_file(self, path: str) -> str:
+   121	        """Read a file from the active sandbox workspace."""
+   122	        if self._default_sandbox_id is None:
+   123	            self.initialize()
+   124	        assert self._default_sandbox_id is not None
+   125	        paths = self._sandboxes[self._default_sandbox_id]
+   126	        root_dir = paths['root'].resolve()
+   127	        ws_dir = paths['workspace'].resolve()
+   128	        if not posixpath.isabs(path):
+   129	            source_path = ws_dir / path
+   130	            allowed_root = ws_dir
+   131	        elif path == '/workspace' or path.startswith('/workspace/'):
+   132	            rel = path[len('/workspace/') :] if path.startswith('/workspace/') else ''
+   133	            source_path = ws_dir / rel
+   134	            allowed_root = ws_dir
+   135	        elif path.startswith(str(root_dir)):
+   136	            source_path = Path(path)
+   137	            allowed_root = root_dir
+   138	        else:
+   139	            source_path = root_dir / path.lstrip('/')
+   140	            allowed_root = root_dir
+   141	
+   142	        source_resolved = source_path.resolve()
+   143	        if not source_resolved.is_relative_to(allowed_root):
+   144	            raise ValueError(
+   145	                f'Path traversal detected: {path} escapes sandbox root {allowed_root}'
+   146	            )
+   147	
+   148	        if not source_resolved.exists():
+   149	            raise FileNotFoundError(f'File {path} not found in sandbox')
+   150	        return source_resolved.read_text(encoding='utf-8', errors='replace')
+   151	
+   152	    def copy_to(
+   153	        self,
+   154	        src_or_sandbox: str | Path,
+   155	        dst_or_src: str | Path,
+   690	        """Start a container asynchronously without blocking the event loop."""
+   691	        return await asyncio.to_thread(self.start)
+   692	
+   693	    def exec(
+   694	        self, container_id: str, command: str, *, timeout: int | None = None
+   695	    ) -> ExecutionResult:
+   696	        """Execute a command in a running container."""
+   697	        import shlex
+   698	
+   699	        container = self.client.containers.get(container_id)
+   700	        timeout = timeout if timeout is not None else self.config.timeout_seconds
+   701	        start_time = time.perf_counter()
+   702	
+   703	        try:
+   704	            escaped_command = shlex.quote(command)
+   705	            timeout_command = f'timeout -k 5s {timeout} /bin/bash -c {escaped_command}'
+   706	
+   707	            res = container.exec_run(
+   708	                cmd=['/bin/bash', '-c', timeout_command],
+   709	                stdout=True,
+   710	                stderr=True,
+   711	                demux=True,
+   712	            )
+   713	
+   714	            duration = time.perf_counter() - start_time
+   715	            timed_out = (res.exit_code == 124) and (duration >= max(0.0, timeout - 1.0))
+   716	
+   717	            max_chars = 10 * 1024 * 1024  # 10 MB character limit
+   718	            raw_stdout: bytes | None = b''
+   719	            raw_stderr: bytes | None = b''
+   720	            if isinstance(res.output, tuple):
+   721	                raw_stdout, raw_stderr = res.output
+   722	            elif isinstance(res.output, (bytes, bytearray)):
+   723	                raw_stdout, raw_stderr = bytes(res.output), b''
+   724	
+   725	            stdout = (
+   726	                raw_stdout.decode('utf-8', errors='replace')
+   727	                if isinstance(raw_stdout, (bytes, bytearray))
+   728	                else ''
+   729	            )
+   730	            stderr = (
+   731	                raw_stderr.decode('utf-8', errors='replace')
+   732	                if isinstance(raw_stderr, (bytes, bytearray))
+   733	                else ''
+   734	            )
+   735	
+   736	            if len(stdout) > max_chars:
+   737	                stdout = stdout[:max_chars] + '\n...[Output truncated at 10MB limit]\n'
+   738	            if len(stderr) > max_chars:
+   739	                stderr = stderr[:max_chars] + '\n...[Output truncated at 10MB limit]\n'
+   740	
+   741	            exit_code = int(res.exit_code) if res.exit_code is not None else 0
+   742	            status: Literal['ok', 'error', 'timeout'] = (
+   743	                'timeout' if timed_out else ('ok' if exit_code == 0 else 'error')
+   744	            )
+   745	            return ExecutionResult(
+   746	                status=status,
+   747	                stdout=stdout,
+   748	                stderr=stderr,
+   749	                exit_code=exit_code,
+   750	                duration_seconds=duration,
+   751	            )
+   752	
+   753	        except Exception as e:
+   754	            duration = time.perf_counter() - start_time
+   755	            return ExecutionResult(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pip/_internal/operations/install/wheel.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pip/_internal/metadata/importlib/_dists.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pip/_internal/req/req_uninstall.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/main.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import json,re
+with open('data/raw/tasks.jsonl') as f:
+ for ln,s in enumerate(f,1):
+  if 'fastapi_14873' not in s:continue
+  t=json.loads(s)
+  if t['instance_id']"'!='"'fastapi_14873':continue
+  for k in ['patch','test_patch']:
+   v=t[k]
+   print(k,'files',re.findall(r'"'^(?:---|'"\\+\\+\\+) (.+)"'$'"',v,re.M))
+   for part in re.split(r'(?="'^--- )'"',v,flags=re.M):
+    if not part.strip():continue
+    print('hunks',re.findall(r'"'^@@.*?@@'"',part,re.M),'plus_lines',sum(l.startswith('+') and not l.startswith('+++') for l in part.splitlines()),'minus_lines',sum(l.startswith('-') and not l.startswith('---') for l in part.splitlines()))
+  a=[l[1:] for l in t['patch'].splitlines() if l.startswith('+') and not l.startswith('+++')]
+  b=[l[1:] for l in t['test_patch'].splitlines() if l.startswith('+') and not l.startswith('+++')]
+  print('test_patch_added_lines_subset_of_gold', all(l in a for l in b))
+  break
+PY
+python3 -B - <<'PY'
+import json
+for p in ['runs/gold-probe/probe.jsonl','runs/gold-null/probe.jsonl']:
+ print(p)
+ with open(p) as f:
+  rows=[json.loads(l) for l in f]
+ for repo in sorted({r['repo'] for r in rows}):
+  samples=[r for r in rows if r['repo']==repo]
+  print(repo,len(samples),samples[-2:])
+for p in ['runs/gold-null/gold_results.jsonl','runs/gold-probe/gold_results.jsonl']:
+ with open(p) as f:
+  for n,l in enumerate(f,1):
+   r=json.loads(l)
+   if r.get('instance_id') in {'requests_7427','requests_7315','requests_7309','fastapi_14873'}:print(p,n,{k:r.get(k) for k in ['instance_id','resolved','exit_code']})
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+patch files ['a/fastapi/routing.py', 'b/fastapi/routing.py']
+hunks ['@@ -952,16 +952,6 @@', '@@ -985,6 +975,17 @@'] plus_lines 11 minus_lines 10
+test_patch files ['a/tests/test_router_events.py', 'b/tests/test_router_events.py']
+hunks ['@@ -317,3 +317,63 @@'] plus_lines 60 minus_lines 0
+test_patch_added_lines_subset_of_gold False
+runs/gold-probe/probe.jsonl
+Textualize/rich 2 [{'container': '05fa9600-bf0', 'repo': 'Textualize/rich', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_05fa9600-bf0_zzzinmjy/workspace/rich/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.02)"}, {'container': '05fa9600-bf0', 'repo': 'Textualize/rich', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_05fa9600-bf0_zzzinmjy/workspace/rich/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.019)"}]
+encode/httpx 2 [{'container': '670898be-f9f', 'repo': 'encode/httpx', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_670898be-f9f_bu2biq83/venv/lib/python3.13/site-packages/httpx/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.263)"}, {'container': '670898be-f9f', 'repo': 'encode/httpx', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_670898be-f9f_bu2biq83/venv/lib/python3.13/site-packages/httpx/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.111)"}]
+fastapi/fastapi 2 [{'container': 'da612f82-de8', 'repo': 'fastapi/fastapi', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_da612f82-de8_11u_ehxw/workspace/fastapi/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.436)"}, {'container': 'da612f82-de8', 'repo': 'fastapi/fastapi', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_da612f82-de8_11u_ehxw/workspace/fastapi/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.238)"}]
+psf/requests 2 [{'container': '5e2677f7-570', 'repo': 'psf/requests', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_5e2677f7-570__uljtu2l/venv/lib/python3.13/site-packages/requests/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.168)"}, {'container': '5e2677f7-570', 'repo': 'psf/requests', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_5e2677f7-570__uljtu2l/venv/lib/python3.13/site-packages/requests/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.09)"}]
+runs/gold-null/probe.jsonl
+Textualize/rich 78 [{'container': 'ad0577dc-ec9', 'repo': 'Textualize/rich', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_ad0577dc-ec9_k0117ygo/workspace/rich/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.019)"}, {'container': 'ad0577dc-ec9', 'repo': 'Textualize/rich', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_ad0577dc-ec9_k0117ygo/workspace/rich/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.019)"}]
+fastapi/fastapi 20 [{'container': '66746372-c72', 'repo': 'fastapi/fastapi', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_66746372-c72_3cp3jxgf/workspace/fastapi/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.414)"}, {'container': '66746372-c72', 'repo': 'fastapi/fastapi', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_66746372-c72_3cp3jxgf/workspace/fastapi/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.212)"}]
+psf/requests 6 [{'container': '9f1926ff-c13', 'repo': 'psf/requests', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_9f1926ff-c13_8biy9r58/venv/lib/python3.13/site-packages/requests/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.093)"}, {'container': 'e92992dd-975', 'repo': 'psf/requests', 'probe': "ExecutionResult(status='ok', stdout='/tmp/swegemma_sandbox_e92992dd-975_3qbhtmhv/venv/lib/python3.13/site-packages/requests/__init__.py\\n', stderr='', exit_code=0, duration_seconds=0.093)"}]
+runs/gold-null/gold_results.jsonl 6 {'instance_id': 'requests_7427', 'resolved': True, 'exit_code': 0}
+runs/gold-null/gold_results.jsonl 7 {'instance_id': 'requests_7315', 'resolved': True, 'exit_code': 0}
+runs/gold-null/gold_results.jsonl 8 {'instance_id': 'requests_7309', 'resolved': True, 'exit_code': 0}
+runs/gold-null/gold_results.jsonl 14 {'instance_id': 'fastapi_14873', 'resolved': True, 'exit_code': 0}
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import tarfile
+from pathlib import PurePosixPath
+for iid in ['requests_7427','httpx_3672','fastapi_14873','rich_3486']:
+ p='data/raw/snapshots/'+iid+'.tgz'
+ print('\\nARCHIVE',p)
+ wanted=['setup.py','pyproject.toml','setup.cfg','pytest.ini','conftest.py','__init__.py','tests/__init__.py','tests/conftest.py','requests/__init__.py','src/requests/__init__.py','httpx/__init__.py']
+ with tarfile.open(p,'r|gz') as tf:
+  for m in tf:
+   n=m.name.removeprefix('./')
+   if n in wanted:
+    print('MEMBER',n,'size',m.size,'type',m.type,'link',m.linkname)
+    if m.isfile() and n in ['setup.py','pyproject.toml','setup.cfg','pytest.ini','conftest.py','__init__.py','tests/__init__.py','tests/conftest.py']:
+     s=tf.extractfile(m).read().decode(errors='replace')
+     if n in ['pyproject.toml','setup.py','setup.cfg']:
+      for i,l in enumerate(s.splitlines(),1):
+       if any(w in l for w in ['build-system','requires =','build-backend','packages','package_dir','where','version','pytest','pythonpath','import-mode','sys.path','setuptools','hatch','pdm','poetry']):print(f'{i}: {l}')
+     else:
+      for i,l in enumerate(s.splitlines(),1):
+       if len(s)<10000 or any(w in l for w in ['sys.path','import','pytest_plugins','collect','__path__']):print(f'{i}: {l}')
+PY" in /home/ubuntu/work/gemma
+exec
+/bin/bash -lc "rg -n 'def import_path|ImportMode|sys.path|insert_missing_modules|resolve_pkg_root|__init__|pythonpath|importmode|import-mode|_importconftest|rootdir' /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py; rg -n 'RECORD|uninstall|distutils|installation' /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pip/_internal/req/req_uninstall.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:204:    pkginit = path / "__init__.py"
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:526:    importmode = config.getoption("--import-mode")
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:530:            mode=importmode,
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:662:    with an `__init__.py` file.
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:666:        Directories without an `__init__.py` file are instead collected by
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:675:    def __init__(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:686:        # super().__init__(self, fspath, parent=parent)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:688:        super().__init__(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:698:        init_mod = importtestmodule(self.path / "__init__.py", self.config)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:716:        # Always collect __init__.py first.
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:718:            return (entry.name != "__init__.py", entry.name)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:785:                    f"__init__ constructor (from: {self.parent.nodeid})"
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:875:    init: object = getattr(obj, "__init__", None)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:877:        return init != object.__init__
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:1243:    def __init__(self, *, node: nodes.Node, argname: str, scope: Scope) -> None:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:1244:        super().__init__(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:1270:    def __init__(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:1689:    def __init__(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:1702:        # instead of going through Node.__init__'s generic
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/python.py:1709:        super().__init__(name, parent, config=config, session=session, nodeid=node_id)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:529:class ImportMode(Enum):
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:546:def import_path(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:549:    mode: str | ImportMode = ImportMode.prepend,
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:563:        * ImportMode.prepend: the directory containing the module (or package, taking
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:564:          `__init__.py` files into account) will be put at the *start* of `sys.path` before
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:567:        * ImportMode.append: same as `prepend`, but the directory will be appended
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:568:          to the end of `sys.path`, if not already in `sys.path`.
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:570:        * ImportMode.importlib: uses more fine control mechanisms provided by `importlib`
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:571:          to import the module, which avoids having to muck with `sys.path` at all. It effectively
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:575:        Used as an anchor when mode == ImportMode.importlib to obtain
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:587:    mode = ImportMode(mode)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:592:    if mode is ImportMode.importlib:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:594:        # without touching sys.path.
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:596:            _, module_name = resolve_pkg_root_and_module_name(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:610:        # Could not import the module with the current sys.path, so we fall back
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:622:        pkg_root, module_name = resolve_pkg_root_and_module_name(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:628:    # Change sys.path permanently: restoring it at the end of this function would cause surprising
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:630:    # might have local imports, which would fail at runtime if we restored sys.path.
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:631:    if mode is ImportMode.append:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:632:        if str(pkg_root) not in sys.path:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:633:            sys.path.append(str(pkg_root))
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:634:    elif mode is ImportMode.prepend:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:635:        if str(pkg_root) != sys.path[0]:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:636:            sys.path.insert(0, str(pkg_root))
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:643:    if path.name == "__init__.py":
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:654:        module_file = module_file.removesuffix(os.sep + "__init__.py")
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:678:        If module is a package, pass the path to the  `__init__.py` of the package.
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:682:        If True, will call `insert_missing_modules` to create empty intermediate modules
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:683:        with made-up module names (when importing test files not reachable from `sys.path`).
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:689:        if "a.b.c" is package ("a/b/c/__init__.py" exists), then
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:691:            parent_module_path:         Path("a/b/c/__init__.py")
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:699:        module_path:        Path("a/b/c/__init__.py")
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:700:        if  "a.b" is package ("a/b/__init__.py" exists), then
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:702:            parent_module_path:         Path("a/b/__init__.py")
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:718:            if module_path.name == "__init__.py":
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:725:            if (parent_module_path / "__init__.py").is_file():
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:726:                # If the parent module is a package, loading by  __init__.py file.
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:727:                parent_module_path = parent_module_path / "__init__.py"
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:766:            insert_missing_modules(sys.modules, module_name)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:822:    # Module name for packages do not contain the __init__ file, unless
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:823:    # the `__init__.py` file is at the root.
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:824:    if len(path_parts) >= 2 and path_parts[-1] == "__init__":
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:835:def insert_missing_modules(modules: dict[str, ModuleType], module_name: str) -> None:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:860:                        doc="Empty module created by pytest's importmode=importlib.",
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:875:    directory upwards which still contains an __init__.py.
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:882:            if not (parent / "__init__.py").is_file():
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:890:def resolve_pkg_root_and_module_name(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:899:                __init__.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:901:                    __init__.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:911:    Raises CouldNotResolvePathError if the given path does not belong to a package (missing any __init__.py files).
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:975:    if names[-1] == "__init__":
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:981:    """Custom exception raised by resolve_pkg_root_and_module_name."""
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:80:from _pytest.pathlib import ImportMode
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:135:    def __init__(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:502:    def __init__(self) -> None:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:506:        super().__init__("pytest")
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:656:        importmode: ImportMode | str,
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:694:                importmode,
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:717:        importmode: str | ImportMode,
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:728:        # Assumes always called with same importmode and rootpath.
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:737:                    mod = self._importconftest(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:739:                        importmode,
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:763:    def _importconftest(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:766:        importmode: str | ImportMode,
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:790:                mode=importmode,
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:830:                "Please move it to a top level conftest file at the rootdir:\n"
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1056:    For example the package "pytest_mock/__init__.py" should be added as "pytest_mock" in
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1064:        pytest_mock/__init__.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1071:        src/pytest_mock/__init__.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1088:        is_package = fn.count("/") == 1 and fn.endswith("__init__.py")
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1122:    def __init__(self, config: Config) -> None:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1188:        def __init__(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1216:    def __init__(
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1294:        """The path to the :ref:`rootdir <rootdir>`.
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1481:            importmode=early_config.known_args_namespace.importmode,
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1544:        # `pythonpath = a b` will set `sys.path` to `[a, b, x, y, z, ...]`
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1545:        for path in reversed(self.getini("pythonpath")):
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1546:            sys.path.insert(0, str(path))
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1550:        for path in self.getini("pythonpath"):
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1552:            if path_str in sys.path:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1553:                sys.path.remove(path_str)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1709:            rootdir_cmd_arg=ns.rootdir or None,
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1716:        self._parser.extra_info["rootdir"] = str(self.rootpath)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:1722:            "pythonpath", type="paths", help="Add paths to sys.path", default=[]
+58:def uninstallation_paths(dist: BaseDistribution) -> Generator[str, None, None]:
+60:    Yield all the uninstallation paths for dist based on RECORD-without-.py[co]
+62:    Yield paths to all the files in RECORD. For each .py file in RECORD, add
+67:    If RECORD is not found, raises an error,
+200:    tentatively uninstalling them."""
+219:            save_dir = TempDirectory(kind="uninstall")
+243:            save_dir = TempDirectory(kind="uninstall")
+273:        """Commits the uninstall by removing stashed files."""
+280:        """Undoes the uninstall by moving stashed files back."""
+304:    """A set of file paths to be removed in the uninstallation of a
+333:        # the tail, since we only want to uninstall symlinks, not their targets
+363:                "Can't uninstall '%s'. No files were found to uninstall.",
+384:                logger.info("Successfully uninstalled %s", dist_name_version)
+418:                "Can't roll back %s; was not uninstalled",
+422:        logger.info("Rolling back uninstall of %s", self._dist.raw_name)
+437:                "Not uninstalling %s since it is not installed",
+445:                "Not uninstalling %s at %s, outside environment %s",
+458:                "Not uninstalling %s at %s, as it is in the standard library.",
+468:        # directory. This means it is not a modern .dist-info installation, an
+470:        setuptools_flat_installation = (
+480:        # same package, pip needs to uninstall the currently detected version
+481:        if setuptools_flat_installation:
+509:        elif dist.installed_by_distutils:
+528:            for path in uninstallation_paths(dist):
+553:                "Not sure how to uninstall: %s - Check: %s",
+563:        # find distutils scripts= scripts
+565:            for script in dist.iter_distutils_script_names():
+
+ succeeded in 2691ms:
+
+ARCHIVE data/raw/snapshots/requests_7427.tgz
+MEMBER pyproject.toml size 3153 type b'0' link 
+1: [build-system]
+2: requires = ["setuptools>=61.0"]
+3: build-backend = "setuptools.build_meta"
+24: dynamic = ["version"]
+61:     "pytest-httpbin==2.1.0",
+63:     "pytest-cov",
+64:     "pytest-mock",
+65:     "pytest-xdist",
+66:     "pytest>=3",
+74: [tool.setuptools]
+77: [tool.setuptools.dynamic]
+78: version = {attr = "requests.__version__.__version__"}
+80: [tool.setuptools.packages.find]
+81: where = ["src"]
+84: target-version = "py310"
+108: [tool.pytest.ini_options]
+111: minversion = "6.2"
+MEMBER setup.py size 179 type b'0' link 
+3: if sys.version_info < (3, 10):  # noqa: UP036
+7: from setuptools import setup
+MEMBER src/requests/__init__.py size 5922 type b'0' link 
+MEMBER tests/__init__.py size 469 type b'0' link 
+1: """Requests test package initialisation."""
+2: 
+3: import warnings
+4: 
+5: try:
+6:     from urllib3.exceptions import SNIMissingWarning
+7: 
+8:     # urllib3 1.x sets SNIMissingWarning to only go off once,
+9:     # while this test suite requires it to always fire
+10:     # so that it occurs during test_requests.test_https_warnings
+11:     warnings.simplefilter("always", SNIMissingWarning)
+12: except ImportError:
+13:     # urllib3 2.0 removed that warning and errors out instead
+14:     SNIMissingWarning = None
+MEMBER tests/conftest.py size 1934 type b'0' link 
+1: try:
+2:     from http.server import HTTPServer, SimpleHTTPRequestHandler
+3: except ImportError:
+4:     from BaseHTTPServer import HTTPServer
+5:     from SimpleHTTPServer import SimpleHTTPRequestHandler
+6: 
+7: import ssl
+8: import threading
+9: 
+10: import pytest
+11: 
+12: from requests.compat import urljoin
+13: 
+14: 
+15: def prepare_url(value):
+16:     # Issue #1483: Make sure the URL always has a trailing slash
+17:     httpbin_url = value.url.rstrip("/") + "/"
+18: 
+19:     def inner(*suffix):
+20:         return urljoin(httpbin_url, "/".join(suffix))
+21: 
+22:     return inner
+23: 
+24: 
+25: @pytest.fixture(autouse=True)
+26: def clean_proxy_environ(monkeypatch):
+27:     """Remove proxy related environment variables for every test."""
+28:     proxy_vars = ("http_proxy", "https_proxy", "no_proxy", "ftp_proxy", "all_proxy")
+29:     for var in proxy_vars:
+30:         monkeypatch.delenv(var, raising=False)
+31:         monkeypatch.delenv(var.upper(), raising=False)
+32: 
+33: 
+34: @pytest.fixture
+35: def httpbin(httpbin):
+36:     return prepare_url(httpbin)
+37: 
+38: 
+39: @pytest.fixture
+40: def httpbin_secure(httpbin_secure):
+41:     return prepare_url(httpbin_secure)
+42: 
+43: 
+44: @pytest.fixture
+45: def nosan_server(tmp_path_factory):
+46:     # delay importing until the fixture in order to make it possible
+47:     # to deselect the test via command-line when trustme is not available
+48:     import trustme
+49: 
+50:     tmpdir = tmp_path_factory.mktemp("certs")
+51:     ca = trustme.CA()
+52:     # only commonName, no subjectAltName
+53:     server_cert = ca.issue_cert(common_name="localhost")
+54:     ca_bundle = str(tmpdir / "ca.pem")
+55:     ca.cert_pem.write_to_path(ca_bundle)
+56: 
+57:     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+58:     server_cert.configure_cert(context)
+59:     server = HTTPServer(("localhost", 0), SimpleHTTPRequestHandler)
+60:     server.socket = context.wrap_socket(server.socket, server_side=True)
+61:     server_thread = threading.Thread(target=server.serve_forever)
+62:     server_thread.start()
+63: 
+64:     yield "localhost", server.server_address[1], ca_bundle
+65: 
+66:     server.shutdown()
+67:     server_thread.join()
+
+ARCHIVE data/raw/snapshots/httpx_3672.tgz
+MEMBER pyproject.toml size 788 type b'0' link 
+1: [build-system]
+2: requires = ["hatchling"]
+3: build-backend = "hatchling.build"
+27: dynamic = ["version"]
+29: [tool.hatch.version]
+30: path = "src/httpx/__version__.py"
+MEMBER tests/__init__.py size 0 type b'0' link 
+
+ARCHIVE data/raw/snapshots/fastapi_14873.tgz
+MEMBER pyproject.toml size 10944 type b'0' link 
+1: [build-system]
+2: requires = ["pdm-backend"]
+3: build-backend = "pdm.backend"
+7: dynamic = ["version"]
+175:     "pytest >=7.1.3,<9.0.0",
+176:     "pytest-codspeed >=4.2.0",
+190: [tool.pdm]
+191: version = { source = "file", path = "fastapi/__init__.py" }
+194: [tool.pdm.build]
+203: [tool.tiangolo._internal-slim-build.packages.fastapi-slim.project]
+226: [tool.pytest.ini_options]
+238:     # TODO: remove after upgrading SQLAlchemy to a version that includes the following changes
+240:     'ignore:datetime\.datetime\.utcfromtimestamp\(\) is deprecated and scheduled for removal in a future version\..*:DeprecationWarning:sqlalchemy',
+243:     # Remove once there's a new version of Trio
+MEMBER tests/__init__.py size 0 type b'0' link 
+
+ARCHIVE data/raw/snapshots/rich_3486.tgz
+MEMBER pyproject.toml size 1922 type b'0' link 
+1: [tool.poetry]
+5: version = "13.8.1"
+30: [tool.poetry.dependencies]
+32: typing-extensions = { version = ">=4.0.0, <5.0", python = "<3.9" }
+34: ipywidgets = { version = ">=7.5.1,<9", optional = true }
+37: [tool.poetry.extras]
+40: [tool.poetry.dev-dependencies]
+41: pytest = "^7.0.0"
+44: pytest-cov = "^3.0.0"
+48: importlib-metadata = { version = "*", python = "<3.8" }
+50: [build-system]
+51: requires = ["poetry-core>=1.0.0"]
+52: build-backend = "poetry.core.masonry.api"
+66: [tool.pytest.ini_options]
+MEMBER setup.py size 196 type b'0' link 
+3: # This is a shim to hopefully allow Github to detect the package, build is done with poetry
+5: import setuptools
+8:     setuptools.setup(name="rich")
+MEMBER tests/__init__.py size 0 type b'0' link 
+MEMBER tests/conftest.py size 245 type b'0' link 
+1: import pytest
+2: 
+3: 
+4: @pytest.fixture(autouse=True)
+5: def reset_color_envvars(monkeypatch):
+6:     """Remove color-related envvars to fix test output"""
+7:     monkeypatch.delenv("FORCE_COLOR", raising=False)
+8:     monkeypatch.delenv("NO_COLOR", raising=False)
+
+exec
+/bin/bash -lc "rg -n 'def copy|read_text|replace\\(|decode|setup.py|is_text' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py; nl -ba /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pip/_internal/req/req_uninstall.py | sed -n '48,90p'; nl -ba /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py | sed -n '586,647p'; nl -ba /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/main.py | sed -n '190,213p'; nl -ba /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site.py | sed -n '165,236p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+150:        return source_resolved.read_text(encoding='utf-8', errors='replace')
+152:    def copy_to(
+234:    def copy_from(
+434:        translated_cmd = command.replace(root_dir_str, sentinel)
+481:        translated_cmd = translated_cmd.replace(sentinel, root_dir_str)
+    48	        seen: set[Any] = set()
+    49	        for item in fn(*args, **kw):
+    50	            if item not in seen:
+    51	                seen.add(item)
+    52	                yield item
+    53	
+    54	    return unique
+    55	
+    56	
+    57	@_unique
+    58	def uninstallation_paths(dist: BaseDistribution) -> Generator[str, None, None]:
+    59	    """
+    60	    Yield all the uninstallation paths for dist based on RECORD-without-.py[co]
+    61	
+    62	    Yield paths to all the files in RECORD. For each .py file in RECORD, add
+    63	    the .pyc and .pyo in the same directory.
+    64	
+    65	    UninstallPathSet.add() takes care of the __pycache__ .py[co].
+    66	
+    67	    If RECORD is not found, raises an error,
+    68	    with possible information from the INSTALLER file.
+    69	
+    70	    https://packaging.python.org/specifications/recording-installed-packages/
+    71	    """
+    72	    location = dist.location
+    73	    assert location is not None, "not installed"
+    74	
+    75	    entries = dist.iter_declared_entries()
+    76	    if entries is None:
+    77	        raise UninstallMissingRecord(distribution=dist)
+    78	
+    79	    for entry in entries:
+    80	        path = os.path.join(location, entry)
+    81	        yield path
+    82	        if path.endswith(".py"):
+    83	            dn, fn = os.path.split(path)
+    84	            base = fn[:-3]
+    85	            path = os.path.join(dn, base + ".pyc")
+    86	            yield path
+    87	            path = os.path.join(dn, base + ".pyo")
+    88	            yield path
+    89	
+    90	
+   586	    path = Path(path)
+   587	    mode = ImportMode(mode)
+   588	
+   589	    if not path.exists():
+   590	        raise ImportError(path)
+   591	
+   592	    if mode is ImportMode.importlib:
+   593	        # Try to import this module using the standard import mechanisms, but
+   594	        # without touching sys.path.
+   595	        try:
+   596	            _, module_name = resolve_pkg_root_and_module_name(
+   597	                path, consider_namespace_packages=consider_namespace_packages
+   598	            )
+   599	        except CouldNotResolvePathError:
+   600	            pass
+   601	        else:
+   602	            # If the given module name is already in sys.modules, do not import it again.
+   603	            with contextlib.suppress(KeyError):
+   604	                return sys.modules[module_name]
+   605	
+   606	            mod = _import_module_using_spec(module_name, path, insert_modules=False)
+   607	            if mod is not None:
+   608	                return mod
+   609	
+   610	        # Could not import the module with the current sys.path, so we fall back
+   611	        # to importing the file as a single module, not being a part of a package.
+   612	        module_name = module_name_from_path(path, root)
+   613	        with contextlib.suppress(KeyError):
+   614	            return sys.modules[module_name]
+   615	
+   616	        mod = _import_module_using_spec(module_name, path, insert_modules=True)
+   617	        if mod is None:
+   618	            raise ImportError(f"Can't find module {module_name} at location {path}")
+   619	        return mod
+   620	
+   621	    try:
+   622	        pkg_root, module_name = resolve_pkg_root_and_module_name(
+   623	            path, consider_namespace_packages=consider_namespace_packages
+   624	        )
+   625	    except CouldNotResolvePathError:
+   626	        pkg_root, module_name = path.parent, path.stem
+   627	
+   628	    # Change sys.path permanently: restoring it at the end of this function would cause surprising
+   629	    # problems because of delayed imports: for example, a conftest.py file imported by this function
+   630	    # might have local imports, which would fail at runtime if we restored sys.path.
+   631	    if mode is ImportMode.append:
+   632	        if str(pkg_root) not in sys.path:
+   633	            sys.path.append(str(pkg_root))
+   634	    elif mode is ImportMode.prepend:
+   635	        if str(pkg_root) != sys.path[0]:
+   636	            sys.path.insert(0, str(pkg_root))
+   637	    else:
+   638	        assert_never(mode)
+   639	
+   640	    importlib.import_module(module_name)
+   641	
+   642	    mod = sys.modules[module_name]
+   643	    if path.name == "__init__.py":
+   644	        return mod
+   645	
+   646	    ignore = os.environ.get("PY_IGNORE_IMPORTMISMATCH", "")
+   647	    if ignore != "1":
+   190	    )
+   191	    group.addoption(
+   192	        "--noconftest",
+   193	        action="store_true",
+   194	        dest="noconftest",
+   195	        default=False,
+   196	        help="Don't load any conftest.py files",
+   197	    )
+   198	    group.addoption(
+   199	        "--keepduplicates",
+   200	        "--keep-duplicates",
+   201	        action="store_true",
+   202	        dest="keepduplicates",
+   203	        default=False,
+   204	        help="Keep duplicate tests",
+   205	    )
+   206	    group.addoption(
+   207	        "--collect-in-virtualenv",
+   208	        action="store_true",
+   209	        dest="collect_in_virtualenv",
+   210	        default=False,
+   211	        help="Don't ignore tests in a local virtualenv directory",
+   212	    )
+   213	    group.addoption(
+   165	       and add that to known_paths, or execute it if it starts with 'import '.
+   166	    """
+   167	    if known_paths is None:
+   168	        known_paths = _init_pathinfo()
+   169	        reset = True
+   170	    else:
+   171	        reset = False
+   172	    fullname = os.path.join(sitedir, name)
+   173	    try:
+   174	        st = os.lstat(fullname)
+   175	    except OSError:
+   176	        return
+   177	    if ((getattr(st, 'st_flags', 0) & stat.UF_HIDDEN) or
+   178	        (getattr(st, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_HIDDEN)):
+   179	        _trace(f"Skipping hidden .pth file: {fullname!r}")
+   180	        return
+   181	    _trace(f"Processing .pth file: {fullname!r}")
+   182	    try:
+   183	        with io.open_code(fullname) as f:
+   184	            pth_content = f.read()
+   185	    except OSError:
+   186	        return
+   187	
+   188	    try:
+   189	        # Accept BOM markers in .pth files as we do in source files
+   190	        # (Windows PowerShell 5.1 makes it hard to emit UTF-8 files without a BOM)
+   191	        pth_content = pth_content.decode("utf-8-sig")
+   192	    except UnicodeDecodeError:
+   193	        # Fallback to locale encoding for backward compatibility.
+   194	        # We will deprecate this fallback in the future.
+   195	        import locale
+   196	        pth_content = pth_content.decode(locale.getencoding())
+   197	        _trace(f"Cannot read {fullname!r} as UTF-8. "
+   198	               f"Using fallback encoding {locale.getencoding()!r}")
+   199	
+   200	    for n, line in enumerate(pth_content.splitlines(), 1):
+   201	        if line.startswith("#"):
+   202	            continue
+   203	        if line.strip() == "":
+   204	            continue
+   205	        try:
+   206	            if line.startswith(("import ", "import\t")):
+   207	                exec(line)
+   208	                continue
+   209	            line = line.rstrip()
+   210	            dir, dircase = makepath(sitedir, line)
+   211	            if dircase not in known_paths and os.path.exists(dir):
+   212	                sys.path.append(dir)
+   213	                known_paths.add(dircase)
+   214	        except Exception as exc:
+   215	            print(f"Error processing line {n:d} of {fullname}:\n",
+   216	                  file=sys.stderr)
+   217	            import traceback
+   218	            for record in traceback.format_exception(exc):
+   219	                for line in record.splitlines():
+   220	                    print('  '+line, file=sys.stderr)
+   221	            print("\nRemainder of file ignored", file=sys.stderr)
+   222	            break
+   223	    if reset:
+   224	        known_paths = None
+   225	    return known_paths
+   226	
+   227	
+   228	def addsitedir(sitedir, known_paths=None):
+   229	    """Add 'sitedir' argument to sys.path if missing and handle .pth files in
+   230	    'sitedir'"""
+   231	    _trace(f"Adding directory: {sitedir!r}")
+   232	    if known_paths is None:
+   233	        known_paths = _init_pathinfo()
+   234	        reset = True
+   235	    else:
+   236	        reset = False
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import json
+with open('data/raw/tasks.jsonl') as f:
+ for ln,s in enumerate(f,1):
+  if 'fastapi_14873' not in s:continue
+  t=json.loads(s)
+  if t['instance_id']=='fastapi_14873':
+   for k in ['patch','test_patch']:print(k, t[k])
+   break
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+patch --- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -952,16 +952,6 @@ def __init__(
+             ),
+         ] = Default(generate_unique_id),
+     ) -> None:
+-        # Handle on_startup/on_shutdown locally since Starlette removed support
+-        # Ref: https://github.com/Kludex/starlette/pull/3117
+-        # TODO: deprecate this once the lifespan (or alternative) interface is improved
+-        self.on_startup: list[Callable[[], Any]] = (
+-            [] if on_startup is None else list(on_startup)
+-        )
+-        self.on_shutdown: list[Callable[[], Any]] = (
+-            [] if on_shutdown is None else list(on_shutdown)
+-        )
+-
+         # Determine the lifespan context to use
+         if lifespan is None:
+             # Use the default lifespan that runs on_startup/on_shutdown handlers
+@@ -985,6 +975,17 @@ def __init__(
+             assert not prefix.endswith("/"), (
+                 "A path prefix must not end with '/', as the routes will start with '/'"
+             )
++
++        # Handle on_startup/on_shutdown locally since Starlette removed support
++        # Ref: https://github.com/Kludex/starlette/pull/3117
++        # TODO: deprecate this once the lifespan (or alternative) interface is improved
++        self.on_startup: list[Callable[[], Any]] = (
++            [] if on_startup is None else list(on_startup)
++        )
++        self.on_shutdown: list[Callable[[], Any]] = (
++            [] if on_shutdown is None else list(on_shutdown)
++        )
++
+         self.prefix = prefix
+         self.tags: list[Union[str, Enum]] = tags or []
+         self.dependencies = list(dependencies or [])
+test_patch --- a/tests/test_router_events.py
++++ b/tests/test_router_events.py
+@@ -317,3 +317,63 @@ def main() -> dict[str, str]:
+         assert response.json() == {"message": "Hello World"}
+     assert state.app_startup is True
+     assert state.app_shutdown is True
++
++
++def test_startup_shutdown_handlers_as_parameters(state: State) -> None:
++    """Test that startup/shutdown handlers passed as parameters to FastAPI are called correctly."""
++
++    def app_startup() -> None:
++        state.app_startup = True
++
++    def app_shutdown() -> None:
++        state.app_shutdown = True
++
++    app = FastAPI(on_startup=[app_startup], on_shutdown=[app_shutdown])
++
++    @app.get("/")
++    def main() -> dict[str, str]:
++        return {"message": "Hello World"}
++
++    def router_startup() -> None:
++        state.router_startup = True
++
++    def router_shutdown() -> None:
++        state.router_shutdown = True
++
++    router = APIRouter(on_startup=[router_startup], on_shutdown=[router_shutdown])
++
++    def sub_router_startup() -> None:
++        state.sub_router_startup = True
++
++    def sub_router_shutdown() -> None:
++        state.sub_router_shutdown = True
++
++    sub_router = APIRouter(
++        on_startup=[sub_router_startup], on_shutdown=[sub_router_shutdown]
++    )
++
++    router.include_router(sub_router)
++    app.include_router(router)
++
++    assert state.app_startup is False
++    assert state.router_startup is False
++    assert state.sub_router_startup is False
++    assert state.app_shutdown is False
++    assert state.router_shutdown is False
++    assert state.sub_router_shutdown is False
++    with TestClient(app) as client:
++        assert state.app_startup is True
++        assert state.router_startup is True
++        assert state.sub_router_startup is True
++        assert state.app_shutdown is False
++        assert state.router_shutdown is False
++        assert state.sub_router_shutdown is False
++        response = client.get("/")
++        assert response.status_code == 200, response.text
++        assert response.json() == {"message": "Hello World"}
++    assert state.app_startup is True
++    assert state.router_startup is True
++    assert state.sub_router_startup is True
++    assert state.app_shutdown is True
++    assert state.router_shutdown is True
++    assert state.sub_router_shutdown is True
+
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py | sed -n '760,803p'; nl -ba /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/main.py | sed -n '166,190p'; nl -ba /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site.py | sed -n '236,264p'; rg -n 'rootdir|sys.path|prepend' /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/findpaths.py; ls -ld /workspace /wheels 2>/dev/null; rg --files /home/ubuntu/gemma-local -g '*python*' -g '"'!**/site-packages/**'"' | head -12" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   760	                continue
+   761	        raise KeyError(name)
+   762	
+   763	    def _importconftest(
+   764	        self,
+   765	        conftestpath: pathlib.Path,
+   766	        importmode: str | ImportMode,
+   767	        rootpath: pathlib.Path,
+   768	        *,
+   769	        consider_namespace_packages: bool,
+   770	    ) -> types.ModuleType:
+   771	        conftestpath_plugin_name = str(conftestpath)
+   772	        existing = self.get_plugin(conftestpath_plugin_name)
+   773	        if existing is not None:
+   774	            return cast(types.ModuleType, existing)
+   775	
+   776	        # conftest.py files there are not in a Python package all have module
+   777	        # name "conftest", and thus conflict with each other. Clear the existing
+   778	        # before loading the new one, otherwise the existing one will be
+   779	        # returned from the module cache.
+   780	        pkgpath = resolve_package_path(conftestpath)
+   781	        if pkgpath is None:
+   782	            try:
+   783	                del sys.modules[conftestpath.stem]
+   784	            except KeyError:
+   785	                pass
+   786	
+   787	        try:
+   788	            mod = import_path(
+   789	                conftestpath,
+   790	                mode=importmode,
+   791	                root=rootpath,
+   792	                consider_namespace_packages=consider_namespace_packages,
+   793	            )
+   794	        except Exception as e:
+   795	            assert e.__traceback__ is not None
+   796	            raise ConftestImportFailure(conftestpath, cause=e) from e
+   797	
+   798	        self._check_non_top_pytest_plugins(mod, conftestpath)
+   799	
+   800	        self._conftest_plugins.add(mod)
+   801	        dirpath = conftestpath.parent
+   802	        if dirpath in self._dirpath2confmods:
+   803	            for path, mods in self._dirpath2confmods.items():
+   166	        "--ignore",
+   167	        action="append",
+   168	        metavar="path",
+   169	        help="Ignore path during collection (multi-allowed)",
+   170	    )
+   171	    group.addoption(
+   172	        "--ignore-glob",
+   173	        action="append",
+   174	        metavar="path",
+   175	        help="Ignore path pattern during collection (multi-allowed)",
+   176	    )
+   177	    group.addoption(
+   178	        "--deselect",
+   179	        action="append",
+   180	        metavar="nodeid_prefix",
+   181	        help="Deselect item (via node id prefix) during collection (multi-allowed)",
+   182	    )
+   183	    group.addoption(
+   184	        "--confcutdir",
+   185	        dest="confcutdir",
+   186	        default=None,
+   187	        metavar="dir",
+   188	        type=functools.partial(directory_arg, optname="--confcutdir"),
+   189	        help="Only load conftest.py's relative to specified dir",
+   190	    )
+   236	        reset = False
+   237	    sitedir, sitedircase = makepath(sitedir)
+   238	    if not sitedircase in known_paths:
+   239	        sys.path.append(sitedir)        # Add path component
+   240	        known_paths.add(sitedircase)
+   241	    try:
+   242	        names = os.listdir(sitedir)
+   243	    except OSError:
+   244	        return
+   245	    names = [name for name in names
+   246	             if name.endswith(".pth") and not name.startswith(".")]
+   247	    for name in sorted(names):
+   248	        addpackage(sitedir, name, known_paths)
+   249	    if reset:
+   250	        known_paths = None
+   251	    return known_paths
+   252	
+   253	
+   254	def check_enableusersite():
+   255	    """Check if user site directory is safe for inclusion
+   256	
+   257	    The function tests for the command line flag (including environment var),
+   258	    process uid/gid equal to effective uid/gid.
+   259	
+   260	    None: Disabled for security reasons
+   261	    False: Disabled by user (command line option)
+   262	    True: Safe and enabled
+   263	    """
+   264	    if sys.flags.no_user_site:
+243:#: considered during rootdir discovery (see :func:`locate_config`) and *how*
+294:    and return a tuple of (rootdir, inifile, cfg-dict, ignored-config-files), where
+400:    rootdir_cmd_arg: str | None,
+403:    """Determine the rootdir, inifile and ini configuration values from the
+412:    :param rootdir_cmd_arg:
+413:        The `--rootdir` command line argument, if given.
+419:    rootdir = None
+451:        if rootdir_cmd_arg is None:
+453:                rootdir = inipath_.parent
+456:                # so the rootdir must not be derived from it -- otherwise
+460:                rootdir = get_common_ancestor(invocation_dir, dirs)
+461:                if is_fs_root(rootdir):
+462:                    rootdir = invocation_dir
+465:        rootdir, inipath, inicfg, ignored_config_files = locate_config(
+468:        if rootdir is None and rootdir_cmd_arg is None:
+469:            for possible_rootdir in (ancestor, *ancestor.parents):
+470:                if (possible_rootdir / "setup.py").is_file():
+471:                    rootdir = possible_rootdir
+475:                    rootdir, inipath, inicfg, _ = locate_config(invocation_dir, dirs)
+476:                if rootdir is None:
+477:                    rootdir = get_common_ancestor(
+480:                    if is_fs_root(rootdir):  # pragma: no cover
+481:                        rootdir = ancestor
+482:    if rootdir_cmd_arg:
+483:        rootdir = absolutepath(os.path.expandvars(rootdir_cmd_arg))
+484:        if not rootdir.is_dir():
+486:                f"Directory '{rootdir}' not found. Check your '--rootdir' option."
+492:    assert rootdir is not None
+493:    return rootdir, inipath, inicfg, ignored_config_files
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/python3.13
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/python3.13-config
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/share/man/man1/python3.13.1
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/libpython3.13.so.1.0
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/pkgconfig/python-3.13-embed.pc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/pkgconfig/python-3.13.pc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/libpython3.so
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/include/python3.13/pythonrun.h
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/include/python3.13/cpython/pythonrun.h
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/urllib/__pycache__/request.cpython-313.pyc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/urllib/__pycache__/error.cpython-313.pyc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/urllib/__pycache__/__init__.cpython-313.pyc
+
+codex
+The final pytest setup overwrites the earlier `--import-mode=importlib` setting, so Phase 2 uses pytest’s default `prepend` mode. That brings `/workspace` forward, but the inspected Requests and HTTPX snapshots put their packages under `src/`. The wheel bundles also omit `RECORD`, which can prevent pip from removing them during the editable-install attempt. This is evidence against treating the wheel imports as an emulation-only bug.
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import tarfile,zipfile
+for iid,targets in [('fastapi_14873',{'fastapi/routing.py':[(937,1010)],'tests/test_router_events.py':[(300,325)]}),('httpx_3672',{'src/httpx/__init__.py':[(1,8)],'src/httpx/__version__.py':[(1,8)]})]:
+ print('ARCHIVE',iid)
+ with tarfile.open('data/raw/snapshots/'+iid+'.tgz','r|gz') as tf:
+  for m in tf:
+   n=m.name.removeprefix('./')
+   if n in targets and m.isfile():
+    s=tf.extractfile(m).read().decode(errors='replace')
+    print('MEMBER',n)
+    for a,b in targets[n]:
+     for i,l in enumerate(s.splitlines(),1):
+      if a<=i<=b:print(f'{i}: {l}')
+for whl in ['starlette-1.6.0-py3-none-any.whl','starlette-0.49.0-py3-none-any.whl']:
+ p='data/raw/wheels/'+whl
+ with zipfile.ZipFile(p) as z:
+  print('WHEEL',whl)
+  s=z.read('starlette/routing.py').decode()
+  ls=s.splitlines()
+  start=next(i for i,l in enumerate(ls) if l.startswith('class Router:'))
+  for i in range(start,min(start+62,len(ls))):print(f'{i+1}: {ls[i]}')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 272ms:
+ARCHIVE fastapi_14873
+MEMBER fastapi/routing.py
+937:             ),
+938:         ] = True,
+939:         generate_unique_id_function: Annotated[
+940:             Callable[[APIRoute], str],
+941:             Doc(
+942:                 """
+943:                 Customize the function used to generate unique IDs for the *path
+944:                 operations* shown in the generated OpenAPI.
+945: 
+946:                 This is particularly useful when automatically generating clients or
+947:                 SDKs for your API.
+948: 
+949:                 Read more about it in the
+950:                 [FastAPI docs about how to Generate Clients](https://fastapi.tiangolo.com/advanced/generate-clients/#custom-generate-unique-id-function).
+951:                 """
+952:             ),
+953:         ] = Default(generate_unique_id),
+954:     ) -> None:
+955:         # Handle on_startup/on_shutdown locally since Starlette removed support
+956:         # Ref: https://github.com/Kludex/starlette/pull/3117
+957:         # TODO: deprecate this once the lifespan (or alternative) interface is improved
+958:         self.on_startup: list[Callable[[], Any]] = (
+959:             [] if on_startup is None else list(on_startup)
+960:         )
+961:         self.on_shutdown: list[Callable[[], Any]] = (
+962:             [] if on_shutdown is None else list(on_shutdown)
+963:         )
+964: 
+965:         # Determine the lifespan context to use
+966:         if lifespan is None:
+967:             # Use the default lifespan that runs on_startup/on_shutdown handlers
+968:             lifespan_context: Lifespan[Any] = _DefaultLifespan(self)
+969:         elif inspect.isasyncgenfunction(lifespan):
+970:             lifespan_context = asynccontextmanager(lifespan)
+971:         elif inspect.isgeneratorfunction(lifespan):
+972:             lifespan_context = _wrap_gen_lifespan_context(lifespan)
+973:         else:
+974:             lifespan_context = lifespan
+975:         self.lifespan_context = lifespan_context
+976: 
+977:         super().__init__(
+978:             routes=routes,
+979:             redirect_slashes=redirect_slashes,
+980:             default=default,
+981:             lifespan=lifespan_context,
+982:         )
+983:         if prefix:
+984:             assert prefix.startswith("/"), "A path prefix must start with '/'"
+985:             assert not prefix.endswith("/"), (
+986:                 "A path prefix must not end with '/', as the routes will start with '/'"
+987:             )
+988:         self.prefix = prefix
+989:         self.tags: list[Union[str, Enum]] = tags or []
+990:         self.dependencies = list(dependencies or [])
+991:         self.deprecated = deprecated
+992:         self.include_in_schema = include_in_schema
+993:         self.responses = responses or {}
+994:         self.callbacks = callbacks or []
+995:         self.dependency_overrides_provider = dependency_overrides_provider
+996:         self.route_class = route_class
+997:         self.default_response_class = default_response_class
+998:         self.generate_unique_id_function = generate_unique_id_function
+999: 
+1000:     def route(
+1001:         self,
+1002:         path: str,
+1003:         methods: Optional[Collection[str]] = None,
+1004:         name: Optional[str] = None,
+1005:         include_in_schema: bool = True,
+1006:     ) -> Callable[[DecoratedCallable], DecoratedCallable]:
+1007:         def decorator(func: DecoratedCallable) -> DecoratedCallable:
+1008:             self.add_route(
+1009:                 path,
+1010:                 func,
+MEMBER tests/test_router_events.py
+300:         state.app_startup = True
+301:         yield
+302:         state.app_shutdown = True
+303: 
+304:     app = FastAPI(lifespan=lifespan)  # type: ignore[arg-type]
+305: 
+306:     @app.get("/")
+307:     def main() -> dict[str, str]:
+308:         return {"message": "Hello World"}
+309: 
+310:     assert state.app_startup is False
+311:     assert state.app_shutdown is False
+312:     with TestClient(app) as client:
+313:         assert state.app_startup is True
+314:         assert state.app_shutdown is False
+315:         response = client.get("/")
+316:         assert response.status_code == 200, response.text
+317:         assert response.json() == {"message": "Hello World"}
+318:     assert state.app_startup is True
+319:     assert state.app_shutdown is True
+ARCHIVE httpx_3672
+MEMBER src/httpx/__init__.py
+1: from .__version__ import __title__, __version__
+2: from ._client import *  # Client
+3: from ._content import *  # Content, File, Files, Form, HTML, JSON, MultiPart, Text
+4: from ._headers import *  # Headers
+5: from ._network import *  # NetworkBackend, NetworkStream, timeout
+6: from ._parsers import *  # HTTPParser, ProtocolError
+7: from ._pool import *  # Connection, ConnectionPool, Transport
+8: from ._quickstart import *  # get, post, put, patch, delete
+MEMBER src/httpx/__version__.py
+1: __title__ = "httpx"
+2: __version__ = "1.0.dev3"
+WHEEL starlette-1.6.0-py3-none-any.whl
+573: class Router:
+574:     def __init__(
+575:         self,
+576:         routes: Sequence[BaseRoute] | None = None,
+577:         redirect_slashes: bool = True,
+578:         default: ASGIApp | None = None,
+579:         # the generic to Lifespan[AppType] is the type of the top level application
+580:         # which the router cannot know statically, so we use Any
+581:         lifespan: Lifespan[Any] | None = None,
+582:         *,
+583:         middleware: Sequence[Middleware] | None = None,
+584:         max_body_size: int | None = None,
+585:     ) -> None:
+586:         self.routes = [] if routes is None else list(routes)
+587:         self.redirect_slashes = redirect_slashes
+588:         self.default = self.not_found if default is None else default
+589: 
+590:         if lifespan is None:
+591:             self.lifespan_context: Lifespan[Any] = _DefaultLifespan(self)
+592: 
+593:         elif inspect.isasyncgenfunction(lifespan):
+594:             warnings.warn(
+595:                 "async generator function lifespans are deprecated, "
+596:                 "use an @contextlib.asynccontextmanager function instead",
+597:                 StarletteDeprecationWarning,
+598:             )
+599:             self.lifespan_context = asynccontextmanager(lifespan)
+600:         elif inspect.isgeneratorfunction(lifespan):
+601:             warnings.warn(
+602:                 "generator function lifespans are deprecated, use an @contextlib.asynccontextmanager function instead",
+603:                 StarletteDeprecationWarning,
+604:             )
+605:             self.lifespan_context = _wrap_gen_lifespan_context(lifespan)
+606:         else:
+607:             self.lifespan_context = lifespan
+608: 
+609:         self.middleware_stack = self.app
+610:         if middleware:
+611:             for cls, args, kwargs in reversed(middleware):
+612:                 self.middleware_stack = cls(self.middleware_stack, *args, **kwargs)
+613:         if max_body_size is not None:
+614:             self.middleware_stack = RequestBodyLimitMiddleware(self.middleware_stack, max_body_size=max_body_size)
+615: 
+616:     async def not_found(self, scope: Scope, receive: Receive, send: Send) -> None:
+617:         if scope["type"] == "websocket":
+618:             websocket_close = WebSocketClose()
+619:             await websocket_close(scope, receive, send)
+620:             return
+621: 
+622:         # If we're running inside a starlette application then raise an
+623:         # exception, so that the configurable exception handler can deal with
+624:         # returning the response. For plain ASGI apps, just return the response.
+625:         if "app" in scope:
+626:             raise HTTPException(status_code=404)
+627:         else:
+628:             response = PlainTextResponse("Not Found", status_code=404)
+629:         await response(scope, receive, send)
+630: 
+631:     def url_path_for(self, name: str, /, **path_params: Any) -> URLPath:
+632:         for route in self.routes:
+633:             try:
+634:                 return route.url_path_for(name, **path_params)
+WHEEL starlette-0.49.0-py3-none-any.whl
+580: class Router:
+581:     def __init__(
+582:         self,
+583:         routes: Sequence[BaseRoute] | None = None,
+584:         redirect_slashes: bool = True,
+585:         default: ASGIApp | None = None,
+586:         on_startup: Sequence[Callable[[], Any]] | None = None,
+587:         on_shutdown: Sequence[Callable[[], Any]] | None = None,
+588:         # the generic to Lifespan[AppType] is the type of the top level application
+589:         # which the router cannot know statically, so we use Any
+590:         lifespan: Lifespan[Any] | None = None,
+591:         *,
+592:         middleware: Sequence[Middleware] | None = None,
+593:     ) -> None:
+594:         self.routes = [] if routes is None else list(routes)
+595:         self.redirect_slashes = redirect_slashes
+596:         self.default = self.not_found if default is None else default
+597:         self.on_startup = [] if on_startup is None else list(on_startup)
+598:         self.on_shutdown = [] if on_shutdown is None else list(on_shutdown)
+599: 
+600:         if on_startup or on_shutdown:
+601:             warnings.warn(
+602:                 "The on_startup and on_shutdown parameters are deprecated, and they "
+603:                 "will be removed on version 1.0. Use the lifespan parameter instead. "
+604:                 "See more about it on https://starlette.dev/lifespan/.",
+605:                 DeprecationWarning,
+606:             )
+607:             if lifespan:
+608:                 warnings.warn(
+609:                     "The `lifespan` parameter cannot be used with `on_startup` or "
+610:                     "`on_shutdown`. Both `on_startup` and `on_shutdown` will be "
+611:                     "ignored."
+612:                 )
+613: 
+614:         if lifespan is None:
+615:             self.lifespan_context: Lifespan[Any] = _DefaultLifespan(self)
+616: 
+617:         elif inspect.isasyncgenfunction(lifespan):
+618:             warnings.warn(
+619:                 "async generator function lifespans are deprecated, "
+620:                 "use an @contextlib.asynccontextmanager function instead",
+621:                 DeprecationWarning,
+622:             )
+623:             self.lifespan_context = asynccontextmanager(
+624:                 lifespan,
+625:             )
+626:         elif inspect.isgeneratorfunction(lifespan):
+627:             warnings.warn(
+628:                 "generator function lifespans are deprecated, use an @contextlib.asynccontextmanager function instead",
+629:                 DeprecationWarning,
+630:             )
+631:             self.lifespan_context = _wrap_gen_lifespan_context(
+632:                 lifespan,
+633:             )
+634:         else:
+635:             self.lifespan_context = lifespan
+636: 
+637:         self.middleware_stack = self.app
+638:         if middleware:
+639:             for cls, args, kwargs in reversed(middleware):
+640:                 self.middleware_stack = cls(self.middleware_stack, *args, **kwargs)
+641: 
+
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py | sed -n '1,110p'; rg -n 'def extract_test_files|test_files' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/models/task.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py; rg -n 'import-mode' /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/main.py; rg -n 'entry|iter_declared_entries|RECORD' /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pip/_internal/metadata/base.py; rg --files /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core | head -45" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	"""Phase 2 evaluation container verification and test execution."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import asyncio
+     6	import logging
+     7	import re
+     8	import shlex
+     9	import tempfile
+    10	import time
+    11	import uuid
+    12	from collections.abc import Sequence
+    13	from pathlib import Path
+    14	
+    15	from adk_eval_core.tracing import SessionTrace
+    16	
+    17	from swegemma.config import EvalConfig
+    18	from swegemma.harness.container_setup import (
+    19	    ContainerSetupError,
+    20	    apply_patch_in_container,
+    21	    extract_snapshot,
+    22	    install_editable_package,
+    23	    install_test_dependencies,
+    24	    setup_baseline_commit,
+    25	    setup_container_wheels,
+    26	    setup_git_exclude,
+    27	    setup_synthetic_hardware,
+    28	    setup_workspace_test_config,
+    29	)
+    30	from swegemma.models import Task, TaskResult, extract_test_files_from_patch
+    31	from swegemma.models.task import _unquote_git_path
+    32	from swegemma.sandbox import (
+    33	    BaseSandboxManager,
+    34	    sandbox_exec,
+    35	    sandbox_start,
+    36	    sandbox_stop,
+    37	)
+    38	
+    39	logger = logging.getLogger(__name__)
+    40	
+    41	
+    42	def save_trace_artifact(
+    43	    trace: SessionTrace | None,
+    44	    results_dir: Path | None,
+    45	    instance_id: str,
+    46	) -> str | None:
+    47	    """Saves a SessionTrace to results_dir/traces/trace_<instance_id>.json if available."""
+    48	    if trace is None or results_dir is None:
+    49	        return None
+    50	    try:
+    51	        trace_dir = results_dir / 'traces'
+    52	        trace_dir.mkdir(parents=True, exist_ok=True)
+    53	        safe_id = instance_id.replace('/', '__')
+    54	        trace_path = trace_dir / f'trace_{safe_id}.json'
+    55	        trace.save(trace_path)
+    56	        return str(trace_path)
+    57	    except Exception as tr_err:
+    58	        logger.warning('Failed to save trace for task %s: %s', instance_id, tr_err)
+    59	        return None
+    60	
+    61	
+    62	def _is_protected_test_or_config_path(rel_path: str) -> bool:
+    63	    """Returns True if rel_path is a test file, conftest, or runner config that agent_patch must not tamper with."""
+    64	    p = Path(rel_path)
+    65	    name = p.name
+    66	    if name in {
+    67	        'conftest.py',
+    68	        'pytest.ini',
+    69	        'pyproject.toml',
+    70	        'tox.ini',
+    71	        'setup.cfg',
+    72	        '.pytest.ini',
+    73	        'sitecustomize.py',
+    74	        'usercustomize.py',
+    75	        '_swegemma_stubs.py',
+    76	    }:
+    77	        return True
+    78	    if name.endswith('.pth'):
+    79	        return True
+    80	    if name.startswith('test_') and name.endswith('.py'):
+    81	        return True
+    82	    if name.endswith('_test.py'):
+    83	        return True
+    84	    parts = {part.lower() for part in p.parts[:-1]}
+    85	    return bool({'tests', 'test', 'testing'} & parts and name.endswith('.py'))
+    86	
+    87	
+    88	def strip_protected_files_from_patch(
+    89	    patch_text: str,
+    90	    extra_protected_paths: Sequence[str] = (),
+    91	) -> str:
+    92	    """Removes unified diff sections that touch protected test or runner config files."""
+    93	    if not patch_text or not patch_text.strip():
+    94	        return ''
+    95	
+    96	    extra_set = {p.strip() for p in extra_protected_paths if p and p.strip()}
+    97	
+    98	    def _is_protected(path_str: str) -> bool:
+    99	        if not path_str or path_str == '/dev/null':
+   100	            return False
+   101	        return path_str in extra_set or _is_protected_test_or_config_path(path_str)
+   102	
+   103	    sections: list[tuple[list[str], list[str]]] = []
+   104	    current_lines: list[str] = []
+   105	    current_paths: list[str] = []
+   106	    in_hunk = False
+   107	    rem_old = 0
+   108	    rem_new = 0
+   109	    saw_hunk = False
+   110	    has_diff_git_header = False
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:30:from swegemma.models import Task, TaskResult, extract_test_files_from_patch
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:367:        and not getattr(task, 'test_files', None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:429:        target_test_files = (
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:430:            list(task.test_files)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:431:            if task.test_files
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:432:            else extract_test_files_from_patch(task.test_patch)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:437:                agent_patch, extra_protected_paths=target_test_files
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:494:        agent_touched_files = extract_test_files_from_patch(agent_patch)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:526:                target_test_files
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:540:            test_files_quoted = [shlex.quote(p) for p in files_to_reset]
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:541:            test_files_str = ' '.join(test_files_quoted)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:543:                f'cd /workspace && tracked=$(git ls-tree -r --name-only HEAD -- {test_files_str} 2>/dev/null) '
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:544:                f'&& [ -n "$tracked" ] && git ls-tree -r -z --name-only HEAD -- {test_files_str} '
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:548:                f'cd /workspace && git clean -f -- {test_files_str} 2>/dev/null || true'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:621:            for p in target_test_files
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:623:        ] or target_test_files
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:624:        test_files_quoted = [shlex.quote(p) for p in pytest_targets]
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:625:        test_files_str = ' '.join(test_files_quoted) if test_files_quoted else '.'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:629:            f'cd /workspace && PYTHONSAFEPATH=1 PYTHONNOUSERSITE=1 python3 -s -m pytest {test_files_str} '
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/models/task.py:56:def extract_test_files_from_patch(patch: str) -> list[str]:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/models/task.py:149:    def test_files(self) -> list[str]:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/models/task.py:151:        return extract_test_files_from_patch(self.test_patch)
+221:        "--import-mode",
+65:    entry: tuple[str, ...],
+68:    """Convert a legacy installed-files.txt path into modern RECORD path.
+74:    :param entry: Path parts of the installed-files.txt entry.
+76:    :returns: The converted entry.
+81:    1. While ``entry`` starts with ``..``, remove the equal amounts of parts
+85:    while entry and entry[0] == "..":
+90:        entry = entry[1:]
+91:    return str(pathlib.Path(*info, *entry))
+361:        """Check whether an entry in the info directory is a file."""
+381:    def iter_entry_points(self) -> Iterable[BaseEntryPoint]:
+466:    def _iter_declared_entries_from_record(self) -> Iterator[str] | None:
+468:            text = self.read_text("RECORD")
+474:    def _iter_declared_entries_from_legacy(self) -> Iterator[str] | None:
+495:    def iter_declared_entries(self) -> Iterator[str] | None:
+499:        ``RECORD`` metadata file. For legacy setuptools distributions, this
+501:        compatible with the format used by ``RECORD``.
+504:            contains neither ``RECORD`` nor ``installed-files.txt``.
+507:            self._iter_declared_entries_from_record()
+508:            or self._iter_declared_entries_from_legacy()
+515:        section name describes extra other environment markers, while each entry
+539:        for entry in self._iter_requires_txt_entries():
+540:            extra = canonicalize_name(entry.extra)
+549:        To ease parsing, this converts a legacy dependency entry into a PEP 508
+559:        for entry in self._iter_requires_txt_entries():
+560:            extra = canonicalize_name(entry.extra)
+561:            if extra and entry.marker:
+562:                marker = f'({entry.marker}) and extra == "{extra}"'
+565:            elif entry.marker:
+566:                marker = entry.marker
+570:                yield f"{entry.requirement} ; {marker}"
+572:                yield entry.requirement
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/__pycache__/__init__.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/__pycache__/errors.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/py.typed
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/__pycache__/viewer.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/__pycache__/templates.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/__pycache__/__init__.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/assets/viewer.css
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/assets/viewer.js
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/__init__.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/templates.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/viewer.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/errors.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/__init__.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/__pycache__/yaml_loader.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/__pycache__/paths.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/__pycache__/schema.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/__pycache__/registry.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/__pycache__/__init__.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/__pycache__/discovery.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/__pycache__/errors.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/__pycache__/limits.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/__pycache__/context.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/__pycache__/compiler.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/__pycache__/containers.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/__pycache__/subprocess_sandbox.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/__pycache__/base.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/__pycache__/__init__.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/__pycache__/docker_sandbox.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/docker_sandbox.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/__init__.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/containers.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/__pycache__/base.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/__pycache__/__init__.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/__init__.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/__pycache__/generation.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/__pycache__/callbacks.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/__pycache__/models.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/__pycache__/__init__.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/__pycache__/tools.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/__init__.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/callbacks.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/models.py
+
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py | sed -n '615,865p'; nl -ba /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/main.py | sed -n '215,233p'; rg -n 'swegemma|verify|pytest|PYTHONPATH|site.packages|ensure|workspace' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/*.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/*.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   615	    sys.stderr.write(f"Patch file not found: {p_path}\n")
+   616	    sys.exit(1)
+   617	if p_path.stat().st_size == 0:
+   618	    sys.exit(0)
+   619	
+   620	def check_safe_rel_path(raw_rel: str) -> None:
+   621	    s = raw_rel.strip().strip('"')
+   622	    if not s or s == "/dev/null":
+   623	        return
+   624	    if s.startswith(("a/", "b/")):
+   625	        s = s[2:].strip()
+   626	    if not s or s == "/dev/null":
+   627	        return
+   628	    if s.startswith("/") or ".." in Path(s).parts:
+   629	        sys.stderr.write(f"Unsafe path traversal in patch: {raw_rel}\n")
+   630	        sys.exit(1)
+   631	    resolved_target = (workspace / s).resolve()
+   632	    if resolved_target != workspace and not resolved_target.is_relative_to(workspace):
+   633	        sys.stderr.write(f"Unsafe symlink/path escape in patch: {raw_rel}\n")
+   634	        sys.exit(1)
+   635	
+   636	raw_patch_text = p_path.read_text(errors="replace")
+   637	for raw_line in raw_patch_text.splitlines():
+   638	    if raw_line.startswith("diff --git "):
+   639	        m = re.match(r'^diff --git\s+"?a/(.+?)"?\s+"?b/(.+?)"?$', raw_line)
+   640	        if m:
+   641	            check_safe_rel_path(m.group(1))
+   642	            check_safe_rel_path(m.group(2))
+   643	    elif raw_line.startswith(("--- ", "+++ ")):
+   644	        hdr = raw_line[4:].split("\t", 1)[0].strip()
+   645	        check_safe_rel_path(hdr)
+   646	    elif raw_line.startswith(("rename from ", "rename to ")):
+   647	        hdr = raw_line.split(" ", 2)[2].strip()
+   648	        check_safe_rel_path(hdr)
+   649	    elif raw_line.startswith("# empty_dir: "):
+   650	        hdr = raw_line.split(": ", 1)[-1].strip()
+   651	        check_safe_rel_path(hdr)
+   652	
+   653	try:
+   654	    with open(p_path, 'rb') as pf:
+   655	        for line in pf:
+   656	            if line.startswith(b'# empty_dir: '):
+   657	                d = line.decode('utf-8', errors='ignore').strip().split(': ', 1)[-1]
+   658	                if d:
+   659	                    check_safe_rel_path(d)
+   660	                    (workspace / d).mkdir(parents=True, exist_ok=True)
+   661	            elif line.startswith(b'diff --git'):
+   662	                break
+   663	except Exception:
+   664	    pass
+   665	
+   666	def normalize_patch(p: Path) -> Path:
+   667	    text = p.read_text(errors="replace")
+   668	    lines, mod = [], False
+   669	
+   670	    def quote_path(prefix: str, path_str: str) -> str:
+   671	        if " " in path_str:
+   672	            return f'"{prefix}/{path_str}"'
+   673	        return f"{prefix}/{path_str}"
+   674	
+   675	    for line in text.splitlines(keepends=True):
+   676	        nl = "\r\n" if line.endswith("\r\n") else ("\n" if line.endswith("\n") else "")
+   677	        content = line[:-len(nl)] if nl else line
+   678	
+   679	        if content.startswith("diff --git "):
+   680	            matched = False
+   681	            # Case 1: Quoted diff --git "a/..." "b/..."
+   682	            m = re.match(r'^diff --git\s+"a/(.+?)"\s+"b/(.+?)"(.*)$', content)
+   683	            if m:
+   684	                p_a, p_b, rest = m.groups()
+   685	                matched = True
+   686	            else:
+   687	                # Case 2: Unquoted identical paths (with or without spaces)
+   688	                m = re.match(r'^diff --git\s+a/(.+)\s+b/\1(.*)$', content)
+   689	                if m:
+   690	                    p_a, p_b, rest = m.group(1), m.group(1), m.group(2)
+   691	                    matched = True
+   692	                else:
+   693	                    # Case 3: Standard unquoted diff --git a/... b/...
+   694	                    m = re.match(r'^diff --git\s+a/(\S+)\s+b/(\S+)(.*)$', content)
+   695	                    if m:
+   696	                        p_a, p_b, rest = m.groups()
+   697	                        matched = True
+   698	            if matched:
+   699	                try:
+   700	                    r_a = os.path.relpath(os.path.realpath(workspace / p_a), workspace)
+   701	                    r_b = os.path.relpath(os.path.realpath(workspace / p_b), workspace)
+   702	                    check_safe_rel_path(r_a)
+   703	                    check_safe_rel_path(r_b)
+   704	                    if r_a != p_a or r_b != p_b:
+   705	                        mod = True
+   706	                    qa = quote_path("a", r_a)
+   707	                    qb = quote_path("b", r_b)
+   708	                    lines.append(f"diff --git {qa} {qb}{rest}{nl}")
+   709	                    continue
+   710	                except Exception:
+   711	                    pass
+   712	
+   713	        elif content.startswith("--- a/") or content.startswith('--- "a/'):
+   714	            try:
+   715	                if content.startswith('--- "a/'):
+   716	                    raw_after = content[7:]
+   717	                    p_sub, _, rest = raw_after.partition('"')
+   718	                    quoted = True
+   719	                else:
+   720	                    raw_after = content[6:]
+   721	                    p_sub, tab, timestamp = raw_after.partition("\t")
+   722	                    rest = f"\t{timestamp}" if tab else ""
+   723	                    quoted = False
+   724	                r_sub = os.path.relpath(os.path.realpath(workspace / p_sub), workspace)
+   725	                check_safe_rel_path(r_sub)
+   726	                if r_sub != p_sub:
+   727	                    mod = True
+   728	                q_sub = quote_path("a", r_sub) if (quoted or " " in r_sub) else f"a/{r_sub}"
+   729	                lines.append(f"--- {q_sub}{rest}{nl}")
+   730	                continue
+   731	            except Exception:
+   732	                pass
+   733	
+   734	        elif content.startswith("+++ b/") or content.startswith('+++ "b/'):
+   735	            try:
+   736	                if content.startswith('+++ "b/'):
+   737	                    raw_after = content[7:]
+   738	                    p_sub, _, rest = raw_after.partition('"')
+   739	                    quoted = True
+   740	                else:
+   741	                    raw_after = content[6:]
+   742	                    p_sub, tab, timestamp = raw_after.partition("\t")
+   743	                    rest = f"\t{timestamp}" if tab else ""
+   744	                    quoted = False
+   745	                r_sub = os.path.relpath(os.path.realpath(workspace / p_sub), workspace)
+   746	                check_safe_rel_path(r_sub)
+   747	                if r_sub != p_sub:
+   748	                    mod = True
+   749	                q_sub = quote_path("b", r_sub) if (quoted or " " in r_sub) else f"b/{r_sub}"
+   750	                lines.append(f"+++ {q_sub}{rest}{nl}")
+   751	                continue
+   752	            except Exception:
+   753	                pass
+   754	
+   755	        lines.append(line)
+   756	
+   757	    if not mod:
+   758	        return p
+   759	    norm_p = p.with_suffix(".norm.patch")
+   760	    norm_p.write_text("".join(lines))
+   761	    return norm_p
+   762	
+   763	errors = []
+   764	def try_cmd(c: list[str]) -> bool:
+   765	    try:
+   766	        r = subprocess.run(c, cwd=workspace, capture_output=True, text=True)
+   767	        if r.returncode == 0:
+   768	            sys.exit(0)
+   769	        errors.append(f"{' '.join(c)} failed ({r.returncode}):\n{r.stderr}\n{r.stdout}")
+   770	    except FileNotFoundError as fnf:
+   771	        errors.append(f"{c[0]} not found: {fnf}")
+   772	    return False
+   773	
+   774	# Pass 1: Raw patch with -p1 strategies ONLY
+   775	for c in [
+   776	    ["git", "apply", str(p_path)],
+   777	    ["git", "apply", "-3", str(p_path)],
+   778	    ["git", "apply", "--ignore-space-change", "--ignore-whitespace", str(p_path)],
+   779	    ["git", "apply", "--recount", str(p_path)],
+   780	]:
+   781	    try_cmd(c)
+   782	
+   783	# Pass 2: Normalized patch with -p1 strategies ONLY
+   784	norm_p = normalize_patch(p_path)
+   785	if norm_p != p_path:
+   786	    for c in [
+   787	        ["git", "apply", str(norm_p)],
+   788	        ["git", "apply", "-3", str(norm_p)],
+   789	        ["git", "apply", "--ignore-space-change", "--ignore-whitespace", str(norm_p)],
+   790	        ["git", "apply", "--recount", str(norm_p)],
+   791	    ]:
+   792	        try_cmd(c)
+   793	
+   794	# Pass 3: -p0 strategies on raw and normalized patches ONLY if both -p1 passes fail (for prefixless patches)
+   795	p0_targets = [p_path, norm_p] if norm_p != p_path else [p_path]
+   796	for target in p0_targets:
+   797	    for c in [
+   798	        ["git", "apply", "-p0", str(target)],
+   799	        ["git", "apply", "-p0", "-3", str(target)],
+   800	        ["git", "apply", "-p0", "--ignore-space-change", "--ignore-whitespace", str(target)],
+   801	        ["git", "apply", "-p0", "--recount", str(target)],
+   802	    ]:
+   803	        try_cmd(c)
+   804	
+   805	# Pass 4: Non-interactive patch fallback with --dry-run validation (try -p1 first, then -p0)
+   806	patch_targets = [norm_p, p_path] if norm_p != p_path else [p_path]
+   807	for target in patch_targets:
+   808	    for c in [
+   809	        ["patch", "-p1", "--batch", "--forward", "-i", str(target)],
+   810	        ["patch", "-p1", "-l", "--batch", "--forward", "-i", str(target)],
+   811	    ]:
+   812	        dry_cmd = c + ["--dry-run"]
+   813	        try:
+   814	            r_dry = subprocess.run(dry_cmd, cwd=workspace, capture_output=True, text=True)
+   815	            if r_dry.returncode == 0:
+   816	                r_apply = subprocess.run(c, cwd=workspace, capture_output=True, text=True)
+   817	                if r_apply.returncode == 0:
+   818	                    sys.exit(0)
+   819	                errors.append(f"{' '.join(c)} apply failed ({r_apply.returncode}):\n{r_apply.stderr}\n{r_apply.stdout}")
+   820	            else:
+   821	                errors.append(f"{' '.join(dry_cmd)} dry-run failed ({r_dry.returncode}):\n{r_dry.stderr}\n{r_dry.stdout}")
+   822	        except FileNotFoundError as fnf:
+   823	            errors.append(f"{c[0]} not found: {fnf}")
+   824	
+   825	for target in patch_targets:
+   826	    for c in [
+   827	        ["patch", "-p0", "--batch", "--forward", "-i", str(target)],
+   828	        ["patch", "-p0", "-l", "--batch", "--forward", "-i", str(target)],
+   829	    ]:
+   830	        dry_cmd = c + ["--dry-run"]
+   831	        try:
+   832	            r_dry = subprocess.run(dry_cmd, cwd=workspace, capture_output=True, text=True)
+   833	            if r_dry.returncode == 0:
+   834	                r_apply = subprocess.run(c, cwd=workspace, capture_output=True, text=True)
+   835	                if r_apply.returncode == 0:
+   836	                    sys.exit(0)
+   837	                errors.append(f"{' '.join(c)} apply failed ({r_apply.returncode}):\n{r_apply.stderr}\n{r_apply.stdout}")
+   838	            else:
+   839	                errors.append(f"{' '.join(dry_cmd)} dry-run failed ({r_dry.returncode}):\n{r_dry.stderr}\n{r_dry.stdout}")
+   840	        except FileNotFoundError as fnf:
+   841	            errors.append(f"{c[0]} not found: {fnf}")
+   842	
+   843	sys.stderr.write("\n".join(errors) + "\n")
+   844	sys.exit(1)
+   845	'''
+   846	    cmd = (
+   847	        f'python3 -S -c {shlex.quote(script)} {shlex.quote(workspace_dir)} '
+   848	        f'{shlex.quote(patch_path_in_container)}'
+   849	    )
+   850	    try:
+   851	        res = docker.exec(container_id, cmd)
+   852	        exit_code = res.exit_code if res.exit_code is not None else -1
+   853	        return exit_code, res.stdout, res.stderr
+   854	    finally:
+   855	        if patch_path_in_container.startswith('/tmp/'):
+   856	            docker.exec(container_id, f'rm -f {shlex.quote(patch_path_in_container)}*')
+   857	
+   858	
+   859	def setup_synthetic_hardware(docker: BaseSandboxManager, container_id: str) -> None:
+   860	    """Delegate synthetic environment preparation to the bundle's sandbox/setup.py script."""
+   861	    return
+   862	
+   863	
+   864	def setup_workspace_test_config(
+   865	    docker: BaseSandboxManager,
+   215	        action="store_true",
+   216	        default=False,
+   217	        dest="continue_on_collection_errors",
+   218	        help="Force test execution even if collection errors occur",
+   219	    )
+   220	    group.addoption(
+   221	        "--import-mode",
+   222	        default="prepend",
+   223	        choices=["prepend", "append", "importlib"],
+   224	        dest="importmode",
+   225	        help="Prepend/append to sys.path when importing test modules and conftest "
+   226	        "files. Default: prepend.",
+   227	    )
+   228	    parser.addini(
+   229	        "norecursedirs",
+   230	        "Directory patterns to avoid for recursion",
+   231	        type="args",
+   232	        default=[
+   233	            "*.egg",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:37:    enforcing competition limits and verifying directory structure. All paths stored in this
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:66:    Performs a recursive scan of the submission directory to ensure compliance with
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:704:        from .paths import ensure_no_traversal_components
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:707:            ensure_no_traversal_components(rel, context="in Sub-agent")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/registry.py:222:    via ``get()`` requires specifying the intended callback position to ensure safety and
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/context.py:104:        from .paths import ensure_no_traversal_components, validate_sandboxed_path
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/context.py:106:        ensure_no_traversal_components(config_path, context=f"in {error_prefix}")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:208:        """Write file to local workspace."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:217:        """Read text file from local workspace."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:283:        """Reset sandbox workspace to its initial state."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:22:def ensure_no_traversal_components(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:28:    Performs strict lexical validation to verify that:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/docker_sandbox.py:131:        """Write file into container workspace."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/docker_sandbox.py:139:        """Read file from container workspace."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/docker_sandbox.py:172:        """Reset container workspace to initial state."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/server.py:220:        # Ensure /tmp is not injected into PYTHONPATH or LD_LIBRARY_PATH
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/server.py:221:        if "PYTHONPATH" in env:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/server.py:224:                for p in env["PYTHONPATH"].split(":")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/server.py:228:                env["PYTHONPATH"] = ":".join(cleaned_py)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/server.py:230:                env.pop("PYTHONPATH", None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:4:configurations submitted by participants. To ensure sandboxed execution, these models
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:38:from .paths import ensure_no_traversal_components
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:75:        ensure_no_traversal_components(v)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:117:        ensure_no_traversal_components(v)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:322:                ensure_no_traversal_components(p, context="in skill")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:60:                to write into the sandbox workspace upon initialization and restore
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:85:        """Write a single file into the sandbox workspace.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:94:        """Read a text file from the sandbox workspace.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:112:            container_path: Destination path inside the sandbox workspace.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:116:            ValueError: If container_path escapes the sandbox workspace.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:134:        """Reset the sandbox workspace to its initial state.
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import tarfile,zipfile
+p='/tmp/swegemma_sp_cache_v8/sp_base_local.tar'
+with tarfile.open(p) as tf:
+ names=tf.getnames()
+ print(p,'package files',{pkg:any(n.lstrip('./').startswith(pkg+'/') for n in names) for pkg in ['requests','httpx','fastapi','rich','starlette']})
+ print('RECORDs',sum(n.endswith('/RECORD') for n in names))
+ print('local pths',[n for n in names if n.endswith('.pth')])
+ print('distinfo',[n for n in names if n.endswith('/METADATA') and any('/'+x in n for x in ['requests','httpx','fastapi','rich','starlette'])])
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/tmp/swegemma_sp_cache_v8/sp_base_local.tar package files {'requests': True, 'httpx': True, 'fastapi': True, 'rich': True, 'starlette': True}
+RECORDs 0
+local pths []
+distinfo ['./rich-15.0.0.dist-info/METADATA', './httpx-0.28.1.dist-info/METADATA', './requests-2.34.2.dist-info/METADATA', './starlette-1.6.0.dist-info/METADATA', './fastapi-0.141.1.dist-info/METADATA']
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import tarfile,zipfile,json
+for iid in ['requests_7427','httpx_3672']:
+ print('ARCHIVE',iid)
+ with tarfile.open('data/raw/snapshots/'+iid+'.tgz','r|gz') as tf:
+  for m in tf:
+   n=m.name.removeprefix('./')
+   if n=='pyproject.toml':
+    ls=tf.extractfile(m).read().decode().splitlines()
+    for i,l in enumerate(ls,1):
+     if (iid.startswith('requests') and 71<=i<=82) or (iid.startswith('httpx') and (i<5 or i>27)): print(i,l)
+with zipfile.ZipFile('data/raw/wheels/starlette-1.6.0-py3-none-any.whl') as z:
+ print('starlette full Router on_startup / on_shutdown mentions',[(i,l.strip()) for i,l in enumerate(z.read('starlette/routing.py').decode().splitlines(),1) if 'on_startup' in l or 'on_shutdown' in l])
+for p in ['runs/gold-probe/probe.jsonl','runs/gold-null/probe.jsonl']:
+ with open(p) as f:
+  found={}
+  for n,l in enumerate(f,1):
+   r=json.loads(l);found.setdefault(r['repo'],n)
+  print(p,found)
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+ARCHIVE requests_7427
+71     "typing_extensions",
+72 ]
+73 
+74 [tool.setuptools]
+75 license-files = ["LICENSE", "NOTICE"]
+76 
+77 [tool.setuptools.dynamic]
+78 version = {attr = "requests.__version__.__version__"}
+79 
+80 [tool.setuptools.packages.find]
+81 where = ["src"]
+82 
+ARCHIVE httpx_3672
+1 [build-system]
+2 requires = ["hatchling"]
+3 build-backend = "hatchling.build"
+4 
+28 
+29 [tool.hatch.version]
+30 path = "src/httpx/__version__.py"
+starlette full Router on_startup / on_shutdown mentions []
+runs/gold-probe/probe.jsonl {'encode/httpx': 1, 'fastapi/fastapi': 3, 'psf/requests': 5, 'Textualize/rich': 7}
+runs/gold-null/probe.jsonl {'fastapi/fastapi': 1, 'psf/requests': 10, 'Textualize/rich': 17}
+
+exec
+/bin/bash -lc "rg -n 'site|PYTHONPATH|env' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/execution.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/utils.py 2>/dev/null; rg --files /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox | head -20; rg -n 'def iter_all_distributions|_iter_distributions|canonical_name|_found_names|find_installed' /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pip/_internal/metadata/importlib/_envs.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/__pycache__/docker.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/__pycache__/base.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/__pycache__/__init__.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/__pycache__/subprocess.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/__init__.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/base.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/docker.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py
+21:from ._compat import BadMetadata, BasePath, get_dist_canonical_name, get_info_location
+59:        self._found_names: set[NormalizedName] = set()
+73:                name = get_dist_canonical_name(dist)
+79:            if name in self._found_names:
+81:            self._found_names.add(name)
+135:    def _iter_distributions(self) -> Iterator[BaseDistribution]:
+142:        canonical_name = canonicalize_name(name)
+146:            if distribution.canonical_name == canonical_name
+
+exec
+/bin/bash -lc "rg -n 'build_editable|dev_mode|\\.pth|add_to|sys.meta_path|insert|append' /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/editables/__init__.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/editables/__init__.py:57:        self.pth_name = f"_editable_impl_{self.project_name}"
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/editables/__init__.py:93:    def add_to_path(self, dirname: Union[str, os.PathLike]) -> None:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/editables/__init__.py:94:        self.path_entries.append(self.make_absolute(dirname))
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/editables/__init__.py:96:    def add_to_subpackage(self, package: str, dirname: Union[str, os.PathLike]) -> None:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/editables/__init__.py:100:        pth_file = self.pth_file()
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/editables/__init__.py:102:            yield f"{self.pth_name}.pth", pth_file
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/editables/__init__.py:116:            deps.append("editables")
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/editables/__init__.py:122:            lines.append(f"import {self.bootstrap_name}")
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/editables/__init__.py:124:            lines.append(str(entry))
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/editables/__init__.py:141:            bootstrap.append(f"F.map_module({name!r}, {path!r})")
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:8:   to create a separated directory inside ``build`` and use a .pth file to point to that
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:417:        wheel.writestr(f"__editable__.{self.name}.pth", contents)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:421:        Editable install will be performed using .pth file to extend `sys.path` with:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:438:    Creates a ``.pth`` file that points to a link tree in the ``auxiliary_dir``.
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:553:        yield (f"__editable__.{self.name}.pth", content)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:582:    .pth files are always read with 'locale' encoding, the recommendation
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:891:    if not any(finder == _EditableFinder for finder in sys.meta_path):
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:892:        sys.meta_path.append(_EditableFinder)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:899:        sys.path_hooks.append(_EditableNamespaceFinder._path_hook)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:901:        sys.path.append(PATH_PLACEHOLDER)  # Used just to trigger the path hook
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:8:   to create a separated directory inside ``build`` and use a .pth file to point to that
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:417:        wheel.writestr(f"__editable__.{self.name}.pth", contents)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:421:        Editable install will be performed using .pth file to extend `sys.path` with:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:438:    Creates a ``.pth`` file that points to a link tree in the ``auxiliary_dir``.
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:553:        yield (f"__editable__.{self.name}.pth", content)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:582:    .pth files are always read with 'locale' encoding, the recommendation
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:891:    if not any(finder == _EditableFinder for finder in sys.meta_path):
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:892:        sys.meta_path.append(_EditableFinder)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:899:        sys.path_hooks.append(_EditableNamespaceFinder._path_hook)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/command/editable_wheel.py:901:        sys.path.append(PATH_PLACEHOLDER)  # Used just to trigger the path hook
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:503:        return {"standard": self.build_standard, "editable": self.build_editable}
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:543:    def build_editable(self, directory: str, **build_data: Any) -> str:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:544:        if self.config.dev_mode_dirs:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:545:            return self.build_editable_explicit(directory, **build_data)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:547:        return self.build_editable_detection(directory, **build_data)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:549:    def build_editable_detection(self, directory: str, **build_data: Any) -> str:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:593:            if self.config.dev_mode_exact:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:598:                    editable_project.add_to_path(os.path.dirname(relative_path))
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:602:                if filename.endswith(".pth") and not filename.startswith("_"):
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:620:                extra_dependencies.append(dependency)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:633:    def build_editable_explicit(self, directory: str, **build_data: Any) -> str:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:642:                for relative_directory in self.config.dev_mode_dirs
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:645:            record = archive.write_file(f"_{self.metadata.core.name.replace('-', '_')}.pth", "\n".join(directories))
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:837:                    supported_python_versions.append(f"py{major_version}")
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/hatchling/builders/wheel.py:848:                            supported_python_versions.append(f"py{major_version}")
+
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py | sed -n '870,935p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py | sed -n '233,270p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py | sed -n '30,55p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   870	        module_name = ".".join(module_parts)
+   871	
+   872	
+   873	def resolve_package_path(path: Path) -> Path | None:
+   874	    """Return the Python package path by looking for the last
+   875	    directory upwards which still contains an __init__.py.
+   876	
+   877	    Returns None if it cannot be determined.
+   878	    """
+   879	    result = None
+   880	    for parent in itertools.chain((path,), path.parents):
+   881	        if parent.is_dir():
+   882	            if not (parent / "__init__.py").is_file():
+   883	                break
+   884	            if not parent.name.isidentifier():
+   885	                break
+   886	            result = parent
+   887	    return result
+   888	
+   889	
+   890	def resolve_pkg_root_and_module_name(
+   891	    path: Path, *, consider_namespace_packages: bool = False
+   892	) -> tuple[Path, str]:
+   893	    """
+   894	    Return the path to the directory of the root package that contains the
+   895	    given Python file, and its module name:
+   896	
+   897	        src/
+   898	            app/
+   899	                __init__.py
+   900	                core/
+   901	                    __init__.py
+   902	                    models.py
+   903	
+   904	    Passing the full path to `models.py` will yield Path("src") and "app.core.models".
+   905	
+   906	    If consider_namespace_packages is True, then we additionally check upwards in the hierarchy
+   907	    for namespace packages:
+   908	
+   909	    https://packaging.python.org/en/latest/guides/packaging-namespace-packages
+   910	
+   911	    Raises CouldNotResolvePathError if the given path does not belong to a package (missing any __init__.py files).
+   912	    """
+   913	    pkg_root: Path | None = None
+   914	    pkg_path = resolve_package_path(path)
+   915	    if pkg_path is not None:
+   916	        pkg_root = pkg_path.parent
+   917	    if consider_namespace_packages:
+   918	        start = pkg_root if pkg_root is not None else path.parent
+   919	        for candidate in (start, *start.parents):
+   920	            module_name = compute_module_name(candidate, path)
+   921	            if module_name and is_importable(module_name, path):
+   922	                # Point the pkg_root to the root of the namespace package.
+   923	                pkg_root = candidate
+   924	                break
+   925	
+   926	    if pkg_root is not None:
+   927	        module_name = compute_module_name(pkg_root, path)
+   928	        if module_name:
+   929	            return pkg_root, module_name
+   930	
+   931	    raise CouldNotResolvePathError(f"Could not resolve for {path}")
+   932	
+   933	
+   934	def is_importable(module_name: str, module_path: Path) -> bool:
+   935	    """
+   233	def _build_unpacked_wheels_tar(
+   234	    selected_wheels: list[Path], cache_name: str, marker_name: str
+   235	) -> Path:
+   236	    """Unpacks selected_wheels into a cached uncompressed tar archive with a marker file."""
+   237	    import shutil
+   238	    import subprocess
+   239	    import tempfile
+   240	    import uuid
+   241	    import zipfile
+   242	    from concurrent.futures import ThreadPoolExecutor
+   243	
+   244	    cache_dir = Path(tempfile.gettempdir()) / 'swegemma_sp_cache_v8'
+   245	    cache_dir.mkdir(parents=True, exist_ok=True)
+   246	    tar_path = cache_dir / f'{cache_name}.tar'
+   247	    if tar_path.exists() and tar_path.stat().st_size > 0:
+   248	        return tar_path
+   249	
+   250	    with _WHEELS_TAR_LOCK:
+   251	        if tar_path.exists() and tar_path.stat().st_size > 0:
+   252	            return tar_path
+   253	
+   254	        uid = uuid.uuid4().hex[:8]
+   255	        staging_dir = cache_dir / f'staging_{cache_name}_{os.getpid()}_{uid}'
+   256	        if staging_dir.exists():
+   257	            shutil.rmtree(staging_dir, ignore_errors=True)
+   258	        staging_dir.mkdir(parents=True, exist_ok=True)
+   259	
+   260	        def _extract_one(w_path: Path) -> None:
+   261	            try:
+   262	                with zipfile.ZipFile(w_path, 'r') as zf:
+   263	                    members = [
+   264	                        m
+   265	                        for m in zf.infolist()
+   266	                        if not m.filename.endswith(('.pyc', '/RECORD'))
+   267	                    ]
+   268	                    zf.extractall(staging_dir, members=members)
+   269	            except Exception as e:
+   270	                logger.debug('Skipping wheel %s during staging: %s', w_path.name, e)
+    30	class SubprocessManager(BaseSandbox):
+    31	    """Manages isolated local working directories and virtual environments directly conforming to BaseSandbox."""
+    32	
+    33	    def __init__(
+    34	        self,
+    35	        timeout_seconds: int = 300,
+    36	        base_dir: Path | None = None,
+    37	        system_site_packages: bool = True,
+    38	    ):
+    39	        self.timeout_seconds = timeout_seconds
+    40	        self.base_dir = base_dir
+    41	        self.system_site_packages = system_site_packages
+    42	        self._sandboxes: dict[str, dict[str, Path]] = {}
+    43	        self._default_sandbox_id: str | None = None
+    44	        self._initial_files: dict[str, str | bytes] = {}
+    45	        self._lock = threading.RLock()
+    46	
+    47	    @property
+    48	    def sandboxes(self) -> dict[str, dict[str, Path]]:
+    49	        with self._lock:
+    50	            return {k: dict(v) for k, v in self._sandboxes.items()}
+    51	
+    52	    @property
+    53	    def work_dir(self) -> str:
+    54	        with self._lock:
+    55	            if self._default_sandbox_id and self._default_sandbox_id in self._sandboxes:
+
+codex
+For `fastapi_14873`, the gold patch changes `fastapi/routing.py`; the test patch changes only `tests/test_router_events.py`. They do not overwrite each other. The stronger explanation is dependency version sensitivity: older Starlette resets the handler lists during construction, while the selected Starlette 1.6.0 wheel no longer does. That explains how the workspace source can pass this test without the gold change.

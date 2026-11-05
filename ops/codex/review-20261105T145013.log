@@ -3532,3 +3532,2085 @@ async def run_agent_sandbox(
         self, sandbox_id: str, command: str, *, timeout: int | None = None
     ) -> ExecutionResult:
 
+exec
+/bin/bash -lc "sed -n '1,185p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py; sed -n '1,145p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/budget.py; sed -n '1,90p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py; sed -n '160,355p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py; rg -n 'strip_protected|def submit_patch|def run_command|timeout|timed out' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/core* -g '*.py'; cat docs/ATTRIBUTION.md" in /home/ubuntu/work/gemma-wt/codex-eval-runner
+ succeeded in 0ms:
+"""Execution and status inspection tools for SWE-gemma."""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import Callable
+from typing import Any
+
+from swegemma.tools.base import (
+    budget_gated,
+    error_response,
+    ok_response,
+    parse_tool_response,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@budget_gated
+def run_command(ctx: Any, command: str) -> str:
+    """Execute a shell command inside the repository sandbox.
+
+    You can run any shell command (Python scripts, tests, git commands, etc.).
+    The command runs in the repository workspace. No network access.
+
+    Args:
+        ctx: Context instance.
+        command: Shell command to execute (e.g., "pytest tests/", "python3 script.py").
+    """
+    # Determine effective command timeout
+    cmd_timeout = ctx.harness.command_timeout_seconds
+    if ctx.budget.time_minutes is not None:
+        remaining = ctx.remaining_time_seconds
+        if remaining is not None:
+            # Provide a minimum floor of 5s on remaining time so near-deadline commands don't fail immediately on 1s
+            effective_remaining = max(5, int(remaining))
+            if cmd_timeout is not None:
+                effective_timeout = min(cmd_timeout, effective_remaining)
+            else:
+                effective_timeout = effective_remaining
+        else:
+            effective_timeout = cmd_timeout
+    else:
+        effective_timeout = cmd_timeout
+
+    result = ctx.docker.exec(ctx.container_id, command, timeout=effective_timeout)
+    if result.timed_out:
+        return error_response(
+            error_type='TimeoutExceeded',
+            error_message=f'Command timed out after {effective_timeout} seconds',
+        )
+
+    max_chars = ctx.harness.max_stdout_chars
+    stdout_str = result.stdout[:max_chars] if max_chars is not None else result.stdout
+    stderr_str = result.stderr[:max_chars] if max_chars is not None else result.stderr
+
+    if result.exit_code != 0:
+        return error_response(
+            error_type='CommandError',
+            error_message=stderr_str if stderr_str else stdout_str,
+            details={
+                'stdout': stdout_str,
+                'stderr': stderr_str,
+                'exit_code': result.exit_code,
+            },
+        )
+
+    return ok_response(
+        stdout=stdout_str,
+        stderr=stderr_str,
+        exit_code=0,
+    )
+
+
+@budget_gated(count_tool_call=False)
+def submit_patch(ctx: Any) -> str:
+    """Capture the current working tree modifications as the agent's submission.
+
+    This generates a unified git diff against the baseline commit. The agent
+    can submit multiple times; only the final submission is evaluated.
+
+    Args:
+        ctx: Context instance.
+    """
+    ctx.docker.exec(ctx.container_id, 'cd /workspace && git add -N .')
+    res = ctx.docker.exec(
+        ctx.container_id,
+        'cd /workspace && (git diff --binary _swegemma_baseline 2>/dev/null || git diff --binary HEAD)',
+    )
+    if res.exit_code != 0:
+        return error_response(
+            error_type='GitDiffError',
+            error_message=f'git diff failed with exit code {res.exit_code}: {res.stderr}',
+        )
+
+    diff = res.stdout
+    repo = (
+        getattr(ctx, 'repo', None)
+        or getattr(getattr(ctx, 'task', None), 'repo', None)
+        or ''
+    )
+    if not str(repo).startswith('test/mock_repo') and diff.strip():
+        from swegemma.harness.verification import strip_protected_files_from_patch
+
+        task_obj = getattr(ctx, 'task', None)
+        extra_protected = list(getattr(task_obj, 'test_files', None) or ())
+        diff = strip_protected_files_from_patch(
+            diff, extra_protected_paths=extra_protected
+        )
+    ctx.submitted_patch = diff
+    ctx.patch_submitted = True
+    return ok_response(
+        patch_size=len(diff),
+        files_changed=diff.count('diff --git'),
+    )
+
+
+@budget_gated(count_tool_call=False)
+def get_status(ctx: Any) -> str:
+    """Check active budget details (time, tool calls) and active patch details.
+
+    Args:
+        ctx: Context instance.
+    """
+    status_data: dict[str, Any] = {
+        'status': 'ok',
+        'tool_calls_used': ctx.tool_calls_used,
+        'patch_submitted': ctx.submitted_patch is not None,
+        'patch_size': len(ctx.submitted_patch) if ctx.submitted_patch else 0,
+    }
+    if ctx.budget.tool_calls is not None:
+        status_data['tool_calls_remaining'] = max(
+            0, ctx.budget.tool_calls - ctx.tool_calls_used
+        )
+        status_data['max_tool_calls'] = ctx.budget.tool_calls
+    if ctx.budget.time_minutes is not None:
+        status_data['time_seconds_remaining'] = ctx.remaining_time_seconds
+        status_data['max_time_minutes'] = ctx.budget.time_minutes
+        status_data['agent_elapsed_seconds'] = ctx.agent_elapsed_seconds
+    if ctx.budget.turns is not None:
+        status_data['max_turns'] = ctx.budget.turns
+    if ctx.harness.command_timeout_seconds is not None:
+        status_data['command_timeout_seconds'] = ctx.harness.command_timeout_seconds
+    return json.dumps(status_data, ensure_ascii=False)
+
+
+def make_run_command(ctx: Any) -> Callable:
+    def run_command_tool(command: str) -> dict[str, Any]:
+        """Execute a shell command inside the repository sandbox.
+
+        You can run any shell command (Python scripts, tests, git commands, etc.).
+        The command runs in the repository workspace. No network access.
+
+        Args:
+            command: Shell command to execute (e.g., "pytest tests/", "python3 script.py").
+        """
+        return parse_tool_response(run_command(ctx, command))
+
+    run_command_tool.__name__ = 'run_command'
+    return run_command_tool
+
+
+def make_submit_patch(ctx: Any) -> Callable:
+    def submit_patch_tool() -> dict[str, Any]:
+        """Capture the current working tree modifications as the agent's submission.
+
+        This generates a unified git diff against the baseline commit. The agent
+        can submit multiple times; only the final submission is evaluated.
+        """
+        return parse_tool_response(submit_patch(ctx))
+
+    submit_patch_tool.__name__ = 'submit_patch'
+    return submit_patch_tool
+
+
+def make_get_status(ctx: Any) -> Callable:
+    def get_status_tool() -> dict[str, Any]:
+        """Check active budget details (time, tool calls) and active patch details."""
+        return parse_tool_response(get_status(ctx))
+
+    get_status_tool.__name__ = 'get_status'
+    return get_status_tool
+
+
+"""Token counter, USD spending calculator, evaluation budgets, and harness operational limits."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from adk_eval_core.budget import (
+    ModelPricing,
+    PricingTable,
+    TokenBudget,
+)
+
+
+@dataclass(frozen=True)
+class EvaluationBudget:
+    """Consumable allowances that terminate or conclude a task session when exhausted."""
+
+    time_minutes: float | None = 60.0  # Max session wall-clock time in minutes
+    tool_calls: int | None = None  # Max total tool invocations
+    turns: int | None = None  # Max LLM reasoning / loop turns
+    cost_usd: float | None = None  # Max monetary spend in USD
+    total_tokens: int | None = None  # Max total tokens consumed
+
+
+@dataclass(frozen=True)
+class HarnessLimits:
+    """Operational constraints that govern individual tool and sandbox execution."""
+
+    command_timeout_seconds: int | None = 300  # Timeout for a single shell command
+    max_stdout_chars: int | None = 5000  # Max characters returned per command
+    max_file_lines: int | None = 150  # Max lines returned per read_file
+    max_file_chars: int | None = 10000  # Max characters returned per read_file
+    verification_timeout_seconds: int | None = 300  # Timeout for Phase 2 pytest verification
+
+
+__all__ = [
+    'EvaluationBudget',
+    'HarnessLimits',
+    'ModelPricing',
+    'PricingTable',
+    'TokenBudget',
+]
+"""Session trace recorder for ADK agent benchmark evaluations.
+
+Captures every ADK event during an agent run and provides
+structured output for debugging and analysis.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from adk_eval_core.utils.utils import unwrap_tool_response
+
+if TYPE_CHECKING:
+    from adk_eval_core.tracing.atif import Trajectory
+
+
+@dataclass
+class TraceEntry:
+    """A single recorded event in the session trace.
+
+    Attributes:
+        timestamp: Absolute wall-clock time of the event (seconds since epoch).
+        elapsed: Seconds elapsed since the trace started.
+        event_type: Category of event (e.g., "tool_call", "tool_response",
+            "thinking", "text", "final", "usage", or custom types).
+        author: The agent or component that produced this event.
+        content: Text content (for thinking, text, and final events).
+        tool_name: Name of the tool (for tool_call and tool_response events).
+        tool_args: Arguments passed to the tool (for tool_call events).
+        tool_result: Serialized tool response (for tool_response events).
+        usage: Token usage metadata (prompt, completion, total counts).
+        model_version: Model identifier that produced this event.
+        metadata: Arbitrary metadata for custom events.
+    """
+
+    timestamp: float
+    elapsed: float  # seconds since trace start
+    event_type: (
+        str  # "thinking", "tool_call", "tool_response", "text", "final", "error"
+    )
+    author: str = ""
+    content: str = ""
+    tool_name: str = ""
+    tool_args: dict[str, Any] | None = None
+    tool_result: str = ""
+    usage: dict[str, Any] | None = None  # token counts
+    model_version: str = ""
+    metadata: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the trace entry to a dictionary."""
+        d = {
+            "timestamp": self.timestamp,
+            "elapsed_s": round(self.elapsed, 3),
+            "type": self.event_type,
+        }
+        if self.author:
+            d["author"] = self.author
+        if self.content:
+            d["content"] = self.content
+        if self.tool_name:
+            d["tool"] = self.tool_name
+        if self.tool_args is not None:
+            d["args"] = self.tool_args
+        if self.tool_result:
+            d["result"] = self.tool_result
+        if self.usage:
+            d["usage"] = self.usage
+        if self.model_version:
+            d["model"] = self.model_version
+        if self.metadata:
+            d["metadata"] = self.metadata
+        return d
+
+
+class SessionTrace:
+    """Records and exports a complete session trace.
+
+    Usage:
+        trace = SessionTrace()
+        trace.start()
+        # ... during agent run, call trace.record_event(event) for each ADK event
+        trace.save("trace.json")
+    """
+
+                "end_timestamp": comp.end_timestamp,
+            }
+            summary_text = ""
+            if hasattr(comp, "compacted_content") and comp.compacted_content and hasattr(comp.compacted_content, "parts"):
+                for part in comp.compacted_content.parts:
+                    if hasattr(part, "text") and part.text:
+                        summary_text += part.text
+            self._add(
+                TraceEntry(
+                    timestamp=now,
+                    elapsed=elapsed,
+                    event_type="compaction",
+                    author=author or "compactor",
+                    content=summary_text.strip(),
+                    usage=consume_usage(),
+                    model_version=model,
+                    metadata=meta,
+                )
+            )
+            return True
+        return False
+
+    def _record_function_call(
+        self,
+        part: Any,
+        author: str,
+        model: str,
+        now: float,
+        elapsed: float,
+        consume_usage: Callable[[], dict[str, Any] | None],
+    ) -> None:
+        """Record a tool function call event."""
+        fc = part.function_call
+        args = dict(fc.args) if fc.args else {}
+        self._add(
+            TraceEntry(
+                timestamp=now,
+                elapsed=elapsed,
+                event_type="tool_call",
+                author=author,
+                tool_name=fc.name,
+                tool_args=args,
+                usage=consume_usage(),
+                model_version=model,
+            )
+        )
+
+    def _record_function_response(
+        self,
+        part: Any,
+        author: str,
+        model: str,
+        now: float,
+        elapsed: float,
+        consume_usage: Callable[[], dict[str, Any] | None],
+    ) -> None:
+        """Record a tool function response event."""
+        fr = part.function_response
+        parsed = unwrap_tool_response(fr)
+        resp_text = json.dumps(parsed, default=str) if parsed is not None else ""
+        self._add(
+            TraceEntry(
+                timestamp=now,
+                elapsed=elapsed,
+                event_type="tool_response",
+                author=author,
+                tool_name=getattr(fr, "name", "") or "",
+                tool_result=resp_text,
+                usage=consume_usage(),
+                model_version=model,
+            )
+        )
+
+    def _record_thought(
+        self,
+        part: Any,
+        author: str,
+        model: str,
+        now: float,
+        elapsed: float,
+        consume_usage: Callable[[], dict[str, Any] | None],
+    ) -> None:
+        """Record a thinking/thought event."""
+        self._add(
+            TraceEntry(
+                timestamp=now,
+                elapsed=elapsed,
+                event_type="thinking",
+                author=author,
+                content=part.text.strip() if part.text else "",
+                usage=consume_usage(),
+                model_version=model,
+            )
+        )
+
+    def _record_text(
+        self,
+        part: Any,
+        event: Any,
+        author: str,
+        model: str,
+        now: float,
+        elapsed: float,
+        consume_usage: Callable[[], dict[str, Any] | None],
+    ) -> None:
+        """Record a text or final response event."""
+        is_final = (
+            hasattr(event, "is_final_response") and event.is_final_response()
+        )
+        self._add(
+            TraceEntry(
+                timestamp=now,
+                elapsed=elapsed,
+                event_type="final" if is_final else "text",
+                author=author,
+                content=part.text.strip(),
+                usage=consume_usage(),
+                model_version=model,
+            )
+        )
+
+    def record_event(self, event: Any) -> None:
+        """Record an ADK Event into the trace."""
+        now = time.time()
+        elapsed = now - self._start_time if self._start_time is not None else 0.0
+        author = getattr(event, "author", "")
+        model = getattr(event, "model_version", "") or ""
+
+        usage = self._extract_usage(event)
+
+        def _consume_usage() -> dict[str, Any] | None:
+            """Return usage and clear it so it's only attached once."""
+            nonlocal usage
+            result, usage = usage, None
+            return result
+
+        if self._record_compaction(event, author, model, now, elapsed, _consume_usage):
+            return
+
+        content = getattr(event, "content", None)
+        if not content or not hasattr(content, "parts") or not content.parts:
+            if usage:
+                self._add(
+                    TraceEntry(
+                        timestamp=now,
+                        elapsed=elapsed,
+                        event_type="usage",
+                        author=author,
+                        usage=_consume_usage(),
+                        model_version=model,
+                    )
+                )
+            return
+
+        for part in content.parts:
+            if hasattr(part, "function_call") and part.function_call:
+                self._record_function_call(part, author, model, now, elapsed, _consume_usage)
+            elif hasattr(part, "function_response") and part.function_response:
+                self._record_function_response(part, author, model, now, elapsed, _consume_usage)
+            elif hasattr(part, "thought") and part.thought:
+                self._record_thought(part, author, model, now, elapsed, _consume_usage)
+            elif hasattr(part, "text") and part.text and part.text.strip():
+                self._record_text(part, event, author, model, now, elapsed, _consume_usage)
+
+        if usage:
+            self._add(
+                TraceEntry(
+                    timestamp=now,
+                    elapsed=elapsed,
+                    event_type="usage",
+                    author=author,
+                    usage=_consume_usage(),
+                    model_version=model,
+                )
+            )
+
+    def record_custom(
+        self,
+        event_type: str,
+        content: str = "",
+        metadata: dict[str, Any] | None = None,
+        author: str = "harness",
+    ) -> None:
+        """Record a custom trace entry (e.g., harness-level events)."""
+        now = time.time()
+        elapsed = now - self._start_time if self._start_time is not None else 0.0
+        self._add(
+            TraceEntry(
+                timestamp=now,
+                elapsed=elapsed,
+                event_type=event_type,
+                author=author,
+                content=content,
+                metadata=metadata,
+            )
+        )
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/core*: IO error for operation on /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/core*: No such file or directory (os error 2)
+# Attribution
+Public code and ideas reused from competition participants (Apache-2.0 unless noted). Each entry
+gives the source URL, what we reused, and the date.
+
+- Official competition `sample_submission` (Kaggle Gemma 4 Developer Agent competition data, `data/raw/sample_submission`; competition-provided starter, local only, not redistributed). Reused: agent.yaml structure, sub-agent/skill layout, eval_config schema as base for bundles/31b/v000 and bundles/e4b/v000. 2026-11-04.
+
+- Official public competition starter (`docs/starter_notebook.ipynb`) and `HARNESS_README.md` sections 4, 8, 9 (Kaggle Gemma 4 Developer Agent competition). Referenced for offline wheelhouse setup, `EvalConfig`/`Evaluator` construction, sandbox selection, and Phase 2 semantics in `eval/kaggle/gold_calibration.py`; no task data copied. 2026-11-04.
+
+exec
+/bin/bash -lc "sed -n '469,630p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py; sed -n '1,255p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/tools/_batch_executor.py; sed -n '45,112p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py; rg -n 'def _build_cli_model_registry|adapter|discover' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/cli.py; rg -n 'def install_editable_package|def _ensure_container_site_packages|skip_base|def _inspect_wheels_dir|def install_test_dependencies|def setup_container_wheels' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+  async def run_async(
+      self, *, args: dict[str, Any], tool_context: ToolContext
+  ) -> Any:
+    # Preprocess arguments (includes Pydantic model conversion and type
+    # validation). Validation errors are returned to the LLM so it can
+    # self-correct and retry with proper argument types.
+    preprocessed_args, validation_errors = (
+        self._preprocess_args_with_validation(args)
+    )
+
+    if validation_errors:
+      return self._build_validation_error_response(validation_errors)
+
+    args_to_call = self._prepare_invocation_args(
+        preprocessed_args, tool_context
+    )
+
+    # Before invoking the function, we check for if the list of args passed in
+    # has all the mandatory arguments or not.
+    # If the check fails, then we don't invoke the tool and let the Agent know
+    # that there was a missing input parameter. This will basically help
+    # the underlying model fix the issue and retry.
+    mandatory_args = self._get_mandatory_args()
+    missing_mandatory_args = [
+        arg for arg in mandatory_args if arg not in args_to_call
+    ]
+
+    if missing_mandatory_args:
+      missing_mandatory_args_str = "\n".join(missing_mandatory_args)
+      error_str = f"""Invoking `{self.name}()` failed as the following mandatory input parameters are not present:
+{missing_mandatory_args_str}
+You could retry calling this tool, but it is IMPORTANT for you to provide all the mandatory parameters."""
+      return {"error": error_str}
+
+    require_confirmation = await self.check_require_confirmation(
+        args, tool_context
+    )
+
+    if require_confirmation:
+      if not tool_context.tool_confirmation:
+        args_to_show = args_to_call.copy()
+        if self._context_param_name in args_to_show:
+          args_to_show.pop(self._context_param_name)
+
+        tool_context.request_confirmation(
+            hint=(
+                f"Please approve or reject the tool call {self.name}() by"
+                " responding with a FunctionResponse with an expected"
+                " ToolConfirmation payload."
+            ),
+        )
+        tool_context.actions.skip_summarization = True
+        return {
+            "error": (
+                "This tool call requires confirmation, please approve or"
+                " reject."
+            )
+        }
+      elif not tool_context.tool_confirmation.confirmed:
+        return {"error": "This tool call is rejected."}
+
+    try:
+      if self._should_run_generator_as_node(tool_context):
+        return await self._run_generator_as_node(
+            args_to_call=args_to_call, tool_context=tool_context
+        )
+      with _use_sync_callable_context(tool_context):
+        return await self._invoke_callable(self.func, args_to_call)
+    except TypeError as e:
+      if not self._spec.has_signature and self._is_invocation_type_error(
+          e, self.func
+      ):
+        logger.warning(
+            "Invocation of signature-less tool '%s' failed: %s",
+            self.name,
+            e,
+        )
+        return {
+            "error": (
+                f"Invoking `{self.name}()` failed: {e}. You could retry"
+                " calling this tool with valid parameters."
+            )
+        }
+      raise
+
+  def _should_run_generator_as_node(self, tool_context: ToolContext) -> bool:
+    """Returns whether a generator tool should run as a FunctionNode."""
+    if not self._spec.is_generator:
+      return False
+    if self._spec.has_signature and (
+        "input_stream" in self._spec.signature.parameters
+    ):
+      return False
+    ic = getattr(tool_context, "_invocation_context", None)
+    return ic is not None and ic.live_request_queue is None
+
+  def _get_generator_node(self) -> FunctionNode:
+    """Returns a cached FunctionNode configured for this generator tool."""
+    from ..workflow._function_node import FunctionNode
+
+    func = self._get_compatible_func()
+    cache_key = (self.name, func, self._context_param_name)
+    if (
+        self._generator_node_cache is not None
+        and self._generator_node_cache[0] == cache_key
+    ):
+      return self._generator_node_cache[1]
+
+    node_name = re.sub(r"[^a-zA-Z0-9_]", "_", self.name)
+    if not node_name or not node_name.isidentifier():
+      node_name = f"_{node_name}"
+
+    node = FunctionNode(
+        func=func,
+        name=node_name,
+        parameter_binding="node_input",
+        rerun_on_resume=True,
+    )
+    # Inject the context under the same parameter FunctionTool uses, so
+    # e.g. a plain `ctx: str` argument is bound from args rather than
+    # replaced by the node's own `ctx` convention.
+    node._context_param_name = self._context_param_name
+    # run_async has already preprocessed and (when FUNCTION_TOOL_ARG_VALIDATION
+    # is on) validated the arguments. Clearing the node's type hints makes it
+    # bind them as-is, so generator tools see the same values as other
+    # FunctionTools instead of a second TypeAdapter pass that would reject a
+    # `param: str = None` default or raise past the tool's error handling.
+    node._type_hints = {}
+    node._type_adapters = {}
+    self._generator_node_cache = (cache_key, node)
+    return node
+
+  async def _run_generator_as_node(
+      self,
+      *,
+      args_to_call: dict[str, Any],
+      tool_context: ToolContext,
+  ) -> Any:
+    """Executes a non-live generator FunctionTool via FunctionNode."""
+    from ._node_tool import _run_node_in_tool_context
+
+    return await _run_node_in_tool_context(
+        self._get_generator_node(),
+        tool_name=self.name,
+        node_input=args_to_call,
+        tool_context=tool_context,
+    )
+
+  def _detect_error_in_response(self, response: Any) -> Optional[str]:
+    """Telemetry hook: returns an error type if the response indicates an error."""
+    if isinstance(response, dict) and response.get("error"):
+      return "TOOL_ERROR"
+    return None
+
+  async def _invoke_callable(
+      self, target: Callable[..., Any], args_to_call: dict[str, Any]
+  ) -> Any:
+    """Invokes a callable, handling both sync and async cases."""
+    unwrapped = (
+        self._spec.unwrapped_func
+        if target is self.func
+        else unwrap_callable(target)
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Batch execution, parallel dispatch, and event merging for tool calls."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+from collections.abc import Coroutine
+import logging
+from typing import Any
+from typing import Optional
+from typing import TYPE_CHECKING
+from typing import TypeVar
+
+from google.genai import types
+
+from ....agents.llm.task._finish_task_tool import FINISH_TASK_TOOL_NAME
+from ....events.event import Event
+from ....events.event_actions import EventActions
+from ....telemetry.tracing import trace_merged_tool_calls
+from ....telemetry.tracing import tracer
+from ....tools.base_tool import BaseTool
+from ....tools.tool_confirmation import ToolConfirmation
+from ....workflow._errors import NodeInterruptedError
+from ..core._utils import as_llm_agent as _as_llm_agent
+from ._caller import _execute_single_prepared_call_async
+from ._caller import _prepare_single
+from ._caller import _PreparedFunctionCall
+
+if TYPE_CHECKING:
+  from ....agents.invocation_context import InvocationContext
+  from ....agents.llm_agent import LlmAgent
+
+logger = logging.getLogger('google_adk.' + __name__)
+
+_T = TypeVar('_T')
+
+
+def deep_merge_dicts(d1: dict[str, Any], d2: dict[str, Any]) -> dict[str, Any]:
+  """Recursively merges d2 into d1."""
+  for key, value in d2.items():
+    if key in d1 and isinstance(d1[key], dict) and isinstance(value, dict):
+      d1[key] = deep_merge_dicts(d1[key], value)
+    else:
+      d1[key] = value
+  return d1
+
+
+def merge_parallel_function_response_events(
+    function_response_events: list[Event],
+) -> Event:
+  """Merges parallel function response events into a single response event."""
+  if not function_response_events:
+    raise ValueError('No function response events provided.')
+
+  if len(function_response_events) == 1:
+    return function_response_events[0]
+  merged_parts = []
+  for event in function_response_events:
+    if event.content:
+      for part in event.content.parts or []:
+        merged_parts.append(part)
+
+  # Use the first event as the "base" for common attributes
+  base_event = function_response_events[0]
+
+  # Merge actions from all events
+  merged_actions_data: dict[str, Any] = {}
+  aggregated_ui_widgets = []
+  for event in function_response_events:
+    if event.actions:
+      # Use `by_alias=True` because it converts the model to a dictionary
+      # while respecting field aliases, ensuring that the enum fields are
+      # correctly handled without creating a duplicate.
+      actions_dict = event.actions.model_dump(exclude_none=True, by_alias=True)
+      ui_widgets = actions_dict.pop(
+          'renderUiWidgets', None
+      ) or actions_dict.pop('render_ui_widgets', None)
+      if ui_widgets:
+        aggregated_ui_widgets.extend(ui_widgets)
+
+      merged_actions_data = deep_merge_dicts(
+          merged_actions_data,
+          actions_dict,
+      )
+
+  if aggregated_ui_widgets:
+    merged_actions_data['renderUiWidgets'] = aggregated_ui_widgets
+
+  merged_actions = EventActions.model_validate(merged_actions_data)
+
+  # Create the new merged event
+  merged_event = Event(
+      invocation_id=base_event.invocation_id,
+      author=base_event.author,
+      branch=base_event.branch,
+      content=types.Content(role='user', parts=merged_parts),
+      actions=merged_actions,
+      live_session_id=base_event.live_session_id,
+  )
+
+  # Use the base_event as the timestamp
+  merged_event.timestamp = base_event.timestamp
+  return merged_event
+
+
+def _apply_latest_state_writes(
+    merged_event: Event,
+    function_response_events: list[Event],
+    session_state: dict[str, Any],
+) -> None:
+  """Re-applies the latest value of list and dict keys several calls wrote.
+
+  Calls share the session state, so a call that reads a key after another call
+  wrote it builds on that write, which merging in call order alone can drop.
+  """
+  merged_delta = merged_event.actions.state_delta
+  latest_writes: dict[str, Any] = {}
+  for key in merged_delta:
+    latest = session_state.get(key)
+    if not isinstance(latest, (dict, list)):
+      continue
+    writes = [
+        event.actions.state_delta[key]
+        for event in function_response_events
+        if key in event.actions.state_delta
+    ]
+    # State stores the same object in the session and in the call's delta.
+    if len(writes) > 1 and any(write is latest for write in writes):
+      latest_writes[key] = latest
+  deep_merge_dicts(merged_delta, latest_writes)
+
+
+def _merge_and_trace_function_response_events(
+    invocation_context: InvocationContext,
+    function_response_events: list[Event],
+) -> Event:
+  """Merges the response events of parallel calls into a single event."""
+  merged_event = merge_parallel_function_response_events(
+      function_response_events
+  )
+  _apply_latest_state_writes(
+      merged_event, function_response_events, invocation_context.session.state
+  )
+
+  # this is needed for debug traces of parallel calls
+  # individual response with tool.name is traced in __build_response_event
+  # (we drop tool.name from span name here as this is merged event)
+  if len(function_response_events) > 1:
+    with tracer.start_as_current_span('execute_tool (merged)'):
+      trace_merged_tool_calls(
+          response_event_id=merged_event.id,
+          function_response_event=merged_event,
+          invocation_context=invocation_context,
+      )
+  return merged_event
+
+
+def _start_execute_task(
+    prepared_call: _PreparedFunctionCall,
+    coro: Coroutine[Any, Any, _T],
+) -> asyncio.Task[_T]:
+  """Starts the execute phase of one call in the context its prepare left behind.
+
+  asyncio hands every new task a copy of the context that was current when the
+  task was created, and whatever the task sets stays in that copy. The prepare
+  phase runs in a task of its own, so a contextvar a before-tool callback sets
+  there -- an auth token, a tracing span -- is not set in an execute task
+  created by the caller. Creating that task from inside the prepare phase's
+  snapshot gives it a copy of the snapshot instead, so the tool sees what the
+  callbacks set. Copying rather than sharing also keeps each call to itself:
+  what the tool sets reaches neither its sibling calls nor the caller.
+  """
+  return prepared_call.contextvars_snapshot.run(asyncio.create_task, coro)
+
+
+def _cancel_unfinished_tasks(tasks: list[asyncio.Task[Any]]) -> None:
+  """Cancels tasks that are still running and not already cancelling."""
+  for t in tasks:
+    if not t.done() and not t.cancelling():
+      t.cancel()
+
+
+async def _gather_or_cancel(tasks: list[asyncio.Task[_T]]) -> list[_T]:
+  """Awaits every task; cancels and awaits the rest if one fails or the caller is cancelled or closed."""
+  gatherer = asyncio.gather(*tasks)
+  try:
+    return list(await gatherer)
+  except GeneratorExit:
+    gatherer.cancel()
+    # Retrieve the exception so the abandoned gather future does not log
+    # "Future exception was never retrieved" at GC.
+    gatherer.add_done_callback(
+        lambda fut: fut.exception() if not fut.cancelled() else None
+    )
+    raise
+  except BaseException:
+    _cancel_unfinished_tasks(tasks)
+    await asyncio.gather(*tasks, return_exceptions=True)
+    raise
+
+
+async def _prepare_function_calls(
+    invocation_context: InvocationContext,
+    function_calls: list[types.FunctionCall],
+    tools_dict: dict[str, BaseTool],
+    agent: LlmAgent,
+    *,
+    filters: Optional[set[str]] = None,
+    tool_confirmation_dict: Optional[dict[str, ToolConfirmation]] = None,
+) -> list[_PreparedFunctionCall]:
+  """Prepares every call that the execute phase will run, in parallel."""
+  filtered_calls = [
+      fc for fc in function_calls if not filters or fc.id in filters
+  ]
+
+  if not filtered_calls:
+    return []
+
+  tasks = [
+      asyncio.create_task(
+          _prepare_single(
+              invocation_context,
+              function_call,
+              tools_dict,
+              agent,
+              tool_confirmation_dict.get(function_call.id)
+              if tool_confirmation_dict and function_call.id is not None
+              else None,
+          )
+      )
+      for function_call in filtered_calls
+  ]
+  return await _gather_or_cancel(tasks)
+
+
+_KEPT_FUNCTION_RESPONSE_EVENT_ATTR = '_adk_kept_function_response_event'
+
+
+async def _execute_prepared_function_calls(
+    invocation_context: InvocationContext,
+    prepared_calls: list[_PreparedFunctionCall],
+
+    def __init__(
+        self,
+        *,
+        docker_manager: BaseSandboxManager | Any = None,
+        container_id: str = '',
+        problem_statement: str = '',
+        hints_text: str = '',
+        task: Any | None = None,
+        task_id: str | None = None,
+        repo: str | None = None,
+        graph_dir: str = 'data/graphs',
+        embeddings_dir: str = 'data/embeddings',
+        budget: EvaluationBudget | None = None,
+        harness: HarnessLimits | None = None,
+        # Direct convenience kwargs for backward compatibility
+        max_tool_calls: int | None = None,
+        max_time_minutes: int | float | None = None,
+        max_exec_seconds: int | None = None,
+        max_stdout_chars: int | None = None,
+    ) -> None:
+        self.docker = docker_manager
+        self._lock = threading.RLock()
+        self.tool_lock = threading.RLock()
+        self._container_id = container_id
+        self._sandbox: Any | None = None
+        self._update_sandbox()
+
+        self.problem_statement = problem_statement or (
+            task.problem_statement
+            if task and hasattr(task, 'problem_statement')
+            else ''
+        )
+        self.hints_text = hints_text or (
+            task.hints_text if task and hasattr(task, 'hints_text') else ''
+        )
+        self.task = task
+        self._task_id = (
+            task_id
+            if task_id is not None
+            else (task.instance_id if task and hasattr(task, 'instance_id') else None)
+        )
+        self.repo = repo or (task.repo if task and hasattr(task, 'repo') else None)
+        self.graph_dir = graph_dir
+        self.embeddings_dir = embeddings_dir
+
+        # Construct budget (resolving direct kwargs if provided)
+        base_budget = budget or EvaluationBudget()
+        final_tool_calls = (
+            max_tool_calls if max_tool_calls is not None else base_budget.tool_calls
+        )
+        final_time_minutes = (
+            max_time_minutes
+            if max_time_minutes is not None
+            else base_budget.time_minutes
+        )
+        self.budget = EvaluationBudget(
+            time_minutes=final_time_minutes,
+            tool_calls=final_tool_calls,
+            turns=base_budget.turns,
+            cost_usd=base_budget.cost_usd,
+            total_tokens=base_budget.total_tokens,
+        )
+
+        # Construct harness limits (resolving direct kwargs if provided)
+        base_harness = harness or HarnessLimits()
+        final_cmd_timeout = (
+            max_exec_seconds
+13:from adk_submission import ModelRegistry, discover_adapters
+14:from adk_submission.discovery import discover_declared_models
+37:def _build_cli_model_registry(
+60:            for raw_model in discover_declared_models(submission_dir):
+77:            manifest = discover_adapters(submission_dir)
+78:            if getattr(manifest, 'adapters', None):
+79:                def _make_adapter(info: Any) -> Any:
+88:                manifest.register_all(models, _make_adapter)
+89:                for name, info in manifest.adapters.items():
+90:                    models.register(name, _make_adapter(info))
+144:def _inspect_wheels_dir(
+155:    skip_base_pkgs = {
+179:        if pkg_norm in skip_base_pkgs:
+318:def _ensure_container_site_packages(
+393:def setup_container_wheels(
+506:def install_editable_package(docker: BaseSandboxManager, container_id: str) -> None:
+520:def install_test_dependencies(
+
+exec
+/bin/bash -lc "rg --files /home/ubuntu/work/gemma/docs /tmp/wh /home/ubuntu/gemma-local -g '"'!**/site-packages/**'"' -g '"'!**/include/**'"' -g '"'!**/share/**'"' -g '"'!**/lib/**'"' -g '"'!**/data/**'"' -g '"'!**/ops/decisions/**'"' | head -90; cat bundles/e4b/v000/eval_config.yaml; sed -n '125,148p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/models/task.py; git diff main...codex/eval-runner -- eval/tests/test_gold_calibration.py" in /home/ubuntu/work/gemma-wt/codex-eval-runner
+ succeeded in 0ms:
+/tmp/wh/adk_eval_core-0.1.0-py3-none-any.whl
+/home/ubuntu/gemma-local/rich_2725.json
+/home/ubuntu/gemma-local/fastapi_14258.json
+/home/ubuntu/gemma-local/requests_7433.json
+/tmp/wh/x/swegemma/py.typed
+/tmp/wh/x/swegemma/budget.py
+/tmp/wh/x/swegemma/__main__.py
+/tmp/wh/x/swegemma/config.py
+/tmp/wh/x/swegemma/__init__.py
+/tmp/wh/x/swegemma/graph/graph_utils.py
+/tmp/wh/x/swegemma/graph/__init__.py
+/tmp/wh/x/swegemma/graph/retrieval_utils.py
+/tmp/wh/x/swegemma/graph/embedding_utils.py
+/tmp/wh/x/swegemma/sandbox/__init__.py
+/tmp/wh/x/swegemma/sandbox/base.py
+/tmp/wh/x/swegemma/sandbox/docker.py
+/tmp/wh/x/swegemma/sandbox/subprocess.py
+/home/ubuntu/gemma-local/wh/adk_submission-0.2.13-py3-none-any.whl
+/tmp/wh/x/swegemma/models/__init__.py
+/tmp/wh/x/swegemma/models/task.py
+/tmp/wh/x/swegemma/results.py
+/tmp/wh/x/swegemma/warnings.py
+/tmp/wh/x/swegemma/difficulty.py
+/tmp/wh/x/swegemma/evaluate.py
+/tmp/wh/x/swegemma/tools/graph.py
+/tmp/wh/x/swegemma/tools/__init__.py
+/tmp/wh/x/swegemma/tools/execution.py
+/tmp/wh/x/swegemma/tools/base.py
+/tmp/wh/x/swegemma/tools/workspace.py
+/tmp/wh/x/swegemma/edit.py
+/tmp/wh/x/swegemma/harness/sample_verification.py
+/tmp/wh/x/swegemma/harness/__init__.py
+/tmp/wh/x/swegemma/harness/container_setup.py
+/tmp/wh/x/swegemma/harness/verification.py
+/tmp/wh/x/swegemma/harness/agent_runner.py
+/tmp/wh/x/swegemma/deduplication.py
+/tmp/wh/x/swegemma/display.py
+/tmp/wh/x/swegemma/cli.py
+/tmp/wh/x/swegemma/submission.py
+/tmp/wh/x/swegemma/context.py
+/tmp/wh/x/swegemma-0.2.11.dist-info/RECORD
+/tmp/wh/x/swegemma-0.2.11.dist-info/METADATA
+/tmp/wh/x/swegemma-0.2.11.dist-info/top_level.txt
+/tmp/wh/x/swegemma-0.2.11.dist-info/WHEEL
+/tmp/wh/x/swegemma-0.2.11.dist-info/entry_points.txt
+/tmp/wh/x/adk_eval_core-0.1.0.dist-info/RECORD
+/tmp/wh/x/adk_eval_core-0.1.0.dist-info/METADATA
+/tmp/wh/x/adk_eval_core-0.1.0.dist-info/top_level.txt
+/tmp/wh/x/adk_eval_core-0.1.0.dist-info/WHEEL
+/tmp/wh/x/adk_eval_core/py.typed
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/pip3
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/py.test
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/pygmentize
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/pytest
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/idle3.13
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/python3.13
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/pip
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/pydoc3.13
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/hatchling
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/python3.13-config
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/wheel
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/trove-classifiers
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/pip3.13
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/typer
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/markdown-it
+/tmp/wh/x/adk_eval_core/viewer/assets/viewer.css
+/tmp/wh/x/adk_eval_core/viewer/assets/viewer.js
+/tmp/wh/x/adk_eval_core/viewer/__init__.py
+/tmp/wh/x/adk_eval_core/viewer/templates.py
+/tmp/wh/x/adk_eval_core/viewer/viewer.py
+/tmp/wh/x/adk_eval_core/errors.py
+/tmp/wh/x/adk_eval_core/__init__.py
+/tmp/wh/x/adk_eval_core/sandbox/docker_sandbox.py
+/tmp/wh/x/adk_eval_core/sandbox/__init__.py
+/tmp/wh/x/adk_eval_core/sandbox/subprocess_sandbox.py
+/tmp/wh/x/adk_eval_core/sandbox/base.py
+/tmp/wh/x/adk_eval_core/sandbox/containers.py
+/tmp/wh/x/adk_eval_core/models/__init__.py
+/tmp/wh/x/adk_eval_core/models/base.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/BUILD
+/tmp/wh/x/adk_eval_core/runner/__init__.py
+/tmp/wh/x/adk_eval_core/runner/base.py
+/tmp/wh/x/adk_eval_core/runner/runner.py
+/tmp/wh/x/adk_eval_core/plugins/display_plugin.py
+/tmp/wh/x/adk_eval_core/plugins/__init__.py
+/tmp/wh/x/adk_eval_core/plugins/retry_plugin.py
+/home/ubuntu/gemma-local/show.py
+/home/ubuntu/gemma-local/fastapi_14458.json
+/tmp/wh/x/adk_eval_core/budget/budget.py
+/tmp/wh/x/adk_eval_core/budget/__init__.py
+# v000 baseline: 5 min/task cap -> worst case 5*125+30 = 655 min <= 660
+evaluation:
+  timeout_seconds: 60
+  max_tool_calls: 40
+  max_time_minutes: 5
+  max_turns: 50
+    test_patch: str = ''  # verification tests (applied in eval container)
+    hints_text: str = ''
+    created_at: str = ''
+    FAIL_TO_PASS: tuple[str, ...] = ()
+    PASS_TO_PASS: tuple[str, ...] = ()
+    environment_setup_commit: str = ''
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, 'FAIL_TO_PASS', _normalize_test_nodes(self.FAIL_TO_PASS))
+        object.__setattr__(self, 'PASS_TO_PASS', _normalize_test_nodes(self.PASS_TO_PASS))
+
+    @property
+    def repo_org(self) -> str:
+        """Repository organization (e.g., 'fastapi')."""
+        parts = self.repo.split('/', 1)
+        return parts[0]
+
+    @property
+    def repo_name(self) -> str:
+        """Repository name (e.g., 'fastapi')."""
+        parts = self.repo.split('/', 1)
+        return parts[1] if len(parts) > 1 else parts[0]
+
+    @property
+diff --git a/eval/tests/test_gold_calibration.py b/eval/tests/test_gold_calibration.py
+index 7107fce..cbb2607 100644
+--- a/eval/tests/test_gold_calibration.py
++++ b/eval/tests/test_gold_calibration.py
+@@ -119,6 +119,7 @@ class WorkerTests(unittest.TestCase):
+                                       sandbox='subprocess', result=Path(directory) / 'result.json')
+             with patch.object(gold, 'load_inventory', return_value=[raw]), \
+                     patch.dict('sys.modules', {'swegemma.models': models}), \
++                    patch.object(gold, 'patch_subprocess_deps'), \
+                     patch.object(gold, 'verify_gold', side_effect=verifier):
+                 gold.worker(args)
+             return json.loads(args.result.read_text())
+
+codex
+I found a potential contamination path outside the task object: the subprocess backend runs shell commands on the host without a filesystem boundary. I’m checking it with a harmless file outside the workspace; I won’t read competition data. I’m also checking whether trace timestamps measure individual tool execution or time spent waiting for an entire batch.
+exec
+/bin/bash -lc "sed -n '255,425p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/tools/_batch_executor.py; sed -n '621,675p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py; sed -n '124,224p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py; sed -n '1,150p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/base.py; sed -n '1,72p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py; sed -n '500,570p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+    prepared_calls: list[_PreparedFunctionCall],
+    *,
+    call_executor: Callable[
+        [_PreparedFunctionCall], Coroutine[Any, Any, Optional[Event]]
+    ],
+    live_session_id: Optional[str] = None,
+) -> Optional[Event]:
+  """Runs prepared calls in parallel and merges their response events."""
+  if not prepared_calls:
+    return None
+
+  # Create tasks for parallel execution
+  tasks = [
+      _start_execute_task(prepared_call, call_executor(prepared_call))
+      for prepared_call in prepared_calls
+  ]
+
+  # Wait for all tasks to complete
+  try:
+    maybe_function_response_events = await _gather_or_cancel(tasks)
+  except (Exception, NodeInterruptedError) as e:
+    # A call raised and its unfinished siblings were cancelled. Calls that had
+    # already finished may have had side effects, so keep their real results
+    # for the postprocessor to yield before the error unwinds the agent.
+    if (
+        kept_event := _keep_completed_responses(invocation_context, tasks)
+    ) is not None:
+      setattr(e, _KEPT_FUNCTION_RESPONSE_EVENT_ATTR, kept_event)
+    raise
+
+  # Filter out None results
+  function_response_events = [
+      event for event in maybe_function_response_events if event is not None
+  ]
+
+  if live_session_id is not None:
+    for event in function_response_events:
+      event.live_session_id = live_session_id
+
+  if not function_response_events:
+    return None
+
+  return _merge_and_trace_function_response_events(
+      invocation_context, function_response_events
+  )
+
+
+def _keep_completed_responses(
+    invocation_context: InvocationContext,
+    tasks: list[asyncio.Task[Optional[Event]]],
+) -> Optional[Event]:
+  """Keeps the responses of calls that finished before their batch ended early.
+
+  Only plain tool results are kept: a call that was cancelled, raised or
+  returned no event gets nothing. They are merged as a complete batch would
+  be and returned for the flow postprocessor to yield before re-raising. Live
+  mode and aborted invocations are skipped.
+  """
+  if (
+      invocation_context.live_request_queue is not None
+      or invocation_context.is_aborted
+  ):
+    return None
+  finished = [
+      t.result()
+      for t in tasks
+      if t.done() and not t.cancelled() and t.exception() is None
+  ]
+  completed = [
+      event
+      for event in finished
+      if event is not None and _is_plain_result(event)
+  ]
+  if not completed:
+    return None
+  return _merge_and_trace_function_response_events(
+      invocation_context, completed
+  )
+
+
+def _pop_kept_function_response_event(
+    error: BaseException,
+) -> Optional[Event]:
+  """Pops and returns any kept function response event attached to `error`."""
+  kept_event = getattr(error, _KEPT_FUNCTION_RESPONSE_EVENT_ATTR, None)
+  if isinstance(kept_event, Event):
+    delattr(error, _KEPT_FUNCTION_RESPONSE_EVENT_ATTR)
+    return kept_event
+  return None
+
+
+def _is_plain_result(event: Event) -> bool:
+  """True if the event is a tool result with no control-flow actions.
+
+  Besides the tool's state and artifact deltas, any action (a transfer, an
+  escalation, a confirmation or credential request whose tool has not run)
+  is an instruction the failed step never carried out, so it is not kept.
+  finish_task sets no action and is detected by name.
+  """
+  actions = event.actions.model_copy(
+      update={
+          'state_delta': {},
+          'artifact_delta': {},
+          'skip_summarization': None,
+          'render_ui_widgets': None,
+      }
+  )
+  if actions != EventActions():
+    return False
+  return not any(
+      response.name == FINISH_TASK_TOOL_NAME
+      for response in event.get_function_responses()
+  )
+
+
+async def _execute_prepared_function_calls_async(
+    invocation_context: InvocationContext,
+    prepared_calls: list[_PreparedFunctionCall],
+    agent: LlmAgent,
+) -> Optional[Event]:
+  """Runs the prepared calls in parallel and merges their response events."""
+  return await _execute_prepared_function_calls(
+      invocation_context,
+      prepared_calls,
+      call_executor=lambda prepared_call: _execute_single_prepared_call_async(
+          invocation_context, prepared_call, agent
+      ),
+  )
+
+
+async def handle_function_call_list_async(
+    invocation_context: InvocationContext,
+    function_calls: list[types.FunctionCall],
+    tools_dict: dict[str, BaseTool],
+    filters: Optional[set[str]] = None,
+    tool_confirmation_dict: Optional[dict[str, ToolConfirmation]] = None,
+) -> Optional[Event]:
+  """Calls the functions and returns the function response event."""
+  agent = _as_llm_agent(invocation_context)
+  prepared_calls = await _prepare_function_calls(
+      invocation_context,
+      function_calls,
+      tools_dict,
+      agent,
+      filters=filters,
+      tool_confirmation_dict=tool_confirmation_dict,
+  )
+  return await _execute_prepared_function_calls_async(
+      invocation_context, prepared_calls, agent
+  )
+
+
+async def handle_function_calls_live(
+    invocation_context: InvocationContext,
+    function_call_event: Event,
+    tools_dict: dict[str, BaseTool],
+) -> Event | None:
+  """Calls the functions and returns the function response event."""
+  from . import _live_caller
+
+  return await _live_caller.handle_function_calls_live(
+      invocation_context=invocation_context,
+      function_call_event=function_call_event,
+      tools_dict=tools_dict,
+  )
+    return None
+
+  async def _invoke_callable(
+      self, target: Callable[..., Any], args_to_call: dict[str, Any]
+  ) -> Any:
+    """Invokes a callable, handling both sync and async cases."""
+    unwrapped = (
+        self._spec.unwrapped_func
+        if target is self.func
+        else unwrap_callable(target)
+    )
+    if target is self.func:
+      target = self._get_compatible_func()
+    else:
+      target = _make_keyword_compatible(target)
+    return await _invoke_callable(target, args_to_call, unwrapped=unwrapped)
+
+  def _get_mandatory_args(
+      self,
+  ) -> list[str]:
+    """Identifies mandatory parameters (those without default values) for a function.
+
+    Returns:
+      A list of strings, where each string is the name of a mandatory parameter.
+    """
+    if not self._spec.has_signature:
+      return []
+
+    signature = self._spec.signature
+    mandatory_params = []
+
+    for name, param in signature.parameters.items():
+      # A parameter is mandatory if:
+      # 1. It has no default value (param.default is inspect.Parameter.empty)
+      # 2. It's not a variable positional (*args) or variable keyword (**kwargs) parameter
+      # 3. It's not an internal parameter to ignore (e.g. tool_context, input_stream)
+      #
+      # For more refer to: https://docs.python.org/3/library/inspect.html#inspect.Parameter.kind
+      if (
+          param.default == inspect.Parameter.empty
+          and param.kind
+          not in (
+              inspect.Parameter.VAR_POSITIONAL,
+              inspect.Parameter.VAR_KEYWORD,
+          )
+          and name not in self._ignore_params
+      ):
+        mandatory_params.append(name)
+
+    return mandatory_params
+
+    def __post_init__(self) -> None:
+        """Merge flat kwargs into budget and harness if explicitly provided."""
+        valid_modes = {'auto', 'dashboard', 'single', 'quiet'}
+        if self.display_mode not in valid_modes:
+            raise ValueError(
+                f"Invalid display_mode {self.display_mode!r}, must be one of {valid_modes}"
+            )
+
+        if self.num_shards is not None and self.num_shards < 1:
+            raise ValueError(f'num_shards must be >= 1, got {self.num_shards}')
+        if self.shard_index is not None:
+            if self.num_shards is None or self.num_shards < 1:
+                raise ValueError('shard_index requires num_shards >= 1')
+            if self.shard_index < 0 or self.shard_index >= self.num_shards:
+                raise ValueError(
+                    f'shard_index ({self.shard_index}) must be in range [0, {self.num_shards})'
+                )
+
+        default_limits, default_gen_constraints = build_submission_limits()
+        if self.limits is None:
+            self.limits = default_limits
+        if self.generation_constraints is None:
+            self.generation_constraints = default_gen_constraints
+
+        t_min = (
+            self.max_time_minutes
+            if self.max_time_minutes is not None
+            else self.budget.time_minutes
+        )
+        tc = (
+            self.max_tool_calls
+            if self.max_tool_calls is not None
+            else self.budget.tool_calls
+        )
+        turns = (
+            self.max_turns
+            if self.max_turns is not None
+            else (
+                self.max_llm_calls
+                if self.max_llm_calls is not None
+                else self.budget.turns
+            )
+        )
+        object.__setattr__(
+            self,
+            'budget',
+            EvaluationBudget(
+                time_minutes=t_min,
+                tool_calls=tc,
+                turns=turns,
+                cost_usd=self.budget.cost_usd,
+                total_tokens=self.budget.total_tokens,
+            ),
+        )
+
+        cmd_timeout = (
+            self.timeout_seconds
+            if self.timeout_seconds is not None
+            else self.harness.command_timeout_seconds
+        )
+        ver_timeout = (
+            self.verification_timeout_seconds
+            if self.verification_timeout_seconds is not None
+            else self.harness.verification_timeout_seconds
+        )
+        object.__setattr__(
+            self,
+            'harness',
+            HarnessLimits(
+                command_timeout_seconds=cmd_timeout,
+                max_stdout_chars=self.harness.max_stdout_chars,
+                max_file_lines=self.harness.max_file_lines,
+                max_file_chars=self.harness.max_file_chars,
+                verification_timeout_seconds=ver_timeout,
+            ),
+        )
+
+        if self.tasks_path is not None:
+            tasks_parent = Path(self.tasks_path).parent
+            if self.graph_dir == 'data/graphs' and not Path(self.graph_dir).exists():
+                cand_graphs = tasks_parent / 'graphs'
+                if cand_graphs.is_dir():
+                    object.__setattr__(self, 'graph_dir', str(cand_graphs))
+            if (
+                self.embeddings_dir == 'data/embeddings'
+                and not Path(self.embeddings_dir).exists()
+            ):
+                cand_emb = tasks_parent / 'embeddings'
+                if cand_emb.is_dir():
+                    object.__setattr__(self, 'embeddings_dir', str(cand_emb))
+
+"""Base response helpers and decorators for SWE-gemma tools."""
+
+from __future__ import annotations
+
+import functools
+import json
+from collections.abc import Callable
+from typing import Any
+
+
+def ok_response(**kwargs: Any) -> str:
+    """Format a successful tool JSON response."""
+    data = {'status': 'ok'}
+    data.update(kwargs)
+    return json.dumps(data, ensure_ascii=False)
+
+
+def error_response(
+    error_type: str,
+    error_message: str,
+    details: dict[str, Any] | None = None,
+) -> str:
+    """Format an error tool JSON response."""
+    data: dict[str, Any] = {
+        'status': 'error',
+        'error_type': error_type,
+        'error_message': error_message,
+    }
+    if details is not None:
+        data['details'] = details
+    return json.dumps(data, ensure_ascii=False)
+
+
+def parse_tool_response(raw_response: str | dict[str, Any]) -> dict[str, Any]:
+    """Convert a JSON-serialized tool response into a dict for the ADK tool boundary."""
+    if isinstance(raw_response, dict):
+        return raw_response
+    try:
+        parsed = json.loads(raw_response)
+        if isinstance(parsed, dict):
+            return parsed
+        return {'status': 'ok', 'result': parsed}
+    except Exception:
+        return {'status': 'ok', 'result': raw_response}
+
+
+def _attach_low_budget_warning(ctx: Any, raw_response: str) -> str:
+    """Attach a low-budget warning to a JSON tool response when <= 10 tool calls remain."""
+    budget = getattr(ctx, 'budget', None)
+    max_calls = getattr(budget, 'tool_calls', None) if budget is not None else None
+    used_calls = getattr(ctx, 'tool_calls_used', None)
+    if max_calls is None or used_calls is None or max_calls < 20:
+        return raw_response
+
+    remaining = max(0, max_calls - used_calls)
+    if remaining > 10:
+        return raw_response
+
+    try:
+        payload = json.loads(raw_response)
+        if isinstance(payload, dict) and 'budget_warning' not in payload:
+            payload['budget_warning'] = (
+                f'Only {remaining} tool call(s) remaining ({used_calls}/{max_calls} used). '
+                'Finalize your edits and call submit_patch soon.'
+            )
+            return json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        pass
+    return raw_response
+
+
+def budget_gated(
+    func: Callable | None = None,
+    *,
+    count_tool_call: bool = True,
+) -> Callable:
+    """Decorator ensuring that tool invocations check and adhere to the context budget."""
+
+    def decorator(target: Callable) -> Callable:
+        @functools.wraps(target)
+        def wrapper(ctx: Any, *args: Any, **kwargs: Any) -> str:
+            tool_lock = getattr(ctx, 'tool_lock', None)
+            if tool_lock is not None:
+                with tool_lock:
+                    try:
+                        budget_error = ctx.check_budget(
+                            count_tool_call=count_tool_call
+                        )
+                    except TypeError:
+                        budget_error = ctx.check_budget()
+                    if budget_error:
+                        return budget_error
+                    res = target(ctx, *args, **kwargs)
+            else:
+                try:
+                    budget_error = ctx.check_budget(
+                        count_tool_call=count_tool_call
+                    )
+                except TypeError:
+                    budget_error = ctx.check_budget()
+                if budget_error:
+                    return budget_error
+                res = target(ctx, *args, **kwargs)
+
+            if count_tool_call and isinstance(res, str):
+                return _attach_low_budget_warning(ctx, res)
+            return res
+
+        return wrapper
+
+    if func is not None:
+        return decorator(func)
+    return decorator
+"""Graph inspection and semantic code search tools for SWE-gemma."""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import Callable
+from typing import Any, cast
+
+from swegemma.tools.base import (
+    budget_gated,
+    error_response,
+    ok_response,
+    parse_tool_response,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _coerce_int(val: Any, default: int, param_name: str) -> int:
+    """Coerce an integer tool parameter that may arrive as a string or None."""
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        raise TypeError(f'{param_name} must be an integer, got boolean {val}')
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float):
+        return int(val)
+    if isinstance(val, str):
+        s = val.strip()
+        if not s or s.lower() in ('none', 'null', 'nil'):
+            return default
+        try:
+            return int(s)
+        except ValueError:
+            try:
+                f = float(s)
+                if f.is_integer():
+                    return int(f)
+            except ValueError:
+                pass
+            raise ValueError(
+                f'Invalid integer for {param_name}: {val!r}'
+            ) from None
+    raise ValueError(f'Invalid integer for {param_name}: {val!r}')
+
+
+def _get_max_stdout_chars(ctx: Any) -> int | None:
+    """Resolve max_stdout_chars from context harness or fallback attribute."""
+    harness = getattr(ctx, 'harness', None)
+    if harness is not None and hasattr(harness, 'max_stdout_chars'):
+        return harness.max_stdout_chars
+    return getattr(ctx, 'max_stdout_chars', 5000)
+
+
+def _allocate_code_budgets(lengths: list[int], max_chars: int) -> list[int]:
+    """Divide max_chars across results with unused characters rolling over to larger nodes."""
+    if not lengths:
+        return []
+    if max_chars <= 0:
+        return [0] * len(lengths)
+    if sum(lengths) <= max_chars:
+        return list(lengths)
+
+    remaining = max_chars
+    unallocated = list(range(len(lengths)))
+    budgets = [0] * len(lengths)
+
+    while unallocated:
+        share = remaining // len(unallocated)
+        fitting = [i for i in unallocated if lengths[i] <= share]
+    docker.exec(
+        container_id,
+        'mkdir -p /workspace/.git/info && printf "__pycache__/\\n*.pyc\\n.pytest_cache/\\n*.egg-info/\\nbuild/\\ndist/\\n.coverage\\n.adk_exec_*.py\\n" >> /workspace/.git/info/exclude',
+    )
+
+
+def install_editable_package(docker: BaseSandboxManager, container_id: str) -> None:
+    """Installs the workspace package in editable mode using pre-cached wheels.
+
+    Uses --no-deps to prevent pip from resolving and potentially installing incompatible
+    wheel versions over the container's pre-configured environment.
+    """
+    if type(docker).__name__ in {'SubprocessManager', 'SubprocessSandbox'}:
+        return
+    docker.exec(
+        container_id,
+        'pip install --no-index --find-links=/wheels --no-build-isolation --no-deps -e /workspace 2>/dev/null || true',
+    )
+
+
+def install_test_dependencies(
+    docker: BaseSandboxManager,
+    container_id: str,
+    repo: str = '',
+    *,
+    fast_path: bool = True,
+    config: EvalConfig | None = None,
+) -> None:
+    """Installs test dependencies discovered from pyproject.toml and requirements files or via fast-path."""
+    if type(docker).__name__ in {'SubprocessManager', 'SubprocessSandbox'}:
+        return
+    _ensure_container_site_packages(docker, container_id, repo, config)
+
+    setup_script = resolve_sandbox_setup_script(config)
+    if setup_script and setup_script.exists():
+        docker.copy_to(container_id, setup_script, '/tmp/setup.py')
+        script_in_container = '/tmp/setup.py'
+    else:
+        check_res = docker.exec(container_id, 'test -f /sandbox/setup.py')
+        if check_res.exit_code == 0:
+            script_in_container = '/sandbox/setup.py'
+        else:
+            msg = f'setup.py not found on host or container for {container_id}'
+            is_subprocess = (
+                getattr(config, 'sandbox', 'docker') == 'subprocess'
+                or type(docker).__name__ in {'SubprocessManager', 'SubprocessSandbox'}
+            )
+            if config is not None and not is_subprocess:
+                logger.error(msg)
+                raise ContainerSetupError(msg)
+            logger.warning(msg)
+            return
+
+    fast_flag = '--fast-path' if fast_path else ''
+    cmd = f'python3 {script_in_container} {fast_flag} {repo}'.strip()
+    try:
+        res = docker.exec(container_id, cmd)
+        logger.debug('Install test deps stdout: %s', res.stdout)
+        if res.exit_code != 0:
+            details = f'stdout:\n{res.stdout}\nstderr:\n{res.stderr}'.strip()
+            if 'No such file or directory' in (res.stderr or ''):
+                msg = f'Failed to execute {script_in_container} on container {container_id}: {res.stderr}'
+                logger.error(msg)
+                raise ContainerSetupError(msg)
+            logger.warning(
+                'Failed to install test dependencies for %s (exit code %d):\n%s',
+                repo,
+                res.exit_code,
+                details,
+            )
+    finally:
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/venv/bin/python -B - <<'PY'
+from pathlib import Path
+from threading import RLock
+from swegemma.sandbox import SubprocessManager
+m = SubprocessManager.__new__(SubprocessManager)
+m._lock = RLock()
+m.timeout_seconds = 5
+m._sandboxes = {'synthetic': {'root': Path('/synthetic-root'), 'workspace': Path('/home/ubuntu/work/gemma-wt/codex-eval-runner'), 'tmp': Path('/tmp'), 'wheels': Path('/nonexistent-wheels'), 'venv': Path('/home/ubuntu/gemma-local/venv')}}
+r = m.exec('synthetic', \"python3 -B -c \\\"from pathlib import Path; print(Path('/home/ubuntu/work/gemma/AGENTS.md').read_text().startswith('# Codex instructions'))\\\"\")
+print({'outside_workspace_read': r.stdout.strip(), 'exit_code': r.exit_code})
+PY" in /home/ubuntu/work/gemma
+ exited 1 in 2109ms:
+Traceback (most recent call last):
+  File "<stdin>", line 3, in <module>
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/__init__.py", line 84, in <module>
+    import litellm
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/__init__.py", line 1342, in <module>
+    from .llms.anthropic.common_utils import AnthropicModelInfo
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/__init__.py", line 1, in <module>
+    from .batches.transformation import AnthropicBatchesConfig
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/batches/__init__.py", line 1, in <module>
+    from .handler import AnthropicBatchesHandler
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/batches/handler.py", line 21, in <module>
+    from ..common_utils import AnthropicModelInfo
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/common_utils.py", line 37, in <module>
+    from litellm.llms.anthropic.wif import (
+    ...<4 lines>...
+    )
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/wif.py", line 18, in <module>
+    from litellm.llms.base_llm.auth.client_credentials import keycloak_assertion_source
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/__init__.py", line 1, in <module>
+    from litellm.llms.base_llm.auth.client_credentials import (
+    ...<3 lines>...
+    )
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/client_credentials.py", line 25, in <module>
+    from litellm.llms.base_llm.auth.token_exchange import (
+    ...<5 lines>...
+    )
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/token_exchange.py", line 942, in <module>
+    default_token_exchange_engine: Final = JwtBearerTokenExchangeEngine(shared_store=default_shared_token_store())
+                                                                                     ~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/shared_token_store.py", line 182, in default_shared_token_store
+    return FileTokenStore(Path(tempfile.gettempdir()) / f"litellm-token-exchange-{os.getuid()}")
+                               ~~~~~~~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 366, in gettempdir
+    return _os.fsdecode(_gettempdir())
+                        ~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 359, in _gettempdir
+    tempdir = _get_default_tempdir()
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 223, in _get_default_tempdir
+    raise FileNotFoundError(_errno.ENOENT,
+                            "No usable temporary directory found in %s" %
+                            dirlist)
+FileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma']
+
+exec
+/bin/bash -lc "sed -n '24,90p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/shared_token_store.py; rg -n 'tool_lock|parallel|thread|_invoke_callable' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/_function_tool.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/_*.py; rg -n 'timed_out|exit_code=124|TimeoutExpired|def build_sanitized_env|def execute_subprocess_command' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox -g '*.py'; nl -ba eval/run_agent_eval.py | sed -n '96,145p'; nl -ba eval/run_agent_eval.py | sed -n '260,300p'; rg -n 'def _load_graph|graph_dir|embeddings_dir' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py" in /home/ubuntu/work/gemma-wt/codex-eval-runner
+ succeeded in 0ms:
+CACHE_DIR_ENV: Final = "LITELLM_TOKEN_EXCHANGE_CACHE_DIR"
+
+
+@dataclass(frozen=True, slots=True)
+class StoredToken:
+    access_token: SecretStr
+    expires_at_epoch: float | None
+    assertion_sha256: str
+
+
+class SharedTokenStore(Protocol):
+    """Every method is best-effort: a store that cannot read, write, or lock degrades to a per-process
+    cache and never raises into the mint path."""
+
+    def load(self, key: str) -> StoredToken | None: ...
+
+    def save(self, key: str, token: StoredToken) -> None: ...
+
+    def delete(self, key: str) -> None: ...
+
+    def lock(self, key: str) -> contextlib.AbstractContextManager[None]: ...
+
+
+class _StoredTokenFile(LiteLLMBaseModel):
+    access_token: str
+    expires_at_epoch: float | None
+    assertion_sha256: str
+
+
+def _directory_is_private(directory: Path) -> bool:
+    try:
+        directory.mkdir(mode=0o700, exist_ok=True)
+        stat: Final = directory.stat()
+    except OSError as e:
+        verbose_logger.warning("Token exchange cache directory %s is unusable (%s); caching per process", directory, e)
+        return False
+    if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+        verbose_logger.warning(
+            "Token exchange cache directory %s must be owned by uid %d with mode 0700; caching per process",
+            directory,
+            os.getuid(),
+        )
+        return False
+    return True
+
+
+def _unlink(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink()
+
+
+def _write_token_file(directory: Path, key: str, body: bytes) -> None:
+    """The token is staged in its own file and renamed over the entry, so a reader never sees a
+    half-written one. Every failure unlinks the staging file, including the buffered write that only
+    reaches the disk when the handle closes: nothing else sweeps this directory, and that file holds
+    a token that still works. The rename leaves nothing behind for the unlink to find."""
+    descriptor, name = tempfile.mkstemp(dir=directory, prefix=f"{key}.")
+    os.close(descriptor)
+    staged: Final = Path(name)
+    try:
+        staged.write_bytes(body)
+        os.replace(staged, directory / f"{key}.json")
+    finally:
+        _unlink(staged)
+
+
+class FileTokenStore:
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/_function_tool.py: No such file or directory (os error 2)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/_node_tool.py:79:  from ..workflow._parallel_worker import _ParallelWorker
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/_node_tool.py:211:  from ..workflow._parallel_worker import _ParallelWorker
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/_google_credentials.py:227:          creds = await asyncio.to_thread(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/_google_credentials.py:267:          await asyncio.to_thread(creds.refresh, Request())
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/_google_credentials.py:290:            await asyncio.to_thread(creds.to_json)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/_google_credentials.py:297:        await asyncio.to_thread(creds.refresh, Request())
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/_google_credentials.py:303:                await asyncio.to_thread(creds.to_json)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/_google_credentials.py:390:            await asyncio.to_thread(creds.to_json)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/docker_sandbox.py:117:                exit_code=124,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:38:def build_sanitized_env(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:57:def execute_subprocess_command(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:110:    except subprocess.TimeoutExpired:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:117:        except (subprocess.TimeoutExpired, Exception):  # noqa: BLE001
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:124:            exit_code=124,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:35:    def timed_out(self) -> bool:
+    96	
+    97	class Journal:
+    98	    """Single writer lock, durable appends, and repair of an interrupted final write."""
+    99	    def __init__(self, path, header, force=False):
+   100	        path.parent.mkdir(parents=True, exist_ok=True)
+   101	        self.stream = path.open('a+b')
+   102	        fcntl.flock(self.stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+   103	        self.stream.seek(0)
+   104	        lines = self.stream.read().splitlines(keepends=True)
+   105	        self.finished = set()
+   106	        try:
+   107	            if lines and not force:
+   108	                old = json.loads(lines[0])
+   109	                identity = ('_schema', 'bundle', 'bundle_sha256', 'caps', 'split',
+   110	                            'concurrency', 'endpoint', 'models_yaml', 'data_dir')
+   111	                if any(old.get(k) != header.get(k) for k in identity):
+   112	                    raise ValueError('Results header mismatch; use a new run name or --force-new')
+   113	                valid_bytes = len(lines[0])
+   114	                for i, line in enumerate(lines[1:], 1):
+   115	                    try:
+   116	                        row = json.loads(line)
+   117	                    except json.JSONDecodeError:
+   118	                        if i == len(lines) - 1 and not line.endswith(b'\n'):
+   119	                            self.stream.truncate(valid_bytes)
+   120	                            break
+   121	                        raise ValueError('Corrupt results record') from None
+   122	                    if (not isinstance(row.get('instance_id'), str)
+   123	                            or type(row.get('resolved')) is not bool or '_schema' in row):
+   124	                        raise ValueError('Invalid task record')
+   125	                    self.finished.add(row['instance_id'])
+   126	                    valid_bytes += len(line)
+   127	                else:
+   128	                    if not lines[-1].endswith(b'\n'):
+   129	                        self.stream.write(b'\n')
+   130	            else:
+   131	                self.stream.truncate(0)
+   132	                self.append(header)
+   133	        except BaseException:
+   134	            self.close()
+   135	            raise
+   136	
+   137	    def append(self, row):
+   138	        self.stream.write((json.dumps(row, allow_nan=False) + '\n').encode())
+   139	        self.stream.flush()
+   140	        os.fsync(self.stream.fileno())
+   141	        if 'instance_id' in row:
+   142	            self.finished.add(row['instance_id'])
+   143	
+   144	    def close(self):
+   145	        self.stream.close()
+   260	    settings = args.bundle / 'eval_config.yaml'
+   261	    defaults = (yaml.safe_load(settings.read_text()) or {}).get('evaluation', {}) if settings.exists() else {}
+   262	    caps = {key: value if value is not None else defaults.get(key, fallback) for key, value, fallback in
+   263	            [('max_tool_calls', args.max_tool_calls, None), ('max_turns', args.max_turns, None),
+   264	             ('max_time_minutes', args.session_minutes, 5), ('timeout_seconds', args.command_timeout, 60)]}
+   265	    if any(v is not None and (not math.isfinite(v) or v <= 0) for v in caps.values()):
+   266	        raise ValueError('Caps must be positive finite numbers')
+   267	    if args.models_yaml and not args.models_yaml.is_file():
+   268	        raise ValueError('models.yaml missing')
+   269	    models = _build_cli_model_registry(args.bundle, args.models_yaml)
+   270	    # Force every alias to the one recorded endpoint (including models.yaml aliases).
+   271	    for name in models.list_available():
+   272	        model = models.get(name)
+   273	        model._additional_args['api_base'] = args.endpoint
+   274	    header = dict(_schema='agent_eval_v1', fields=FIELDS, bundle=str(args.bundle),
+   275	                  bundle_sha256=bundle_sha(args.bundle), git_sha=subprocess.check_output(
+   276	                      ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+   277	                  split=dict(path=str(args.split), sha256=sha_file(args.split)), caps=caps,
+   278	                  concurrency=args.concurrency, endpoint=args.endpoint,
+   279	                  models_yaml=sha_file(args.models_yaml) if args.models_yaml else None,
+   280	                  data_dir=str(args.data_dir), created_utc=datetime.now(timezone.utc).isoformat())
+   281	    journal = Journal(ROOT / 'results' / f'{args.run_name}.jsonl', header, args.force_new)
+   282	    if not journal.finished <= split_ids:
+   283	        journal.close()
+   284	        raise ValueError('Resume records contain IDs outside the split')
+   285	    raw_dir = ROOT / 'runs' / args.run_name
+   286	    raw_dir.mkdir(parents=True, exist_ok=True)
+   287	    logging.getLogger().addHandler(logging.FileHandler(raw_dir / 'harness.log'))
+   288	    config = EvalConfig(tasks_path=args.data_dir / 'tasks.jsonl', snapshots_dir=args.data_dir / 'snapshots',
+   289	                        wheels_dir=args.data_dir / 'wheels', results_dir=raw_dir,
+   290	                        submission_dir=args.bundle, models=models, sandbox='subprocess',
+   291	                        concurrency=args.concurrency, display_mode='quiet', **caps)
+   292	    import swegemma.evaluate as evaluate_module
+   293	    original_verify = evaluate_module.verify_task
+   294	    phase_times = ContextVar('phase_times')
+   295	    import swegemma.harness.verification as verification_module
+   296	    original_strip = verification_module.strip_protected_files_from_patch
+   297	    verification_module.strip_protected_files_from_patch = observe_patch_strip(original_strip, phase_times)
+   298	
+   299	    async def timed_verify(*pos, **kw):
+   300	        start = time.perf_counter()
+149:            sstable_path=str(ctx.graph_dir)
+150:            if ctx.graph_dir
+152:            embeddings_sstable_path=str(ctx.embeddings_dir)
+153:            if ctx.embeddings_dir
+157:            graph_dir=str(ctx.graph_dir) if ctx.graph_dir else None,
+158:            embeddings_dir=str(ctx.embeddings_dir)
+159:            if ctx.embeddings_dir
+247:            graphs_sstable_path=str(ctx.graph_dir)
+248:            if ctx.graph_dir
+250:            embeddings_sstable_path=str(ctx.embeddings_dir)
+251:            if ctx.embeddings_dir
+254:            graph_dir=str(ctx.graph_dir) if ctx.graph_dir else None,
+255:            embeddings_dir=str(ctx.embeddings_dir)
+256:            if ctx.embeddings_dir
+352:            sstable_path=str(ctx.graph_dir)
+353:            if ctx.graph_dir
+355:            embeddings_sstable_path=str(ctx.embeddings_dir)
+356:            if ctx.embeddings_dir
+359:            graph_dir=str(ctx.graph_dir) if ctx.graph_dir else None,
+360:            embeddings_dir=str(ctx.embeddings_dir)
+361:            if ctx.embeddings_dir
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 /home/ubuntu/gemma-local/venv/bin/python -B - <<'PY'
+import os, sys, tempfile
+os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] = '1'
+os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
+tempfile.tempdir = '/tmp'
+sys.path.insert(0, '/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages')
+import pytest
+raise SystemExit(pytest.main(['eval/tests/test_run_agent_eval.py', '-q', '-s', '-p', 'no:cacheprovider', '-k', 'binding_assertion or patch_classification or patch_deletion or harness_protected or trace_usage or tool_seconds or env_guard or observe_patch']))
+PY" in /home/ubuntu/work/gemma-wt/codex-eval-runner
+ succeeded in 50ms:
+........
+8 passed, 10 deselected in 0.03s
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PY'
+import asyncio, io, json, types
+from contextvars import ContextVar
+from unittest.mock import patch
+from eval import run_agent_eval as r
+
+class P:
+    def __init__(self, content):
+        self.parent = self
+        self.stream = io.BytesIO(content)
+    def mkdir(self, **kw): pass
+    def open(self, *a): return self.stream
+h = {'_schema':'agent_eval_v1','git_sha':'old'}
+p = P((json.dumps(h)+'\\n').encode())
+with patch.object(r.fcntl, 'flock'):
+    j = r.Journal(p, dict(h, git_sha='new'))
+    print('resume_accepts_changed_git_sha:', True)
+    j.close()
+
+try:
+    p = '\"a/pkg/caf\\\\303\\\\251.py\"'
+    q = '\"b/pkg/caf\\\\303\\\\251.py\"'
+    r.classify_patch(f'diff --git {p} {q}\\n--- {p}\\n+++ {q}\\n@@ -1 +1 @@\\n-a\\n+b\\n', 'org/pkg')
+    print('quoted_unicode_patch_accepted:', True)
+except Exception as e:
+    print('quoted_unicode_patch_error:', type(e).__name__)
+
+async def check():
+    cv=ContextVar('state')
+    strip=r.observe_patch_strip(lambda p: p.replace('TEST',''),cv)
+    async def one(name):
+        d={'agent_active':True}
+        cv.set(d)
+        await asyncio.to_thread(strip,name+'TEST')
+        await asyncio.sleep(0)
+        return d['raw_patch']
+    print('concurrent_context_patch_capture:', await asyncio.gather(one('A'),one('B')))
+asyncio.run(check())
+PY" in /home/ubuntu/work/gemma-wt/codex-eval-runner
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 -u -B - <<'PY'
+import asyncio, io, json, types
+from contextvars import ContextVar
+from unittest.mock import patch
+from eval import run_agent_eval as r
+class P:
+    def __init__(self, content):
+        self.parent = self
+        self.stream = io.BytesIO(content)
+    def mkdir(self, **kw): pass
+    def open(self, *a): return self.stream
+h = {'_schema':'agent_eval_v1','git_sha':'old'}
+p = P((json.dumps(h)+'\\n').encode())
+with patch.object(r.fcntl, 'flock'):
+    j = r.Journal(p, dict(h, git_sha='new'))
+    print('resume_accepts_changed_git_sha:', True)
+    j.close()
+try:
+    p = '\"a/pkg/caf\\\\303\\\\251.py\"'
+    q = '\"b/pkg/caf\\\\303\\\\251.py\"'
+    r.classify_patch(f'diff --git {p} {q}\\n--- {p}\\n+++ {q}\\n@@ -1 +1 @@\\n-a\\n+b\\n', 'org/pkg')
+    print('quoted_unicode_patch_accepted:', True)
+except Exception as e:
+    print('quoted_unicode_patch_error:', type(e).__name__)
+async def check():
+    cv=ContextVar('state')
+    strip=r.observe_patch_strip(lambda p: p.replace('TEST',''),cv)
+    async def one(name):
+        d={'agent_active':True}
+        cv.set(d)
+        await asyncio.to_thread(strip,name+'TEST')
+        await asyncio.sleep(0)
+        return d['raw_patch']
+    print('concurrent_context_patch_capture:', await asyncio.gather(one('A'),one('B')))
+asyncio.run(check())
+PY" in /home/ubuntu/work/gemma-wt/codex-eval-runner

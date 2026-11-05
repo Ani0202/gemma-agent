@@ -1,4 +1,13 @@
-# STATE (2026-11-05, cycle 44 / Phase 0) — Builder on Opus (dec 010 local-first, two-strike)
+# STATE (2026-11-05, cycle 45 / Phase 0) — Builder on Opus (dec 010 local-first, two-strike)
+Cycle 45 (dec 014): shadowing RESOLVED = scorer property (container_setup.py:266 strips RECORD -> setup.py editable install fails
+  uninstall-no-record-file, reproduced in scratch venv -> src-layout requests/httpx import wheel copy). Rule 2b: requests/httpx
+  dropped (unmeasurable locally). null_pass excluded: fastapi_14873, requests_7309/7315/7427.
+  SPLITS v2 FROZEN: clean 48 (rich 39, fastapi 9), dev 33, holdout 15; holdout uses=0. Hashes: eval/splits/MANIFEST.json + journal.
+  results/gold_calibration_per_task.jsonl v2, gold_failure_causes.jsonl (81 rows), gold_calibration_summary.json = manifest copy.
+  docs/GOLD_CALIBRATION.md v2 section. Scripts: tag_gold_failures.py (GOLD_NULL_RESULTS, SHADOWED_REPOS), make_splits.py
+  (EXCLUDE_FILE, DROP_REPOS). ask-shadowing (codex) still running: cross-check only; decision already made, do not reopen.
+  Report 002 MUST state: LORO with 2 repos is weak = known limitation for ship decision (dec 014 item 3).
+  Agent-prompt idea (generic): verify pkg.__file__ under /workspace before trusting repro.
 Cycle 44: (a) codex eval-runner built (branch codex/eval-runner, worktree gemma-wt/codex-eval-runner, commits 7c9a7ad + my bcdbfbd adding tool_seconds {tool:{n,total,max}} from trace call->response timestamps = plan 001 test-run share). 371 unit pass. Stub E2E initially 0 LLM calls: litellm 1.108 imports `mcp` unconditionally when tools passed; mcp not in harness venv -> installed mcp 2.3.0 into /home/ubuntu/gemma-local/venv (uv, user-space). E2E now PASS (3 LLM calls, patch captured, verif ran). CHECK on Kaggle eval kernel: `import mcp` works in scorer-like env. Job review-eval-runner (codex-review) running; merge only after review.
   (b) gold-null DONE -> BOTH pre-registered emulation triggers fired: null-patch PASS on 4/52 (requests_7427/7315/7309 = all 3 requests gold-passers; fastapi_14873) and probes show requests+httpx import from sandbox venv site-packages (wheel), fastapi+rich from workspace. results/gold_null_control.jsonl, results/gold_import_probe.jsonl. Splits v2 BLOCKED (dec 011 item 4). Job ask-shadowing (codex-ask): does official docker path also shadow (scorer property) or is it our emulation bug; minimal faithful fix; why fastapi_14873 null-passes.
   If our bug: fix emulation, rerun gold-local + gold-null, then splits v2. If scorer property: requests/httpx tasks unmeasurable -> exclude (tag scorer_fail=verified, cause wheel_shadowing), clean set ~ rich 39 + fastapi 9 -> tell Director (LORO/generalization impact).
@@ -29,5 +38,7 @@ Open: (1) E2 resolved (dec 005): paper session owns paper/, do not edit; keep re
 Dec 012 FYI: paper §4.1 cites only the committed gold-local v2 results file -> commit it promptly when gold-local finishes.
 Paper evidence (dec 007, due Nov 9 23:59Z, no extra compute): commit schema-headed results/ files for (a) gold calibration per-task outcomes+exclusion causes, (b) timing per task from Kaggle E4B smoke (31B if run), (c) failure taxonomy via trace-analyst once. Not yet produced; flag here if any won't exist by Nov 9.
 
-Running jobs: review-eval-runner, ask-shadowing, gold-diag4-wait (cross-check only).
-Next 3: (1) ask-shadowing -> fix emulation or exclude requests/httpx -> rerun gold-local/null if fixed -> splits v2 + causes v2 + FYI; (2) review-eval-runner -> fix BLOCKING, merge to main; then Kaggle L4x4 E4B timing run (plan 001, check mcp import); (3) codex-review gold_calibration.py adapter.
+
+Running jobs: review-eval-runner (codex-review, critical path), ask-shadowing (cross-check), gold-diag4-wait (cross-check).
+Next 3: (1) review-eval-runner -> fix BLOCKING, merge codex/eval-runner to main; (2) Kaggle L4x4 E4B timing run (plan 001;
+  check `import mcp` in kernel; log test-run share mean/p90 via tool_seconds); (3) report 002 with first-submission candidate + LORO caveat.

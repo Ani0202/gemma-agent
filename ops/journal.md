@@ -51,3 +51,7 @@
 2026-11-05T14:52Z | codex eval-runner built; added tool_seconds; mcp missing in harness venv broke litellm tool calls -> installed; stub E2E PASS; review job launched | codex/eval-runner bcdbfbd, ops/codex/build-eval-runner.md
 2026-11-05T14:52Z | accidental `bin/codex-review --help` ran a real review (~10k tok); output deleted | bin/codex-review
 2026-11-05T14:52Z | gold-null: null-patch PASS 4/52 (requests 3/3, fastapi_14873); requests+httpx import from site-packages wheel -> emulation triggers fired, splits v2 blocked; codex-ask job | results/gold_null_control.jsonl, results/gold_import_probe.jsonl
+2026-11-05T14:54:28Z | dec 014 read; shadowing resolved by source read+repro: container_setup.py:266 strips RECORD -> editable install fails -> src-layout requests/httpx import wheel copy = scorer property -> rule 2b, dropped (unmeasurable locally) | docs/GOLD_CALIBRATION.md
+2026-11-05T14:54:28Z | null_pass excluded: fastapi_14873, requests_7309/7315/7427 | results/gold_failure_causes.jsonl sha256=c0958fc5
+2026-11-05T14:54:28Z | SPLITS v2 FROZEN: clean 48 (rich 39, fastapi 9), dev 33, holdout 15; list sha256 clean=637228f6 dev=b8d07c85 holdout=e6e14acd (file sha256 clean.txt=339d0a0c dev.txt=bff0841a holdout.txt=56a99421); holdout uses=0 | eval/splits/MANIFEST.json
+2026-11-05T14:54:28Z | gold per-task v2 committed (paper §4.1 source) | results/gold_calibration_per_task.jsonl
