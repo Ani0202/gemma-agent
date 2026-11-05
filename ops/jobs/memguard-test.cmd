@@ -1,0 +1,1 @@
+/home/ubuntu/gemma-local/venv/bin/python3 -c import\ sys\;\ sys.path.append\(\'/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages\'\)\;\ import\ pytest\;\ sys.exit\(pytest.main\(\[\'-q\'\,\'-p\'\,\'no:cacheprovider\'\,\'eval/tests/test_memguard.py\'\]\)\) 

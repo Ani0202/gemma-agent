@@ -1,0 +1,75 @@
+--- a/bin/job
++++ b/bin/job
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env bash
+ # Detached long-running jobs that survive the end of a Claude cycle.
+ #   bin/job start <name> -- <command...>   bin/job status [name]   bin/job tail <name> [lines]   bin/job kill <name>
+-# Writes ops/jobs/<name>.status: "running <pid> <start>" -> "done 0 <end>" / "failed <rc> <end>"
++# Writes ops/jobs/<name>.status: "running <pid> <start> <pgid>" -> "done 0 <end>" / "failed <rc> <end>"
+ set -uo pipefail
+ cd "$(dirname "$0")/.." || exit 1
+ mkdir -p ops/jobs
+@@ -11,32 +11,56 @@
+     name=$1; shift; [ "${1:-}" = "--" ] && shift
+     [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "bad name"; exit 2; }
+     if grep -q '^running' "ops/jobs/$name.status" 2>/dev/null; then echo "job $name already running"; exit 1; fi
++    # Admission control (dec 021): refuse heavy jobs when the VM is already short of memory.
++    avail_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
++    if [[ "$name" != *-light ]] && [ "${avail_kb:-0}" -lt $((5 * 1024 * 1024)) ]; then
++      echo "refusing $name: MemAvailable $((avail_kb / 1024)) MiB < 5 GiB (name it *-light if it is small)"; exit 3
++    fi
+     printf '%q ' "$@" > "ops/jobs/$name.cmd"
+     # Memory cap per job: a runaway job must not stall the VM (Etho shares it; 2026-11-05 incident).
+     # Prefer a systemd user scope (caps the whole process tree); after a cron-started boot with no
+     # login there is no user manager, so fall back to a per-process ulimit -v.
+     rt=/run/user/$(id -u)
++    rm -f "ops/jobs/$name.unit"
+     if [ -S "$rt/bus" ] && XDG_RUNTIME_DIR=$rt systemd-run --user --scope --quiet -p MemoryMax=64M true 2>/dev/null; then
+-      pre=(env XDG_RUNTIME_DIR="$rt" systemd-run --user --scope --quiet --collect --unit="gemma-job-$name-$(date +%s)" -p MemoryMax=5G)
++      unit="gemma-job-$name-$(date +%s)"
++      echo "$unit" > "ops/jobs/$name.unit"
++      pre=(env XDG_RUNTIME_DIR="$rt" systemd-run --user --scope --quiet --collect --unit="$unit" -p MemoryMax=5G)
+       cap="memory cap: systemd scope MemoryMax=5G (whole job)"
+     else
+       pre=(bash -c 'ulimit -v 5242880 && exec "$@"' _)
+       cap="memory cap: ulimit -v 5G per process (no systemd user manager)"
+     fi
+-    GEMMA_JOB_CAP=$cap nohup bash -c '
++    # setsid: the wrapper leads its own process group, so `kill` can signal the whole tree.
++    GEMMA_JOB_CAP=$cap setsid nohup bash -c '
+       name=$1; shift
+-      echo "running $$ $(date -u +%FT%TZ)" > "ops/jobs/$name.status"
+-      { echo "[bin/job] $GEMMA_JOB_CAP"; nice -n 15 "$@"; } > "ops/jobs/$name.log" 2>&1; rc=$?
++      echo 1000 > /proc/self/oom_score_adj 2>/dev/null || true   # kernel OOM killer picks our jobs before Etho
++      pgid=$(ps -o pgid= -p $$ | tr -d " ")
++      echo "running $$ $(date -u +%FT%TZ) $pgid" > "ops/jobs/$name.status"
++      { echo "[bin/job] $GEMMA_JOB_CAP; pgid $pgid"; nice -n 15 "$@"; } > "ops/jobs/$name.log" 2>&1; rc=$?
+       [ $rc -eq 137 ] && echo "[bin/job] exit 137: killed, most likely at the memory cap" >> "ops/jobs/$name.log"
+       if [ $rc -eq 0 ]; then st=done; else st=failed; fi
+       echo "$st $rc $(date -u +%FT%TZ)" > "ops/jobs/$name.status"
+-    ' _ "$name" "${pre[@]}" "$@" >/dev/null 2>&1 &
++    ' _ "$name" "${pre[@]}" "$@" >/dev/null 2>&1 < /dev/null &
+     sleep 1; echo "started $name: $(cat "ops/jobs/$name.status" 2>/dev/null) [$cap]";;
+   status)
+     if [ -n "${1:-}" ]; then cat "ops/jobs/$1.status"; else for f in ops/jobs/*.status; do [ -e "$f" ] && echo "$(basename "$f" .status): $(cat "$f")"; done; fi;;
+   tail) tail -n "${2:-40}" "ops/jobs/$1.log";;
+   kill)
+-    read -r st pid _ < "ops/jobs/$1.status"
+-    [ "$st" = running ] && { pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null; echo "failed killed $(date -u +%FT%TZ)" > "ops/jobs/$1.status"; echo killed; } || echo "not running";;
++    read -r st pid _ pgid < "ops/jobs/$1.status"
++    [ "$st" = running ] || { echo "not running"; exit 0; }
++    if [[ "${pgid:-}" =~ ^[0-9]+$ ]] && [ "$pgid" -gt 1 ]; then
++      kill -TERM -- "-$pgid" 2>/dev/null
++      for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -g "$pgid" >/dev/null || break; sleep 0.5; done
++      kill -KILL -- "-$pgid" 2>/dev/null; sleep 0.3
++    else  # status written by an older bin/job without a pgid
++      pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null
++    fi
++    if [ -s "ops/jobs/$1.unit" ]; then
++      XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user stop "$(cat "ops/jobs/$1.unit").scope" 2>/dev/null
++    fi
++    echo "failed killed $(date -u +%FT%TZ)" > "ops/jobs/$1.status"
++    surv=$( { [ -n "${pgid:-}" ] && pgrep -g "$pgid"; pgrep -P "$pid"; } 2>/dev/null | sort -u | tr '\n' ' ')
++    if [ -n "$surv" ]; then echo "killed; SURVIVORS: $surv"; exit 1; else echo "killed (no survivors in group)"; fi;;
+   *) echo "usage: bin/job start <name> -- <cmd...> | status [name] | tail <name> [n] | kill <name>"; exit 2;;
+ esac

@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""bin/memguard: unprivileged userspace memory watchdog for this shared VM (dec 021).
+
+Protects Etho (and the Claude sessions) from our own runaway work. No sudo, no systemd.
+Every --interval seconds (default 2):
+  1. Find TARGETS, only processes of our own uid that are either
+     (i)  carrying the bin/job env marker (GEMMA_JOB_CAP=... in /proc/<pid>/environ), i.e. bin/job
+          descendants, including orphans re-parented away from their wrapper; or
+     (ii) cwd under /home/ubuntu/work/gemma or /tmp, RSS > 3G, and comm not a session process
+          (claude/node/codex/tmux, or a bash/sh whose parent is one of those).
+     Nothing else is ever signalled. memguard's own job group is never a target.
+  2. Raise oom_score_adj to 1000 on every target (unprivileged), so the kernel picks us first.
+  3. Group targets into JOBS: a marked process's job root is its topmost marked ancestor; an
+     unmarked (ii) process is its own root. Job RSS = sum of targeted RSS in that tree.
+  4. If MemAvailable < --min-available (2.5G) or total targeted RSS > --max-total (6G), SIGKILL
+     the whole tree of the largest job: every descendant, then the root if still alive 3 s later
+     (so a bin/job wrapper gets to record "failed 137" first). Re-scan until there are no survivors.
+     Log to ops/logs/memguard.log, append to ops/jobs/<name>.log, and mail the builder.
+Reads only /proc/<pid>/{status,stat,environ,cwd,cmdline} of our own uid. Python stdlib only.
+Usage: bin/memguard [--once] [--dry-run] [--interval S] [--min-available G] [--max-total G]
+                    [--unmarked-rss G] [--marker NAME] [--roots DIR,DIR] [--log PATH] [--no-mail]
+"""
+import argparse, os, signal, subprocess, sys, time
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GIB = 1024 ** 3
+SESSION_COMMS = {"claude", "node", "codex", "tmux", "tmux: server", "tmux: client"}
+SHELL_COMMS = {"bash", "sh", "dash", "zsh"}
+UID = os.getuid()
+
+
+def read(path, mode="r"):
+    try:
+        with open(path, mode) as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def mem_available():
+    txt = read("/proc/meminfo") or ""
+    for line in txt.splitlines():
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) * 1024
+    return None
+
+
+def proc_info(pid):
+    """Return dict(pid, ppid, uid, comm, rss) for one pid, or None if gone/not readable."""
+    st = read(f"/proc/{pid}/status")
+    if st is None:
+        return None
+    d = {"pid": pid, "rss": 0, "uid": None, "ppid": 0, "comm": ""}
+    for line in st.splitlines():
+        k, _, v = line.partition(":")
+        if k == "Name":
+            d["comm"] = v.strip()
+        elif k == "PPid":
+            d["ppid"] = int(v)
+        elif k == "Uid":
+            d["uid"] = int(v.split()[0])
+        elif k == "VmRSS":
+            d["rss"] = int(v.split()[0]) * 1024
+    return d
+
+
+def snapshot():
+    """All processes of our uid: {pid: info}. Others are skipped after reading only their status uid."""
+    procs = {}
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        d = proc_info(int(name))
+        if d and d["uid"] == UID:
+            procs[d["pid"]] = d
+    return procs
+
+
+def has_marker(pid, marker):
+    env = read(f"/proc/{pid}/environ", "rb")
+    if not env:
+        return False
+    key = marker.encode() + b"="
+    return any(e.startswith(key) for e in env.split(b"\0"))
+
+
+def cwd_of(pid):
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return ""
+
+
+def under(path, roots):
+    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+def ancestors(pid, procs):
+    out, seen = [], set()
+    p = procs.get(pid, {}).get("ppid", 0)
+    while p and p in procs and p not in seen:
+        seen.add(p); out.append(p); p = procs[p]["ppid"]
+    return out
+
+
+def descendants(root, procs):
+    kids = {}
+    for d in procs.values():
+        kids.setdefault(d["ppid"], []).append(d["pid"])
+    out, stack = [], [root]
+    while stack:
+        for c in kids.get(stack.pop(), []):
+            if c not in out:
+                out.append(c); stack.append(c)
+    return out
+
+
+def is_session(pid, procs):
+    d = procs[pid]
+    if d["comm"] in SESSION_COMMS:
+        return True
+    if d["comm"] in SHELL_COMMS:
+        par = procs.get(d["ppid"])
+        return bool(par and par["comm"] in SESSION_COMMS)
+    return False
+
+
+def find_jobs(procs, args, self_pids):
+    """Return (targets set, jobs dict root -> {'pids': [...], 'rss': int})."""
+    marked = {p for p in procs if has_marker(p, args.marker)}
+    targets = set()
+    for p, d in procs.items():
+        if p in self_pids:
+            continue
+        if p in marked:
+            targets.add(p)
+        elif (d["rss"] > args.unmarked_rss and not is_session(p, procs)
+              and under(cwd_of(p), args.roots)):
+            targets.add(p)
+    jobs = {}
+    for p in targets:
+        if p in marked:
+            root = p
+            for a in ancestors(p, procs):
+                if a in marked:
+                    root = a
+        else:
+            root = p
+        j = jobs.setdefault(root, {"pids": [], "rss": 0})
+        j["pids"].append(p); j["rss"] += procs[p]["rss"]
+    # Never touch our own job (memguard runs under bin/job and carries the marker).
+    for root in list(jobs):
+        if root in self_pids or (set(descendants(root, procs)) | {root}) & self_pids:
+            del jobs[root]
+            targets -= set(descendants(root, procs)) | {root}
+    return targets, jobs
+
+
+def job_name(root):
+    """bin/job wrapper cmdline is: bash -c '<script>' _ <name> ...  -> <name>; else None."""
+    raw = read(f"/proc/{root}/cmdline", "rb") or b""
+    argv = [a.decode(errors="replace") for a in raw.split(b"\0")]
+    if len(argv) >= 5 and argv[1] == "-c" and "ops/jobs/" in argv[2] and argv[3] == "_":
+        return argv[4]
+    return None
+
+
+def raise_oom_adj(pids, dry):
+    n = 0
+    for p in pids:
+        cur = read(f"/proc/{p}/oom_score_adj")
+        if cur is None or cur.strip() == "1000":
+            continue
+        if not dry:
+            try:
+                with open(f"/proc/{p}/oom_score_adj", "w") as f:
+                    f.write("1000")
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
+def kill_tree(root, known, self_pids, log):
+    """SIGKILL every descendant of root plus the job's known target pids (re-scanning until none
+    are left), then root itself. Return (killed, survivors)."""
+    killed = set()
+    for _ in range(20):
+        procs = snapshot()
+        tree = [p for p in set(descendants(root, procs)) | ({k for k in known if k in procs} - {root} - killed)
+                if p not in self_pids]
+        if not tree:
+            break
+        for p in tree:
+            try:
+                os.kill(p, signal.SIGKILL); killed.add(p)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                log(f"  cannot kill {p} (permission)")
+        time.sleep(0.2)
+    # Give a bin/job wrapper time to record its exit status, then make sure the root is gone too.
+    deadline = time.time() + 3
+    while time.time() < deadline and os.path.exists(f"/proc/{root}"):
+        time.sleep(0.2)
+    d = proc_info(root)
+    if d and d["uid"] == UID and root not in self_pids:
+        try:
+            os.kill(root, signal.SIGKILL); killed.add(root)
+        except ProcessLookupError:
+            pass
+        time.sleep(0.2)
+    survivors = []
+    for p in killed:
+        d = proc_info(p)
+        stat = read(f"/proc/{p}/stat") if d and d["uid"] == UID else None
+        if stat and stat.rsplit(") ", 1)[-1][:1] != "Z":
+            survivors.append(p)
+    return sorted(killed), survivors
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--interval", type=float, default=2.0)
+    ap.add_argument("--min-available", type=float, default=2.5, help="GiB")
+    ap.add_argument("--max-total", type=float, default=6.0, help="GiB of summed targeted RSS")
+    ap.add_argument("--unmarked-rss", type=float, default=3.0, help="GiB, for unmarked targets (ii)")
+    ap.add_argument("--min-kill-rss", type=float, default=0.25,
+                    help="GiB; on low MemAvailable alone, skip jobs smaller than this (killing a waiter frees nothing)")
+    ap.add_argument("--marker", default="GEMMA_JOB_CAP")
+    ap.add_argument("--roots", default="/home/ubuntu/work/gemma,/tmp")
+    ap.add_argument("--log", default=os.path.join(REPO, "ops/logs/memguard.log"))
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-mail", action="store_true")
+    args = ap.parse_args()
+    args.roots = [r for r in args.roots.split(",") if r]
+    for k in ("min_available", "max_total", "unmarked_rss", "min_kill_rss"):
+        setattr(args, k, int(getattr(args, k) * GIB))
+    os.makedirs(os.path.dirname(args.log), exist_ok=True)
+
+    def log(msg):
+        line = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}"
+        with open(args.log, "a") as f:
+            f.write(line + "\n")
+        print(line, flush=True)
+
+    log(f"start pid={os.getpid()} min_available={args.min_available/GIB:.2f}G max_total={args.max_total/GIB:.2f}G "
+        f"marker={args.marker} roots={args.roots} dry_run={args.dry_run}")
+    last_beat = 0
+    while True:
+        procs = snapshot()
+        self_pids = {os.getpid()} | set(ancestors(os.getpid(), procs))
+        # Our ancestors include the bin/job wrapper and maybe a Claude shell; they're never targets.
+        targets, jobs = find_jobs(procs, args, self_pids)
+        raise_oom_adj(targets, args.dry_run)
+        avail = mem_available() or 0
+        total = sum(j["rss"] for j in jobs.values())
+        if time.time() - last_beat > 600:
+            log(f"beat avail={avail/GIB:.2f}G targeted_rss={total/GIB:.2f}G jobs={len(jobs)} targets={len(targets)}")
+            last_beat = time.time()
+        reason = None
+        if total > args.max_total:
+            reason = f"targeted RSS {total/GIB:.2f}G > {args.max_total/GIB:.2f}G"
+        elif avail < args.min_available:
+            reason = f"MemAvailable {avail/GIB:.2f}G < {args.min_available/GIB:.2f}G"
+        if reason and jobs:
+            root, j = max(jobs.items(), key=lambda kv: kv[1]["rss"])
+            if total <= args.max_total and j["rss"] < args.min_kill_rss:
+                reason = None  # pressure is not ours to fix by killing a tiny job
+        if reason and jobs:
+            name = job_name(root)
+            comm = procs.get(root, {}).get("comm", "?")
+            log(f"KILL job={name or '-'} root={root} comm={comm} rss={j['rss']/GIB:.2f}G reason: {reason}"
+                + (" [dry-run]" if args.dry_run else ""))
+            if not args.dry_run:
+                killed, surv = kill_tree(root, j["pids"], self_pids, log)
+                log(f"  killed {len(killed)} pids; survivors={surv}")
+                msg = (f"memguard killed job {name or '(unmarked pid %d %s)' % (root, comm)}: "
+                       f"{j['rss']/GIB:.2f}G, {reason}. Survivors: {surv or 'none'}. See ops/logs/memguard.log.")
+                if name:
+                    time.sleep(0.5)
+                    try:
+                        with open(os.path.join(REPO, "ops/jobs", f"{name}.log"), "a") as f:
+                            f.write(f"[memguard] {msg}\n")
+                    except OSError:
+                        pass
+                if not args.no_mail:
+                    subprocess.run([os.path.join(REPO, "bin/send"), "builder", msg],
+                                   env={**os.environ, "SEND_FROM": "memguard", "GEMMA_ROLE": "memguard"},
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if args.once:
+            return 0
+        time.sleep(args.interval)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -88,3 +88,8 @@
 2026-11-05T17:40Z | VM OOM stall ~16:45Z, reboot 17:30Z (owner mail); gold-rerun-b5 + e4b-timing-wait3 wrappers dead -> marked failed 255; no local jobs until Director incident decision | ops/mail/builder/read/20261105T173757-27563-from-aniket.md
 2026-11-05T17:42Z | e4b-timing v3 COMPLETE: 4x NVIDIA L4 confirmed (dec 018), mcp_import_ok; 1/8 resolved, 0 empty/test-edit/stray | results/kaggle_timing_e4b_v000.json
 2026-11-05T17:50Z | plan-001 gate FAIL: setup ~210 s/task outside max_time_minutes; corrected projection 743 min, cap-5 worst case 1097; max cap 1.51 min; report 003 | results/kaggle_timing_e4b_v000_setup.json, ops/reports/003-e4b-v000-timing-gate-fail.md
+2026-11-05T17:45Z | dec 020 item 4: bin/job kill gold-rerun-b5 and e4b-timing-wait3 (both already not running) | ops/decisions/020-20261105T173757-28117-from-aniket.md
+2026-11-05T17:48Z | dec 021 item 1: bin/memguard written; test 2/2 pass under bin/job; started as job memguard; codex-review queued | bin/memguard, eval/tests/test_memguard.py, ops/logs/memguard.log
+2026-11-05T17:48Z | dec 021 item 2: proposed bin/job patch (setsid pgid kill, oom_score_adj, MemAvailable gate); scratch smoke OK | ops/patches/bin-job-hardening.diff
+2026-11-05T17:49Z | dec 020 item 6: gold-null2 exit-124 rows 22/38/39 (rich, up to 2867 s); harness already killpg's; suspect: no per-sandbox mem cap. codex-build sandbox-limits launched | runs/gold-null2/gold_results.jsonl, ops/codex/build-sandbox-limits.spec
+2026-11-05T17:50Z | dec 022 item 2 (210 s setup root-cause): codex-ask ask-setup-210s + scout launched | ops/decisions/022-003-e4b-v000-timing-gate-fail.md
