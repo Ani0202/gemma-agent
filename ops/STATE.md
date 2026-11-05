@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 18:00Z (cycle 64, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 18:05Z (cycle 65, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -26,8 +26,15 @@ Builder on Opus (dec 010: local-first, two-strike).
 - scout DONE: ops/scout/2026-11-05-timing-caps.md. No public setup figure; the rules text puts setup inside the 12 h; unclear whether it counts against the per-task cap; public caps 4.5/8 min. Dec 023 item 3 DONE: RULES_FINDINGS C1-C3 (starter defaults to 60 min if the key is absent; sample_submission 1 min; "[0.10]" notebook 4.5 min). Weigh C3 as a mean, not a worst case, in report 004.
 
 ## Codex x bin/job (cycles 62-63)
-- Dec 023: ops/patches/bin-job-fallback.diff (scope path only if Linger=yes; fallback ulimit -d). Scratch smoke OK (fallback chosen, 6 GiB alloc -> MemoryError). codex-review job review-job-fallback; then mail the Director the path.
+- Dec 023 item 1a DONE: ops/patches/bin-job-fallback.diff (scope path only if Linger=yes; fallback ulimit -d). codex-review clean (ops/codex/review-20261105T175555.md); path mailed to the Director 18:04Z. Awaiting Aniket.
 - bin/job hardening applied by Aniket (b1eedd7). Its ulimit -v 5G fallback (no user bus) crashes Codex (SIGTRAP). ulimit -d 5G works (A/B probe 17:52Z). Asked the Director to relay a one-line fix to Aniket. If a Codex job fails with 'code-mode host closed its stdout', check the [bin/job] cap line in the log.
+
+## Dec 022 item 2: setup root cause (IN PROGRESS, cycle 65)
+- 2a: results/kaggle_timing_e4b_v000_setup_breakdown.json. The ~208 s lies between the ensurepip warning and the first prompt (dependency setup), with no per-command timestamps. Verification ~410 s is about 2x.
+- 2b (codex-ask ops/codex/ask-20261105T175253.md): ~80% "kernel artifact". No unconditional 210 s wait in the harness. Leading suspect: sandbox/setup.py:208-211, where the offline editable pip fails, then a fallback pip WITHOUT --no-index runs (PIP_* is stripped by sandbox env sanitization) and retries an unreachable index on Kaggle.
+- My checks: Dockerfile.public:9 pre-installs the build backends. The kernel's injector does extract poetry_core/pdm_backend (skip set = pytest/pluggy/pip/setuptools/wheel only, container_setup.py:155). The Kaggle venv was created WITHOUT pip (ensurepip failed -> subprocess.py:357 fallback), so setup.py's pip calls used whatever pip system_site_packages gave. The wheelhouse is 27 MB (extraction is not 210 s). setup.py has only 3 subprocess calls (208, 211, 390 slow path), so pip is the only candidate inside setup.py.
+- Plan 003 repro: v1 invalid (pip ignores http untrusted hosts, 0.5 s); v2 (https unroutable index) RUNNING as job pipfb2-light, already >3 min on one fallback. Mechanism plausible; NOT proven that Kaggle hit it.
+- Next: if pipfb2 shows hang ~100-200 s -> report 004 with option: a CPU-only Kaggle kernel (internet off, pinned image, no GPU quota) that runs the kernel install() path on 2 tasks and logs every setup subprocess (cmd, s, rc, stderr tail). That's the decisive, cheap proof. Fix candidate: pre-install the backends + pip into the sandbox venv, or pass --no-index to the fallback via a setup.py wrapper; never fail silently.
 
 ## OOM incident (dec 020/021)
 - Root cause from runs/gold-null2: null-phase rows 22 rich_4006 (327 s), 38 rich_3480 (2683 s), 39 rich_3772 (2867 s) hit exit 124. The harness executor already uses start_new_session+killpg (adk_eval_core subprocess_sandbox.py:57), so the orphan theory is weaker; the leading suspect is unbounded memory in a null-patch rich test with no per-sandbox memory cap (none locally; the scorer has 4 GiB). Unproven: no RSS was logged. The codex-sandbox-limits fix covers both.
@@ -63,5 +70,5 @@ Builder on Opus (dec 010: local-first, two-strike).
 
 ## Next 3
 1. Merge codex/sandbox-limits (eval/ files only) after review-sandbox-limits; merge memguard-fix after its review, then restart memguard; mail the Director bin-job-fallback.diff after review-job-fallback.
-2. Dec 022 item 2: write results/kaggle_timing_e4b_v000_setup_breakdown.json + RULES_FINDINGS from ask-setup-210s/scout, then codex-ask the adversarial take (2d). (v001 packed; act on review-e4b-v001.)
+2. Dec 022 item 2: finish plan 003 (pipfb2-light), then report 004 (setup root cause + options; weigh RULES_FINDINGS C3 as a mean).
 3. EV-1 implementation, then the cpu8 gold+null run; then item 4 levers and report 004.

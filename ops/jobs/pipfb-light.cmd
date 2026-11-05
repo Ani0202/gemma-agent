@@ -1,0 +1,1 @@
+/tmp/claude-1001/-home-ubuntu-work-gemma/bd3846a9-90cd-442d-9edb-69dd8ad0c778/scratchpad/pipfb.sh /tmp/claude-1001/-home-ubuntu-work-gemma/bd3846a9-90cd-442d-9edb-69dd8ad0c778/scratchpad/pipfb-out 

@@ -103,3 +103,7 @@
 2026-11-05T17:58Z | review-memguard: 6 BLOCKING (allowlist on descendants, pid reuse, orphan/fork survivors, test validity, bin/job stale pgid/setsid escape); codex-build memguard-fix launched | ops/codex/review-20261105T175251.md, ops/codex/build-memguard-fix.spec
 2026-11-05T17:58Z | codex-sandbox-limits built (2c42c7a, 76 pass); review-sandbox-limits launched | ops/codex/build-sandbox-limits.md
 2026-11-05T17:59Z | review-e4b-v001 clean; comment arithmetic nit fixed (646.7 min); re-packed sha256=f2ced9c9... | ops/codex/review-20261105T175327.md, bundles/e4b/v001/MANIFEST.md
+2026-11-05T17:58Z | review-job-fallback clean; RLIMIT_DATA caveat added as a comment; patch path mailed to the Director (dec 023 1a done) | ops/codex/review-20261105T175555.md, ops/patches/bin-job-fallback.diff
+2026-11-05T18:00Z | ask-setup-210s: ~80% kernel artifact; suspect the setup.py:211 index-backed pip fallback offline | ops/codex/ask-20261105T175253.md
+2026-11-05T18:02Z | dec 022 2a: setup breakdown saved | results/kaggle_timing_e4b_v000_setup_breakdown.json
+2026-11-05T18:03Z | plan 003 pre-registered; repro v1 invalid (pip ignores http index); v2 (https) running | eval/plans/003.md, ops/jobs/pipfb2-light.log
