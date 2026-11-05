@@ -623,7 +623,7 @@ def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, s
 @pytest.mark.parametrize('key,value,check', [
     ('phase1_wall_seconds', 296.00001, 'b_max_phase1'),
     ('phase1_wall_seconds', 270.00001, 'c_mean_phase1'),
-    ('setup_failed', True, 'a_all_tasks_complete_no_harness_error'),
+    ('phase1_source', 'run_agent_sandbox', 'a_all_tasks_complete_no_harness_error'),
     ('error', 'Harness task failure', 'a_all_tasks_complete_no_harness_error'),
     ('empty_patch', True, 'e_nonempty_source_diff'),
     ('phase1_wall_seconds', None, 'b_max_phase1'),
@@ -727,6 +727,8 @@ def test_kernel_header_contains_vllm_startup(tmp_path, monkeypatch):
     monkeypatch.setattr(timing, 'WORK', tmp_path)
     monkeypatch.setattr(timing, 'BUNDLE', tmp_path / 'bundle')
     monkeypatch.setattr(timing, 'install', lambda: None)
+    monkeypatch.setattr(timing, 'gpu_preflight', lambda: None)
+    monkeypatch.setattr(timing, 'check_hook_targets', lambda: None)
     for name in ('mcp', 'torch', 'yaml', 'litellm', 'google', 'google.adk',
                  'google.adk.agents', 'google.adk.agents.context_cache_config',
                  'google.adk.apps', 'google.adk.apps._configs', 'swegemma', 'swegemma.config'):
@@ -749,3 +751,120 @@ def test_kernel_header_contains_vllm_startup(tmp_path, monkeypatch):
     assert rows[-1]['_done']['startup_seconds'] == 345.6
     expected_fields = timing.phase1_fields({}, 0, 0, None, '').keys()
     assert set(expected_fields) <= rows[0]['fields'].keys()
+
+
+# --- Builder fix (dec 029, ops/reviews/claude-review-fix5.md findings 1-3, 6, 9-11) ---
+
+@pytest.mark.parametrize('message,outcome', [
+    ('Agent exceeded session timeout (1.4 min)', 'timeout'),
+    ('Agent exceeded turns budget (40 turns)', 'turns'),
+    ('Agent exceeded maximum allowed LLM turns', 'turns'),
+    ('Agent exceeded tool call budget (100 calls)', 'tool_calls'),
+    ('Agent completed execution without calling submit_patch.', 'no_submit'),
+    ('Sandbox execution error: boom', None),
+    ('Something new', None),
+    ('', None),
+    (None, None),
+])
+def test_agent_outcome_and_harness_error(message, outcome):
+    assert timing.agent_outcome(message) == outcome
+    result = Entry(error=message)
+    expected = None if (outcome is not None or not message) else 'Harness task failure'
+    assert timing.harness_error(result, message) == expected
+    assert timing.harness_error(None, message) == expected
+    # A known agent outcome never masks a different, unknown result error.
+    assert timing.harness_error(Entry(error='Evaluation broke'), message) == 'Harness task failure'
+
+
+def test_image_emulation_seconds():
+    calls = [dict(step='tool_install', duration_s=2.0), dict(step='pip_check', duration_s=0.5),
+             dict(step='setup.py', duration_s=100.0), dict(step='venv_fidelity', duration_s=None)]
+    assert timing.image_emulation_seconds(calls) == 2.5
+
+
+@pytest.mark.parametrize('exec_result', ['rc', 'json', 'raise'])
+def test_record_distributions_is_non_fatal(exec_result):
+    def exec_(container_id, cmd, timeout):
+        if exec_result == 'raise':
+            raise TimeoutError('slow')
+        return Entry(exit_code=1 if exec_result == 'rc' else 0, stdout='not json')
+    row = {}
+    timing.record_distributions(Entry(exec=exec_), 'cid', 'org/repo', row)
+    assert row['dist_probe_error'] in ('rc', 'JSONDecodeError', 'TimeoutError')
+    assert 'distributions' not in row
+
+
+def _gate_journal(path, task_ids=('a', 'b'), done=True, stopped=None, **row_extra):
+    header = dict(_schema='kaggle_timing_v1', task_ids=list(task_ids), caps={'max_time_minutes': 1.4},
+                  git_sha='abc', bundle_sha256='b' * 64, agent_yaml_sha256='y' * 64, gpu_count=4)
+    rows = [{**dict(instance_id=iid, repo='org/repo', wall_seconds={'total': 300}, phase1_wall_seconds=250,
+                 phase1_source='sandbox_wrappers', image_emulation_seconds=3.0, sandbox_setup_seconds=10,
+                 finalization_seconds=3, patch_files=['repo/a.py'], empty_patch=False, test_files_edited=[],
+                 stray_files=[], error=None, agent_outcome='timeout', agent_timeout_fired=True,
+                 setup_failed=False, editable_failed=False, setup_calls=[]), **row_extra}
+            for iid in ('a', 'b')]
+    records = [header, {'_vllm': {'startup_seconds': 400}}, *rows]
+    if stopped:
+        records.append({'_stopped': stopped})
+    if done:
+        records.append({'_done': {'n': len(rows)}})
+    path.write_text('\n'.join(json.dumps(r) for r in records) + '\n')
+
+
+def test_gate_a_passes_with_timeouts_and_nonfatal_setup_failures(tmp_path):
+    path = tmp_path / 'j'
+    _gate_journal(path, setup_failed=True, editable_failed=True)
+    result = summary.summarize(path)
+    assert result['gate']['a_all_tasks_complete_no_harness_error']['status'] == 'PASS'
+    assert result['gate']['status'] == 'PASS'
+    assert result['setup_failed_count'] == result['editable_failed_count'] == 2
+    assert result['agent_outcome_counts'] == {'timeout': 2}
+    assert result['phase1_minus_image_seconds']['max'] == 247
+    assert result['provenance']['git_sha'] == 'abc' and result['provenance']['gpu_count'] == 4
+
+
+@pytest.mark.parametrize('kwargs', [
+    dict(task_ids=('a', 'b', 'c')),          # kernel stopped before the planned third task
+    dict(done=False),                         # no _done record
+    dict(stopped='insufficient remaining budget for next task'),
+])
+def test_gate_a_fails_on_incomplete_run(tmp_path, kwargs):
+    path = tmp_path / 'j'
+    _gate_journal(path, **kwargs)
+    result = summary.summarize(path)
+    assert result['gate']['n_expected'] == len(kwargs.get('task_ids', ('a', 'b')))
+    assert result['gate']['a_all_tasks_complete_no_harness_error']['status'] == 'FAIL'
+    assert result['gate']['status'] == 'FAIL'
+
+
+def test_fallback_units_reported_separately(tmp_path):
+    path = tmp_path / 'j'
+    _gate_journal(path)
+    records = [json.loads(x) for x in path.read_text().splitlines()]
+    records[2]['setup_calls'] = [dict(step='setup.py', duration_s=1, rc=0, retrying_lines=5, subprocesses=[dict(
+        argv=['python', '-m', 'pip', 'install', '-e', '.'], retrying_lines=5)])]
+    path.write_text('\n'.join(json.dumps(r) for r in records))
+    result = summary.summarize(path)
+    assert result['fallback_invocations'] == 1 and result['retrying_lines_total'] == 5
+    assert result['fallback_count'] == 6  # legacy combined figure kept for continuity
+
+
+@pytest.mark.parametrize('lines,ok', [
+    (['GPU %d: NVIDIA L4 (UUID: x)' % i for i in range(4)], True),
+    (['GPU %d: Tesla T4 (UUID: x)' % i for i in range(2)], False),
+    (['GPU 0: NVIDIA L4 (UUID: x)'], False),
+])
+def test_gpu_preflight(monkeypatch, lines, ok):
+    monkeypatch.setattr(timing.subprocess, 'run', lambda *a, **kw: Entry(stdout='\n'.join(lines) + '\n'))
+    if ok:
+        timing.gpu_preflight()
+    else:
+        with pytest.raises(timing.WrongAccelerator):
+            timing.gpu_preflight()
+
+
+def test_gpu_preflight_skips_without_nvidia_smi(monkeypatch):
+    def missing(*a, **kw):
+        raise FileNotFoundError('nvidia-smi')
+    monkeypatch.setattr(timing.subprocess, 'run', missing)
+    timing.gpu_preflight()

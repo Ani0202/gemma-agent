@@ -2,6 +2,7 @@
 import argparse
 import json
 import math
+from collections import Counter
 from pathlib import Path
 
 
@@ -12,6 +13,15 @@ def distribution(values):
         low = int(pos)
         return values[low] + (values[min(low + 1, len(values) - 1)] - values[low]) * (pos - low)
     return dict(mean=sum(values) / len(values), p50=percentile(.5), p90=percentile(.9), max=max(values)) if values else dict.fromkeys(('mean', 'p50', 'p90', 'max'))
+
+
+def retrying_lines(call):
+    children = call.get('subprocesses', [])
+    return max(call.get('retrying_lines', 0), sum(c.get('retrying_lines', 0) for c in children))
+
+
+def fallback_invocations(call):
+    return setup_evidence(call) - retrying_lines(call)
 
 
 def setup_evidence(call):
@@ -70,22 +80,31 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                          for call in row.get('setup_calls', [])],
             **{key: row.get(key) for key in ('sandbox_setup_seconds', 'agent_clock_seconds',
                 'agent_timeout_fired', 'finalization_seconds', 'teardown_seconds',
-                'phase1_wall_seconds', 'error', 'fallback_patch_used')},
+                'phase1_wall_seconds', 'phase1_source', 'error', 'agent_outcome', 'fallback_patch_used',
+                'image_emulation_seconds', 'setup_failed', 'editable_failed')},
+            phase1_minus_image_seconds=(row['phase1_wall_seconds'] - row['image_emulation_seconds']
+                if row.get('phase1_wall_seconds') is not None and row.get('image_emulation_seconds') is not None else None),
             total=row['wall_seconds']['total'],
             nonempty_source_diff=not row.get('empty_patch', True) and bool(source_files)))
     def measured(key):
         return numbers([r[key] for r in tasks if r[key] is not None])
     phase1, setup = distribution(measured('phase1_wall_seconds')), distribution(measured('sandbox_setup_seconds'))
     finalization = distribution(measured('finalization_seconds'))
-    complete = sum(r['error'] is None and r['phase1_wall_seconds'] is not None
-                   and not original.get('setup_failed', False)
-                   for r, original in zip(tasks, rows))
+    # Dec 028 (a): harness errors only. Non-fatal setup results (setup_failed/editable_failed) and
+    # normal agent end states (timeout, no submit) are diagnostics, not gate failures. A Phase-1 value
+    # from the run_agent_sandbox fallback means the sandbox wrappers never fired: not complete.
+    def wrapped(r):
+        return r['phase1_wall_seconds'] is not None and r.get('phase1_source') != 'run_agent_sandbox'
+    complete = sum(r['error'] is None and wrapped(r) for r in tasks)
+    n_expected = len(header['task_ids'])
+    missing = [iid for iid in header['task_ids'] if iid not in ids]
     nonempty = sum(t['nonempty_source_diff'] for t in tasks)
     def check(passed, value, threshold):
         return dict(status='PASS' if passed else 'FAIL', value=value, threshold=threshold)
-    all_phase1 = bool(tasks) and len(measured('phase1_wall_seconds')) == len(tasks)
-    gate = dict(n_expected=len(rows),
-        a_all_tasks_complete_no_harness_error=check(bool(tasks) and complete == len(tasks), complete, len(tasks)),
+    all_phase1 = bool(tasks) and all(wrapped(r) for r in tasks)
+    gate = dict(n_expected=n_expected,
+        a_all_tasks_complete_no_harness_error=check(n_expected > 0 and complete == n_expected and not missing
+                                                    and not stopped and done is not None, complete, n_expected),
         b_max_phase1=check(all_phase1 and phase1['max'] <= gate_max_phase1, phase1['max'], gate_max_phase1),
         c_mean_phase1=check(all_phase1 and phase1['mean'] <= gate_mean_phase1, phase1['mean'], gate_mean_phase1),
         d_vllm_seconds=check(startup is not None and startup <= gate_vllm_seconds, startup, gate_vllm_seconds),
@@ -93,7 +112,15 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
     gate['status'] = 'PASS' if all(v['status'] == 'PASS' for v in gate.values() if isinstance(v, dict)) else 'FAIL'
     return dict(_schema='kaggle_timing_summary_v1',
                 fields=dict(n='Number of task rows (gate expected n)',
-                    n_complete_no_error='Rows with phase1 measurement, no harness error and no setup failure',
+                    n_complete_no_error='Rows with a sandbox-wrapper phase1 measurement and no harness error (setup_failed is diagnostic only)',
+                    provenance='Kernel header: git_sha, bundle_sha256, agent_yaml_sha256, gpu_names, gpu_count, caps, created_utc, concurrency, mcp_import_ok',
+                    agent_outcome_counts='Rows per agent_outcome (timeout/turns/tool_calls/no_submit/null)',
+                    setup_failed_count='Rows with a non-fatal setup rc!=0 (diagnostic, not gated)',
+                    editable_failed_count='Rows whose editable install returned rc!=0 (diagnostic, not gated)',
+                    image_emulation_seconds='Distribution of in-Phase-1 seconds emulating image layers the scorer image already has',
+                    phase1_minus_image_seconds='Distribution of phase1_wall_seconds minus image_emulation_seconds (not gated; reported for the Director)',
+                    fallback_invocations='Index-enabled editable fallback invocations across setup calls',
+                    retrying_lines_total='pip Retrying lines across setup calls, nested output counted once',
                     tasks='Per-task instance_id, repo, setup_calls [{step,duration_s,rc,retrying_lines}], sandbox_setup_seconds, agent_clock_seconds, agent_timeout_fired, finalization_seconds, teardown_seconds, phase1_wall_seconds, total, error, nonempty_source_diff, fallback_patch_used; unavailable measurements are null',
                     nonempty_source_diff='Nonblank classified patch with a path outside protected/test and stray files',
                     phase1_seconds='Phase-1 wall seconds: mean/p50/p90/max of available measurements',
@@ -114,6 +141,15 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                     cap_worst_case_minutes='Configured cap times 125 plus 30 minutes', cap_minutes='Configured agent cap',
                     missing_task_ids='Header task IDs absent from task rows', done_present='Journal contains _done', stopped='Journal stop reasons'),
                 tasks=tasks, gate=gate, n_complete_no_error=complete,
+                provenance={k: header.get(k) for k in ('git_sha', 'bundle_sha256', 'agent_yaml_sha256', 'gpu_names',
+                    'gpu_count', 'caps', 'created_utc', 'concurrency', 'mcp_import_ok')},
+                agent_outcome_counts=dict(Counter(str(t['agent_outcome']) for t in tasks)),
+                setup_failed_count=sum(bool(t['setup_failed']) for t in tasks),
+                editable_failed_count=sum(bool(t['editable_failed']) for t in tasks),
+                image_emulation_seconds=distribution(measured('image_emulation_seconds')),
+                phase1_minus_image_seconds=distribution(measured('phase1_minus_image_seconds')),
+                fallback_invocations=sum(fallback_invocations(c) for r in rows for c in r.get('setup_calls', [])),
+                retrying_lines_total=sum(retrying_lines(c) for r in rows for c in r.get('setup_calls', [])),
                 phase1_seconds=phase1, setup_seconds=setup, finalization_max_seconds=finalization['max'],
                 fallback_count=sum(setup_evidence(c) for r in rows for c in r.get('setup_calls', [])),
                 tasks_with_retrying_lines=sum(any(c.get('retrying_lines', 0) > 0 or
@@ -130,7 +166,7 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                 stray_files_files=sum(len(r.get('stray_files', [])) for r in rows),
                 decision='PASS' if timing_minutes is not None and cap_minutes is not None and timing_minutes <= 660 and cap_minutes <= 660 else 'FAIL',
                 projected_minutes=timing_minutes, cap_worst_case_minutes=cap_minutes,
-                cap_minutes=cap, missing_task_ids=[iid for iid in header['task_ids'] if iid not in ids],
+                cap_minutes=cap, missing_task_ids=missing,
                 done_present=done is not None, stopped=stopped)
 
 

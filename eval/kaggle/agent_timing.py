@@ -165,11 +165,16 @@ for name in names:
         result[name] = dict(location=None, version=None, metadata_location=None, record_exists=False)
 print(json.dumps(result))
 """.replace('NAMES', repr([package]))
-    result = docker.exec(container_id, 'python3 -c ' + shlex.quote(probe), timeout=30)
-    row['dist_probe_rc'] = result.exit_code
-    if result.exit_code != 0:
-        raise RuntimeError('Sandbox distribution probe failed')
-    row['distributions'] = json.loads(result.stdout)
+    # Diagnostic only: a probe problem must never change the harness path.
+    try:
+        result = docker.exec(container_id, 'python3 -c ' + shlex.quote(probe), timeout=30)
+        row['dist_probe_rc'] = result.exit_code
+        if result.exit_code != 0:
+            row['dist_probe_error'] = 'rc'
+            return
+        row['distributions'] = json.loads(result.stdout)
+    except Exception as exc:
+        row['dist_probe_error'] = type(exc).__name__
 
 
 def setup_step(current, name, action, *, fatal=True):
@@ -724,8 +729,30 @@ def phase1_fields(current, run_seconds, total, context, patch):
         verification_skipped=SKIP_VERIFICATION)
 
 
+# Normal agent end states that swegemma reports through agent_error (agent_runner.py 0.2.11).
+AGENT_OUTCOMES = (('timeout', re.compile(r'Agent exceeded session timeout\b')),
+                  ('turns', re.compile(r'Agent exceeded (turns budget|maximum allowed LLM turns)\b')),
+                  ('tool_calls', re.compile(r'Agent exceeded tool call budget\b')),
+                  ('no_submit', re.compile(r'Agent completed execution without calling submit_patch\b')))
+IMAGE_EMULATION_STEPS = ('venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'tool_sources',
+                         'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check')
+
+
+def agent_outcome(message):
+    """Name of a known normal agent end state, else None (including for empty messages)."""
+    text = (message or '').strip()
+    return next((name for name, pattern in AGENT_OUTCOMES if pattern.match(text)), None)
+
+
 def harness_error(result, agent_error):
-    return 'Harness task failure' if (result is not None and result.error) or agent_error else None
+    """Fail closed: any error that is not a known normal agent end state is a harness failure."""
+    messages = [m for m in ((result.error if result is not None else None), agent_error) if m]
+    return 'Harness task failure' if any(agent_outcome(m) is None for m in messages) else None
+
+
+def image_emulation_seconds(setup_calls):
+    """Seconds spent emulating Dockerfile.public image layers the scorer image already has."""
+    return sum(c.get('duration_s') or 0 for c in setup_calls if c.get('step') in IMAGE_EMULATION_STEPS)
 
 def distribution(values):
     values = sorted(values)
@@ -826,6 +853,8 @@ async def evaluate(config, journal, started, caps, totals):
             phase = phase1_fields(times, evaluator.agent_seconds, total,
                                   getattr(evaluator, 'context', None),
                                   result.agent_patch if result else evaluator.patch)
+            phase.update(agent_outcome=agent_outcome(evaluator.agent_error or raw_error),
+                         image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
             try:
               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
                 **phase,
@@ -902,6 +931,29 @@ def start_server(holder):
 
 class WrongAccelerator(RuntimeError):
     pass
+
+
+def gpu_preflight():
+    """Raise WrongAccelerator unless nvidia-smi lists >= 4 L4 GPUs; skip if nvidia-smi is unavailable."""
+    try:
+        gpus = subprocess.run(['nvidia-smi', '-L'], capture_output=True, text=True, timeout=60).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return
+    if len(gpus) < 4 or not all('L4' in g for g in gpus):
+        raise WrongAccelerator('expected 4x L4 (nvidia-smi -L preflight)')
+
+
+def check_hook_targets():
+    """The observation hooks in evaluate() need these swegemma attributes; check before vLLM starts."""
+    import swegemma.evaluate as ev
+    import swegemma.harness.agent_runner as ar
+    import swegemma.harness.verification as vf
+    wanted = ((ar, ('asyncio', 'sandbox_start', 'sandbox_stop', 'sandbox_exec')),
+              (ev, ('verify_task', 'Evaluator')),
+              (vf, ('strip_protected_files_from_patch', '_is_protected_test_or_config_path')))
+    missing = [m.__name__ + '.' + n for m, names in wanted for n in names if not hasattr(m, n)]
+    if missing:
+        raise RuntimeError('swegemma hook targets missing: ' + ', '.join(missing))
 
 
 def setup_task(data_dir, wheels_dir, iid, repo, state):
@@ -985,6 +1037,8 @@ def main():
                       fields=dict(instance_id='Task ID', repo='Repository', wall_seconds='Agent (including setup), verification, total wall seconds',
                           vllm_startup_seconds='Header: perf_counter seconds spent starting vLLM; null on startup failure',
                           verification_skipped='Container B and verification tests skipped',
+                          agent_outcome='timeout/turns/tool_calls/no_submit from agent_error, or null',
+                          image_emulation_seconds='Setup steps emulating image layers the scorer image already has (inside Phase-1)',
                           agent_timeout_seconds='Delay passed to agent_runner asyncio.timeout, or null',
                           agent_clock_seconds='Timeout context exit minus enter (perf_counter), or null',
                           agent_timeout_fired='Real timeout expired or exit TimeoutError; null if not entered',
@@ -1007,7 +1061,9 @@ def main():
         try:
             header['bundle_sha256'], header['agent_yaml_sha256'] = extract_bundle(BUNDLE_B64, BUNDLE)
             print('bundle_sha256=', header['bundle_sha256'], 'agent_yaml_sha256=', header['agent_yaml_sha256'], flush=True)
+            gpu_preflight()  # cheap fail-fast before the multi-minute install (torch check below stays authoritative)
             install()
+            check_hook_targets()  # fail before vLLM startup if the wheelhouse swegemma lacks the hook targets
             try:
                 import mcp  # noqa: F401
                 header['mcp_import_ok'] = True
