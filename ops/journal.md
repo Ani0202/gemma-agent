@@ -138,3 +138,5 @@
 2026-11-05T18:54Z | review-kernel-setup3: 3 BLOCKING (Docker order not reproduced; unfixed control reused empty base tar; missing tool deps can PASS); diagnosis mechanism supported but Docker-order attribution unproven -> 2a STOP deferred | ops/codex/review-20261105T184723.md
 2026-11-05T18:55Z | codex-kernel-setup-fix4 launched in worktree codex-kernel-setup-fix (first launch via bin/codex-build created a branch off main; killed, worktree removed) | ops/codex/build-kernel-setup-fix4.spec
 2026-11-05T18:55Z | memguard-fix4-livetest green (78 passed live) -> review-memguard-fix4-light | ops/jobs/memguard-fix4-livetest.log
+2026-11-05T19:01Z | codex-kernel-setup-fix4 done (c4c9528, 462 pass/4 skip; bwrap blocked in Codex) -> local acceptance job kernel-setup-accept-r4 | ops/codex/build-kernel-setup-fix4.md
+2026-11-05T19:01Z | review-memguard-fix4: 3 BLOCKING (stale watchdog protection at action time; previous-boot records admit unrelated procs; python-option watchdog evades detection) -> round 5 codex-memguard-fix5b (worktree reset onto 5cb49c2) | ops/codex/review-20261105T185456.md ops/codex/build-memguard-fix5.spec

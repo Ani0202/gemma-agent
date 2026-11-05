@@ -3472,3 +3472,68 @@ PY
 wrapper parent in same-UID snapshot= False targets= [20] action= False signals= []
 wrapper parent in same-UID snapshot= True targets= [20] action= True signals= [(42, <Signals.SIGKILL: 9>)]
 
+codex
+Both prior regressions pass their new tests, but I still can’t confirm the absolute safety guarantee. Mocked actions accepted an unmarked process through a previous-boot record and signalled a recipient whose job ID became `memguard-light/...` during the protection scan. I also found that a verified shell wrapper with an unreadable parent is refused indefinitely, despite the intended three-second grace.
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PY'
+import sys, runpy, io
+from types import SimpleNamespace
+sys.path.append('/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages')
+import pytest
+ns=runpy.run_path('eval/tests/test_memguard.py')
+mg=ns['mg'].__wrapped__()
+detect=mg.runs_memguard
+class Output(io.StringIO):
+    def close(self): pass
+with pytest.MonkeyPatch.context() as mp:
+    world=ns['mock_world'](mp,mg,{20:ns['proc'](20,comm='bash',pgid=20),10:ns['proc'](10,ppid=20,pgid=20)}, {},[dict(name='watchdog-light',pid=20,pgid=20)])
+    orig_read=mg.read
+    mp.setattr(mg,'read',lambda path,mode='r': b'/usr/bin/python3\\0-u\\0/repo/bin/memguard\\0' if str(path)=='/proc/10/cmdline' else orig_read(path,mode))
+    mp.setattr(mg,'runs_memguard',detect)
+    targets,jobs=mg.find_jobs(world,SimpleNamespace(),set())
+    real_open=open
+    out,sent=Output(),[]
+    mp.setattr('builtins.open',lambda path,*a,**kw:out if str(path).endswith('/oom_score_adj') else real_open(path,*a,**kw))
+    mp.setattr(mg.os,'pidfd_open',lambda p:42)
+    mp.setattr(mg.os,'close',lambda fd:None)
+    mp.setattr(mg.signal,'pidfd_send_signal',lambda *a:sent.append(a))
+    print('real runs_memguard:',detect(10),'targets:',sorted(targets),'signal:',mg.send_kill(targets[10],print,SimpleNamespace()),'oom:',mg.raise_oom_adj({10:targets[10]},False,SimpleNamespace()),'sent:',sent,'written:',repr(out.getvalue()))
+for path in ('bin/memguard','eval/tests/test_memguard.py'):
+    from pathlib import Path
+    compile(Path(path).read_text(),path,'exec')
+print('syntax: PASS')
+PY
+ git diff --check b299167 5cb49c2
+ git status --short" in /home/ubuntu/work/gemma-wt/codex-memguard-fix
+ succeeded in 33ms:
+real runs_memguard: False targets: [10, 20] signal: True oom: 1 sent: [(42, <Signals.SIGKILL: 9>)] written: '1000'
+syntax: PASS
+
+codex
+**BLOCKING**
+
+1. **Action-time watchdog protection still uses stale state.** [bin/memguard:297](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:297) calculates `protected` before the final recipient refresh. The final [eligibility check](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:305) accepts a fresh `GEMMA_JOB_ID` as provenance without checking its watchdog prefix.
+
+   Mocked reproduction: PID 10 becomes `memguard-light/boot/123` during the protection scan, retaining its starttime. `send_kill()` returns `True` and sends SIGKILL; `raise_oom_adj()` writes `1000`. Recheck the recipient’s watchdog identity immediately before both actions, and add these transition regressions.
+
+2. **Previous-boot records can admit unrelated processes.** [bin/memguard:193](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:193) checks a six-field record’s starttime but ignores its retained `boot_id`. PID and starttime ticks can repeat after reboot.
+
+   Mocked reproduction: a previous-boot record matches an unrelated current Python process’s PID/starttime. Its unmarked child becomes a target, receives SIGKILL, and gets `oom_score_adj=1000`. Reject records from another boot before using their ancestry as provenance. **Etho’s absolute exclusion remains unconfirmed.**
+
+3. **Another normally invoked Python watchdog can evade detection.** [bin/memguard:158](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:158) examines only `argv[0:2]`. This implements the earlier spec’s narrow matcher, but cannot support the requested universal guarantee.
+
+   Mocked reproduction: `bin/job` job `watchdog-light` runs `/usr/bin/python3 -u /repo/bin/memguard`. Detection returns `False`; the guard becomes a target, receives SIGKILL, and gets OOM adjustment. Recognize supported Python interpreter options before the script argument, or explicitly constrain every watchdog launch to the protected naming convention.
+
+**NON-BLOCKING**
+
+- **The two exact prior reproductions now pass.** The final recipient reread rejects Python → `node` transitions during discovery. Unmarked RSS/cwd alone no longer admits a process. The added regressions cover both action paths: [test_memguard.py:637](/home/ubuntu/work/gemma-wt/codex-memguard-fix/eval/tests/test_memguard.py:637), [test_memguard.py:675](/home/ubuntu/work/gemma-wt/codex-memguard-fix/eval/tests/test_memguard.py:675). Legacy history, exact job-ID grouping, and specified watchdog cases also pass.
+- **Ordinary wrappers are not always killable after grace.** [bin/memguard:301](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:301) permanently refuses a shell whose parent is absent from the same-UID snapshot—for example, a verified wrapper adopted by root-owned PID 1. Mocked signalling returned `False`. This fails closed safely, but contradicts the stated wrapper behavior.
+- The [no-overlap deployment comment](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:164) matches the proposed stop-then-start plan.
+
+**Questions**
+
+None.
+
+Validation: **75 passed, 1 skipped, 2 deselected**; both filesystem tests passed separately in memory. Syntax and diff checks passed. The [builder’s host log](/home/ubuntu/work/gemma/ops/jobs/memguard-fix4-livetest.log:4) records **78 passed**. Live allocation was not independently rerun in this read-only sandbox. No files changed or Etho processes inspected.
+tokens used
+73,444
