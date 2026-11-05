@@ -9,9 +9,10 @@ Every --interval seconds (default 2):
   2. Raise oom_score_adj to 1000 on every target (unprivileged), so the kernel picks us first.
   3. Group by exact GEMMA_JOB_ID when present; retain legacy member identities.
      Job-ID marked orphans outside running groups remain targets.
-  4. On memory pressure, kill eligible members of the largest job, allowing its wrapper
-     3 seconds to record failure. Re-inventory for up to 5 seconds, including new forks.
-Reads only /proc/<pid>/{status,stat,environ,cmdline} of our own uid; writes oom_score_adj.
+  4. On memory pressure, kill eligible members of the largest job, leaving its wrapper
+     to record failure and exit on its own. Re-inventory for up to 5 seconds, including new forks.
+Reads /proc/<pid>/{status,stat,environ,cmdline,cwd} of our own uid and stats argv paths;
+writes oom_score_adj only for eligible recipients.
 Python stdlib only. No process-group signals: every recipient must pass the allowlist.
 Usage: bin/memguard [--once] [--dry-run] [--interval S] [--min-available G] [--max-total G]
                     [--log PATH] [--no-mail]
@@ -20,6 +21,8 @@ import argparse, errno, os, signal, subprocess, sys, threading, time
 from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MEMGUARD_STAT = os.stat(os.path.join(REPO, "bin/memguard"))
+MEMGUARD_IDENTITY = (MEMGUARD_STAT.st_dev, MEMGUARD_STAT.st_ino)
 GIB = 1024 ** 3
 SESSION_COMMS = {"claude", "node", "codex", "tmux", "tmux: server", "tmux: client"}
 SHELL_COMMS = {"bash", "sh", "dash", "zsh"}
@@ -168,12 +171,25 @@ def watchdog_id(job_id):
     return job_id is not None and job_id.split(b"/", 1)[0].startswith(b"memguard")
 
 
-def watchdog_argv(cmdline):
+def watchdog_argv(cmdline, pid):
+    """Resolve every argv path against the recipient, comparing file identity first."""
+    argv = [arg for arg in cmdline.split(b"\0") if arg]
+    cwd = None
+    if any(not os.path.isabs(arg) for arg in argv):
+        try:
+            cwd = os.fsencode(os.readlink(f"/proc/{pid}/cwd"))
+        except OSError:
+            return True  # Relative argv cannot be ruled out as this watchdog.
     installed = os.fsencode(os.path.realpath(os.path.join(REPO, "bin/memguard")))
-    for arg in cmdline.split(b"\0"):
-        if not arg:
-            continue
-        path = os.path.realpath(arg) if b"/" in arg else arg
+    for arg in argv:
+        path = arg if os.path.isabs(arg) else os.path.join(cwd, arg)
+        try:
+            st = os.stat(path)  # Follow symlinks; hardlinks share the same identity.
+            if (st.st_dev, st.st_ino) == MEMGUARD_IDENTITY:
+                return True
+        except (OSError, ValueError):
+            pass  # Options and other non-path arguments need not exist.
+        path = os.fsencode(os.path.realpath(os.fsdecode(path)))
         if path == installed or (os.path.basename(path) == b"memguard" and
                                  os.path.basename(os.path.dirname(path)) == b"bin"):
             return True
@@ -181,7 +197,7 @@ def watchdog_argv(cmdline):
 
 
 def runs_memguard(pid):
-    return watchdog_argv(read(f"/proc/{pid}/cmdline", "rb") or b"")
+    return watchdog_argv(read(f"/proc/{pid}/cmdline", "rb") or b"", pid)
 
 
 def wrapper_script():
@@ -199,9 +215,15 @@ def is_job_wrapper(cmdline, name, script):
             argv[4] == name.encode())
 
 
+def verified_wrapper(cmdline):
+    """Match the complete installed bin/job body, even without a status record."""
+    argv = cmdline.split(b"\0")
+    return len(argv) >= 6 and is_job_wrapper(cmdline, os.fsdecode(argv[4]), wrapper_script())
+
+
 def watchdog_record(pid, cmdline, job_id, records):
     """Use this recipient's fresh command and marker, including wrapper metadata."""
-    if watchdog_id(job_id) or watchdog_argv(cmdline):
+    if watchdog_id(job_id) or watchdog_argv(cmdline, pid):
         return True
     for record in records:
         if record["pid"] != pid:
@@ -275,7 +297,9 @@ def provenance(pid, procs, records, known_jobs=None):
 def eligible(pid, procs, args, protected=(), records=(), known_jobs=None):
     d = procs[pid]
     return (pid not in protected and d["uid"] == UID and d["state"] not in {"Z", "X"} and
-            not is_session(pid, procs) and provenance(pid, procs, records, known_jobs))
+            not is_session(pid, procs) and
+            not verified_wrapper(read(f"/proc/{pid}/cmdline", "rb") or b"") and
+            provenance(pid, procs, records, known_jobs))
 
 
 def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
@@ -366,7 +390,7 @@ def action_eligible(d, args, known_jobs=None):
         return False
     job_id = next((entry[len(b"GEMMA_JOB_ID="):] for entry in environ.split(b"\0")
                    if entry.startswith(b"GEMMA_JOB_ID=")), None)
-    if watchdog_record(d["pid"], cmdline, job_id, records):
+    if verified_wrapper(cmdline) or watchdog_record(d["pid"], cmdline, job_id, records):
         return False
     # Re-parented wrappers whose parent cannot be inspected fail closed.
     if current["comm"] in SHELL_COMMS and current["ppid"] and current["ppid"] not in procs:
@@ -430,23 +454,15 @@ def inventory(job, args, self_pids):
 def kill_tree(job, args, self_pids, log):
     """Two empty scans, bounded by five seconds, then an independent survivor inventory."""
     killed = set()
-    started = time.monotonic()
-    deadline = started + 5
-    root_identity = job["members"].get(job["root"])
+    deadline = time.monotonic() + 5
     empty_scans = 0
     while time.monotonic() < deadline:
         members = inventory(job, args, self_pids)
-        # The wrapper gets a grace period to record the child's failure. A new process
-        # with the same numeric pid does not inherit this special treatment.
-        grace = (root_identity and time.monotonic() < started + 3 and
-                 any(p != job["root"] for p in job["members"]))
         for p, d in members.items():
-            if grace and p == job["root"] and d["starttime"] == root_identity["starttime"]:
-                continue
             if send_kill(d, log, args, {job["key"]: job}):
                 killed.add(p)
         empty_scans = empty_scans + 1 if not members else 0
-        if empty_scans >= 2 and not grace:
+        if empty_scans >= 2:
             break
         time.sleep(0.2)
     survivors = sorted(inventory(job, args, self_pids))

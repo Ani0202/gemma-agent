@@ -16,13 +16,17 @@ REPO = Path(__file__).resolve().parents[2]
 MG = REPO / "bin/memguard"
 
 
-@pytest.fixture
-def mg():
-    loader = importlib.machinery.SourceFileLoader("memguard", str(MG))
+def load_memguard(path):
+    loader = importlib.machinery.SourceFileLoader("memguard", str(path))
     spec = importlib.util.spec_from_loader("memguard", loader)
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
+
+
+@pytest.fixture
+def mg():
+    return load_memguard(MG)
 
 
 @pytest.fixture
@@ -37,6 +41,10 @@ def proc(pid, ppid=1, pgid=10, starttime=123, comm="python", rss=1024, uid=None)
 
 def mock_world(monkeypatch, mg, initial, markers, records=()):
     world = dict(initial)
+    original_readlink = mg.os.readlink
+    monkeypatch.setattr(mg.os, "readlink", lambda p: "/tmp/memguard-mock-cwd"
+                        if str(p).startswith("/proc/") and str(p).endswith("/cwd")
+                        else original_readlink(p))
     monkeypatch.setattr(mg, "current_boot_id", lambda: "boot-id")
     monkeypatch.setattr(mg, "snapshot", lambda: dict(world))
     # Legacy records exercise ancestry admission; record-free fixtures use job IDs.
@@ -150,7 +158,7 @@ def test_marked_orphans_and_separate_wrappers(monkeypatch, mg, args):
     assert not world
 
 
-def test_fork_during_kill_is_found_after_root_grace(monkeypatch, mg, args):
+def test_fork_during_kill_is_found_without_signalling_wrapper(monkeypatch, mg, args):
     records = [dict(name="job", pid=10, pgid=10)]
     world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
                        {10: b"cap", 11: b"cap", 12: b"cap"}, records)
@@ -162,14 +170,14 @@ def test_fork_during_kill_is_found_after_root_grace(monkeypatch, mg, args):
     def kill(d, log, args, known_jobs=None):
         sent.append(d["pid"])
         world.pop(d["pid"])
-        if d["pid"] == 10:
-            assert mg.time.monotonic() >= 3
-            world[12] = proc(12)  # new orphan discovered after wrapper grace/kill
+        if d["pid"] == 11:
+            world[12] = proc(12)  # new orphan discovered after the first child dies
         return True
 
     monkeypatch.setattr(mg, "send_kill", kill)
-    assert mg.kill_tree(select(mg, args), args, set(), lambda _: None) == ([10, 11, 12], [])
-    assert sent == [11, 10, 12]
+    assert mg.kill_tree(select(mg, args), args, set(), lambda _: None) == ([11, 12], [])
+    assert sent == [11, 12]
+    assert 10 in world
 
 
 def test_survivors_use_independent_final_inventory(monkeypatch, mg, args):
@@ -207,9 +215,9 @@ def test_legacy_status_and_job_names(monkeypatch, mg, args, tmp_path):
                         (REPO / "bin/job").read_text() if str(path) == str(tmp_path / "bin/job")
                         else original_read(path, mode))
     targets, jobs = mg.find_jobs(world, args, set())
-    assert set(targets) == {10, 11, 20, 21}
+    assert set(targets) == {11, 21}
     assert {j["name"]: sorted(j["pids"]) for j in jobs.values()} == {
-        "legacy": [10, 11], "current": [20, 21]}
+        "legacy": [11], "current": [21]}
 
 
 
@@ -238,15 +246,17 @@ def test_mail_failure_is_bounded_and_logged(monkeypatch, mg, failure):
 
 
 def test_final_root_is_reclassified_before_signal(monkeypatch, mg, args):
-    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+    world = mock_world(monkeypatch, mg, {11: proc(11, ppid=10), 10: proc(10)},
                        {10: b"cap", 11: b"cap"})
     job = select(mg, args)
     sent = []
 
     def kill(d, log, args, known_jobs=None):
+        if not mg.action_eligible(d, args, known_jobs):
+            return False
         sent.append(d["pid"])
         world.pop(d["pid"])
-        # The wrapper execs a protected session process during its grace period.
+        # A remaining member execs a protected session process after the child dies.
         world[10] = proc(10, comm="node")
         return True
 
@@ -265,9 +275,10 @@ def test_other_uid_and_small_unmarked_are_excluded(monkeypatch, mg, args):
 def test_self_job_siblings_are_excluded(monkeypatch, mg, args):
     records = [dict(name="guard", pid=10, pgid=10), dict(name="work", pid=20, pgid=20)]
     world = mock_world(monkeypatch, mg, {
-        10: proc(10), 11: proc(11, ppid=10), 12: proc(12, ppid=10), 20: proc(20, pgid=20)},
-        {p: b"cap" for p in (10, 11, 12, 20)}, records)
-    assert set(mg.find_jobs(world, args, {10, 11})[0]) == {20}
+        10: proc(10), 11: proc(11, ppid=10), 12: proc(12, ppid=10), 20: proc(20, pgid=20),
+        21: proc(21, ppid=20, pgid=20)},
+        {p: b"cap" for p in (10, 11, 12, 20, 21)}, records)
+    assert set(mg.find_jobs(world, args, {10, 11})[0]) == {21}
 
 
 def test_failed_signal_stops_at_deadline_and_reports_survivor(monkeypatch, mg, args):
@@ -402,7 +413,7 @@ def test_escaped_members_remain_in_job(monkeypatch, mg, args, legacy, survives):
     world[11] = proc(11, ppid=1, pgid=11)
     # Normal polling and the kill/final inventories must agree.
     _, jobs = mg.find_jobs(world, args, set(), known_jobs={job["key"]: job})
-    assert set(jobs[job["key"]]["members"]) == {10, 11}
+    assert set(jobs[job["key"]]["members"]) == {11}
     sent = []
 
     def kill(d, log, args, known_jobs=None):
@@ -414,7 +425,7 @@ def test_escaped_members_remain_in_job(monkeypatch, mg, args, legacy, survives):
 
     monkeypatch.setattr(mg, "send_kill", kill)
     assert mg.kill_tree(job, args, set(), lambda _: None) == (
-        [10] if survives else [10, 11], [11] if survives else [])
+        [] if survives else [11], [11] if survives else [])
     assert 11 in sent
 
 
@@ -438,7 +449,7 @@ def test_legacy_known_members_do_not_follow_reused_pid(monkeypatch, mg, args):
                        {10: b"cap", 11: b"cap"}, [dict(name="job", pid=10, pgid=None)])
     job = select(mg, args)
     world[11] = proc(11, pgid=11, starttime=999)
-    assert set(mg.inventory(job, args, set())) == {10}
+    assert mg.inventory(job, args, set()) == {}
 
 
 @pytest.mark.parametrize("survives", [False, True])
@@ -453,7 +464,7 @@ def test_legacy_history_survives_new_first_member_and_temporary_node(monkeypatch
     world[11] = proc(11, ppid=10, comm="node")
     _, jobs = mg.find_jobs(world, args, set(), known_jobs=seeded)  # poll 1
     key = next(iter(jobs))
-    assert set(jobs[key]["known_members"]) == {10, 11, 12, 13}
+    assert set(jobs[key]["known_members"]) == {11, 12, 13}
     del world[10]
     world[11] = proc(11, comm="python")
     world[13] = proc(13, comm="node")
@@ -483,8 +494,8 @@ def test_legacy_history_survives_new_first_member_and_temporary_node(monkeypatch
 
 
 def test_legacy_history_survives_poll_with_no_eligible_members(monkeypatch, mg, args):
-    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"},
-                       [dict(name="job", pid=10, pgid=None)])
+    world = mock_world(monkeypatch, mg, {9: proc(9), 10: proc(10, ppid=9)}, {10: b"cap"},
+                       [dict(name="job", pid=9, pgid=None)])
     _, jobs = mg.find_jobs(world, args, set())
     key = next(iter(jobs))
     world[10] = proc(10, comm="node")
@@ -709,7 +720,7 @@ def test_large_unrelated_process_requires_verified_wrapper(monkeypatch, mg, args
     assert 10 not in mg.find_jobs(world, args, set())[0]
     world[10] = proc(10, ppid=20, pgid=20, rss=4 * 1024**3)
     targets, jobs = mg.find_jobs(world, args, set())
-    assert set(targets) == {10, 20}
+    assert set(targets) == {10}
     assert mg.action_eligible(world[10], args)
     # Retained provenance survives losing both marker and wrapper ancestry.
     del world[20]
@@ -843,4 +854,94 @@ def test_watchdog_argv_resolves_symlinks(monkeypatch, mg, tmp_path):
     guard.touch()
     alias = tmp_path / "guard-alias"
     alias.symlink_to(guard)
-    assert mg.watchdog_argv(b"python3\0-u\0" + os.fsencode(alias) + b"\0")
+    original_readlink = mg.os.readlink
+    monkeypatch.setattr(mg.os, "readlink", lambda p: str(tmp_path)
+                        if str(p) == "/proc/10/cwd" else original_readlink(p))
+    assert mg.watchdog_argv(b"python3\0-u\0" + os.fsencode(alias) + b"\0", 10)
+
+
+@pytest.mark.parametrize("kind,index", [("bare-symlink", 2), ("relative-hardlink", 0),
+                                       ("absolute-hardlink", 4)])
+def test_watchdog_inode_identity_protects_aliases(monkeypatch, mg, args, tmp_path, kind, index):
+    # Use a temporary installation so both hardlink endpoints share a filesystem,
+    # including when the workspace is a separate sandbox mount from /tmp.
+    installed = tmp_path / "installation/bin/memguard"
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(MG.read_bytes())
+    mg = load_memguard(installed)
+    installed_stat = installed.stat()
+    assert mg.MEMGUARD_IDENTITY == (installed_stat.st_dev, installed_stat.st_ino)
+    parser = mg.runs_memguard
+    record = dict(name="watchdog-light", pid=20, pgid=20)
+    world = mock_world(monkeypatch, mg, {1: proc(1, ppid=0), 20: proc(20, comm="bash"),
+                       10: proc(10, ppid=20)}, {}, [record])
+    alias = tmp_path / "guard-alias"
+    if kind == "bare-symlink":
+        alias.symlink_to(installed)
+    else:
+        os.link(installed, alias)
+    argument = os.fsencode(alias if kind == "absolute-hardlink" else alias.name)
+    argv = b"\0".join([b"python3", b"-u", b"unused", b"another"][:index] + [argument, b""])
+    original_read, original_readlink = mg.read, mg.os.readlink
+    monkeypatch.setattr(mg.os, "readlink", lambda p: str(tmp_path)
+                        if str(p) == "/proc/10/cwd" else original_readlink(p))
+    monkeypatch.setattr(mg, "read", lambda path, mode="r":
+                        argv if path == "/proc/10/cmdline" else original_read(path, mode))
+    monkeypatch.setattr(mg, "runs_memguard", parser)
+    assert Path.cwd() != tmp_path
+    assert parser(10)
+    assert {10, 20} <= mg.protected_watchdogs(world, [record])
+    assert mg.find_jobs(world, args, set()) == ({}, {})
+    assert_actions_refused(monkeypatch, mg, args, world[10])
+    assert_actions_refused(monkeypatch, mg, args, world[20])
+    # Force discovery to miss the recipient: fresh action checks must still use identity.
+    monkeypatch.setattr(mg, "protected_watchdogs", lambda *a: set())
+    assert_actions_refused(monkeypatch, mg, args, world[10])
+
+
+def test_unreadable_cwd_with_relative_argv_is_protected(monkeypatch, mg, args):
+    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"work/boot/123"})
+    original_read = mg.read
+    def unreadable(path):
+        raise PermissionError(path)
+    monkeypatch.setattr(mg.os, "readlink", unreadable)
+    monkeypatch.setattr(mg, "read", lambda path, mode="r":
+                        b"/usr/bin/python3\0-u\0guard-alias\0" if path == "/proc/10/cmdline"
+                        else original_read(path, mode))
+    assert 10 in mg.protected_watchdogs(world, [])
+    assert mg.find_jobs(world, args, set()) == ({}, {})
+    monkeypatch.setattr(mg, "protected_watchdogs", lambda *a: set())
+    assert_actions_refused(monkeypatch, mg, args, world[10])
+    # Absolute-only argv do not depend on cwd readability.
+    assert not mg.watchdog_argv(b"/nonexistent/python3\0/nonexistent/worker.py\0", 10)
+
+
+@pytest.mark.parametrize("with_record", [False, True])
+def test_verified_wrapper_is_permanently_excluded(monkeypatch, mg, args, with_record):
+    record = dict(name="work", pid=10, pgid=10)
+    world = mock_world(monkeypatch, mg, {1: proc(1, ppid=0), 10: proc(10, comm="bash"),
+                       11: proc(11, ppid=10)}, {}, [record])
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                        b"work/boot/123" if p in {10, 11} and marker == "GEMMA_JOB_ID" else None)
+    if not with_record:
+        monkeypatch.setattr(mg, "running_jobs", lambda: [])
+    targets, jobs = mg.find_jobs(world, args, set())
+    assert set(targets) == {11}
+    job = next(iter(jobs.values()))
+    assert_actions_refused(monkeypatch, mg, args, world[10], jobs)
+    # Also refuse a wrapper first recognised after the protection scan.
+    monkeypatch.setattr(mg, "protected_watchdogs", lambda *a: set())
+    assert_actions_refused(monkeypatch, mg, args, world[10], jobs)
+    sent = []
+    def kill(fd, sig):
+        sent.append((fd, mg.time.monotonic()))
+        # Keep the child present beyond the old grace window to exercise every poll.
+        if mg.time.monotonic() >= 4:
+            world.pop(fd, None)
+    monkeypatch.setattr(mg.os, "pidfd_open", lambda p: p)
+    monkeypatch.setattr(mg.signal, "pidfd_send_signal", kill)
+    killed, survivors = mg.kill_tree(job, args, set(), lambda _: None)
+    assert killed == [11] and survivors == []
+    assert sent and {p for p, _ in sent} == {11}
+    assert max(t for _, t in sent) >= 4
+    assert 10 in world
