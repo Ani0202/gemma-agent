@@ -25,6 +25,9 @@ import time
 
 BUNDLE_B64 = ""  # embedded by timing_push.sh
 TASK_IDS = []
+# {wheel filename: [sha256, base64]}: public wheels the scorer image pip-installs online but the offline
+# Kaggle wheelhouse lacks (pytest-timeout==2.1.0, Dockerfile.public line 9). Embedded by timing_push.sh.
+EXTRA_WHEELS = {}
 SETUP_ONLY = False
 SKIP_VERIFICATION = True
 SETUP_FIX = 1
@@ -81,6 +84,43 @@ def install():
         if 'litellm' in name.lower():
             lg.propagate = False
             lg.handlers.clear()
+
+def extra_wheels():
+    """Write the embedded wheels (sha256-checked) to a kernel-local dir and return it."""
+    target = WORK / 'extra_wheels'
+    target.mkdir(parents=True, exist_ok=True)
+    for name, (digest, payload) in EXTRA_WHEELS.items():
+        data = base64.b64decode(payload)
+        if hashlib.sha256(data).hexdigest() != digest or '/' in name or name.startswith('.'):
+            raise RuntimeError('Embedded wheel failed verification: ' + name)
+        (target / name).write_bytes(data)
+    return target
+
+
+def pytest_timeout_wheels(wheels):
+    """Wheelhouse pytest-timeout 2.1.0 first, then the embedded official wheel."""
+    return [*sorted(Path(wheels).glob('pytest_timeout-2.1.0-*.whl')),
+            *sorted(extra_wheels().glob('pytest_timeout-2.1.0-*.whl'))]
+
+
+def check_tool_sources(wheels):
+    """Before vLLM starts: every Dockerfile.public line-9 tool needs an offline wheel (or pip fallback)."""
+    from packaging.utils import canonicalize_name, parse_wheel_filename
+    names = set()
+    for w in Path(wheels).glob('*.whl'):
+        try:
+            names.add(canonicalize_name(parse_wheel_filename(w.name)[0]))
+        except Exception:
+            continue
+    missing = [n for n in SCORER_TOOLS if n not in ('pip', 'pytest-timeout') and canonicalize_name(n) not in names]
+    if not pytest_timeout_wheels(wheels):
+        missing.append('pytest-timeout==2.1.0')
+    if fallback_wheel(wheels, 'pip') is None:
+        missing.append('pip')
+    if missing:
+        raise RuntimeError('Offline scorer tool sources missing: ' + ', '.join(missing))
+    return sorted(names)
+
 
 SCORER_TOOLS = ('pip', 'pdm-backend', 'setuptools', 'wheel', 'poetry-core',
                 'hatchling', 'flit-core', 'editables', 'pytest', 'pytest-timeout', 'typer')
@@ -430,9 +470,10 @@ def patch_subprocess_deps(data_dir, state=None):
             selected = compatible_wheels(wheels, identity['tags'])
             # The image pins pytest-timeout, even if a newer wheel is present.
             selected.pop('pytest-timeout', None)
-            for path in wheels.glob('pytest_timeout-2.1.0-*.whl'):
+            for path in pytest_timeout_wheels(wheels):
                 if {str(t) for t in parse_wheel_filename(path.name)[3]} & set(identity['tags']):
                     selected['pytest-timeout'] = path
+                    break
             current['wheel_tags_chosen'] = [p.name for p in selected.values()]
             def validate_tools():
                 missing = [n for n in SCORER_TOOLS if n not in selected and n not in ('pip', 'pytest-timeout')]
@@ -1070,6 +1111,7 @@ def main():
             gpu_preflight()  # cheap fail-fast before the multi-minute install (torch check below stays authoritative)
             install()
             check_hook_targets()  # fail before vLLM startup if the wheelhouse swegemma lacks the hook targets
+            check_tool_sources(DATA / 'wheels' if (DATA / 'wheels').is_dir() else WHEELHOUSE)  # same choice as patch_subprocess_deps
             try:
                 import mcp  # noqa: F401
                 header['mcp_import_ok'] = True

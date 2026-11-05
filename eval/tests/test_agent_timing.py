@@ -91,6 +91,12 @@ def test_timebox_boundary():
     assert timing.should_stop(100, 5, 300, 601, 1000)
 
 
+@pytest.fixture(autouse=True)
+def _kernel_work_dir(monkeypatch, tmp_path):
+    """Kernel writes (e.g. extra_wheels) go to a temp dir, never /kaggle/working; tests may override."""
+    monkeypatch.setattr(timing, 'WORK', tmp_path / 'kernel-work')
+
+
 def journal(path, cap=5.04, startup=1800, seconds=302.4):
     header = dict(_schema='kaggle_timing_v1', task_ids=['a', 'b'], caps={'max_time_minutes': cap})
     rows = [dict(instance_id=iid, wall_seconds={'total': seconds}, test_run=dict(n=n, share_of_agent_seconds=share),
@@ -729,6 +735,7 @@ def test_kernel_header_contains_vllm_startup(tmp_path, monkeypatch):
     monkeypatch.setattr(timing, 'install', lambda: None)
     monkeypatch.setattr(timing, 'gpu_preflight', lambda: None)
     monkeypatch.setattr(timing, 'check_hook_targets', lambda: None)
+    monkeypatch.setattr(timing, 'check_tool_sources', lambda wheels: [])
     for name in ('mcp', 'torch', 'yaml', 'litellm', 'google', 'google.adk',
                  'google.adk.agents', 'google.adk.agents.context_cache_config',
                  'google.adk.apps', 'google.adk.apps._configs', 'swegemma', 'swegemma.config'):
@@ -868,3 +875,70 @@ def test_gpu_preflight_skips_without_nvidia_smi(monkeypatch):
         raise FileNotFoundError('nvidia-smi')
     monkeypatch.setattr(timing.subprocess, 'run', missing)
     timing.gpu_preflight()
+
+
+# --- pytest-timeout 2.1.0 embedded wheel (kernel v4 failed: no offline source on Kaggle) ---
+
+VENDOR = ROOT / 'eval/kaggle/vendor/pytest_timeout-2.1.0-py3-none-any.whl'
+
+
+def _embed(monkeypatch, tmp_path, data=None, digest=None):
+    data = VENDOR.read_bytes() if data is None else data
+    digest = hashlib.sha256(data).hexdigest() if digest is None else digest
+    monkeypatch.setattr(timing, 'WORK', tmp_path / 'work')
+    monkeypatch.setattr(timing, 'EXTRA_WHEELS', {VENDOR.name: [digest, base64.b64encode(data).decode()]})
+
+
+def test_vendored_wheel_is_official():
+    assert hashlib.sha256(VENDOR.read_bytes()).hexdigest() == 'f6f50101443ce70ad325ceb4473c4255e9d74e3c7cd0ef827309dfa4c0d975c6'
+
+
+def test_extra_wheels_verified(monkeypatch, tmp_path):
+    _embed(monkeypatch, tmp_path)
+    assert (timing.extra_wheels() / VENDOR.name).read_bytes() == VENDOR.read_bytes()
+    _embed(monkeypatch, tmp_path, digest='0' * 64)
+    with pytest.raises(RuntimeError, match='verification'):
+        timing.extra_wheels()
+
+
+def test_pytest_timeout_prefers_wheelhouse_then_embedded(monkeypatch, tmp_path):
+    _embed(monkeypatch, tmp_path)
+    house = tmp_path / 'house'
+    house.mkdir()
+    assert [p.name for p in timing.pytest_timeout_wheels(house)] == [VENDOR.name]
+    (house / VENDOR.name).write_bytes(VENDOR.read_bytes())
+    found = timing.pytest_timeout_wheels(house)
+    assert found[0].parent == house and len(found) == 2
+
+
+def test_check_tool_sources(monkeypatch, tmp_path):
+    house = tmp_path / 'house'
+    house.mkdir()
+    names = {'pdm-backend': 'pdm_backend', 'setuptools': 'setuptools', 'wheel': 'wheel', 'poetry-core': 'poetry_core',
+             'hatchling': 'hatchling', 'flit-core': 'flit_core', 'editables': 'editables', 'pytest': 'pytest', 'typer': 'typer'}
+    for dist in names.values():
+        (house / f'{dist}-1.0-py3-none-any.whl').write_bytes(b'')
+    (house / 'pip-26.0-py3-none-any.whl').write_bytes(b'')
+    _embed(monkeypatch, tmp_path)
+    timing.check_tool_sources(house)
+    monkeypatch.setattr(timing, 'EXTRA_WHEELS', {})
+    monkeypatch.setattr(timing, 'WORK', tmp_path / 'fresh-work')
+    with pytest.raises(RuntimeError, match='pytest-timeout==2.1.0'):
+        timing.check_tool_sources(house)
+    _embed(monkeypatch, tmp_path)
+    (house / 'typer-1.0-py3-none-any.whl').unlink()
+    with pytest.raises(RuntimeError, match='typer'):
+        timing.check_tool_sources(house)
+
+
+def test_push_embeds_vendored_wheel(tmp_path):
+    ids = tmp_path / 'ids.txt'
+    ids.write_text('rich_3063\n')
+    bundle = tmp_path / 'bundle'
+    bundle.mkdir()
+    (bundle / 'agent.yaml').write_text('model: gemma-4-e4b-it-qat-w4a16-ct\n')
+    out = subprocess.run(['bash', str(ROOT / 'eval/kaggle/timing_push.sh'), '--dry-run', 'u/s', str(bundle), str(ids)],
+                         check=True, capture_output=True, text=True).stdout
+    stage = Path(out.strip().splitlines()[-1].split('Staged: ')[1])
+    text = (stage / 'agent_timing.py').read_text()
+    assert "EXTRA_WHEELS = {'pytest_timeout-2.1.0-py3-none-any.whl': ['f6f50101" in text
