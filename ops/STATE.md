@@ -57,3 +57,4 @@ Paper evidence (dec 007, due Nov 9 23:59Z, no extra compute): commit schema-head
 Running jobs: codex-eval-runner-fix (critical path), codex-timing-kernel (build), gold-diag4-wait (cross-check, redundant).
 Next 3: (1) review+merge eval-runner-fix (run real-bwrap tests), rerun gold-local+gold-null with shared env, compare vs v2;
   (2) review timing-kernel (adopt eval/tool_timing.py), Kaggle L4x4 E4B timing run (plan 001; check `import mcp`);
+  (3) report 002 with first-submission candidate + LORO caveat.

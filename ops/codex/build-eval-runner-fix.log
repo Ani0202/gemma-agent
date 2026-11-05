@@ -2577,3 +2577,661 @@ def pending_tasks(tasks, results):
         raise ValueError('Duplicate task ids in tasks.jsonl')
     for task_id, row in results.items():
 
+exec
+/bin/bash -lc 'cat eval/tests/test_run_agent_eval.py; cat eval/tests/test_gold_calibration.py' in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+"""Fast offline contracts; the real harness smoke test is explicitly opt-in."""
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import threading
+import types
+import uuid
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from eval import run_agent_eval as runner
+from eval.stub_openai import make_server
+
+
+def header(**kwargs):
+    return dict(_schema='agent_eval_v1', bundle='bundle', bundle_sha256='sha',
+                caps={'max_turns': 3}, split={'path': 'dev', 'sha256': 'split'},
+                created_utc=kwargs.pop('created_utc', 'today'), **kwargs)
+
+
+def test_binding_assertion_catches_late_unpatched_module(monkeypatch):
+    patched = lambda: None
+    for name in runner.BINDINGS:
+        monkeypatch.setitem(sys.modules, name, types.SimpleNamespace(install_test_dependencies=patched))
+    runner.assert_dependency_bindings(patched)
+    monkeypatch.setitem(sys.modules, 'swegemma.extra',
+                        types.SimpleNamespace(install_test_dependencies=lambda: None))
+    with pytest.raises(RuntimeError, match='swegemma.extra'):
+        runner.assert_dependency_bindings(patched)
+
+
+def test_patch_updates_every_original_binding(monkeypatch, tmp_path):
+    # No real harness import or filesystem setup is needed to exercise binding replacement.
+    swe = types.ModuleType('swegemma')
+    harness = types.ModuleType('swegemma.harness')
+    swe.harness = harness
+    monkeypatch.setitem(sys.modules, 'swegemma', swe)
+    monkeypatch.setitem(sys.modules, 'swegemma.harness', harness)
+    orig = lambda: None
+    for name in runner.BINDINGS + ('swegemma.cli', 'swegemma.extra'):
+        module = types.ModuleType(name)
+        module.install_test_dependencies = orig
+        monkeypatch.setitem(sys.modules, name, module)
+        parent, attr = name.rsplit('.', 1)
+        setattr(sys.modules[parent], attr, module)
+    patched = runner.patch_subprocess_deps(tmp_path)
+    runner.assert_dependency_bindings(patched)
+    assert patched is not orig
+
+
+def test_header_written_once_resume_failures_and_successes(tmp_path):
+    path = tmp_path / 'r.jsonl'
+    journal = runner.Journal(path, header())
+    for iid, resolved in [('a', True), ('b', False)]:
+        journal.append(dict(instance_id=iid, resolved=resolved))
+    journal.close()
+    journal = runner.Journal(path, header(created_utc='tomorrow'))
+    assert journal.finished == {'a', 'b'}
+    assert sorted({'a', 'b', 'c'} - journal.finished) == ['c']
+    journal.close()
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(lines) == 3
+    assert sum('_schema' in row for row in lines) == 1
+
+
+@pytest.mark.parametrize('key,value', [('bundle', 'other'), ('bundle_sha256', 'new'),
+                                     ('caps', {}), ('split', {})])
+def test_header_mismatch_and_force_new(tmp_path, key, value):
+    path = tmp_path / 'r.jsonl'
+    runner.Journal(path, header()).close()
+    changed = dict(header(), **{key: value})
+    with pytest.raises(ValueError, match='header mismatch'):
+        runner.Journal(path, changed)
+    journal = runner.Journal(path, changed, force=True)
+    assert not journal.finished
+    journal.close()
+    assert len(path.read_text().splitlines()) == 1
+
+
+def test_torn_append_repaired_but_complete_corruption_rejected(tmp_path):
+    path = tmp_path / 'r.jsonl'
+    runner.Journal(path, header()).close()
+    with path.open('a') as stream:
+        stream.write('{"instance_id":')
+    journal = runner.Journal(path, header())
+    journal.append(dict(instance_id='b', resolved=False))
+    journal.close()
+    assert len(path.read_text().splitlines()) == 2
+    with path.open('a') as stream:
+        stream.write('invalid\n')
+    with pytest.raises(ValueError):
+        runner.Journal(path, header())
+
+
+def diff(path, old='a', new='b', added=False):
+    return (f'diff --git a/{path} b/{path}\n' + ('new file mode 100644\n' if added else '') +
+            f'--- {"/dev/null" if added else "a/" + path}\n+++ b/{path}\n' +
+            f'@@ -{0 if added else 1},{0 if added else 1} +1 @@\n' +
+            ('' if added else '-' + old + '\n') + '+' + new + '\n')
+
+
+def test_patch_classification():
+    paths = ['requests/api.py', 'requests/new.py', 'src/requests/module.py', 'scratch.py',
+             'notes.txt', 'tests/test_api.py', 'test_x.py', 'foo_test.py', 'conftest.py']
+    patch = ''.join(diff(p, added=p != 'requests/api.py') for p in paths)
+    result = runner.classify_patch(patch, 'psf/requests')
+    assert result['patch_files'] == sorted(paths)
+    assert result['test_files_edited'] == sorted(paths[-4:])
+    assert result['stray_files'] == sorted(paths[3:])
+    assert result['patch_bytes'] == len(patch.encode())
+    assert not result['empty_patch']
+    assert runner.classify_patch('', 'psf/requests')['empty_patch']
+
+
+def test_patch_deletion_rename_and_hunk_header_lookalikes():
+    patch = ('diff --git a/old.py b/old.py\ndeleted file mode 100644\n--- a/old.py\n'
+             '+++ /dev/null\n@@ -1 +0,0 @@\n-old\n'
+             'diff --git a/before.py b/after.py\nsimilarity index 100%\n'
+             'rename from before.py\nrename to after.py\n')
+    patch += diff('requests/file.py', new='++ b/fake.py')
+    result = runner.classify_patch(patch, 'psf/requests')
+    assert result['patch_files'] == ['after.py', 'before.py', 'old.py', 'requests/file.py']
+    assert result['stray_files'] == []
+
+
+def test_harness_protected_rule_and_extra_targets():
+    protected = lambda p: p == 'pyproject.toml'
+    result = runner.classify_patch(diff('pyproject.toml') + diff('checks/custom.py'),
+                                   'org/pkg', protected, ['checks/custom.py'])
+    assert result['test_files_edited'] == ['checks/custom.py', 'pyproject.toml']
+
+
+def test_trace_usage_is_only_recorded_values():
+    entry = lambda **kw: types.SimpleNamespace(event_type='tool_call', tool_name='read_file', timestamp=0.0, **kw)
+    counts, tokens, _ = runner.trace_counts(types.SimpleNamespace(entries=[
+        entry(usage={'prompt_tokens': 3}), entry(usage={'prompt_tokens': 0})]))
+    assert counts == {'read_file': 2}
+    assert tokens == dict(prompt_tokens=3, completion_tokens=None)
+    assert runner.trace_counts(None)[1] == dict(prompt_tokens=None, completion_tokens=None)
+
+
+def test_tool_seconds_pairs_calls_fifo_per_tool():
+    e = lambda t, name, ts: types.SimpleNamespace(event_type=t, tool_name=name, timestamp=ts, usage=None)
+    out = runner.tool_seconds([e('tool_call', 'run_tests', 10.0), e('tool_call', 'read_file', 10.5),
+                               e('tool_response', 'read_file', 11.0), e('tool_response', 'run_tests', 14.0),
+                               e('tool_call', 'run_tests', 20.0), e('tool_response', 'run_tests', 21.0),
+                               e('tool_response', 'orphan', 30.0)])
+    assert out == {'run_tests': dict(n=2, total=5.0, max=4.0), 'read_file': dict(n=1, total=0.5, max=0.5)}
+
+
+def test_env_guard(monkeypatch):
+    monkeypatch.setattr(sys, '_base_executable', '/usr/bin/python3')
+    with pytest.raises(ValueError, match='pyimg'):
+        runner.guard_python()
+    runner.guard_python(True)
+
+
+def test_stub_tool_calls_and_models(tmp_path, monkeypatch):
+    script = tmp_path / 'script.json'
+    call = dict(id='call_1', type='function', function=dict(name='get_status', arguments='{}'))
+    script.write_text(json.dumps([dict(content=None, tool_calls=[call]), dict(content='Done')]))
+    # Exercise the actual HTTP handlers with in-memory streams; no socket permissions needed.
+    monkeypatch.setattr('eval.stub_openai.ThreadingHTTPServer', lambda address, handler: handler)
+    handler_class = make_server(script)
+    handler = handler_class.__new__(handler_class)
+    handler.send_response = lambda status: None
+    handler.send_header = lambda *args: None
+    handler.end_headers = lambda: None
+    handler.wfile = io.BytesIO()
+    handler.path = '/v1/models'
+    handler.do_GET()
+    assert json.loads(handler.wfile.getvalue())['object'] == 'list'
+    for expected in ('tool_calls', 'stop'):
+        body = b'{"model":"stub"}'
+        handler.path = '/v1/chat/completions'
+        handler.headers = {'Content-Length': str(len(body))}
+        handler.rfile, handler.wfile = io.BytesIO(body), io.BytesIO()
+        handler.do_POST()
+        payload = json.loads(handler.wfile.getvalue())
+        assert payload['choices'][0]['finish_reason'] == expected
+        if expected == 'tool_calls':
+            assert payload['choices'][0]['message']['tool_calls'] == [call]
+        assert 'usage' not in payload  # Never invent token counts.
+
+
+@pytest.mark.skipif(os.environ.get('RUN_AGENT_EVAL_E2E') != '1', reason='opt-in real harness smoke test')
+def test_e2e(tmp_path):
+    iid = sorted(runner.read_ids(ROOT / 'eval/splits/dev.txt') &
+                 runner.read_ids(ROOT / 'eval/splits/clean.txt'))[0]
+    name = 'test-agent-eval-' + uuid.uuid4().hex[:10]
+    script = tmp_path / 'script.json'
+    # A harmless source addition exercises tool execution, patch fallback and verification.
+    script.write_text(json.dumps([
+        dict(content=None, tool_calls=[dict(id='call_1', type='function', function=dict(
+            name='run_command', arguments=json.dumps({'command': 'printf "# stub smoke\\n" > stub_smoke.py'})))]),
+        dict(content=None, tool_calls=[dict(id='call_2', type='function', function=dict(
+            name='submit_patch', arguments='{}'))]), dict(content='Done.')]))
+    try:
+        server = make_server(script)
+    except PermissionError:
+        pytest.skip('Sandbox denied localhost socket creation')
+    with server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with (tmp_path / 'runner.log').open('w') as log:
+                proc = subprocess.run([sys.executable, str(ROOT / 'eval/run_agent_eval.py'),
+                    '--bundle', str(ROOT / 'bundles/e4b/v000'), '--data-dir', str(ROOT / 'data/raw'),
+                    '--split', str(ROOT / 'eval/splits/dev.txt'), '--ids', iid, '--run-name', name,
+                    '--concurrency', '1', '--skip-selfcheck', '--max-turns', '4',
+                    '--session-minutes', '1', '--endpoint', f'http://127.0.0.1:{server.server_port}/v1'],
+                    cwd=ROOT, stdout=log, stderr=log, timeout=240)
+            assert proc.returncode == 0, (tmp_path / 'runner.log').read_text()[-2000:]
+            path = ROOT / 'results' / f'{name}.jsonl'
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            assert len(rows) == 2 and rows[1]['instance_id'] == iid
+            assert rows[1]['llm_turns'] >= 2 and rows[1]['patch_bytes'] > 0
+            assert Path(ROOT / rows[1]['trace_path']).is_file()
+        finally:
+            server.shutdown()
+            thread.join()
+            (ROOT / 'results' / f'{name}.jsonl').unlink(missing_ok=True)
+
+
+def test_observe_patch_before_repeated_stripping():
+    from contextvars import ContextVar
+    state = ContextVar('test_state')
+    strip = runner.observe_patch_strip(lambda patch, **kw: patch.replace('TEST', ''), state)
+    assert strip('GOLDTEST') == 'GOLD'  # Self-check has no agent context.
+    current = {'agent_active': True}
+    state.set(current)
+    assert strip('SOURCETEST') == 'SOURCE'
+    assert strip('SOURCE') == 'SOURCE'  # Harness strips a submitted patch a second time.
+    assert current['raw_patch'] == 'SOURCETEST'
+    current['agent_active'] = False
+    strip('VERIFICATIONTEST')
+    assert current['raw_patch'] == 'SOURCETEST'
+
+
+def test_host_package_isolation_removes_only_harness_pth(tmp_path, monkeypatch):
+    pth = tmp_path / 'lib/python3.13/site-packages/_host_env.pth'
+    pth.parent.mkdir(parents=True)
+    pth.write_text('/harness/site-packages\n')
+    image_pth = pth.with_name('image.pth')
+    image_pth.write_text('keep')
+
+    class SubprocessManager:
+        def start(self):
+            self.sandboxes = {'id': {'venv': tmp_path}}
+            return 'id'
+
+    monkeypatch.setitem(sys.modules, 'swegemma.sandbox',
+                        types.SimpleNamespace(SubprocessManager=SubprocessManager))
+    runner.isolate_host_packages()
+    runner.isolate_host_packages()  # Idempotent across repeated evaluations.
+    assert SubprocessManager().start() == 'id'
+    assert not pth.exists() and image_pth.read_text() == 'keep'
+"""Offline tests: stdlib unittest, no competition data or harness imports."""
+import argparse
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import types
+import unittest
+from unittest.mock import patch
+
+SCRIPT = Path(__file__).resolve().parents[1] / 'kaggle/gold_calibration.py'
+spec = importlib.util.spec_from_file_location('gold_calibration', SCRIPT)
+gold = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gold)
+
+
+def result(task_id='a', repo='org/repo', resolved=True, error=None):
+    return dict(instance_id=task_id, repo=repo, resolved=resolved,
+                exit_code=0 if resolved else 1, duration_seconds=1.5, error=error)
+
+
+class ResumeTests(unittest.TestCase):
+    def test_success_and_failure_are_finished(self):
+        rows = [result(), result('b', resolved=False, error='setup failed')]
+        results = gold.finished_results(''.join(json.dumps(row) + '\n' for row in rows))
+        tasks = [dict(instance_id=x, repo='org/repo') for x in 'abc']
+        self.assertEqual([t['instance_id'] for t in gold.pending_tasks(tasks, results)], ['c'])
+
+    def test_last_completed_duplicate_wins(self):
+        rows = [result(resolved=False), result()]
+        results = gold.finished_results('\n'.join(map(json.dumps, rows)) + '\n')
+        self.assertTrue(results['a']['resolved'])
+        self.assertEqual(len(results), 1)
+
+    def test_partial_tail_repaired_and_append_survives_second_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'results.jsonl'
+            complete = json.dumps(result()) + '\n'
+            path.write_text(complete + '{"instance_id": "unfinished')
+            self.assertEqual(set(gold.resume_journal(path)), {'a'})
+            self.assertEqual(path.read_text(), complete)
+            with path.open('a') as stream:
+                stream.write(json.dumps(result('b')) + '\n')
+            self.assertEqual(set(gold.resume_journal(path)), {'a', 'b'})
+
+    def test_complete_last_record_without_newline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'results.jsonl'
+            path.write_text(json.dumps(result()))
+            self.assertEqual(set(gold.resume_journal(path)), {'a'})
+            self.assertTrue(path.read_text().endswith('\n'))
+
+    def test_missing_file_and_empty_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(gold.resume_journal(Path(directory) / 'absent'), {})
+        self.assertEqual(gold.finished_results(''), {})
+
+    def test_corruption_is_not_silently_dropped(self):
+        for text in ('bad\n', 'bad\n' + json.dumps(result()), '{}\n',
+                     json.dumps(dict(result(), duration_seconds=float('nan'))) + '\n'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                gold.finished_results(text)
+
+    def test_inventory_mismatch_and_duplicate_ids(self):
+        tasks = [dict(instance_id='a', repo='org/repo')]
+        for inventory, results in ((tasks * 2, {}), (tasks, {'b': result('b')}),
+                                   (tasks, {'a': result(repo='wrong/repo')})):
+            with self.assertRaises(ValueError):
+                gold.pending_tasks(inventory, results)
+
+
+class SummaryTests(unittest.TestCase):
+    def test_all_tasks_counted_by_repo(self):
+        tasks = [dict(instance_id=x, repo=repo) for x, repo in
+                 [('a', 'org/one'), ('b', 'org/one'), ('c', 'org/two'), ('d', 'org/two')]]
+        results = {'a': result('a', 'org/one'),
+                   'b': result('b', 'org/one', False, 'setup failed'),
+                   'c': result('c', 'org/two', False)}
+        summary = gold.summarize(tasks, results)
+        self.assertEqual([summary[k] for k in ('total', 'finished', 'passed', 'failed', 'pending')],
+                         [4, 3, 1, 2, 1])
+        self.assertEqual(summary['passing_ids'], ['a'])
+        self.assertEqual(summary['pending_ids'], ['d'])
+        self.assertEqual(summary['failing_ids'], [
+            dict(instance_id='b', reason='setup failed'),
+            dict(instance_id='c', reason='verification unresolved (exit_code=1)')])
+        self.assertEqual(summary['per_repo']['org/one'],
+                         dict(total=2, finished=2, passed=1, failed=1, pending=0))
+        self.assertEqual(summary['per_repo']['org/two'],
+                         dict(total=2, finished=1, passed=0, failed=1, pending=1))
+
+    def test_empty_summary_and_short_reasons(self):
+        self.assertEqual(gold.summarize([], {})['total'], 0)
+        summary = gold.summarize([dict(instance_id='a', repo='org/repo')],
+                                {'a': result(resolved=False, error='x' * 500)})
+        self.assertEqual(len(summary['failing_ids'][0]['reason']), 200)
+
+    def test_main_fully_resumed_needs_no_harness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'tasks.jsonl').write_text(json.dumps(dict(instance_id='a', repo='org/repo')) + '\n')
+            (root / 'gold_results.jsonl').write_text(json.dumps(result()) + '\n')
+            with patch('sys.argv', [str(SCRIPT), '--data-dir', str(root), '--working-dir', str(root)]), \
+                    patch.object(gold, 'install_harness', side_effect=AssertionError('must not import harness')), \
+                    patch('builtins.print'):
+                gold.main()
+            self.assertEqual(json.loads((root / 'gold_summary.json').read_text())['passing_ids'], ['a'])
+
+
+class WorkerTests(unittest.TestCase):
+    def run_worker(self, verifier):
+        raw = dict(instance_id='a', repo='org/repo', patch='GOLD_PATCH_SECRET',
+                   test_patch='TEST_PATCH_SECRET', problem_statement='TASK_TEXT_SECRET')
+        task = types.SimpleNamespace(instance_id='a')
+        models = types.ModuleType('swegemma.models')
+        models.load_tasks = lambda path: [task]
+        with tempfile.TemporaryDirectory() as directory:
+            args = argparse.Namespace(data_dir=Path(directory), worker='a',
+                                      sandbox='subprocess', result=Path(directory) / 'result.json')
+            with patch.object(gold, 'load_inventory', return_value=[raw]), \
+                    patch.dict('sys.modules', {'swegemma.models': models}), \
+                    patch.object(gold, 'patch_subprocess_deps'), \
+                    patch.object(gold, 'verify_gold', side_effect=verifier):
+                gold.worker(args)
+            return json.loads(args.result.read_text())
+
+    def test_gold_patch_only_and_harness_verdict_preserved(self):
+        async def verify(task, patch_text, data_dir, sandbox):
+            self.assertEqual(patch_text, 'GOLD_PATCH_SECRET')
+            self.assertEqual(sandbox, 'subprocess')
+            # Exit 0 can still fail the harness's required-test/JUnit checks.
+            return dict(resolved=False, test_exit_code=0, error='TEST_PATCH_SECRET')
+        row = self.run_worker(verify)
+        self.assertFalse(row['resolved'])
+        self.assertEqual(row['exit_code'], 0)
+        self.assertNotIn('SECRET', json.dumps(row))
+        self.assertGreaterEqual(row['duration_seconds'], 0)
+
+    def test_exception_text_never_copied_into_result(self):
+        async def verify(*args):
+            raise RuntimeError('GOLD_PATCH_SECRET TASK_TEXT_SECRET')
+        row = self.run_worker(verify)
+        self.assertFalse(row['resolved'])
+        self.assertIsNone(row['exit_code'])
+        self.assertEqual(row['error'], 'Verification/setup exception (RuntimeError)')
+        self.assertNotIn('SECRET', json.dumps(row))
+
+    def test_docker_unavailable_falls_back_without_network_pull(self):
+        with patch.object(gold.subprocess, 'run', side_effect=FileNotFoundError):
+            self.assertEqual(gold.choose_sandbox(), 'subprocess')
+        with patch.object(gold.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)) as run:
+            self.assertEqual(gold.choose_sandbox(), 'docker')
+            self.assertIn('--pull=never', run.call_args_list[0].args[0])
+            self.assertIn('--network=none', run.call_args_list[0].args[0])
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+exec
+/bin/bash -lc "sed -n '660,710p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py; rg -n 'def .*tool|await .*run_async|function_call_id' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/tools/_functions.py; rg -n 'def execute_subprocess_command|timeout' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/*; cat eval/stub_openai.py; cat eval/README_AGENT_EVAL.md" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+
+        def _on_event(event: Any) -> None:
+            trace.record_event(event)
+            if file_display_mgr is not None:
+                file_display_mgr.on_event(event)
+            context.handle_adk_event(event, agent_name=agent.name)
+
+        display_plugin = EventDisplayPlugin(
+            trace_callback=_on_event,
+            display_manager=display_mgr,
+        )
+        retry_plugin = ModelRetryPlugin()
+        tool_error_plugin = ToolErrorPlugin()
+
+        # Setup ADK Runner and App
+        session_service = InMemorySessionService()
+        session_state = {
+            'problem_description': task.problem_statement,
+        }
+        hints = getattr(task, 'hints_text', '') or ''
+        if isinstance(hints, str) and hints.strip():
+            session_state['hints'] = hints.strip()
+        session = await session_service.create_session(
+            app_name='swegemma_eval',
+            user_id='eval_user',
+            state=session_state,
+        )
+        app_kwargs: dict[str, Any] = {
+            'name': 'swegemma_eval',
+            'root_agent': agent,
+            'plugins': [display_plugin, retry_plugin, tool_error_plugin],
+        }
+        if config.context_cache_config is not None:
+            app_kwargs['context_cache_config'] = config.context_cache_config
+        if config.events_compaction_config is not None:
+            app_kwargs['events_compaction_config'] = config.events_compaction_config
+
+        app = App(**app_kwargs)
+        runner = Runner(app=app, session_service=session_service)
+
+        initial_prompt = build_agent_prompt(
+            task=task,
+            config=config,
+            workspace_tree=workspace_tree,
+            enable_sandbox_testing=enable_sandbox_testing,
+            declared_tools=_extract_declared_tools(agent),
+        )
+
+        user_message = genai_types.Content(
+            role='user',
+            parts=[genai_types.Part(text=initial_prompt)],
+45:def generate_client_function_call_id() -> str:
+49:def _new_client_function_call_id() -> str:
+53:  `google.adk.flows.llm_flows.functions.generate_client_function_call_id` to
+60:  `generate_client_function_call_id()` directly would bypass those patches,
+65:  return functions.generate_client_function_call_id()
+68:def populate_client_function_call_id(model_response_event: Event) -> None:
+73:      function_call.id = _new_client_function_call_id()
+76:def remove_client_function_call_id(content: Optional[types.Content]) -> None:
+131:    auth_requests: Dict mapping function_call_id to AuthConfig.
+145:  for function_call_id, auth_config in auth_requests.items():
+148:      deduplicated_requests[function_call_id] = auth_config
+151:      deduplicated_requests[function_call_id] = auth_config
+153:  for function_call_id, auth_config in deduplicated_requests.items():
+154:    request_id = _new_client_function_call_id()
+159:            function_call_id=function_call_id,
+217:      function_call_id,
+221:        (fc for fc in function_calls if fc.id == function_call_id), None
+225:    request_id = _new_client_function_call_id()
+300:def find_event_by_function_call_id(
+302:    function_call_id: str,
+307:      if function_call.id == function_call_id:
+312:def _collect_function_call_ids(events: list[Event]) -> set[str]:
+339:  function_call_id = function_responses[0].id
+340:  if not function_call_id:
+348:  return find_event_by_function_call_id(search_space, function_call_id)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/docker_sandbox.py:76:        timeout: float | None = 300,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/docker_sandbox.py:88:                command, timeout=timeout, work_dir=eff_work_dir
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/docker_sandbox.py:114:                status="timeout",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:28:    status: Literal["ok", "error", "timeout"]
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:37:        return self.status == "timeout"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:68:        timeout: float | None = 300,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:75:            timeout: Max execution duration in seconds (defaults to 300).
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:79:            ExecutionResult containing status ("ok", "error", "timeout"),
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:170:    timeout_seconds: int | None = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:187:        fallback_timeout = self.timeout_seconds if self.timeout_seconds is not None else 300
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:197:            timeout = max(1, int(min(fallback_timeout, remaining)))
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:199:            timeout = fallback_timeout
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:208:            res = self.sandbox.run_command(wrapped_cmd, timeout=timeout)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:214:            if res.status == "timeout":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/base.py:215:                stderr = f"Command timed out after {timeout}s (exit_code={res.exit_code})"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:57:def execute_subprocess_command(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:61:    timeout: float | None = 300,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:66:    """Execute a command in a new process group with timeout and SIGKILL cleanup."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:94:        stdout, stderr = proc.communicate(timeout=timeout)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:116:            stdout, stderr = proc.communicate(timeout=1.0)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:121:            status="timeout",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:180:        timeout: float | None = 300,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:194:            timeout=timeout,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/containers.py:140:                raise SandboxTimeoutError("Container failed to start within 10 seconds", timeout=10.0)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/containers.py:154:                self.container.stop(timeout=1)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/containers.py:162:        timeout: float | None = 300,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/containers.py:170:            timeout: Optional execution timeout.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/containers.py:185:            f"timeout -k 5s {max(1, int(timeout))} sh -c {shlex.quote(command)}"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/containers.py:186:            if timeout is not None and timeout > 0
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/containers.py:269:        if exit_code in (124, 137) and timeout is not None and timeout > 0:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/containers.py:271:                f"Command timed out after {timeout}s",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/containers.py:273:                timeout=float(timeout),
+"""Stdlib scripted OpenAI server. Script: JSON list of assistant messages or completions."""
+import argparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+from pathlib import Path
+import threading
+import time
+
+
+def make_server(script, host='127.0.0.1', port=0):
+    responses = json.loads(Path(script).read_text())
+    if not isinstance(responses, list) or not responses:
+        raise ValueError('Script must be a nonempty JSON array')
+    lock = threading.Lock()
+    position = 0
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def send_json(self, status, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path.rstrip('/') == '/v1/models':
+                self.send_json(200, dict(object='list', data=[dict(id='gemma-4-e4b-it-qat-w4a16-ct',
+                                                                 object='model', owned_by='stub')]))
+            else:
+                self.send_json(404, dict(error='Unknown route'))
+
+        def do_POST(self):
+            nonlocal position
+            if self.path.rstrip('/') != '/v1/chat/completions':
+                self.send_json(404, dict(error='Unknown route'))
+                return
+            request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            if request.get('stream'):
+                self.send_json(400, dict(error='Stub supports non-streaming requests only'))
+                return
+            with lock:
+                if position >= len(responses):
+                    self.send_json(409, dict(error='Script exhausted'))
+                    return
+                entry = responses[position]
+                position += 1
+                index = position
+            if 'choices' in entry:
+                payload = entry
+            else:
+                message = dict(role='assistant', **{k: v for k, v in entry.items() if k != 'role'})
+                payload = dict(choices=[dict(index=0, message=message, finish_reason=(
+                    'tool_calls' if message.get('tool_calls') else 'stop'))])
+            payload = dict(id=f'chatcmpl-stub-{index}', object='chat.completion',
+                           created=int(time.time()), model=request.get('model', 'stub'), **payload)
+            self.send_json(200, payload)
+
+    return ThreadingHTTPServer((host, port), Handler)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--script', required=True, type=Path)
+    parser.add_argument('--port', type=int, default=8000)
+    args = parser.parse_args()
+    with make_server(args.script, port=args.port) as server:
+        print(f'http://127.0.0.1:{server.server_port}/v1', flush=True)
+        server.serve_forever()
+
+
+if __name__ == '__main__':
+    main()
+Run a local bundle with the image-mirror interpreter base:
+
+```sh
+/home/ubuntu/gemma-local/venv/bin/python eval/run_agent_eval.py \
+  --bundle bundles/e4b/v000 --data-dir data/raw --split eval/splits/dev.txt \
+  --run-name baseline-local --concurrency 1 --endpoint http://localhost:8000/v1
+```
+
+The runner uses swegemma 0.2.11 programmatically with the subprocess sandbox. Caps
+come from the bundle's `eval_config.yaml`, with CLI overrides taking precedence.
+It checks two clean tasks with gold patches before inference. `--selfcheck-ids a,b`
+chooses the two checks; `--skip-selfcheck` explicitly bypasses them. Only IDs in the
+frozen dev split are accepted. `--ids a,b` limits the agent run, not the default
+self-check selection. Concurrent durations are throughput measurements, not scorer
+timing measurements.
+
+`results/<run-name>.jsonl` contains a metadata header and sanitized task metrics.
+Completed attempts, including failures, are skipped on resume. Changing the bundle,
+caps, split, model registry, data directory, endpoint or concurrency requires a new
+name or `--force-new`, which **replaces the results journal**. Raw traces, logs,
+pre-stripping agent diffs, and harness outputs remain in `runs/<run-name>/`.
+`patch_bytes` and file classifications describe the agent diff before protected-file
+stripping; `output.json` includes the diff actually passed to verification.
+
+The offline stub accepts a JSON array of assistant messages, including OpenAI
+`tool_calls`, or full completion responses. Responses are consumed in order;
+exhaustion returns HTTP 409. It supports non-streaming chat completions and models:
+
+```sh
+python eval/stub_openai.py --script /tmp/responses.json --port 8000
+```
+
+No packages need installing for tests. The harness venv currently lacks pytest, so
+expose the existing pyimg copy when running the requested command:
+
+```sh
+export PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages
+export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+export LITELLM_LOCAL_MODEL_COST_MAP=True
+/home/ubuntu/gemma-local/venv/bin/python -m pytest eval/tests -q
+RUN_AGENT_EVAL_E2E=1 /home/ubuntu/gemma-local/venv/bin/python -m pytest eval/tests/test_run_agent_eval.py -q -rs
+```
+
+The integration test needs localhost socket permission and existing clean dev data;
+it uses the stub without a GPU. `--allow-foreign-python` is a unit-test escape hatch.
+
