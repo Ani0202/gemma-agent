@@ -21,7 +21,13 @@ if [ "\$2" = submissions ]; then case "\${SUBS:-none}" in
   today) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,%s 01:00:00,x,COMPLETE,0.1,\n' "\$(date -u +%F)";;
   sha) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,2026-11-01 01:00:00,e4b sha:%s y,COMPLETE,0.1,\n' "\$SHA12";;
   old) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,2026-11-01 01:00:00,other,COMPLETE,0.1,\n';;
-  junk) echo "<html>oops";; fail) exit 1;; esac; exit 0; fi
+  junk) echo "<html>oops";; fail) exit 1;;
+  short) printf 'ref,fileName,date,description,status,publicScore,privateScore\n1\n';;
+  baddate) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,junk,x,COMPLETE,0.1,\n';;
+  quote) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,"2026-11-01 01:00:00,x,COMPLETE,0.1,\n';;
+  header) printf 'ref,fileName,date,description,status,publicScore,privateScore\n';;
+  full) printf 'ref,fileName,date,description,status,publicScore,privateScore\n'; for i in \$(seq 100); do printf '%s,submission.zip,2026-11-01 01:00:00,other,COMPLETE,0.1,\n' \$i; done;;
+  esac; exit 0; fi
 case "\${MODE:-ok}" in ok) echo "Submission ref: 123";; noref) echo "ERROR: submission rejected";;
   400) echo "400 Client Error: Bad Request" >&2; exit 1;; 408) echo "408 Client Error: Request Timeout" >&2; exit 1;;
   503) echo "HTTPError: 503 Server Error" >&2; exit 1;; killed) exit 137;; esac
@@ -51,6 +57,11 @@ expect subs_sha 3 N 0 1 -- SUBS=sha
 expect subs_junk 3 N 0 1 -- SUBS=junk
 expect subs_fail 3 N 0 1 -- SUBS=fail
 expect subs_old 0 N 1 1 -- SUBS=old
+expect subs_short 3 N 0 1 -- SUBS=short
+expect subs_baddate 3 N 0 1 -- SUBS=baddate
+expect subs_quote 3 N 0 1 -- SUBS=quote
+expect subs_header_only 3 N 0 1 -- SUBS=header
+expect subs_full_page 3 N 0 1 -- SUBS=full
 expect no_version 3 N 0 x -- MODE=ok
 expect bad_output 3 N 0 1 -- OUTZIP=/etc/hostname
 # pending blocks the next call
@@ -76,5 +87,5 @@ for b in dirmode link nul; do
   set +e; out=$(G MODE=ok bin/kaggle-submit dist/$b.zip e4b m 1 2>&1); rc=$?; set -e
   [ $rc = 3 ] && printf '%s' "$out" | grep -q 'agent.yaml' && echo "PASS zip_$b" || { echo "FAIL zip_$b rc=$rc"; fail=1; }
 done
-grep -qv '^competitions submit mock-competition-not-real\|^competitions submissions mock-competition-not-real\|^kernels output mockowner/mock-kernel/' "$T/calls.log" && { echo "FAIL unexpected mock calls"; fail=1; } || true
+grep -qv '^competitions submit mock-competition-not-real \|^competitions submissions mock-competition-not-real \|^kernels output mockowner/mock-kernel/' "$T/calls.log" && { echo "FAIL unexpected mock calls"; fail=1; } || true
 echo "mock calls: $(wc -l < "$T/calls.log")"; [ $fail = 0 ] && echo "ALL PASS" || { echo "SOME FAILED"; exit 1; }

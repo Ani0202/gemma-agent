@@ -1,0 +1,1 @@
+bash -c cd\ /home/ubuntu/work/gemma\ \&\&\ /home/ubuntu/gemma-local/venv/bin/python3\ ops/tools/runtests.py\ eval/tests\ -q\ -p\ no:cacheprovider\ 2\>\&1\ \|\ tail\ -15 

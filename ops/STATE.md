@@ -20,16 +20,16 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - requests/httpx dropped (wheel shadowing = scorer property, dec 014). Gold v2 files in results/ (gold_calibration_*, gold_failure_causes).
 ## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
-- Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
+- Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - Heavy jobs one at a time (waiters/memguard/codex exempt); bin/job hardened b1eedd7. codex-build branches from main HEAD.
-## Running jobs (23:30Z): review-kernel-probes-light -> probes-gate + memguard-fix6e -> kernel-gate-finfix (+legacy-decision/attribution, dec 041); memguard 7933.
+## Running jobs (23:38Z): review-submit-guard5-light (FULL, v5), codex-probes-fix7 (on finfix e02666f; spec ops/codex/build-probes-fix7.spec), memguard-light.
 - KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
   dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
 - fix5c BLOCKING 1 (gate a ignored failed finalization git rc/exception) FIXED on codex/kernel-gate-finfix e02666f (on 92a74c7;
   109 tests pass; v5 unchanged a=7/8). Stack fix5->probes->gate->finfix merges together once all reviews are clean, then host eval/tests
   on main. fix5c NON-BLOCKING 4: add the 5 vendored wheels to docs/ATTRIBUTION.md before merge. Item 6 docker-order
   MERGED 8c55985; main eval/tests 469p/3s/1f (stale test_memguard oom_score_adj; fixed by the fix6 merge).
-- memguard-fix6 eedf84b+0f5de3d GREEN: review clean -> merge, eval/tests, deploy (stop 7933, start memguard-light). bin/job owner patch: HOLD (dec 026).
+- memguard-fix6 MERGED e8a2b04 + deployed. Tests: ops/tools/runtests.py (pyimg path). bin/job owner patch: HOLD (dec 026).
 - DEC 027 FIDELITY: kernel = Dockerfile.public only (offline); NO PIP_* prefixes; setup_calls logging mandatory.
 - Dec 022 item 4 = plan 005 (ops/codex/ask-20261105T181222.md; draft bundles/drafts/item4-system.md; empty submit loses all; needs GPU).
 ## Quota / spend
@@ -72,7 +72,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   pass-rate evals start, pre-register which environment the local sandbox models and why. Don't act on it before then.
 - Dec 032 item 5: decision_note is in timing_summary (probes branch); add the same note field to results/kaggle_timing_e4b_v001.json at merge.
 ## Next 3
-1. DEC 046 guard v5 (rebuild candidate: git apply ops/patches/kaggle-submit-kernel-v4.diff in a temp worktree): server pre-check strict
+1. DEC 046 guard v5 = ops/patches/kaggle-submit-kernel-v5.diff (written, under FULL review; candidate = git apply on HEAD in tmp): pre-check strict
    fail-closed (csv exact header, field count, ISO date; any doubt refuses; all pages, or refuse if rows == page size; re-read UTC day
    AFTER the query, refuse if changed). FULL adversarial review of the whole guard. BLOCKING only in the pre-check -> drop the pre-check,
    re-review that removal = last round. Clean -> bin/send aniket "apply ops/patches/kaggle-submit-kernel-v5.diff" -> commit -> dry checks -> submit.
