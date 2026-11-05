@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 18:16Z (cycle 68, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 18:17Z (cycle 69, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -20,13 +20,13 @@ Builder on Opus (dec 010: local-first, two-strike).
 
 ## Running jobs (18:12Z)
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
-- review-job-patch2-light, review-memguard-fix-light, codex-sandbox-limits2, codex-kernel-setup-fix, ask-item4-light.
+- codex-kernel-setup-fix, ask-item4-light, codex-sandbox-limits3, codex-memguard-fix2.
 - Done this cycle: pipfb2-light (plan 003), scout (ops/scout/2026-11-05-timing-caps.md; RULES_FINDINGS C1-C3).
 
 ## bin/job, memguard, owner patch (cycles 62-66)
 - Linger=yes since ~18:05Z (dec 025): the scope path (MemoryMax=5G) is normal; Codex works under it.
-- Owner patch v2 = ONE diff (dec 024 item 3; dec 026: HOLD for Aniket, low urgency, keep the RLIMIT_DATA comment): ops/patches/bin-job-fallback.diff (linger-gated scope, ulimit -d fallback, 6-field status with boot_id+starttime, GEMMA_JOB_ID marker, stale-boot refusal, trusted-pgid check, setsid escapes killed+reported, scope stop only if active). Smoke test ops/patches/bin-job-killtest.sh: 4/4 pass. v1 review clean; v2 review job review-job-patch2-light. Then mail the Director the path.
-- memguard-fix: branch codex/memguard-fix (53c87da + my ddf9746: status parse >=3 fields for the v2 patch). 22 pass/1 skip. Review job review-memguard-fix-light. Merge only with no BLOCKING; deploy as memguard-light, start the new one BEFORE stopping old pid 7933 (dec 024 item 4).
+- Owner patch v2 = ONE diff (dec 024 item 3; dec 026: HOLD for Aniket, low urgency, after the critical path; keep the RLIMIT_DATA comment): ops/patches/bin-job-fallback.diff. v2 review ops/codex/review-20261105T180811.md: 3 BLOCKING (grep regex marker -> use grep -F; PID reuse between scan and signal plus cached group_ok -> bind identities (pidfd); legacy 3/4-field records -> refuse destructive signalling without identity evidence). Plan v3: a small Python helper using pidfds (like memguard) called from bin/job kill. NOT started (low urgency).
+- memguard-fix: branch codex/memguard-fix. Review ops/codex/review-20261105T180810.md: 2 BLOCKING (group by GEMMA_JOB_ID; revalidate eligibility before acting). Round 2 job codex-memguard-fix2 (ops/codex/build-memguard-fix2.sh). Merge only with no BLOCKING; deploy as memguard-light, new one BEFORE stopping pid 7933.
 
 ## Dec 027 (report 004 approved, option B with fidelity changes): plan 004 pre-registered (eval/plans/004.md)
 - FIDELITY: the timing kernel may only reproduce Dockerfile.public (pip + the line-9 tool set, offline). NO PIP_NO_INDEX/retry prefixes. setup_calls logging is mandatory.

@@ -3270,3 +3270,643 @@ if __name__ == '__main__':
     raise SystemExit(main())
 PY
 /home/ubuntu/gemma-local/venv/bin/python3 -c \"import sys;sys.path.append('/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages');import pytest;raise SystemExit(pytest.main(['-q','eval/tests']))\"" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ exited 1 in 17035ms:
+.......................s............................................ [ 15%]
+.........F.............................................................. [ 31%]
+........................................................................ [ 48%]
+........................................................................ [ 64%]
+........................................................................ [ 80%]
+......................................................s................. [ 97%]
+........ss..                                                             [100%]
+=================================== FAILURES ===================================
+________________ test_memguard_kills_job_tree_and_spares_dummy _________________
+
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-15/test_memguard_kills_job_tree_a0')
+
+    def test_memguard_kills_job_tree_and_spares_dummy(tmp_path):
+        marker = "GEMMA_MGTEST_" + uuid.uuid4().hex[:8]
+        root = tmp_path / "jobcwd"; root.mkdir()
+        rcfile = tmp_path / "rc"; log = tmp_path / "memguard.log"
+        env_clean = {k: v for k, v in os.environ.items() if not k.startswith("GEMMA_MGTEST_")}
+    
+        dummy = subprocess.Popen([sys.executable, "-c", ALLOC], cwd="/", env=env_clean)
+        job = subprocess.Popen(
+            ["bash", "-c", f'{sys.executable} -c "$CHILD_SRC"; echo $? > {rcfile}'],
+            cwd=root, env={**env_clean, marker: "test", "CHILD_SRC": CHILD})
+        mg = None
+        try:
+            time.sleep(3.0)  # dummy reaches ~1.2G; job grandchild is ramping
+            pids = [job.pid] + tree(job.pid)
+            assert len(pids) >= 3, f"synthetic tree not built: {pids}"
+            mg = subprocess.Popen(
+                [sys.executable, str(MG), "--marker", marker, "--max-total", "0.8", "--min-available", "0",
+                 "--unmarked-rss", "0.5", "--interval", "0.5", "--roots", str(tmp_path),
+                 "--log", str(log), "--no-mail"], env=env_clean,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = time.time() + 30
+            while time.time() < deadline and "survivors=" not in (log.read_text() if log.exists() else ""):
+                time.sleep(0.5)
+            text = log.read_text()
+            assert "KILL" in text and "survivors=[]" in text, text
+            job.wait(timeout=10)
+            for p in pids:
+                assert not alive(p), f"survivor {p}"
+            assert rcfile.read_text().strip() == "137"
+            assert alive(dummy.pid), "dummy non-target was killed"
+>           assert Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip() == "0"
+E           AssertionError: assert '1000' == '0'
+E             
+E             - 0
+E             + 1000
+
+eval/tests/test_memguard.py:82: AssertionError
+----------------------------- Captured stderr call -----------------------------
+bash: line 1:    58 Killed                  /home/ubuntu/gemma-local/venv/bin/python3 -c "$CHILD_SRC"
+=========================== short test summary info ============================
+FAILED eval/tests/test_memguard.py::test_memguard_kills_job_tree_and_spares_dummy
+1 failed, 435 passed, 4 skipped, 4 subtests passed in 15.30s
+
+exec
+/bin/bash -lc '/home/ubuntu/gemma-local/venv/bin/python3 eval/repro/plan003_kernel_setup.py --data-dir /home/ubuntu/work/gemma/data/raw --wheels-dir /home/ubuntu/work/gemma/data/raw/wheels --output /tmp/plan003-kernel-acceptance.json; cat /tmp/plan003-kernel-acceptance.json; git diff --stat; git diff --check' in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+bwrap: loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted
+{
+  "status": "blocked",
+  "rc": 1,
+  "stderr": "bwrap: loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted\n",
+  "rows": []
+}
+ eval/kaggle/agent_timing.py     | 145 +++++++++++++++++++++++++++++++++++-----
+ eval/tests/test_agent_timing.py |  79 ++++++++++++++++++++++
+ 2 files changed, 209 insertions(+), 15 deletions(-)
+
+codex
+The new installer tests pass. The full offline suite reached 435 passed and 4 skipped, with one unrelated memguard failure: its dummy process inherits `oom_score_adj=1000`, but the test expects `0`. The two-task acceptance run was blocked before either task started because bubblewrap cannot create a network namespace, so no setup durations are available.
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/kaggle/agent_timing.py');s=p.read_text()
+s=s.replace(\"            setup_step(current, 'pip_bootstrap', lambda: (_ for _ in ()).throw(\\n                RuntimeError('Required compatible pip wheel missing')))\", \"            def missing_pip():\\n                raise RuntimeError('Required compatible pip wheel missing')\\n            setup_step(current, 'pip_bootstrap', missing_pip)\")
+s=s.replace(\"        docker.copy_to(container_id, pip_wheel, '/tmp/bootstrap-pip.whl')\\n\", '')
+s=s.replace(\"        result = setup_step(current, 'interpreter_probe', lambda: docker.exec(\\n            container_id, 'python3 -c ' + shlex.quote(probe), timeout=30))\", \"        def probe_interpreter():\\n            docker.copy_to(container_id, pip_wheel, '/tmp/bootstrap-pip.whl')\\n            return docker.exec(container_id, 'python3 -c ' + shlex.quote(probe), timeout=30)\\n        result = setup_step(current, 'interpreter_probe', probe_interpreter)\")
+a=s.index('        # Copy to a sandbox-local wheelhouse:');b=s.index('        if result.exit_code "'!= 0:'"',a)
+s=s[:a]+'''        def install_tools():
+            # Copy to a sandbox-local wheelhouse; include copy time in this step.
+            for path in selected.values():
+                docker.copy_to(container_id, path, '/wheels/' + path.name)
+            tools = ['/wheels/' + selected[n].name for n in SCORER_TOOLS]
+            return docker.exec(container_id,
+                PIP_PREFIX + ' python3 -m pip install --ignore-installed --no-index --find-links=/wheels ' +
+                ' '.join(shlex.quote(n) for n in tools), timeout=60)
+        result = setup_step(current, 'tool_install', install_tools)
+''' + s[b:]
+s=s.replace(\"        docker.copy_to(container_id, setup, '/tmp/setup.py')\\n        setup_step(current, 'setup.py', lambda: docker.exec(\\n            container_id, setup_command(repo, fast_path), timeout=280))\", \"        def run_setup():\\n            docker.copy_to(container_id, setup, '/tmp/setup.py')\\n            return docker.exec(container_id, setup_command(repo, fast_path), timeout=280)\\n        setup_step(current, 'setup.py', run_setup)\")
+p.write_text(s)
+p=Path('eval/repro/plan003_kernel_setup.py');s=p.read_text().replace('import os\\n','')
+s=s.replace(\"                    install(manager, sid, repo)\", \"                    install_started = time.perf_counter()\\n                    install(manager, sid, repo)\\n                    duration = time.perf_counter()-install_started + current['setup_calls'][0]['duration_s']\")
+s=s.replace(\"                    duration = sum(c['duration_s'] for c in current['setup_calls'])\\n\", '')
+p.write_text(s)
+PY
+/home/ubuntu/gemma-local/venv/bin/python3 -c \"open('/proc/self/oom_score_adj','w').write('0');import sys;sys.path.append('/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages');import pytest;raise SystemExit(pytest.main(['-q','eval/tests']))\"" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+exec
+/bin/bash -lc "rg -n 'staged|stage|shared_env' eval/tests/test_gold_calibration.py; git diff --check; python3 -m py_compile eval/repro/plan003_kernel_setup.py eval/kaggle/agent_timing.py; sed -n '350,390p' eval/kaggle/agent_timing.py; sed -n '1,70p' eval/tests/test_gold_calibration.py" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+    class TimingEvaluator(Evaluator):
+        agent_seconds, patch, trace, agent_error = 0.0, '', None, ''
+        def _hydrate_task_from_secret(self, task):
+            return task
+        def _get_secret_bundle_data(self):
+            return {}, {}, None
+        async def _run_agent_sandbox(self, task, *args, **kwargs):
+            safe = dataclasses.replace(task, patch='', test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=())
+            self.context = kwargs['context']
+            self.context.task = safe
+            start = time.perf_counter()
+            state.get()['agent_active'] = True
+            try:
+                self.patch, self.agent_error, self.trace = await super()._run_agent_sandbox(safe, *args, **kwargs)
+                return self.patch, self.agent_error, self.trace
+            finally:
+                self.agent_seconds = time.perf_counter() - start
+                state.get()['agent_active'] = False
+    try:
+        inventory = {t.instance_id: t for t in load_tasks(config.tasks_path)}
+        if len(set(TASK_IDS)) != len(TASK_IDS) or set(TASK_IDS) - inventory.keys():
+            raise ValueError('Duplicate or missing task IDs')
+        patch_subprocess_deps(DATA, state)
+        for iid in TASK_IDS:
+            if should_stop(time.monotonic()-started, caps['max_time_minutes'], caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
+                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+                break
+            task = dataclasses.replace(inventory[iid], patch='')
+            times = dict(verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+            state.set(times)
+            evaluator, result, error = TimingEvaluator(config), None, None
+            original_start = evaluator.docker.start
+            evaluator.docker.start = lambda: setup_step(times, 'venv', original_start)
+            start = time.perf_counter()
+            try:
+                result = await evaluator.evaluate_task(task)
+                error = 'Harness task failure' if result.error else None
+            except Exception as exc:
+                error = 'Evaluation exception (' + type(exc).__name__ + ')'
+            finally:
+                try:
+"""Offline tests: stdlib unittest, no competition data or harness imports."""
+import argparse
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import types
+import unittest
+from unittest.mock import patch
+
+SCRIPT = Path(__file__).resolve().parents[1] / 'kaggle/gold_calibration.py'
+spec = importlib.util.spec_from_file_location('gold_calibration', SCRIPT)
+gold = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gold)
+
+
+def result(task_id='a', repo='org/repo', resolved=True, error=None):
+    return dict(instance_id=task_id, repo=repo, resolved=resolved,
+                exit_code=0 if resolved else 1, duration_seconds=1.5, error=error)
+
+
+class ResumeTests(unittest.TestCase):
+    def test_success_and_failure_are_finished(self):
+        rows = [result(), result('b', resolved=False, error='setup failed')]
+        results = gold.finished_results(''.join(json.dumps(row) + '\n' for row in rows))
+        tasks = [dict(instance_id=x, repo='org/repo') for x in 'abc']
+        self.assertEqual([t['instance_id'] for t in gold.pending_tasks(tasks, results)], ['c'])
+
+    def test_last_completed_duplicate_wins(self):
+        rows = [result(resolved=False), result()]
+        results = gold.finished_results('\n'.join(map(json.dumps, rows)) + '\n')
+        self.assertTrue(results['a']['resolved'])
+        self.assertEqual(len(results), 1)
+
+    def test_partial_tail_repaired_and_append_survives_second_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'results.jsonl'
+            complete = json.dumps(result()) + '\n'
+            path.write_text(complete + '{"instance_id": "unfinished')
+            self.assertEqual(set(gold.resume_journal(path)), {'a'})
+            self.assertEqual(path.read_text(), complete)
+            with path.open('a') as stream:
+                stream.write(json.dumps(result('b')) + '\n')
+            self.assertEqual(set(gold.resume_journal(path)), {'a', 'b'})
+
+    def test_complete_last_record_without_newline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'results.jsonl'
+            path.write_text(json.dumps(result()))
+            self.assertEqual(set(gold.resume_journal(path)), {'a'})
+            self.assertTrue(path.read_text().endswith('\n'))
+
+    def test_missing_file_and_empty_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(gold.resume_journal(Path(directory) / 'absent'), {})
+        self.assertEqual(gold.finished_results(''), {})
+
+    def test_corruption_is_not_silently_dropped(self):
+        for text in ('bad\n', 'bad\n' + json.dumps(result()), '{}\n',
+                     json.dumps(dict(result(), duration_seconds=float('nan'))) + '\n'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                gold.finished_results(text)
+
+    def test_inventory_mismatch_and_duplicate_ids(self):
+        tasks = [dict(instance_id='a', repo='org/repo')]
+        for inventory, results in ((tasks * 2, {}), (tasks, {'b': result('b')}),
+                                   (tasks, {'a': result(repo='wrong/repo')})):
+            with self.assertRaises(ValueError):
+                gold.pending_tasks(inventory, results)
+
+
+exec
+/bin/bash -lc "sed -n '355,410p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py; rg -n 'start\\(|start_async|SubprocessManager' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+        # -------------------------------------------------------------------
+        context.set_phase('Verifying')
+        context.set_activity('Running test suite...')
+
+        verify_kwargs: dict[str, Any] = {
+            'agent_patch': agent_patch,
+            'agent_error': agent_error,
+            'trace': trace,
+            'start_time': start_time,
+        }
+        verify_sig = inspect.signature(verify_task)
+        if 'base_snapshot_path' in verify_sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in verify_sig.parameters.values()
+        ):
+            verify_kwargs['base_snapshot_path'] = base_snapshot_path
+            verify_kwargs['patch_path'] = patch_path
+
+        res = await verify_task(
+            self.docker,
+            self.config,
+            task,
+            snapshot_path,
+            **verify_kwargs,
+        )
+        llm_calls = context.llm_calls_used
+        res.total_llm_calls = llm_calls
+        res.tool_calls = context.tool_calls_used
+        res.task_index = task_index
+        if dashboard is not None and slot_id is not None:
+            dashboard.task_completed(
+                slot_id,
+                res.resolved,
+                res.duration_seconds,
+                res.error,
+                agent_duration=context.agent_elapsed_seconds if context else None,
+            )
+        return res
+
+    async def run(self) -> EvaluationResult:
+        """Run evaluation across all configured tasks."""
+        tasks = [
+            self._hydrate_task_from_secret(t)
+            for t in load_tasks(self.config.tasks_path)
+        ]
+        if self.config.task_ids:
+            task_set = set(self.config.task_ids)
+            tasks = [t for t in tasks if t.instance_id in task_set]
+
+        if self.config.num_shards and self.config.num_shards > 0:
+            shard_idx = self.config.shard_index or 0
+            tasks = [
+                t
+                for idx, t in enumerate(tasks)
+                if idx % self.config.num_shards == shard_idx
+            ]
+            logger.info(
+384:    eval_id = await sandbox_start(docker)
+657:                'SubprocessManager',
+
+ exited 1 in 16854ms:
+.......................s............................................ [ 15%]
+.........F.............................................................. [ 31%]
+........................................................................ [ 48%]
+........................................................................ [ 64%]
+........................................................................ [ 80%]
+......................................................s................. [ 97%]
+........ss..                                                             [100%]
+=================================== FAILURES ===================================
+________________ test_memguard_kills_job_tree_and_spares_dummy _________________
+
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-18/test_memguard_kills_job_tree_a0')
+
+    def test_memguard_kills_job_tree_and_spares_dummy(tmp_path):
+        marker = "GEMMA_MGTEST_" + uuid.uuid4().hex[:8]
+        root = tmp_path / "jobcwd"; root.mkdir()
+        rcfile = tmp_path / "rc"; log = tmp_path / "memguard.log"
+        env_clean = {k: v for k, v in os.environ.items() if not k.startswith("GEMMA_MGTEST_")}
+    
+        dummy = subprocess.Popen([sys.executable, "-c", ALLOC], cwd="/", env=env_clean)
+        job = subprocess.Popen(
+            ["bash", "-c", f'{sys.executable} -c "$CHILD_SRC"; echo $? > {rcfile}'],
+            cwd=root, env={**env_clean, marker: "test", "CHILD_SRC": CHILD})
+        mg = None
+        try:
+            time.sleep(3.0)  # dummy reaches ~1.2G; job grandchild is ramping
+            pids = [job.pid] + tree(job.pid)
+            assert len(pids) >= 3, f"synthetic tree not built: {pids}"
+            mg = subprocess.Popen(
+                [sys.executable, str(MG), "--marker", marker, "--max-total", "0.8", "--min-available", "0",
+                 "--unmarked-rss", "0.5", "--interval", "0.5", "--roots", str(tmp_path),
+                 "--log", str(log), "--no-mail"], env=env_clean,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = time.time() + 30
+            while time.time() < deadline and "survivors=" not in (log.read_text() if log.exists() else ""):
+                time.sleep(0.5)
+            text = log.read_text()
+            assert "KILL" in text and "survivors=[]" in text, text
+            job.wait(timeout=10)
+            for p in pids:
+                assert not alive(p), f"survivor {p}"
+            assert rcfile.read_text().strip() == "137"
+            assert alive(dummy.pid), "dummy non-target was killed"
+>           assert Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip() == "0"
+E           AssertionError: assert '1000' == '0'
+E             
+E             - 0
+E             + 1000
+
+eval/tests/test_memguard.py:82: AssertionError
+----------------------------- Captured stderr call -----------------------------
+bash: line 1:    57 Killed                  /home/ubuntu/gemma-local/venv/bin/python3 -c "$CHILD_SRC"
+=========================== short test summary info ============================
+FAILED eval/tests/test_memguard.py::test_memguard_kills_job_tree_and_spares_dummy
+1 failed, 435 passed, 4 skipped, 4 subtests passed in 15.21s
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/tests/test_agent_timing.py');s=p.read_text().replace('def test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch):', \"@pytest.mark.parametrize('setup_rc', [0, 7])\\ndef test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch, setup_rc):\")
+s=s.replace(\"exit_code=7 if '/tmp/setup.py' in command else 0\", \"exit_code=setup_rc if '/tmp/setup.py' in command else 0\")
+s=s.replace(\"    assert current['setup_failed']\\n    assert current['setup_calls'][-1]['rc'] == 7\", \"    assert current['setup_failed'] == bool(setup_rc)\\n    assert current['setup_calls'][-1]['rc'] == setup_rc\")
+s += '''\\n\\ndef test_gold_single_file_staging_still_compiles(tmp_path):
+    generated = tmp_path / 'gold.py'
+    load('stage_kernel').stage_kernel(generated)
+    compile(generated.read_text(), str(generated), 'exec')
+    assert '_shared_env = types.ModuleType' in generated.read_text()
+    assert '# BEGIN SHARED ENV IMPORT' not in generated.read_text()
+'''
+p.write_text(s)
+PY
+/home/ubuntu/gemma-local/venv/bin/python3 -c \"import sys;sys.path.append('/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages');import pytest;raise SystemExit(pytest.main(['-q','eval/tests']))\"" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ exited 1 in 16737ms:
+.........................s.......................................... [ 15%]
+...........F............................................................ [ 31%]
+........................................................................ [ 47%]
+........................................................................ [ 64%]
+........................................................................ [ 80%]
+........................................................s............... [ 96%]
+..........ss..                                                           [100%]
+=================================== FAILURES ===================================
+________________ test_memguard_kills_job_tree_and_spares_dummy _________________
+
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-19/test_memguard_kills_job_tree_a0')
+
+    def test_memguard_kills_job_tree_and_spares_dummy(tmp_path):
+        marker = "GEMMA_MGTEST_" + uuid.uuid4().hex[:8]
+        root = tmp_path / "jobcwd"; root.mkdir()
+        rcfile = tmp_path / "rc"; log = tmp_path / "memguard.log"
+        env_clean = {k: v for k, v in os.environ.items() if not k.startswith("GEMMA_MGTEST_")}
+    
+        dummy = subprocess.Popen([sys.executable, "-c", ALLOC], cwd="/", env=env_clean)
+        job = subprocess.Popen(
+            ["bash", "-c", f'{sys.executable} -c "$CHILD_SRC"; echo $? > {rcfile}'],
+            cwd=root, env={**env_clean, marker: "test", "CHILD_SRC": CHILD})
+        mg = None
+        try:
+            time.sleep(3.0)  # dummy reaches ~1.2G; job grandchild is ramping
+            pids = [job.pid] + tree(job.pid)
+            assert len(pids) >= 3, f"synthetic tree not built: {pids}"
+            mg = subprocess.Popen(
+                [sys.executable, str(MG), "--marker", marker, "--max-total", "0.8", "--min-available", "0",
+                 "--unmarked-rss", "0.5", "--interval", "0.5", "--roots", str(tmp_path),
+                 "--log", str(log), "--no-mail"], env=env_clean,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = time.time() + 30
+            while time.time() < deadline and "survivors=" not in (log.read_text() if log.exists() else ""):
+                time.sleep(0.5)
+            text = log.read_text()
+            assert "KILL" in text and "survivors=[]" in text, text
+            job.wait(timeout=10)
+            for p in pids:
+                assert not alive(p), f"survivor {p}"
+            assert rcfile.read_text().strip() == "137"
+            assert alive(dummy.pid), "dummy non-target was killed"
+>           assert Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip() == "0"
+E           AssertionError: assert '1000' == '0'
+E             
+E             - 0
+E             + 1000
+
+eval/tests/test_memguard.py:82: AssertionError
+----------------------------- Captured stderr call -----------------------------
+bash: line 1:    57 Killed                  /home/ubuntu/gemma-local/venv/bin/python3 -c "$CHILD_SRC"
+=========================== short test summary info ============================
+FAILED eval/tests/test_memguard.py::test_memguard_kills_job_tree_and_spares_dummy
+1 failed, 437 passed, 4 skipped, 4 subtests passed in 15.08s
+
+exec
+/bin/bash -lc 'git diff --check; git diff --numstat; git status --short' in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+135	16	eval/kaggle/agent_timing.py
+88	0	eval/tests/test_agent_timing.py
+ M eval/kaggle/agent_timing.py
+ M eval/tests/test_agent_timing.py
+?? eval/repro/plan003_kernel_setup.py
+
+codex
+The final offline suite reports 437 passed, 4 skipped, and the same single memguard failure. Both single-file staging paths compile, and tests cover wheel ABI selection, the PIP_* command prefix, bounded output, and continuing after setup.py returns a nonzero exit code. I’m recording the blocked acceptance result and missing-wheel prerequisites for follow-up.
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+import json
+from pathlib import Path
+result = json.loads(Path('/tmp/plan003-kernel-acceptance.json').read_text())
+result.update(_schema='plan003_kernel_setup_acceptance_v1',
+    script='eval/repro/plan003_kernel_setup.py',
+    local_data_dir='/home/ubuntu/work/gemma/data/raw',
+    task_ids=['rich_3006', 'fastapi_14986'],
+    setup_durations_s=None,
+    wheelhouse_preflight=dict(missing=['pip', 'pytest-timeout==2.1.0'],
+        note='The local data/raw/wheels directory lacks these required wheels; no downloads attempted.'),
+    tests=dict(command=\"/home/ubuntu/gemma-local/venv/bin/python3 -c \\\"import sys;sys.path.append('/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages');import pytest;raise SystemExit(pytest.main(['-q','eval/tests']))\\\"\",
+        passed=437, skipped=4, failed=1, subtests_passed=4,
+        failure='test_memguard_kills_job_tree_and_spares_dummy: dummy oom_score_adj was 1000; expected 0',
+        note='Resetting the test launcher oom_score_adj to 0 did not remove this failure.'))
+Path('results/plan003_kernel_setup_acceptance.json').write_text(json.dumps(result, indent=2)+'\\n')
+PY
+ git diff --check; git status --short" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+ M eval/kaggle/agent_timing.py
+ M eval/tests/test_agent_timing.py
+?? eval/repro/plan003_kernel_setup.py
+?? results/plan003_kernel_setup_acceptance.json
+
+exec
+/bin/bash -lc "sed -n '152,225p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py; sed -n '65,110p' eval/kaggle/gold_calibration.py; git diff -- eval/kaggle/agent_timing.py | tail -65" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+    def copy_to(
+        self,
+        src_or_sandbox: str | Path,
+        dst_or_src: str | Path,
+        dst: str | Path | None = None,
+    ) -> None:
+        """Copy a file or directory into the sandbox.
+
+        Supports both BaseSandbox 2-argument signature:
+            copy_to(host_path, container_path)
+        and legacy manager 3-argument signature:
+            copy_to(sandbox_id, src, dst)
+        """
+        if dst is not None:
+            sandbox_id = str(src_or_sandbox)
+            src = Path(dst_or_src)
+            target_dst = str(dst)
+            self._copy_to_sandbox(sandbox_id, src, target_dst)
+        else:
+            if self._default_sandbox_id is None:
+                self.initialize()
+            assert self._default_sandbox_id is not None
+            host_p = Path(src_or_sandbox)
+            target_dst = str(dst_or_src)
+            self._copy_to_sandbox(self._default_sandbox_id, host_p, target_dst)
+
+    def _copy_to_sandbox(self, sandbox_id: str, src: Path, dst: str) -> None:
+        if not src.exists():
+            raise FileNotFoundError(f'Source path {src} does not exist')
+        with self._lock:
+            if sandbox_id not in self._sandboxes:
+                raise ValueError(f'Unknown sandbox_id: {sandbox_id}')
+            paths = dict(self._sandboxes[sandbox_id])
+        root_dir = paths['root'].resolve()
+
+        if dst in ('/tmp/', '/tmp'):
+            target_dest = paths['tmp'] / src.name
+        elif dst.startswith('/tmp/'):
+            rel = dst[len('/tmp/') :]
+            target_dest = paths['tmp'] / rel
+        elif dst in ('/workspace/', '/workspace'):
+            target_dest = paths['workspace'] / src.name
+        elif dst.startswith('/workspace/'):
+            rel = dst[len('/workspace/') :]
+            target_dest = paths['workspace'] / rel
+        elif dst in ('/wheels/', '/wheels'):
+            target_dest = paths['wheels'] / src.name
+        elif dst.startswith('/wheels/'):
+            rel = dst[len('/wheels/') :]
+            target_dest = paths['wheels'] / rel
+        elif dst in ('/usr/local/bin/', '/usr/local/bin'):
+            target_dest = paths['venv'] / 'bin' / src.name
+        elif dst.startswith('/usr/local/bin/'):
+            rel = dst[len('/usr/local/bin/') :]
+            target_dest = paths['venv'] / 'bin' / rel
+        elif not posixpath.isabs(dst):
+            target_dest = paths['workspace'] / dst
+        else:
+            rel = dst.lstrip('/')
+            target_dest = paths['root'] / rel
+
+        if src.is_file() and (
+            target_dest.is_dir()
+            or (
+                dst.endswith('/')
+                and dst not in ('/tmp/', '/workspace/', '/wheels/', '/usr/local/bin/')
+            )
+        ):
+            target_dest = target_dest / src.name
+
+        target_resolved = target_dest.resolve()
+        if not target_resolved.is_relative_to(root_dir):
+            raise ValueError(
+                f"Path traversal detected: destination '{dst}' escapes sandbox root '{root_dir}'"
+
+def summarize(tasks, results):
+    """Aggregate every input task, including failures and unfinished attempts."""
+    pending = pending_tasks(tasks, results)
+    if os.environ.get('GOLD_LIMIT'):  # smoke runs only: first task of each repo
+        seen = set(); pending = [t for t in pending if not (t['repo'] in seen or seen.add(t['repo']))]
+    repos = {}
+    passing, failing = [], []
+    for task in tasks:
+        task_id = task['instance_id']
+        counts = repos.setdefault(task['repo'], dict(total=0, finished=0, passed=0, failed=0, pending=0))
+        counts['total'] += 1
+        row = results.get(task_id)
+        if row is None:
+            counts['pending'] += 1
+            continue
+        counts['finished'] += 1
+        if row['resolved']:
+            counts['passed'] += 1
+            passing.append(task_id)
+        else:
+            counts['failed'] += 1
+            reason = row['error'] or f"verification unresolved (exit_code={row['exit_code']})"
+            failing.append({'instance_id': task_id, 'reason': reason[:200]})
+    passing.sort()
+    return dict(total=len(tasks), finished=len(results), passed=len(passing),
+                failed=len(failing), pending=len(pending), concurrency=CONCURRENCY,
+                timing_note='Concurrent calibration durations are not scorer timing measurements.',
+                per_repo=dict(sorted(repos.items())), passing_ids=passing,
+                failing_ids=sorted(failing, key=lambda row: row['instance_id']),
+                pending_ids=sorted(task['instance_id'] for task in pending))
+
+
+def resume_journal(path):
+    """Repair only an interrupted final append, preserving all complete records."""
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding='utf-8')
+    results = finished_results(text)
+    if text and not text.endswith('\n'):
+        try:
+            json.loads(text.splitlines()[-1])
+        except json.JSONDecodeError:
+            # Remove an incomplete tail before further appends. No completed row is lost.
+            with path.open('r+b') as stream:
+                stream.truncate(len(text[:text.rfind('\n') + 1].encode('utf-8')))
++                ' '.join(shlex.quote(n) for n in tools), timeout=60)
++        result = setup_step(current, 'tool_install', install_tools)
++        if result.exit_code != 0:
++            raise RuntimeError('Offline scorer tool installation failed')
++        def run_setup():
++            docker.copy_to(container_id, setup, '/tmp/setup.py')
++            return docker.exec(container_id, setup_command(repo, fast_path), timeout=280)
++        setup_step(current, 'setup.py', run_setup)
++        return current
++    install._timing_original = orig
+     for name, module in list(sys.modules.items()):
+         if name.startswith('swegemma.') and hasattr(module, 'install_test_dependencies'):
+             module.install_test_dependencies = install
++    return install
+ 
+ def classify_patch(patch, repo, protected=None, test_targets=()):
+     """Parse file headers outside hunks, including quoted paths and renames."""
+@@ -253,15 +369,17 @@ async def evaluate(config, journal, started, caps, totals):
+         inventory = {t.instance_id: t for t in load_tasks(config.tasks_path)}
+         if len(set(TASK_IDS)) != len(TASK_IDS) or set(TASK_IDS) - inventory.keys():
+             raise ValueError('Duplicate or missing task IDs')
+-        patch_subprocess_deps(DATA)
++        patch_subprocess_deps(DATA, state)
+         for iid in TASK_IDS:
+             if should_stop(time.monotonic()-started, caps['max_time_minutes'], caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
+                 append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+                 break
+             task = dataclasses.replace(inventory[iid], patch='')
+-            times = dict(verification=0.0)
++            times = dict(verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+             state.set(times)
+             evaluator, result, error = TimingEvaluator(config), None, None
++            original_start = evaluator.docker.start
++            evaluator.docker.start = lambda: setup_step(times, 'venv', original_start)
+             start = time.perf_counter()
+             try:
+                 result = await evaluator.evaluate_task(task)
+@@ -285,7 +403,8 @@ async def evaluate(config, journal, started, caps, totals):
+             raw_error = (result.error or '') if result else error or ''
+             try:
+               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+-                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=None,
++                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
++                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                 llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
+                 tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
+                 completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
+@@ -294,7 +413,7 @@ async def evaluate(config, journal, started, caps, totals):
+             except Exception as exc:
+                 append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+                                      wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+-                                     error='Row build exception (' + type(exc).__name__ + ')'))
++                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'], error='Row build exception (' + type(exc).__name__ + ')'))
+             raw = WORK / 'runs' / iid
+             raw.mkdir(parents=True, exist_ok=True)
+             (raw / 'agent.patch').write_text(patch)
+@@ -354,7 +473,7 @@ def main():
+                       bundle_sha256=None, agent_yaml_sha256=None, gpu_names=[], gpu_count=0,
+                       mcp_import_ok=None, vllm_startup_seconds=None,
+                       fields=dict(instance_id='Task ID', repo='Repository', wall_seconds='Agent (including setup), verification, total wall seconds',
+-                          sandbox_setup_seconds='Null: not separable', resolved='Harness verdict', exit_code='Verification exit code or null',
++                          sandbox_setup_seconds='Sum of measured setup steps', setup_calls='Bounded setup command timings/output', setup_failed='Any setup failure', resolved='Harness verdict', exit_code='Verification exit code or null',
+                           error='Sanitized failure category or null', llm_turns='LLM calls or null', tool_calls='Total and per_tool requests',
+                           tool_seconds='Per-tool n,total,max call->response seconds, FIFO per name', test_run='Test requests n, matched total_seconds, share_of_agent_seconds',
+                           prompt_tokens='Trace usage or null', completion_tokens='Trace usage or null', completion_tokens_per_second='Completion usage / agent seconds or null',
+
+codex
+Implemented in [agent_timing.py](/home/ubuntu/work/gemma-wt/codex-kernel-setup-fix/eval/kaggle/agent_timing.py): sandbox-compatible wheel selection, offline pip bootstrap and scorer tools, explicit PIP_* prefixes, and bounded per-task setup records. setup.py failures are recorded without stopping the run. Single-file staging and the starter image pin remain intact.
+
+Test output: **437 passed, 4 skipped, 1 failed**. The unrelated memguard test observes `oom_score_adj=1000` where it expects `0`.
+
+Open issues: the local wheelhouse lacks pip and pytest-timeout wheels. Added an [offline acceptance script](/home/ubuntu/work/gemma-wt/codex-kernel-setup-fix/eval/repro/plan003_kernel_setup.py) and [validation result](/home/ubuntu/work/gemma-wt/codex-kernel-setup-fix/results/plan003_kernel_setup_acceptance.json).
+
+Sandbox prevented: bubblewrap network namespace creation failed with `Operation not permitted`. Neither task started, so per-step setup durations and the <30-second acceptance remain unverified. No protected paths were modified; no commit was run.
+tokens used
+71,846

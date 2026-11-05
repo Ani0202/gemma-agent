@@ -116,3 +116,6 @@
 2026-11-05T18:10Z | dec 026 read: already satisfied (v2 combined diff under review; linger-off lines already removed in cycle 66) | ops/decisions/026-20261105T180404-9575-from-builder.md
 2026-11-05T18:15Z | dec 027: option B approved with the fidelity rule (no PIP prefix) and the stress-margin ship-cap rule; plan 004 + id lists pre-registered; follow-up kernel spec written | ops/decisions/027-004-setup-210s-root-cause.md, eval/plans/004.md, ops/codex/build-kernel-setup-check.spec
 2026-11-05T18:12Z | dec 027 item 6: codex-ask scoping of the dec 022 item 4 levers | ops/jobs/ask-item4-light.log
+2026-11-05T18:14Z | review owner patch v2: 3 BLOCKING (regex marker, pid reuse, legacy records); v3 deferred (low urgency, dec 026) | ops/codex/review-20261105T180811.md
+2026-11-05T18:14Z | review memguard-fix: 2 BLOCKING (GEMMA_JOB_ID grouping, eligibility revalidation); round 2 launched | ops/codex/review-20261105T180810.md, ops/codex/build-memguard-fix2.spec
+2026-11-05T18:15Z | sandbox-limits round 2: Codex 453 pass, but on this host 7 FAIL (peak_rss 0 for short cmds); round 3 launched | ops/codex/build-sandbox-limits2.md, ops/codex/build-sandbox-limits3.spec
