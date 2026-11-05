@@ -195,3 +195,4 @@
 2026-11-05T23:12:53Z | gate-a finalization fix on codex/kernel-gate-finfix e02666f (109 tests pass; v5 unchanged 7/8); delta review queued review-kernel-gate-finfix-light | ops/codex/review-kernel-gate-finfix.sh
 2026-11-05T23:17:37Z | dec 040 SUBMIT authorized; bin/kaggle-submit file mode -> 400 Bad Request (code competition); nothing logged, auth unused | ops/decisions/040-20261105T231112-18464-from-builder.md
 2026-11-05T23:17:37Z | dec 041: kernel route approved; kernel aniket0202/gemma-submit-e4b v1 COMPLETE, output sha = 60c0...4dad; guard edit DENIED by permission classifier -> patch + light review | ops/decisions/041-20261105T231423-10830-from-builder.md ops/patches/kaggle-submit-kernel.diff
+2026-11-05T23:19:34Z | guard review v1: 3 BLOCKING -> patch v2 (lock, ref-positive success, pending marker, day recheck, JSON); 9 offline mock tests pass; re-review review-submit-guard2-light | ops/codex/review-20261105T231632.md ops/patches/kaggle-submit-kernel.diff

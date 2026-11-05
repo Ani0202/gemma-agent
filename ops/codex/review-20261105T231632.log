@@ -1578,3 +1578,23 @@ exec
 2:SUBMIT: AUTHORIZE sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad track=e4b bundle=dist/e4b-v002.zip
 eval/kaggle/submit_kernel/stage.py
 
+codex
+1. **BLOCKING — Exit 0 with an error consumes the authorization and daily slot.** The submit command’s exit status is the only success check before appending the ledger ([patch:32–41](ops/patches/kaggle-submit-kernel.diff:32)). The installed CLI returns arbitrary response messages normally; it raises for one specific upload-failure message ([CLI API:2344](../../.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:2344), [2367](../../.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:2367)). An offline probe returned `ERROR: submission rejected` without raising, and the mocked guard appended its success record. Require positive acceptance evidence, preferably a submission reference, before recording success.
+   
+   A definite rejection with **non-zero exit** stops under `set -e` and adds no record. However, a connection failure after server acceptance also leaves no record; that ambiguous outcome needs reconciliation before permitting a retry.
+
+2. **BLOCKING — Concurrent calls bypass single use and one-per-day refusals.** Inherited from HEAD: both calls can pass the ledger checks before either submits or appends ([bin/kaggle-submit:14](bin/kaggle-submit:14)). The new download widens that interval ([patch:25](ops/patches/kaggle-submit-kernel.diff:25)). Two simultaneous invocations can therefore submit the same authorization twice. Hold an exclusive lock from ledger checks through submission and recording, with ambiguous attempts preventing automatic retries.
+
+3. **BLOCKING — Crossing midnight records the wrong submission day.** Also inherited: `today` is captured before downloading and submitting ([bin/kaggle-submit:16](bin/kaggle-submit:16)), then reused in the record ([patch:41](ops/patches/kaggle-submit-kernel.diff:41)). A call checked on Nov 5 but accepted on Nov 6 records Nov 5, allowing another Nov 6 submission. Recheck the UTC day immediately before submission under the lock and record the acceptance day.
+
+**NON-BLOCKING findings**
+
+- **Artifact binding looks correct for a valid positive version running the supplied kernel source.** Download uses `owner/slug/N`; submission uses the same slug and `-v N`, with exactly `-f submission.zip` ([patch:25–32](ops/patches/kaggle-submit-kernel.diff:25)). The downloaded bytes must match the authorized SHA and pass root/size checks. A newer push or modification of the local downloaded file does not change that pinned server version. The generated script decodes fixed embedded bytes and checks their SHA before writing, so rerunning this source reproduces the zip ([stage.py:13–20](eval/kaggle/submit_kernel/stage.py:13)). I found no artifact mismatch through those paths. Latest-version enforcement is unnecessary with the supplied version-aware CLI.
+
+- **Ledger serialization is unsafe.** Unescaped quotes/newlines in `msg` or paths produce invalid JSONL; this is inherited ([patch:40–41](ops/patches/kaggle-submit-kernel.diff:40)). Newly accepted version strings such as `01` would also produce an invalid JSON number if submission succeeds ([patch:21](ops/patches/kaggle-submit-kernel.diff:21), [33](ops/patches/kaggle-submit-kernel.diff:33)). Use a JSON serializer and require a canonical positive version integer.
+
+**Questions:** None.
+
+Validation: reconstructed the patched script in memory; `bash -n` passed. Ran offline CLI/error-handling probes. No files edited and no Kaggle requests made.
+tokens used
+34,720
