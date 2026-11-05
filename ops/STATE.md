@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 21:13Z (cycle 92, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 21:38Z (cycle 93, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
@@ -9,7 +9,9 @@ Builder on Opus (dec 010: local-first, two-strike).
   sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad, bin/pack PASS, load check OK
   (results/bundle_load_check_e4b_v002.json: 8192/8192, 60 s). SUBMIT conditions (dec 032 item 3): (i) done; (ii) v002 review
   (review-e4b-v002-light, 23:09Z) no BLOCKING; (iii) fix5c review clean or BLOCKING = summary/gate-only; (iv) diff = item 1 (yes).
-  All hold -> send SUBMIT dist/e4b-v002.zip sha256=60c0...4dad track=e4b + both review links. Slot cutoff ~23:45Z else Nov 6.
+  All hold -> send SUBMIT dist/e4b-v002.zip sha256=60c0...4dad track=e4b + both review links (dec 033: Director authorizes at once).
+  Slot cutoff ~23:45Z else Nov 6. Cap derivation for the SUBMIT mail (dec 033 item 2): overrun F = 7 s (5 s floor execution.py:37
+  + killpg), worst = 60+7+221.6 = 288.6 s -> 631 min <= 660; post-cap fallback git 60 s default timeout = unmeasured tail.
 - No local pass-rate scores yet. eval-runner-fix MERGED to main 70c0d9f (codex review clean + N1 count-cap fix d13ceac; 421 pass, 3 skip).
   Test cmd: /home/ubuntu/gemma-local/venv/bin/python3 with pyimg cp3.13 site-packages appended to sys.path, pytest eval/tests.
 ## Eval data
@@ -57,7 +59,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 ## Timing facts (results/kaggle_timing_e4b_v000_setup.json)
 - Harness sandbox setup ~210 s/task, outside max_time_minutes (the budget clock starts after setup); flat across repos.
 - vLLM startup 5.39 min; verification ~410 s (excluded from the 12 h). Agent clock p90 144 s at cap 5.
-- Corrected rule proposed: (cap + max setup) x125 + 30 <= 660 -> cap <= 1.51 min.
 
 ## Open decisions / instructions in force
 - Dec 022 (report 003): interim timing rule = (cap + max measured setup) x125 + 30 <= 660. Item 2 setup root-cause IN PROGRESS (ask-setup-210s + scout). Item 3: v001 (cap 1.4) may be built/packed now, but the re-time can't be pushed until item 2 concludes; ONE Kaggle timing run. Item 4 (truncation-safe diff, patch hygiene, tool-output trimming) to start. Item 5: no 31B timing yet. Report 004 next.
@@ -66,13 +67,14 @@ Builder on Opus (dec 010: local-first, two-strike).
 ## Dec 032 open items
 - Item 5: add note field to results/kaggle_timing_e4b_v001.json ("decision" = legacy projection, not the gate); NO value changes;
   bundle with the next reviewed timing_summary change. NOT done yet.
-- Item 6 DONE: results/setup_py_cause_v5.json (task-1 = enumeration luck; fallback 200.7 s constant; docker network_mode='none'
-  default -> likely ~8 s on scorer, unverified). FYI sent to Director 21:10Z.
-- Item 7 next after SUBMIT request: plan 006 addendum, 31B cap by total-Phase-1 rule (cap <= 1.325 min with S 221.6 + F 1.32;
-  propose 1.0; flag that 60 s on 31B is ~useless for quality, so item 6's scorer-network question is the big lever).
+- Item 6 DONE (dec 032): results/setup_py_cause_v5.json (fallback 200.7 s constant; superseded by report 009).
+- Item 7: plan 006 addendum DONE (see Report 009 section); build + push next.
 - Item 8 after that: dec 022 item 4 empty-patch protection via codex-build.
-- Director's adversarial codex-ask (21:05Z) failed on the Codex limit; told Director.
+## Report 009 (NEEDS_DECISION, dec 033 item 3): scorer setup path. Verdict S_scorer likely <= ~16 s (subprocess, setup.py
+  skipped; p~0.6), H2 Docker air-gapped ~25-30 s (p~0.25), ~216 s (p~0.15). Forum question drafted (escalate). Phase 2
+  excluded: CONFIRMED verbatim. Caps unchanged until the Director rules. Plan 006 addendum written (cap 1.0 + P1-P3 probes; 31b-v001
+  also gets max_output_tokens 8192). Local stock-path S 2.2-4.9 s: results/stock_subprocess_setup_local.json.
 ## Next 3
 1. 23:08Z fix5c review + 23:09Z v002 review -> evaluate (ii)/(iii) -> SUBMIT follow-up to Director (before ~23:45Z if possible).
 2. fix5c clean: merge branch, host eval/tests. Then memguard-fix6d review (auto after fix5c+v002) -> merge + deploy memguard-light.
-3. Plan 006 addendum (31B cap) -> push 31B timing (<= 4 quota-h, pre-approved).
+3. Build 31b-v001 + kernel P1-P3 probes (codex-build after the reviews) -> codex-review -> push plan 006 (<= 4 quota-h).

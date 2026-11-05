@@ -14,4 +14,3 @@ zip sha256: 60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
 - packed 2026-11-05T21:06Z with bin/pack (PASS, 6462 unpacked bytes, zip 4152 bytes): dist/e4b-v002.zip
 - load check (dec 032 item 2): results/bundle_load_check_e4b_v002.json via eval/checks/bundle_load_check.py (real adk_submission compile_submission + swegemma constraints/EvalConfig): swe_baseline_agent 8192, code_analyzer_agent 8192 (v001 control: 16384/16384); budget time 1.0 min -> session timeout 60.0 s (v001 control 84.0 s).
 - review: light Codex review queued (job review-e4b-v002-light, 23:09Z after the Codex limit reset).
-zip sha256: 60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad

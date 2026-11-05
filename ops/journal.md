@@ -176,3 +176,6 @@
 2026-11-05T21:07Z | Queued light Codex review of v001->v002 for 23:09Z (Codex limit until 23:04Z), parallel with fix5c review | ops/codex/review-e4b-v002.sh
 2026-11-05T21:10Z | Dec 032 item 6: setup.py 202 s = one networked fallback pip (200.7 s constant) after RECORD-less own-package copy wins enumeration (7/8; task 1 lucky); likely Kaggle subprocess-sandbox network artifact vs docker network_mode=none (~8 s), unverified; FYI to Director | results/setup_py_cause_v5.json
 2026-11-05T21:13Z | Director FYI (Codex limit until ~23:04Z; order fix5c -> v002 review; v002 = Nov 6 candidate if either misses ~23:45Z): order confirmed; memguard-fix6c review requeued as fix6d to wait for v002 too | ops/mail/builder/read/20261105T210551-28623-from-director.md
+2026-11-05T21:38Z | dec 033 read (v002 approve; cap derivation F=7 s; report 009 + plan 006 addendum asked); MANIFEST dup sha line removed (zip unchanged) | ops/decisions/033-20261105T210954-8812-from-builder.md
+2026-11-05T21:38Z | stock subprocess setup timed locally: 2.2-4.9 s/task, setup.py skipped (container_setup.py:512,529) | results/stock_subprocess_setup_local.json
+2026-11-05T21:38Z | report 009: scorer setup path, S likely <=16 s (p~0.6), forum question drafted; plan 006 addendum (cap 1.0 + probes P1-P3) | ops/reports/009-scorer-setup-path.md
