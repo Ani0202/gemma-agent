@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 19:18Z (cycle 80, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 19:27Z (cycle 81, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -18,14 +18,24 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
-## Running jobs (19:18Z)
+## Running jobs (19:27Z)
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
-- kernel-setup-accept-r4 DONE (status failed = acceptance gate, not a crash): results/plan003_kernel_setup_acceptance_r4local.json (worktree). Docker order (SETUP_FIX=1): rich_3006 editable rc 1, 5 Retrying (base tar re-injects rich-15.0.0 dist-info, record_exists false, over the 13.4.2 editable); fastapi_14986 rc 0, 0 Retrying (0.132.0 with RECORD seen). SETUP_FIX=0: both fail.
-- Builder reading: the REAL harness causes it: swegemma container_setup.py:266 strips '/RECORD' from injected wheels, base set includes the task's own package (skip set only pytest/pip/...), injection runs after install_editable_package. -> likely dec 027 2a STOP (S~210 s = scorer property). fastapi pass may be dist-info ordering luck.
-- review-kernel-setup4-light DONE (ops/codex/review-20261105T190713.md): RECORD-strip hazard SUPPORTED (STOP threshold met); 'S~210 s scorer property' NOT SUPPORTED (local = 1 fallback, ~8 s); sandbox_env.py not Docker-faithful (BLOCKING for eval/). Keep interim rule; v001 cap 1.4 passes both. -> report ops/reports/005-prelim-2a-cause-harness-record-strip.md NEEDS_DECISION (rec: A = one L4x4 re-time of v001 with setup_calls logging).
-- memguard-fix5 review (ops/codex/review-20261105T191246.md): 2 BLOCKING (bare-name/relative symlink watchdog evades detection; bin/job wrappers still signalable). Round 6 job codex-memguard-fix6 RUNNING (worktree reset onto 652f2cd; spec ops/codex/build-memguard-fix6.spec: inode-identity detection + fail closed, permanent wrapper exclusion). Then host livetest + review; no BLOCKING -> merge + deploy (stop 7933, start memguard-light at once). If round 6 still BLOCKING: stop iterating, write a short report (old memguard 7933 works; 0 kills).
-- NOTE: bin/codex-build always branches from main HEAD; for follow-up rounds reset the new worktree onto the previous round's commit before running ops/codex/build-<name>.sh.
-- sandbox-limits r3 on main: full eval/tests on main NOT yet run (one heavy at a time). Caveats: 8 GiB AS backstop; gold_calibration worker timeout lacks descendant cleanup.
+- DEC 028 (report 005-prelim, option A APPROVED): 2a STOP met; artifact branch closed, 2b moot, no v000 re-time. CPU 2a dropped.
+  Item 1-3: codex-kernel-setup-fix5 RUNNING (branch codex/kernel-setup-fix5 on round-4 c4c9528; spec ops/codex/build-kernel-setup-fix5.spec):
+  SKIP_VERIFICATION, asyncio.timeout proxy (agent clock + fired), sandbox_start/stop/exec wrappers (finalization, teardown,
+  TOTAL Phase-1 wall), vLLM startup in header, timing_summary gate lines. Then ONE codex-review of the merge diff (round 4 +
+  fix5) -> no BLOCKING -> merge -> push e4b-v001 (bundles/e4b/v001, sha256 f2ced9c9...) on 004-gpu-retime-ids, -t ~3 quota-h.
+  Gate (dec 028 item 4, pre-registered): (a) 8/8 no harness error (b) max Phase-1 <= 296 s (c) mean <= 270 s (d) vLLM <= 10 min
+  (e) >= 1 non-empty source diff. Pass -> short report 005 NEEDS_DECISION, request SUBMIT (today if < ~23:00Z). NO kaggle-submit
+  until an AUTHORIZE line exists. Fail (b)/(c) -> propose lower cap from max total wall. Report 005 also derives the v002 cap with
+  F: (cap+S+F)x125+30<=660 and (cap+F+0.875+0.75S); don't build v002 before the Director sees it.
+- Item 6: codex-sandbox-env-docker-order RUNNING (bin/codex-build from main; Docker order + wheel-set cache key + marker in
+  eval/sandbox_env.py) -> review -> merge -> full eval/tests on main.
+- codex-memguard-fix6 RUNNING (round 6; inode-identity detection + fail closed). Then host livetest + review; no BLOCKING -> merge +
+  deploy (stop 7933, start memguard-light at once). If still BLOCKING: stop iterating, short report (old memguard works).
+- Item 7: plan eval/plans/006.md pre-registered (31B timing, cap from e4b-v001 S/F, <= 4 quota-h, same 8 ids). After report 005.
+- NOTE: bin/codex-build always branches from main HEAD; for follow-up rounds create the worktree on the previous commit manually,
+  write the spec, sed the previous build-*.sh, and bin/job start codex-<name>.
 
 ## 2a DIAGNOSIS (cycle 75, local): results/plan003_kernel_setup_acceptance_r3local.json
 - CODEX CHECK (ops/codex/review-20261105T184723.md, cycle 76): RECORD-less injection -> uninstall-no-record-file -> index fallback is SUPPORTED as a harness hazard, but NOT shown for the Docker order (Docker runs an editable install BEFORE injection; existing RECORDs survive tar extraction). One fallback per setup.py call, not two. SETUP_FIX=0 'success' = contaminated control (empty cached base tar sp_base_local). -> 2a STOP not yet justified; round 4 fixes fidelity first. Report 005-prelim deferred until round-4 acceptance.
@@ -75,6 +85,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
 ## Next 3
-1. Director answer on 005-prelim -> if A: codex-review merge diff of agent_timing.py (round 4) -> push ONE L4x4 re-time of e4b-v001.
-2. codex-memguard-fix6 done -> host livetest -> codex-review -> no BLOCKING: merge, deploy; else short report (stop iterating).
-3. Fix eval/sandbox_env.py Docker order + cache key (Codex finding 2) via codex-build; full eval/tests on main; then EV-1 + cpu8 gold/null.
+1. codex-kernel-setup-fix5 done -> codex-review merge diff (round 4 + fix5) -> no BLOCKING: merge, dry-run, push e4b-v001 L4x4 re-time.
+2. Re-time result -> timing_summary gate -> report 005 (NEEDS_DECISION, SUBMIT request if pass).
+3. sandbox-env-docker-order + memguard-fix6 reviews/merges; then 31b-v001 per plan 006.

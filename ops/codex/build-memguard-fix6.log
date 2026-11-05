@@ -1703,3 +1703,1271 @@ def test_watchdog_argv_resolves_symlinks(monkeypatch, mg, tmp_path):
     alias.symlink_to(guard)
     assert mg.watchdog_argv(b"python3\0-u\0" + os.fsencode(alias) + b"\0")
 
+codex
+Both blockers are present: watchdog detection misses bare aliases, and `kill_tree()` allows wrappers to be killed after three seconds. I’ll add inode checks using the recipient’s cwd and permanently exclude verified wrappers at discovery and action time. Some older tests expect wrappers to be killed; I’ll update those expectations while retaining their fork and membership checks.
+exec
+/bin/bash -lc "sed -n '430,570p' eval/tests/test_memguard.py && rg -n 'watchdog_argv|\\{10|\\[10|\\{20|\\[20|grace' eval/tests/test_memguard.py" in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ succeeded in 0ms:
+                        ids.get(p) if marker == "GEMMA_JOB_ID" else caps.get(p))
+    targets, jobs = mg.find_jobs(world, args, set())
+    assert set(targets) == {10, 11, 12, 14}
+    assert sorted(sorted(j["pids"]) for j in jobs.values()) == [[10, 11, 14], [12]]
+
+
+def test_legacy_known_members_do_not_follow_reused_pid(monkeypatch, mg, args):
+    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+                       {10: b"cap", 11: b"cap"}, [dict(name="job", pid=10, pgid=None)])
+    job = select(mg, args)
+    world[11] = proc(11, pgid=11, starttime=999)
+    assert set(mg.inventory(job, args, set())) == {10}
+
+
+@pytest.mark.parametrize("survives", [False, True])
+def test_legacy_history_survives_new_first_member_and_temporary_node(monkeypatch, mg, args, survives):
+    records = [dict(name="job", pid=10, pgid=10)]
+    world = mock_world(monkeypatch, mg, {
+        10: proc(10), 11: proc(11, ppid=10, comm="node"),
+        12: proc(12, ppid=10), 13: proc(13, ppid=10)},
+        {p: b"cap" for p in (10, 11, 12, 13)}, records)
+    world[11] = proc(11, ppid=10)
+    _, seeded = mg.find_jobs(world, args, set())
+    world[11] = proc(11, ppid=10, comm="node")
+    _, jobs = mg.find_jobs(world, args, set(), known_jobs=seeded)  # poll 1
+    key = next(iter(jobs))
+    assert set(jobs[key]["known_members"]) == {10, 11, 12, 13}
+    del world[10]
+    world[11] = proc(11, comm="python")
+    world[13] = proc(13, comm="node")
+    _, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)  # poll 2: 11 first
+    assert jobs[key]["pids"] == [11, 12]
+    assert jobs[key]["known_members"][13] == 123
+    assert set(mg.inventory(jobs[key], args, set())) == {11, 12}
+    world[13] = proc(13, ppid=1, pgid=13)  # unchanged starttime, setsid
+    _, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)  # poll 3
+    assert set(jobs[key]["members"]) == {11, 12, 13}
+    sent = []
+
+    def kill(d, log, args, known_jobs=None):
+        assert world[d["pid"]]["comm"] != "node"
+        sent.append(d["pid"])
+        if survives and d["pid"] == 13:
+            return False
+        del world[d["pid"]]
+        return True
+
+    monkeypatch.setattr(mg, "send_kill", kill)
+    killed, survivors = mg.kill_tree(jobs[key], args, set(), lambda _: None)
+    assert killed == ([11, 12] if survives else [11, 12, 13])
+    assert survivors == ([13] if survives else [])
+    assert 13 in sent
+    assert not (13 in world and survivors == [])
+
+
+def test_legacy_history_survives_poll_with_no_eligible_members(monkeypatch, mg, args):
+    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"},
+                       [dict(name="job", pid=10, pgid=None)])
+    _, jobs = mg.find_jobs(world, args, set())
+    key = next(iter(jobs))
+    world[10] = proc(10, comm="node")
+    targets, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)
+    assert targets == {}
+    assert jobs[key]["known_members"] == {10: 123}
+    assert jobs[key]["rss"] == 0
+    world[10] = proc(10, pgid=99)
+    targets, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)
+    assert set(targets) == set(jobs[key]["members"]) == {10}
+
+
+@pytest.mark.parametrize("legacy_pgid", [None, 10])
+def test_old_legacy_and_new_job_id_watchdogs_are_never_victims(monkeypatch, mg, args, legacy_pgid):
+    import io
+    records = [dict(name="memguard", pid=10, pgid=legacy_pgid),
+               dict(name="memguard-light", pid=20, pgid=20, job_id=b"memguard-light/boot/123")]
+    world = mock_world(monkeypatch, mg, {
+        10: proc(10, comm="bash"), 11: proc(11, ppid=10),
+        20: proc(20, pgid=20, comm="bash"), 21: proc(21, ppid=20, pgid=20)},
+        {p: b"cap" for p in (10, 11, 20, 21)}, records)
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                        (b"memguard-light/boot/123" if p in {20, 21} else None)
+                        if marker == "GEMMA_JOB_ID" else b"cap")
+    targets, jobs = mg.find_jobs(world, args, {20, 21})
+    assert targets == jobs == {}  # neither OOM candidates nor victim jobs
+    assert mg.raise_oom_adj(targets, False, args) == 0
+    class File(io.StringIO):
+        def close(self):
+            pass
+    writes, sent = File(), []
+    monkeypatch.setattr("builtins.open", lambda *a, **kw: writes)
+    monkeypatch.delattr(mg.os, "pidfd_open", raising=False)
+    monkeypatch.setattr(mg.os, "kill", lambda *a: sent.append(a))
+    # Stale candidates must also be excluded at the final action-time check.
+    assert mg.raise_oom_adj(world, False, args) == 0
+    for d in world.values():
+        assert not mg.send_kill(d, lambda _: None, args)
+    assert sent == []
+    assert writes.getvalue() == ""
+
+
+@pytest.mark.parametrize("argv", [b"/repo/bin/memguard\0--once\0",
+                                  b"/usr/bin/python3\0/repo/bin/memguard\0"])
+def test_cmdline_watchdog_and_wrapper_are_protected_without_job_metadata(monkeypatch, mg, args, argv):
+    runs_memguard = mg.runs_memguard
+    world = mock_world(monkeypatch, mg, {10: proc(10, comm="bash"), 11: proc(11, ppid=10)},
+                       {10: b"cap", 11: b"cap"})
+    # Exercise the real parser with a guard which has no identifying env or status.
+    monkeypatch.setattr(mg, "runs_memguard", runs_memguard)
+    monkeypatch.setattr(mg, "read", lambda path, mode="r": argv if path == "/proc/11/cmdline" else b"")
+    assert mg.find_jobs(world, args, set()) == ({}, {})
+    assert not mg.action_eligible(world[10], args)
+    assert not mg.action_eligible(world[11], args)
+
+
+@pytest.mark.parametrize("job_id,protected", [(b"memguard", True), (b"memguard-other/boot/1", True),
+                                               (b"xmemguard/boot/1", False), (b"Memguard/boot/1", False)])
+def test_watchdog_job_id_uses_literal_prefix(monkeypatch, mg, args, job_id, protected):
+    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"})
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                        job_id if marker == "GEMMA_JOB_ID" else b"cap")
+    targets, jobs = mg.find_jobs(world, args, set())
+    assert bool(targets) == bool(jobs) == (not protected)
+
+
+def test_watchdog_job_id_also_protects_legacy_wrapper(monkeypatch, mg, args):
+    world = mock_world(monkeypatch, mg, {10: proc(10, comm="bash"), 11: proc(11, ppid=10)},
+                       {10: b"cap", 11: b"cap"})
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                        (b"memguard-light/boot/123" if p == 11 else None)
+                        if marker == "GEMMA_JOB_ID" else b"cap")
+    assert mg.find_jobs(world, args, set()) == ({}, {})
+    assert not mg.action_eligible(world[10], args)
+
+
+@pytest.mark.parametrize("argv", [b"/bin/memguard-helper\0", b"/bin/xmemguard\0"])
+def test_cmdline_watchdog_match_requires_exact_basename(monkeypatch, mg, argv):
+    monkeypatch.setattr(mg, "read", lambda *a: argv)
+    assert not mg.runs_memguard(10)
+
+
+@pytest.mark.parametrize("action", ["signal", "oom"])
+78:    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)}, {10: b"cap"})
+88:    assert killed == sent == [10]
+134:    assert mg.raise_oom_adj({10: proc(10)}, False, args) == 0
+153:def test_fork_during_kill_is_found_after_root_grace(monkeypatch, mg, args):
+155:    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+156:                       {10: b"cap", 11: b"cap", 12: b"cap"}, records)
+167:            world[12] = proc(12)  # new orphan discovered after wrapper grace/kill
+171:    assert mg.kill_tree(select(mg, args), args, set(), lambda _: None) == ([10, 11, 12], [])
+176:    mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap", 99: b"cap"})
+187:                       10: proc(10, ppid=9, comm=comm)}, {10: b"cap"})
+210:    assert set(targets) == {10, 11, 20, 21}
+212:        "legacy": [10, 11], "current": [20, 21]}
+218:    procs = {10: proc(10, pgid=20), 11: proc(11, pgid=20), 31: proc(31, pgid=30)}
+241:    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+242:                       {10: b"cap", 11: b"cap"})
+249:        # The wrapper execs a protected session process during its grace period.
+250:        world[10] = proc(10, comm="node")
+261:        12: proc(12, rss=4 * 1024**3)}, {10: b"cap"})
+270:    assert set(mg.find_jobs(world, args, {10, 11})[0]) == {20}
+274:    mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"})
+276:    assert mg.kill_tree(select(mg, args), args, set(), lambda _: None) == ([], [10])
+394:    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+395:                       {10: b"cap", 11: b"cap"}, [record])
+405:    assert set(jobs[job["key"]]["members"]) == {10, 11}
+417:        [10] if survives else [10, 11], [11] if survives else [])
+425:        {10: b"cap", 11: b"different-cap", 12: b"cap", 13: b"cap"})
+426:    ids = {10: b"job/[boot]/123", 11: b"job/[boot]/123",
+428:    caps = {10: b"cap", 11: b"different-cap", 12: b"cap", 13: b"cap"}
+432:    assert set(targets) == {10, 11, 12, 14}
+433:    assert sorted(sorted(j["pids"]) for j in jobs.values()) == [[10, 11, 14], [12]]
+437:    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+438:                       {10: b"cap", 11: b"cap"}, [dict(name="job", pid=10, pgid=None)])
+441:    assert set(mg.inventory(job, args, set())) == {10}
+456:    assert set(jobs[key]["known_members"]) == {10, 11, 12, 13}
+457:    del world[10]
+486:    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"},
+490:    world[10] = proc(10, comm="node")
+493:    assert jobs[key]["known_members"] == {10: 123}
+495:    world[10] = proc(10, pgid=99)
+497:    assert set(targets) == set(jobs[key]["members"]) == {10}
+510:                        (b"memguard-light/boot/123" if p in {20, 21} else None)
+512:    targets, jobs = mg.find_jobs(world, args, {20, 21})
+534:    world = mock_world(monkeypatch, mg, {10: proc(10, comm="bash"), 11: proc(11, ppid=10)},
+535:                       {10: b"cap", 11: b"cap"})
+540:    assert not mg.action_eligible(world[10], args)
+547:    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"})
+555:    world = mock_world(monkeypatch, mg, {10: proc(10, comm="bash"), 11: proc(11, ppid=10)},
+556:                       {10: b"cap", 11: b"cap"})
+561:    assert not mg.action_eligible(world[10], args)
+575:    marked = {10: b"cap"}
+576:    world = mock_world(monkeypatch, mg, {10: proc(10)}, marked)
+586:            world[10] = proc(10, comm="node")
+588:            world[10] = proc(10, uid=os.getuid() + 1)
+590:            world[10] = proc(10, comm="bash", ppid=9)
+612:        assert not mg.send_kill(targets[10], lambda _: None, args)
+648:    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"job/boot/123"})
+649:    candidate = world[10]
+654:            world[10] = proc(10, comm="node" if change == "node" else "python",
+678:        assert mg.raise_oom_adj({10: candidate}, False, args) == 0
+689:    world = mock_world(monkeypatch, mg, {10: proc(10, rss=4 * 1024**3)}, {}, [record])
+703:    assert mg.send_kill(world[10], lambda _: None, args) is False
+706:    world[20] = proc(20, comm="bash", pgid=20)
+708:    world[10] = proc(10, pgid=20, rss=4 * 1024**3)
+710:    world[10] = proc(10, ppid=20, pgid=20, rss=4 * 1024**3)
+712:    assert set(targets) == {10, 20}
+713:    assert mg.action_eligible(world[10], args)
+715:    del world[20]
+716:    world[10] = proc(10, pgid=99, rss=4 * 1024**3)
+718:    assert set(targets) == {10}
+720:    assert mg.send_kill(targets[10], lambda _: None, args, jobs)
+722:    world[10] = proc(10, starttime=999, rss=4 * 1024**3)
+729:    world = mock_world(monkeypatch, mg, {10: proc(10, ppid=20), 20: proc(20)},
+730:                       {10: b"cap", 20: b"cap"}, [record])
+732:        world[20]["state"] = "Z"
+742:        world[10] = proc(10, rss=4 * 1024**3)
+744:    assert not mg.action_eligible(world[10], args)
+770:    marked = {10: b"work/boot/123"}
+771:    world = mock_world(monkeypatch, mg, {10: proc(10)}, marked)
+772:    candidate = world[10]
+777:            marked[10] = b"memguard-light/boot/123"
+795:    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)}, {}, [record])
+801:             boot_id="previous-boot", known_members={10: 123, 11: 123})} if history else None
+815:    world = mock_world(monkeypatch, mg, {20: proc(20, comm="bash"), 10: proc(10, ppid=20)}, {}, [record])
+821:    assert {10, 20} <= mg.protected_watchdogs(world, [record])
+823:    assert_actions_refused(monkeypatch, mg, args, world[10])
+824:    assert_actions_refused(monkeypatch, mg, args, world[20])
+829:    world = mock_world(monkeypatch, mg, {10: proc(10, comm="bash")}, {}, [record])
+836:    assert_actions_refused(monkeypatch, mg, args, world[10])
+839:def test_watchdog_argv_resolves_symlinks(monkeypatch, mg, tmp_path):
+846:    assert mg.watchdog_argv(b"python3\0-u\0" + os.fsencode(alias) + b"\0")
+
+exec
+/bin/bash -lc 'df -h . /tmp && cat /sys/fs/cgroup/memory.max && cat /sys/fs/cgroup/memory.current' in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ exited 1 in 0ms:
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1       145G   57G   88G  40% /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+/dev/sda1       145G   57G   88G  40% /tmp
+cat: /sys/fs/cgroup/memory.max: No such file or directory
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('bin/memguard')
+s=p.read_text().replace('allowing its wrapper\\n     3 seconds to record failure.', 'leaving its wrapper\\n     to record failure and exit on its own.').replace('Reads only /proc/<pid>/{status,stat,environ,cmdline} of our own uid; writes oom_score_adj.', 'Reads /proc/<pid>/{status,stat,environ,cmdline,cwd} of our own uid and stats argv paths;\\nwrites oom_score_adj only for eligible recipients.')
+s=s.replace('GIB = 1024 ** 3', 'MEMGUARD_STAT = os.stat(os.path.join(REPO, \"bin/memguard\"))\\nMEMGUARD_IDENTITY = (MEMGUARD_STAT.st_dev, MEMGUARD_STAT.st_ino)\\nGIB = 1024 ** 3')
+a=s.index('def watchdog_argv('); b=s.index('\\ndef wrapper_script()',a)
+s=s[:a]+'''def watchdog_argv(cmdline, pid):
+    \"\"\"Resolve every argv path against the recipient, comparing file identity first.\"\"\"
+    argv = [arg for arg in cmdline.split(b\"\\\\0\") if arg]
+    cwd = None
+    if any(not os.path.isabs(arg) for arg in argv):
+        try:
+            cwd = os.fsencode(os.readlink(f\"/proc/{pid}/cwd\"))
+        except OSError:
+            return True  # Relative argv cannot be ruled out as this watchdog.
+    installed = os.fsencode(os.path.realpath(os.path.join(REPO, \"bin/memguard\")))
+    for arg in argv:
+        path = arg if os.path.isabs(arg) else os.path.join(cwd, arg)
+        try:
+            st = os.stat(path)  # Follow symlinks; hardlinks share the same identity.
+            if (st.st_dev, st.st_ino) == MEMGUARD_IDENTITY:
+                return True
+        except (OSError, ValueError):
+            pass  # Options and other non-path arguments need not exist.
+        path = os.path.realpath(path)
+        if path == installed or (os.path.basename(path) == b\"memguard\" and
+                                 os.path.basename(os.path.dirname(path)) == b\"bin\"):
+            return True
+    return False
+
+
+def runs_memguard(pid):
+    return watchdog_argv(read(f\"/proc/{pid}/cmdline\", \"rb\") or b\"\", pid)
+
+''' + s[b:]
+pos=s.index('\\ndef watchdog_record(')
+s=s[:pos]+'''
+def verified_wrapper(cmdline):
+    \"\"\"Match the complete installed bin/job body, even without a status record.\"\"\"
+    argv = cmdline.split(b\"\\\\0\")
+    return len(argv) >= 6 and is_job_wrapper(cmdline, os.fsdecode(argv[4]), wrapper_script())
+
+''' + s[pos:]
+s=s.replace('watchdog_argv(cmdline):', 'watchdog_argv(cmdline, pid):')
+s=s.replace('not is_session(pid, procs) and provenance(pid, procs, records, known_jobs))', 'not is_session(pid, procs) and\\n            not verified_wrapper(read(f\"/proc/{pid}/cmdline\", \"rb\") or b\"\") and\\n            provenance(pid, procs, records, known_jobs))')
+s=s.replace('if watchdog_record(d[\"pid\"], cmdline, job_id, records):', 'if verified_wrapper(cmdline) or watchdog_record(d[\"pid\"], cmdline, job_id, records):')
+s=s.replace('    started = time.monotonic()\\n    deadline = started + 5\\n    root_identity = job[\"members\"].get(job[\"root\"])', '    deadline = time.monotonic() + 5')
+a=s.index('        # The wrapper gets a grace period'); b=s.index('            if send_kill(',a)
+s=s[:a]+'        for p, d in members.items():\\n'+s[b:]
+s=s.replace('if empty_scans >= 2 and not grace:', 'if empty_scans >= 2:')
+p.write_text(s)
+PY" in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ succeeded in 0ms:
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/tests/test_memguard.py'); s=p.read_text()
+s=s.replace('    world = dict(initial)', '    world = dict(initial)\\n    monkeypatch.setattr(mg.os, \"readlink\", lambda p: \"/tmp/memguard-mock-cwd\")',1)
+s=s.replace('test_fork_during_kill_is_found_after_root_grace', 'test_fork_during_kill_is_found_without_signalling_wrapper')
+s=s.replace('if d[\"pid\"] == 10:\\n            assert mg.time.monotonic() >= 3\\n            world[12] = proc(12)  # new orphan discovered after wrapper grace/kill', 'if d[\"pid\"] == 11:\\n            world[12] = proc(12)  # new orphan discovered after the first child dies')
+s=s.replace('== ([10, 11, 12], [])\\n    assert sent == [11, 10, 12]', '== ([11, 12], [])\\n    assert sent == [11, 12]\\n    assert 10 in world')
+s=s.replace('assert set(targets) == {10, 11, 20, 21}', 'assert set(targets) == {11, 21}')
+s=s.replace('\"legacy\": [10, 11], \"current\": [20, 21]', '\"legacy\": [11], \"current\": [21]')
+s=s.replace('assert set(mg.find_jobs(world, args, {10, 11})[0]) == {20}', 'assert mg.find_jobs(world, args, {10, 11})[0] == {}')
+s=s.replace('assert set(jobs[job[\"key\"]][\"members\"]) == {10, 11}', 'assert set(jobs[job[\"key\"]][\"members\"]) == {11}')
+s=s.replace('[10] if survives else [10, 11], [11] if survives else []', '[] if survives else [11], [11] if survives else []')
+s=s.replace('assert set(mg.inventory(job, args, set())) == {10}', 'assert mg.inventory(job, args, set()) == {}')
+s=s.replace('assert set(jobs[key][\"known_members\"]) == {10, 11, 12, 13}', 'assert set(jobs[key][\"known_members\"]) == {11, 12, 13}')
+s=s.replace('world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b\"cap\"},\\n                       [dict(name=\"job\", pid=10, pgid=None)])', 'world = mock_world(monkeypatch, mg, {9: proc(9), 10: proc(10, ppid=9)}, {10: b\"cap\"},\\n                       [dict(name=\"job\", pid=9, pgid=None)])')
+s=s.replace('assert set(targets) == {10, 20}', 'assert set(targets) == {10}')
+s=s.replace('assert mg.watchdog_argv(b\"python3\\\\0-u\\\\0\" + os.fsencode(alias) + b\"\\\\0\")', 'monkeypatch.setattr(mg.os, \"readlink\", lambda p: str(tmp_path))\\n    assert mg.watchdog_argv(b\"python3\\\\0-u\\\\0\" + os.fsencode(alias) + b\"\\\\0\", 10)')
+s=s.replace('# The wrapper execs a protected session process during its grace period.', '# A remaining member execs a protected session process after the child dies.')
+p.write_text(s)
+PY
+python3 -m pytest eval/tests/test_memguard.py -q" in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ exited 1 in 0ms:
+/usr/bin/python3: No module named pytest
+
+exec
+/bin/bash -lc "ls -d .venv /tmp/*venv* /home/ubuntu/work/gemma/.venv 2>/dev/null; command -v python python3 pytest; rg -n 'pytest|venv' pyproject.toml requirements* setup.cfg 2>/dev/null; git diff --stat" in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ succeeded in 0ms:
+/usr/bin/python3
+ bin/memguard                | 60 ++++++++++++++++++++++++++++-----------------
+ eval/tests/test_memguard.py | 38 ++++++++++++++--------------
+ 2 files changed, 58 insertions(+), 40 deletions(-)
+
+exec
+/bin/bash -lc 'ls -a /home/ubuntu/work/gemma-wt/codex-memguard-fix6 && ls /opt /tmp /home/ubuntu /usr/local/bin' in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ succeeded in 0ms:
+.
+..
+.agents
+.aws
+.claude
+.codex
+.git
+.gitignore
+AGENTS.md
+CLAUDE.md
+DIRECTOR.md
+README.md
+SETUP.md
+bin
+bundles
+config
+config.env
+docs
+eval
+ops
+paper
+results
+setup_vm.sh
+/home/ubuntu:
+bwrap-tests.txt
+etho-final-bwrap-1793817344
+etho-final-nobwrap-1793817344
+etho-ghclone-1793817825
+etho-kit
+etho-kit.zip
+etho-v-bwrap
+etho-v-nobwrap
+etho-v-nogit
+etho-zip-1793817825
+final-bwrap.log
+final-nobwrap.log
+fresh-public
+gemma-kit
+gemma-kit.zip
+gemma-local
+ghclone-bwrap.log
+google-cloud-sdk
+nobwrap-bin
+nobwrap-check.log
+nobwrap-fails.txt
+node_install.log
+nodesource.log
+nogit-check.log
+proof
+setup_vm.log
+tmpuvvi8q5e.secret
+v-bwrap.log
+v-nobwrap.log
+v-nogit.log
+work
+zip-nobwrap.log
+
+/opt:
+unified-monitoring-agent
+
+/tmp:
+add_cpu.py
+cc-socks
+claude-1001
+codex-bwrap-synthetic-mount-targets-1001
+codex-daemon-1001
+edit_memguard.py
+edit_push.py
+edit_r4.py
+edit_setup.py
+edit_tests.py
+gemma-sandbox-limits-tests.py
+kernel-setup-pybx6em_
+memguard-fix-dry-run.log
+memguard-live-final-wnws0xkt
+memguard-live-rciumryo
+more_r4.py
+plan003-kernel-acceptance.json
+plan003-round3-acceptance.json
+plan003_kernel_setup_r4.json
+pytest-of-ubuntu
+rewrite_memguard.py
+rewrite_timing.py
+round2.py
+sandbox-limits-round3-eval.xml
+snap-private-tmp
+swegemma_sandbox_fd9686b4-b63_kugufs7j
+swegemma_sp_cache_v8
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-ModemManager.service-OEFLzB
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-etho-app.service-fGwNc1
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-fwupd.service-KnMQif
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-polkit.service-Ig2nLs
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-systemd-logind.service-P50ZmG
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-systemd-resolved.service-V9cidO
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-systemd-timesyncd.service-udSMTt
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-unified-monitoring-agent.service-8eiWLF
+tests_r4.py
+tmpyip8ilp2
+tmux-1001
+uv-8cd53785d5c5e8be.lock
+
+/usr/local/bin:
+
+exec
+/bin/bash -lc 'ls -d /home/ubuntu/work/gemma/.* /home/ubuntu/.local/lib/python* /home/ubuntu/.cache/uv /home/ubuntu/gemma-local/* 2>/dev/null' in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ exited 2 in 0ms:
+/home/ubuntu/.cache/uv
+/home/ubuntu/gemma-local/fastapi_14258.json
+/home/ubuntu/gemma-local/fastapi_14458.json
+/home/ubuntu/gemma-local/imgrt-stub
+/home/ubuntu/gemma-local/pyimg
+/home/ubuntu/gemma-local/requests_7433.json
+/home/ubuntu/gemma-local/rich_2725.json
+/home/ubuntu/gemma-local/show.py
+/home/ubuntu/gemma-local/venv
+/home/ubuntu/gemma-local/wh
+/home/ubuntu/work/gemma/.claude
+/home/ubuntu/work/gemma/.git
+/home/ubuntu/work/gemma/.gitignore
+/home/ubuntu/work/gemma/.pytest_cache
+
+exec
+/bin/bash -lc '/home/ubuntu/gemma-local/venv/bin/python3 -m pytest eval/tests/test_memguard.py -q' in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ exited 1 in 0ms:
+/home/ubuntu/gemma-local/venv/bin/python3: No module named pytest
+
+codex
+The code changes are in place. The default Python has no pytest installed, so I’m looking for a local cached copy to run the suite offline. I’m also adding regressions for aliases, hardlinks, unreadable cwd, and wrapper protection after discovery.
+exec
+/bin/bash -lc "rg --files --hidden /home/ubuntu/.cache/uv -g 'pytest/__init__.py' -g 'pytest-*.whl' -g '*pytest*' -g 'pyvenv.cfg' | head -40" in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ succeeded in 0ms:
+/home/ubuntu/.cache/uv/simple-v27/pypi/pytest.rkyv
+/home/ubuntu/.cache/uv/archive-v0/nDsZEsuR4KEa7aRf/anyio/pytest_plugin.py
+/home/ubuntu/.cache/uv/archive-v0/zSHSf96r4Se3J9DY/pyvenv.cfg
+/home/ubuntu/.cache/uv/archive-v0/i0sipIeUBagSNiMq/_pytest/__pycache__/pytester.cpython-313.pyc
+/home/ubuntu/.cache/uv/archive-v0/i0sipIeUBagSNiMq/_pytest/pytester.py
+/home/ubuntu/.cache/uv/archive-v0/i0sipIeUBagSNiMq/_pytest/pytester_assertions.py
+/home/ubuntu/.cache/uv/archive-v0/chCrd2XXvPNrywKv/numpy/_pytesttester.py
+/home/ubuntu/.cache/uv/archive-v0/chCrd2XXvPNrywKv/numpy/_pytesttester.pyi
+/home/ubuntu/.cache/uv/archive-v0/I-wK8SrerlMrtw3S/bin/pytest
+/home/ubuntu/.cache/uv/archive-v0/I-wK8SrerlMrtw3S/pyvenv.cfg
+/home/ubuntu/.cache/uv/archive-v0/G3izjGSosj987mJ9/pyvenv.cfg
+/home/ubuntu/.cache/uv/archive-v0/5kJ4C5i3rzJQiqp0/aiohttp/pytest_plugin.py
+/home/ubuntu/.cache/uv/archive-v0/I-wK8SrerlMrtw3S/lib/python3.13/site-packages/_pytest/__pycache__/pytester.cpython-313.pyc
+/home/ubuntu/.cache/uv/archive-v0/I-wK8SrerlMrtw3S/lib/python3.13/site-packages/_pytest/pytester.py
+/home/ubuntu/.cache/uv/archive-v0/I-wK8SrerlMrtw3S/lib/python3.13/site-packages/_pytest/pytester_assertions.py
+/home/ubuntu/.cache/uv/archive-v0/TmFoCYoz_we7WJlr/pyvenv.cfg
+/home/ubuntu/.cache/uv/archive-v0/_e4mxbhPOUlmE8X4/bin/pytest
+/home/ubuntu/.cache/uv/archive-v0/_e4mxbhPOUlmE8X4/pyvenv.cfg
+/home/ubuntu/.cache/uv/archive-v0/_e4mxbhPOUlmE8X4/lib/python3.13/site-packages/_pytest/__pycache__/pytester.cpython-313.pyc
+/home/ubuntu/.cache/uv/archive-v0/_e4mxbhPOUlmE8X4/lib/python3.13/site-packages/_pytest/pytester.py
+/home/ubuntu/.cache/uv/archive-v0/_e4mxbhPOUlmE8X4/lib/python3.13/site-packages/_pytest/pytester_assertions.py
+/home/ubuntu/.cache/uv/archive-v0/znZriArCa4fC9Elg/pyvenv.cfg
+/home/ubuntu/.cache/uv/archive-v0/pUTgc25FDH7F1S8d/anyio/pytest_plugin.py
+/home/ubuntu/.cache/uv/archive-v0/momB4fVFMtdlFoSF/google/genai/tests/pytest_helper.py
+
+exec
+/bin/bash -lc '/home/ubuntu/.cache/uv/archive-v0/I-wK8SrerlMrtw3S/bin/python3 -m pytest eval/tests/test_memguard.py -q' in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ exited 1 in 399ms:
+.................F....s............F.................................... [ 81%]
+...........F...F                                                         [100%]
+=================================== FAILURES ===================================
+________________ test_final_root_is_reclassified_before_signal _________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x768a7a502490>
+mg = <module 'memguard' from '/home/ubuntu/work/gemma-wt/codex-memguard-fix6/bin/memguard'>
+args = namespace()
+
+    def test_final_root_is_reclassified_before_signal(monkeypatch, mg, args):
+        world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+                           {10: b"cap", 11: b"cap"})
+        job = select(mg, args)
+        sent = []
+    
+        def kill(d, log, args, known_jobs=None):
+            sent.append(d["pid"])
+            world.pop(d["pid"])
+            # A remaining member execs a protected session process after the child dies.
+            world[10] = proc(10, comm="node")
+            return True
+    
+        monkeypatch.setattr(mg, "send_kill", kill)
+>       assert mg.kill_tree(job, args, set(), lambda _: None) == ([11], [])
+E       assert ([10, 11], []) == ([11], [])
+E         
+E         At index 0 diff: [10, 11] != [11]
+E         Use -v to get more diff
+
+eval/tests/test_memguard.py:255: AssertionError
+_ test_cmdline_watchdog_and_wrapper_are_protected_without_job_metadata[/usr/bin/python3\x00/repo/bin/memguard\x00] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x768a7ab59940>
+mg = <module 'memguard' from '/home/ubuntu/work/gemma-wt/codex-memguard-fix6/bin/memguard'>
+args = namespace(), argv = b'/usr/bin/python3\x00/repo/bin/memguard\x00'
+
+    @pytest.mark.parametrize("argv", [b"/repo/bin/memguard\0--once\0",
+                                      b"/usr/bin/python3\0/repo/bin/memguard\0"])
+    def test_cmdline_watchdog_and_wrapper_are_protected_without_job_metadata(monkeypatch, mg, args, argv):
+        runs_memguard = mg.runs_memguard
+        world = mock_world(monkeypatch, mg, {10: proc(10, comm="bash"), 11: proc(11, ppid=10)},
+                           {10: b"cap", 11: b"cap"})
+        # Exercise the real parser with a guard which has no identifying env or status.
+        monkeypatch.setattr(mg, "runs_memguard", runs_memguard)
+        monkeypatch.setattr(mg, "read", lambda path, mode="r": argv if path == "/proc/11/cmdline" else b"")
+>       assert mg.find_jobs(world, args, set()) == ({}, {})
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+eval/tests/test_memguard.py:540: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+bin/memguard:314: in find_jobs
+    protected = protected_watchdogs(procs, records)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+bin/memguard:240: in protected_watchdogs
+    guards = {p for p in procs if runs_memguard(p) or watchdog_record(
+                                  ^^^^^^^^^^^^^^^^
+bin/memguard:200: in runs_memguard
+    return watchdog_argv(read(f"/proc/{pid}/cmdline", "rb") or b"", pid)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+bin/memguard:192: in watchdog_argv
+    path = os.path.realpath(path)
+           ^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+filename = b'/usr/bin/python3', strict = False
+
+>   ???
+E   TypeError: startswith first arg must be str or a tuple of str, not bytes
+
+<frozen posixpath>:475: TypeError
+_ test_watchdog_any_argv_position_is_protected[/usr/bin/python3\x00-u\x00/repo/bin/memguard\x00] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x768a7a4f39a0>
+mg = <module 'memguard' from '/home/ubuntu/work/gemma-wt/codex-memguard-fix6/bin/memguard'>
+args = namespace(), argv = b'/usr/bin/python3\x00-u\x00/repo/bin/memguard\x00'
+
+    @pytest.mark.parametrize("argv", [
+        b"/usr/bin/python3\0-u\0/repo/bin/memguard\0",
+        b"python3\0-X\0dev\0-W\0ignore\0bin/memguard\0",
+        b"env\0FOO=1\0python3\0bin/memguard\0",
+    ])
+    def test_watchdog_any_argv_position_is_protected(monkeypatch, mg, args, argv):
+        parser = mg.runs_memguard
+        record = dict(name="watchdog-light", pid=20, pgid=20)
+        world = mock_world(monkeypatch, mg, {20: proc(20, comm="bash"), 10: proc(10, ppid=20)}, {}, [record])
+        original_read = mg.read
+        monkeypatch.setattr(mg, "read", lambda path, mode="r":
+                            argv if path == "/proc/10/cmdline" else original_read(path, mode))
+        monkeypatch.setattr(mg, "runs_memguard", parser)
+>       assert parser(10)
+               ^^^^^^^^^^
+
+eval/tests/test_memguard.py:821: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+bin/memguard:200: in runs_memguard
+    return watchdog_argv(read(f"/proc/{pid}/cmdline", "rb") or b"", pid)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+bin/memguard:192: in watchdog_argv
+    path = os.path.realpath(path)
+           ^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+filename = b'/usr/bin/python3', strict = False
+
+>   ???
+E   TypeError: startswith first arg must be str or a tuple of str, not bytes
+
+<frozen posixpath>:475: TypeError
+_____________________ test_watchdog_argv_resolves_symlinks _____________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x768a7ab4a3c0>
+mg = <module 'memguard' from '/home/ubuntu/work/gemma-wt/codex-memguard-fix6/bin/memguard'>
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-72/test_watchdog_argv_resolves_sy0')
+
+    def test_watchdog_argv_resolves_symlinks(monkeypatch, mg, tmp_path):
+        directory = tmp_path / "bin"
+        directory.mkdir()
+        guard = directory / "memguard"
+        guard.touch()
+        alias = tmp_path / "guard-alias"
+        alias.symlink_to(guard)
+        monkeypatch.setattr(mg.os, "readlink", lambda p: str(tmp_path))
+>       assert mg.watchdog_argv(b"python3\0-u\0" + os.fsencode(alias) + b"\0", 10)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+eval/tests/test_memguard.py:848: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+bin/memguard:192: in watchdog_argv
+    path = os.path.realpath(path)
+           ^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+filename = b'/tmp/pytest-of-ubuntu/pytest-72/test_watchdog_argv_resolves_sy0/guard-alias'
+strict = False
+
+>   ???
+E   TypeError: startswith first arg must be str or a tuple of str, not bytes
+
+<frozen posixpath>:475: TypeError
+=========================== short test summary info ============================
+FAILED eval/tests/test_memguard.py::test_final_root_is_reclassified_before_signal
+FAILED eval/tests/test_memguard.py::test_cmdline_watchdog_and_wrapper_are_protected_without_job_metadata[/usr/bin/python3\x00/repo/bin/memguard\x00]
+FAILED eval/tests/test_memguard.py::test_watchdog_any_argv_position_is_protected[/usr/bin/python3\x00-u\x00/repo/bin/memguard\x00]
+FAILED eval/tests/test_memguard.py::test_watchdog_argv_resolves_symlinks - Ty...
+4 failed, 83 passed, 1 skipped in 0.29s
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('bin/memguard'); s=p.read_text().replace('path = os.path.realpath(path)', 'path = os.fsencode(os.path.realpath(os.fsdecode(path)))'); p.write_text(s)
+p=Path('eval/tests/test_memguard.py'); s=p.read_text().replace('monkeypatch.setattr(mg.os, \"readlink\", lambda p: \"/tmp/memguard-mock-cwd\")', 'original_readlink = mg.os.readlink\\n    monkeypatch.setattr(mg.os, \"readlink\", lambda p: \"/tmp/memguard-mock-cwd\"\\n                        if str(p).startswith(\"/proc/\") and str(p).endswith(\"/cwd\")\\n                        else original_readlink(p))',1)
+a=s.index('def test_final_root_is_reclassified_before_signal'); b=s.index('\\ndef test_other_uid',a)
+chunk=s[a:b].replace('{10: proc(10), 11: proc(11, ppid=10)}', '{11: proc(11, ppid=10), 10: proc(10)}').replace('        sent.append(d[\"pid\"])', '        if not mg.action_eligible(d, args, known_jobs):\\n            return False\\n        sent.append(d[\"pid\"])'); s=s[:a]+chunk+s[b:]
+s=s.replace('    monkeypatch.setattr(mg.os, \"readlink\", lambda p: str(tmp_path))\\n    assert mg.watchdog_argv', '    original_readlink = mg.os.readlink\\n    monkeypatch.setattr(mg.os, \"readlink\", lambda p: str(tmp_path)\\n                        if str(p) == \"/proc/10/cwd\" else original_readlink(p))\\n    assert mg.watchdog_argv')
+s+='''
+
+@pytest.mark.parametrize(\"kind,index\", [(\"bare-symlink\", 2), (\"relative-hardlink\", 0),
+                                       (\"absolute-hardlink\", 4)])
+def test_watchdog_inode_identity_protects_aliases(monkeypatch, mg, args, tmp_path, kind, index):
+    parser = mg.runs_memguard
+    record = dict(name=\"watchdog-light\", pid=20, pgid=20)
+    world = mock_world(monkeypatch, mg, {1: proc(1, ppid=0), 20: proc(20, comm=\"bash\"),
+                       10: proc(10, ppid=20)}, {}, [record])
+    alias = tmp_path / \"guard-alias\"
+    if kind == \"bare-symlink\":
+        alias.symlink_to(MG)
+    else:
+        os.link(MG, alias)
+    argument = os.fsencode(alias if kind == \"absolute-hardlink\" else alias.name)
+    argv = b\"\\\\0\".join([b\"python3\", b\"-u\", b\"unused\", b\"another\"][:index] + [argument, b\"\"])
+    original_read, original_readlink = mg.read, mg.os.readlink
+    monkeypatch.setattr(mg.os, \"readlink\", lambda p: str(tmp_path)
+                        if str(p) == \"/proc/10/cwd\" else original_readlink(p))
+    monkeypatch.setattr(mg, \"read\", lambda path, mode=\"r\":
+                        argv if path == \"/proc/10/cmdline\" else original_read(path, mode))
+    monkeypatch.setattr(mg, \"runs_memguard\", parser)
+    assert Path.cwd() "'!= tmp_path
+    assert parser(10)
+    assert {10, 20} <= mg.protected_watchdogs(world, [record])
+    assert mg.find_jobs(world, args, set()) == ({}, {})
+    assert_actions_refused(monkeypatch, mg, args, world[10])
+    assert_actions_refused(monkeypatch, mg, args, world[20])
+    # Force discovery to miss the recipient: fresh action checks must still use identity.
+    monkeypatch.setattr(mg, "protected_watchdogs", lambda *a: set())
+    assert_actions_refused(monkeypatch, mg, args, world[10])
+
+
+def test_unreadable_cwd_with_relative_argv_is_protected(monkeypatch, mg, args):
+    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"work/boot/123"})
+    original_read = mg.read
+    def unreadable(path):
+        raise PermissionError(path)
+    monkeypatch.setattr(mg.os, "readlink", unreadable)
+    monkeypatch.setattr(mg, "read", lambda path, mode="r":
+                        b"/usr/bin/python3'"\\\\0-u\\\\0guard-alias\\\\0\" if path == \"/proc/10/cmdline\"
+                        else original_read(path, mode))
+    assert 10 in mg.protected_watchdogs(world, [])
+    assert mg.find_jobs(world, args, set()) == ({}, {})
+    monkeypatch.setattr(mg, \"protected_watchdogs\", lambda *a: set())
+    assert_actions_refused(monkeypatch, mg, args, world[10])
+    # Absolute-only argv do not depend on cwd readability.
+    assert not mg.watchdog_argv(b\"/nonexistent/python3\\\\0/nonexistent/worker.py\\\\0\", 10)
+
+
+@pytest.mark.parametrize(\"with_record\", [False, True])
+def test_verified_wrapper_is_permanently_excluded(monkeypatch, mg, args, with_record):
+    record = dict(name=\"work\", pid=10, pgid=10)
+    world = mock_world(monkeypatch, mg, {1: proc(1, ppid=0), 10: proc(10, comm=\"bash\"),
+                       11: proc(11, ppid=10)}, {}, [record])
+    monkeypatch.setattr(mg, \"marker_value\", lambda p, marker:
+                        b\"work/boot/123\" if p in {10, 11} and marker == \"GEMMA_JOB_ID\" else None)
+    if not with_record:
+        monkeypatch.setattr(mg, \"running_jobs\", lambda: [])
+    targets, jobs = mg.find_jobs(world, args, set())
+    assert set(targets) == {11}
+    job = next(iter(jobs.values()))
+    assert_actions_refused(monkeypatch, mg, args, world[10], jobs)
+    # Also refuse a wrapper first recognised after the protection scan.
+    monkeypatch.setattr(mg, \"protected_watchdogs\", lambda *a: set())
+    assert_actions_refused(monkeypatch, mg, args, world[10], jobs)
+    sent = []
+    def kill(fd, sig):
+        sent.append((fd, mg.time.monotonic()))
+        # Keep the child present beyond the old grace window to exercise every poll.
+        if mg.time.monotonic() >= 4:
+            world.pop(fd, None)
+    monkeypatch.setattr(mg.os, \"pidfd_open\", lambda p: p)
+    monkeypatch.setattr(mg.signal, \"pidfd_send_signal\", kill)
+    killed, survivors = mg.kill_tree(job, args, set(), lambda _: None)
+    assert killed == [11] and survivors == []
+    assert sent and {p for p, _ in sent} == {11}
+    assert max(t for _, t in sent) >= 4
+    assert 10 in world
+'''
+p.write_text(s)
+PY
+/home/ubuntu/.cache/uv/archive-v0/I-wK8SrerlMrtw3S/bin/python3 -m pytest eval/tests/test_memguard.py -q" in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ exited 1 in 317ms:
+......................s................................................. [ 76%]
+.................FF...                                                   [100%]
+=================================== FAILURES ===================================
+______ test_watchdog_inode_identity_protects_aliases[relative-hardlink-0] ______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x767b5ad804b0>
+mg = <module 'memguard' from '/home/ubuntu/work/gemma-wt/codex-memguard-fix6/bin/memguard'>
+args = namespace()
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-73/test_watchdog_inode_identity_p1')
+kind = 'relative-hardlink', index = 0
+
+    @pytest.mark.parametrize("kind,index", [("bare-symlink", 2), ("relative-hardlink", 0),
+                                           ("absolute-hardlink", 4)])
+    def test_watchdog_inode_identity_protects_aliases(monkeypatch, mg, args, tmp_path, kind, index):
+        parser = mg.runs_memguard
+        record = dict(name="watchdog-light", pid=20, pgid=20)
+        world = mock_world(monkeypatch, mg, {1: proc(1, ppid=0), 20: proc(20, comm="bash"),
+                           10: proc(10, ppid=20)}, {}, [record])
+        alias = tmp_path / "guard-alias"
+        if kind == "bare-symlink":
+            alias.symlink_to(MG)
+        else:
+>           os.link(MG, alias)
+E           OSError: [Errno 18] Invalid cross-device link: '/home/ubuntu/work/gemma-wt/codex-memguard-fix6/bin/memguard' -> '/tmp/pytest-of-ubuntu/pytest-73/test_watchdog_inode_identity_p1/guard-alias'
+
+eval/tests/test_memguard.py:869: OSError
+______ test_watchdog_inode_identity_protects_aliases[absolute-hardlink-4] ______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x767b5a735080>
+mg = <module 'memguard' from '/home/ubuntu/work/gemma-wt/codex-memguard-fix6/bin/memguard'>
+args = namespace()
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-73/test_watchdog_inode_identity_p2')
+kind = 'absolute-hardlink', index = 4
+
+    @pytest.mark.parametrize("kind,index", [("bare-symlink", 2), ("relative-hardlink", 0),
+                                           ("absolute-hardlink", 4)])
+    def test_watchdog_inode_identity_protects_aliases(monkeypatch, mg, args, tmp_path, kind, index):
+        parser = mg.runs_memguard
+        record = dict(name="watchdog-light", pid=20, pgid=20)
+        world = mock_world(monkeypatch, mg, {1: proc(1, ppid=0), 20: proc(20, comm="bash"),
+                           10: proc(10, ppid=20)}, {}, [record])
+        alias = tmp_path / "guard-alias"
+        if kind == "bare-symlink":
+            alias.symlink_to(MG)
+        else:
+>           os.link(MG, alias)
+E           OSError: [Errno 18] Invalid cross-device link: '/home/ubuntu/work/gemma-wt/codex-memguard-fix6/bin/memguard' -> '/tmp/pytest-of-ubuntu/pytest-73/test_watchdog_inode_identity_p2/guard-alias'
+
+eval/tests/test_memguard.py:869: OSError
+=========================== short test summary info ============================
+FAILED eval/tests/test_memguard.py::test_watchdog_inode_identity_protects_aliases[relative-hardlink-0]
+FAILED eval/tests/test_memguard.py::test_watchdog_inode_identity_protects_aliases[absolute-hardlink-4]
+2 failed, 91 passed, 1 skipped in 0.28s
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/tests/test_memguard.py'); s=p.read_text().replace('@pytest.fixture\\ndef mg():\\n    loader = importlib.machinery.SourceFileLoader(\"memguard\", str(MG))', 'def load_memguard(path):\\n    loader = importlib.machinery.SourceFileLoader(\"memguard\", str(path))').replace('    return module\\n\\n\\n@pytest.fixture\\ndef args():', '    return module\\n\\n\\n@pytest.fixture\\ndef mg():\\n    return load_memguard(MG)\\n\\n\\n@pytest.fixture\\ndef args():',1)
+a=s.index('def test_watchdog_inode_identity_protects_aliases'); b=s.index('\\ndef test_unreadable_cwd',a); chunk=s[a:b]
+chunk=chunk.replace('    parser = mg.runs_memguard', '''    # Use a temporary installation so both hardlink endpoints share a filesystem,
+    # including when the workspace is a separate sandbox mount from /tmp.
+    installed = tmp_path / \"installation/bin/memguard\"
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(MG.read_bytes())
+    mg = load_memguard(installed)
+    installed_stat = installed.stat()
+    assert mg.MEMGUARD_IDENTITY == (installed_stat.st_dev, installed_stat.st_ino)
+    parser = mg.runs_memguard''').replace('alias.symlink_to(MG)', 'alias.symlink_to(installed)').replace('os.link(MG, alias)', 'os.link(installed, alias)')
+s=s[:a]+chunk+s[b:]; p.write_text(s)
+PY
+/home/ubuntu/.cache/uv/archive-v0/I-wK8SrerlMrtw3S/bin/python3 -m pytest eval/tests/test_memguard.py -q
+cat /proc/meminfo | head -5" in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ succeeded in 267ms:
+......................s................................................. [ 76%]
+......................                                                   [100%]
+93 passed, 1 skipped in 0.23s
+MemTotal:       12237948 kB
+MemFree:         6888464 kB
+MemAvailable:   10299780 kB
+Buffers:          430688 kB
+Cached:          3043552 kB
+
+codex
+The offline suite passes: **93 passed, 1 skipped**. The new tests cover inode detection in both discovery and action-time checks, and keep a wrapper present beyond the former three-second window while verifying that only its child is signalled.
+
+The sandbox blocked hardlinking from the workspace into `/tmp`; the hardlink regressions now use a temporary memguard installation entirely under `/tmp`. I’ll run the opt-in live test using the cached pytest environment next.
+exec
+/bin/bash -lc 'PATH=/home/ubuntu/.cache/uv/archive-v0/I-wK8SrerlMrtw3S/bin:$PATH MEMGUARD_LIVE=1 python3 -m pytest eval/tests/test_memguard.py -q' in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+exec
+/bin/bash -lc 'git diff --check && git diff -- bin/memguard && git diff -- eval/tests/test_memguard.py' in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ succeeded in 0ms:
+diff --git a/bin/memguard b/bin/memguard
+index 3e0e82a..a05e2b9 100755
+--- a/bin/memguard
++++ b/bin/memguard
+@@ -9,9 +9,10 @@ Every --interval seconds (default 2):
+   2. Raise oom_score_adj to 1000 on every target (unprivileged), so the kernel picks us first.
+   3. Group by exact GEMMA_JOB_ID when present; retain legacy member identities.
+      Job-ID marked orphans outside running groups remain targets.
+-  4. On memory pressure, kill eligible members of the largest job, allowing its wrapper
+-     3 seconds to record failure. Re-inventory for up to 5 seconds, including new forks.
+-Reads only /proc/<pid>/{status,stat,environ,cmdline} of our own uid; writes oom_score_adj.
++  4. On memory pressure, kill eligible members of the largest job, leaving its wrapper
++     to record failure and exit on its own. Re-inventory for up to 5 seconds, including new forks.
++Reads /proc/<pid>/{status,stat,environ,cmdline,cwd} of our own uid and stats argv paths;
++writes oom_score_adj only for eligible recipients.
+ Python stdlib only. No process-group signals: every recipient must pass the allowlist.
+ Usage: bin/memguard [--once] [--dry-run] [--interval S] [--min-available G] [--max-total G]
+                     [--log PATH] [--no-mail]
+@@ -20,6 +21,8 @@ import argparse, errno, os, signal, subprocess, sys, threading, time
+ from pathlib import Path
+ 
+ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++MEMGUARD_STAT = os.stat(os.path.join(REPO, "bin/memguard"))
++MEMGUARD_IDENTITY = (MEMGUARD_STAT.st_dev, MEMGUARD_STAT.st_ino)
+ GIB = 1024 ** 3
+ SESSION_COMMS = {"claude", "node", "codex", "tmux", "tmux: server", "tmux: client"}
+ SHELL_COMMS = {"bash", "sh", "dash", "zsh"}
+@@ -168,12 +171,25 @@ def watchdog_id(job_id):
+     return job_id is not None and job_id.split(b"/", 1)[0].startswith(b"memguard")
+ 
+ 
+-def watchdog_argv(cmdline):
++def watchdog_argv(cmdline, pid):
++    """Resolve every argv path against the recipient, comparing file identity first."""
++    argv = [arg for arg in cmdline.split(b"\0") if arg]
++    cwd = None
++    if any(not os.path.isabs(arg) for arg in argv):
++        try:
++            cwd = os.fsencode(os.readlink(f"/proc/{pid}/cwd"))
++        except OSError:
++            return True  # Relative argv cannot be ruled out as this watchdog.
+     installed = os.fsencode(os.path.realpath(os.path.join(REPO, "bin/memguard")))
+-    for arg in cmdline.split(b"\0"):
+-        if not arg:
+-            continue
+-        path = os.path.realpath(arg) if b"/" in arg else arg
++    for arg in argv:
++        path = arg if os.path.isabs(arg) else os.path.join(cwd, arg)
++        try:
++            st = os.stat(path)  # Follow symlinks; hardlinks share the same identity.
++            if (st.st_dev, st.st_ino) == MEMGUARD_IDENTITY:
++                return True
++        except (OSError, ValueError):
++            pass  # Options and other non-path arguments need not exist.
++        path = os.fsencode(os.path.realpath(os.fsdecode(path)))
+         if path == installed or (os.path.basename(path) == b"memguard" and
+                                  os.path.basename(os.path.dirname(path)) == b"bin"):
+             return True
+@@ -181,7 +197,7 @@ def watchdog_argv(cmdline):
+ 
+ 
+ def runs_memguard(pid):
+-    return watchdog_argv(read(f"/proc/{pid}/cmdline", "rb") or b"")
++    return watchdog_argv(read(f"/proc/{pid}/cmdline", "rb") or b"", pid)
+ 
+ 
+ def wrapper_script():
+@@ -199,9 +215,15 @@ def is_job_wrapper(cmdline, name, script):
+             argv[4] == name.encode())
+ 
+ 
++def verified_wrapper(cmdline):
++    """Match the complete installed bin/job body, even without a status record."""
++    argv = cmdline.split(b"\0")
++    return len(argv) >= 6 and is_job_wrapper(cmdline, os.fsdecode(argv[4]), wrapper_script())
++
++
+ def watchdog_record(pid, cmdline, job_id, records):
+     """Use this recipient's fresh command and marker, including wrapper metadata."""
+-    if watchdog_id(job_id) or watchdog_argv(cmdline):
++    if watchdog_id(job_id) or watchdog_argv(cmdline, pid):
+         return True
+     for record in records:
+         if record["pid"] != pid:
+@@ -275,7 +297,9 @@ def provenance(pid, procs, records, known_jobs=None):
+ def eligible(pid, procs, args, protected=(), records=(), known_jobs=None):
+     d = procs[pid]
+     return (pid not in protected and d["uid"] == UID and d["state"] not in {"Z", "X"} and
+-            not is_session(pid, procs) and provenance(pid, procs, records, known_jobs))
++            not is_session(pid, procs) and
++            not verified_wrapper(read(f"/proc/{pid}/cmdline", "rb") or b"") and
++            provenance(pid, procs, records, known_jobs))
+ 
+ 
+ def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
+@@ -366,7 +390,7 @@ def action_eligible(d, args, known_jobs=None):
+         return False
+     job_id = next((entry[len(b"GEMMA_JOB_ID="):] for entry in environ.split(b"\0")
+                    if entry.startswith(b"GEMMA_JOB_ID=")), None)
+-    if watchdog_record(d["pid"], cmdline, job_id, records):
++    if verified_wrapper(cmdline) or watchdog_record(d["pid"], cmdline, job_id, records):
+         return False
+     # Re-parented wrappers whose parent cannot be inspected fail closed.
+     if current["comm"] in SHELL_COMMS and current["ppid"] and current["ppid"] not in procs:
+@@ -430,23 +454,15 @@ def inventory(job, args, self_pids):
+ def kill_tree(job, args, self_pids, log):
+     """Two empty scans, bounded by five seconds, then an independent survivor inventory."""
+     killed = set()
+-    started = time.monotonic()
+-    deadline = started + 5
+-    root_identity = job["members"].get(job["root"])
++    deadline = time.monotonic() + 5
+     empty_scans = 0
+     while time.monotonic() < deadline:
+         members = inventory(job, args, self_pids)
+-        # The wrapper gets a grace period to record the child's failure. A new process
+-        # with the same numeric pid does not inherit this special treatment.
+-        grace = (root_identity and time.monotonic() < started + 3 and
+-                 any(p != job["root"] for p in job["members"]))
+         for p, d in members.items():
+-            if grace and p == job["root"] and d["starttime"] == root_identity["starttime"]:
+-                continue
+             if send_kill(d, log, args, {job["key"]: job}):
+                 killed.add(p)
+         empty_scans = empty_scans + 1 if not members else 0
+-        if empty_scans >= 2 and not grace:
++        if empty_scans >= 2:
+             break
+         time.sleep(0.2)
+     survivors = sorted(inventory(job, args, self_pids))
+diff --git a/eval/tests/test_memguard.py b/eval/tests/test_memguard.py
+index 431903b..a6eab9a 100644
+--- a/eval/tests/test_memguard.py
++++ b/eval/tests/test_memguard.py
+@@ -16,15 +16,19 @@ REPO = Path(__file__).resolve().parents[2]
+ MG = REPO / "bin/memguard"
+ 
+ 
+-@pytest.fixture
+-def mg():
+-    loader = importlib.machinery.SourceFileLoader("memguard", str(MG))
++def load_memguard(path):
++    loader = importlib.machinery.SourceFileLoader("memguard", str(path))
+     spec = importlib.util.spec_from_loader("memguard", loader)
+     module = importlib.util.module_from_spec(spec)
+     loader.exec_module(module)
+     return module
+ 
+ 
++@pytest.fixture
++def mg():
++    return load_memguard(MG)
++
++
+ @pytest.fixture
+ def args():
+     return SimpleNamespace()
+@@ -37,6 +41,10 @@ def proc(pid, ppid=1, pgid=10, starttime=123, comm="python", rss=1024, uid=None)
+ 
+ def mock_world(monkeypatch, mg, initial, markers, records=()):
+     world = dict(initial)
++    original_readlink = mg.os.readlink
++    monkeypatch.setattr(mg.os, "readlink", lambda p: "/tmp/memguard-mock-cwd"
++                        if str(p).startswith("/proc/") and str(p).endswith("/cwd")
++                        else original_readlink(p))
+     monkeypatch.setattr(mg, "current_boot_id", lambda: "boot-id")
+     monkeypatch.setattr(mg, "snapshot", lambda: dict(world))
+     # Legacy records exercise ancestry admission; record-free fixtures use job IDs.
+@@ -150,7 +158,7 @@ def test_marked_orphans_and_separate_wrappers(monkeypatch, mg, args):
+     assert not world
+ 
+ 
+-def test_fork_during_kill_is_found_after_root_grace(monkeypatch, mg, args):
++def test_fork_during_kill_is_found_without_signalling_wrapper(monkeypatch, mg, args):
+     records = [dict(name="job", pid=10, pgid=10)]
+     world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+                        {10: b"cap", 11: b"cap", 12: b"cap"}, records)
+@@ -162,14 +170,14 @@ def test_fork_during_kill_is_found_after_root_grace(monkeypatch, mg, args):
+     def kill(d, log, args, known_jobs=None):
+         sent.append(d["pid"])
+         world.pop(d["pid"])
+-        if d["pid"] == 10:
+-            assert mg.time.monotonic() >= 3
+-            world[12] = proc(12)  # new orphan discovered after wrapper grace/kill
++        if d["pid"] == 11:
++            world[12] = proc(12)  # new orphan discovered after the first child dies
+         return True
+ 
+     monkeypatch.setattr(mg, "send_kill", kill)
+-    assert mg.kill_tree(select(mg, args), args, set(), lambda _: None) == ([10, 11, 12], [])
+-    assert sent == [11, 10, 12]
++    assert mg.kill_tree(select(mg, args), args, set(), lambda _: None) == ([11, 12], [])
++    assert sent == [11, 12]
++    assert 10 in world
+ 
+ 
+ def test_survivors_use_independent_final_inventory(monkeypatch, mg, args):
+@@ -207,9 +215,9 @@ def test_legacy_status_and_job_names(monkeypatch, mg, args, tmp_path):
+                         (REPO / "bin/job").read_text() if str(path) == str(tmp_path / "bin/job")
+                         else original_read(path, mode))
+     targets, jobs = mg.find_jobs(world, args, set())
+-    assert set(targets) == {10, 11, 20, 21}
++    assert set(targets) == {11, 21}
+     assert {j["name"]: sorted(j["pids"]) for j in jobs.values()} == {
+-        "legacy": [10, 11], "current": [20, 21]}
++        "legacy": [11], "current": [21]}
+ 
+ 
+ 
+@@ -238,15 +246,17 @@ def test_mail_failure_is_bounded_and_logged(monkeypatch, mg, failure):
+ 
+ 
+ def test_final_root_is_reclassified_before_signal(monkeypatch, mg, args):
+-    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
++    world = mock_world(monkeypatch, mg, {11: proc(11, ppid=10), 10: proc(10)},
+                        {10: b"cap", 11: b"cap"})
+     job = select(mg, args)
+     sent = []
+ 
+     def kill(d, log, args, known_jobs=None):
++        if not mg.action_eligible(d, args, known_jobs):
++            return False
+         sent.append(d["pid"])
+         world.pop(d["pid"])
+-        # The wrapper execs a protected session process during its grace period.
++        # A remaining member execs a protected session process after the child dies.
+         world[10] = proc(10, comm="node")
+         return True
+ 
+@@ -267,7 +277,7 @@ def test_self_job_siblings_are_excluded(monkeypatch, mg, args):
+     world = mock_world(monkeypatch, mg, {
+         10: proc(10), 11: proc(11, ppid=10), 12: proc(12, ppid=10), 20: proc(20, pgid=20)},
+         {p: b"cap" for p in (10, 11, 12, 20)}, records)
+-    assert set(mg.find_jobs(world, args, {10, 11})[0]) == {20}
++    assert mg.find_jobs(world, args, {10, 11})[0] == {}
+ 
+ 
+ def test_failed_signal_stops_at_deadline_and_reports_survivor(monkeypatch, mg, args):
+@@ -402,7 +412,7 @@ def test_escaped_members_remain_in_job(monkeypatch, mg, args, legacy, survives):
+     world[11] = proc(11, ppid=1, pgid=11)
+     # Normal polling and the kill/final inventories must agree.
+     _, jobs = mg.find_jobs(world, args, set(), known_jobs={job["key"]: job})
+-    assert set(jobs[job["key"]]["members"]) == {10, 11}
++    assert set(jobs[job["key"]]["members"]) == {11}
+     sent = []
+ 
+     def kill(d, log, args, known_jobs=None):
+@@ -414,7 +424,7 @@ def test_escaped_members_remain_in_job(monkeypatch, mg, args, legacy, survives):
+ 
+     monkeypatch.setattr(mg, "send_kill", kill)
+     assert mg.kill_tree(job, args, set(), lambda _: None) == (
+-        [10] if survives else [10, 11], [11] if survives else [])
++        [] if survives else [11], [11] if survives else [])
+     assert 11 in sent
+ 
+ 
+@@ -438,7 +448,7 @@ def test_legacy_known_members_do_not_follow_reused_pid(monkeypatch, mg, args):
+                        {10: b"cap", 11: b"cap"}, [dict(name="job", pid=10, pgid=None)])
+     job = select(mg, args)
+     world[11] = proc(11, pgid=11, starttime=999)
+-    assert set(mg.inventory(job, args, set())) == {10}
++    assert mg.inventory(job, args, set()) == {}
+ 
+ 
+ @pytest.mark.parametrize("survives", [False, True])
+@@ -453,7 +463,7 @@ def test_legacy_history_survives_new_first_member_and_temporary_node(monkeypatch
+     world[11] = proc(11, ppid=10, comm="node")
+     _, jobs = mg.find_jobs(world, args, set(), known_jobs=seeded)  # poll 1
+     key = next(iter(jobs))
+-    assert set(jobs[key]["known_members"]) == {10, 11, 12, 13}
++    assert set(jobs[key]["known_members"]) == {11, 12, 13}
+     del world[10]
+     world[11] = proc(11, comm="python")
+     world[13] = proc(13, comm="node")
+@@ -483,8 +493,8 @@ def test_legacy_history_survives_new_first_member_and_temporary_node(monkeypatch
+ 
+ 
+ def test_legacy_history_survives_poll_with_no_eligible_members(monkeypatch, mg, args):
+-    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"},
+-                       [dict(name="job", pid=10, pgid=None)])
++    world = mock_world(monkeypatch, mg, {9: proc(9), 10: proc(10, ppid=9)}, {10: b"cap"},
++                       [dict(name="job", pid=9, pgid=None)])
+     _, jobs = mg.find_jobs(world, args, set())
+     key = next(iter(jobs))
+     world[10] = proc(10, comm="node")
+@@ -709,7 +719,7 @@ def test_large_unrelated_process_requires_verified_wrapper(monkeypatch, mg, args
+     assert 10 not in mg.find_jobs(world, args, set())[0]
+     world[10] = proc(10, ppid=20, pgid=20, rss=4 * 1024**3)
+     targets, jobs = mg.find_jobs(world, args, set())
+-    assert set(targets) == {10, 20}
++    assert set(targets) == {10}
+     assert mg.action_eligible(world[10], args)
+     # Retained provenance survives losing both marker and wrapper ancestry.
+     del world[20]
+@@ -843,4 +853,94 @@ def test_watchdog_argv_resolves_symlinks(monkeypatch, mg, tmp_path):
+     guard.touch()
+     alias = tmp_path / "guard-alias"
+     alias.symlink_to(guard)
+-    assert mg.watchdog_argv(b"python3\0-u\0" + os.fsencode(alias) + b"\0")
++    original_readlink = mg.os.readlink
++    monkeypatch.setattr(mg.os, "readlink", lambda p: str(tmp_path)
++                        if str(p) == "/proc/10/cwd" else original_readlink(p))
++    assert mg.watchdog_argv(b"python3\0-u\0" + os.fsencode(alias) + b"\0", 10)
++
++
++@pytest.mark.parametrize("kind,index", [("bare-symlink", 2), ("relative-hardlink", 0),
++                                       ("absolute-hardlink", 4)])
++def test_watchdog_inode_identity_protects_aliases(monkeypatch, mg, args, tmp_path, kind, index):
++    # Use a temporary installation so both hardlink endpoints share a filesystem,
++    # including when the workspace is a separate sandbox mount from /tmp.
++    installed = tmp_path / "installation/bin/memguard"
++    installed.parent.mkdir(parents=True)
++    installed.write_bytes(MG.read_bytes())
++    mg = load_memguard(installed)
++    installed_stat = installed.stat()
++    assert mg.MEMGUARD_IDENTITY == (installed_stat.st_dev, installed_stat.st_ino)
++    parser = mg.runs_memguard
++    record = dict(name="watchdog-light", pid=20, pgid=20)
++    world = mock_world(monkeypatch, mg, {1: proc(1, ppid=0), 20: proc(20, comm="bash"),
++                       10: proc(10, ppid=20)}, {}, [record])
++    alias = tmp_path / "guard-alias"
++    if kind == "bare-symlink":
++        alias.symlink_to(installed)
++    else:
++        os.link(installed, alias)
++    argument = os.fsencode(alias if kind == "absolute-hardlink" else alias.name)
++    argv = b"\0".join([b"python3", b"-u", b"unused", b"another"][:index] + [argument, b""])
++    original_read, original_readlink = mg.read, mg.os.readlink
++    monkeypatch.setattr(mg.os, "readlink", lambda p: str(tmp_path)
++                        if str(p) == "/proc/10/cwd" else original_readlink(p))
++    monkeypatch.setattr(mg, "read", lambda path, mode="r":
++                        argv if path == "/proc/10/cmdline" else original_read(path, mode))
++    monkeypatch.setattr(mg, "runs_memguard", parser)
++    assert Path.cwd() != tmp_path
++    assert parser(10)
++    assert {10, 20} <= mg.protected_watchdogs(world, [record])
++    assert mg.find_jobs(world, args, set()) == ({}, {})
++    assert_actions_refused(monkeypatch, mg, args, world[10])
++    assert_actions_refused(monkeypatch, mg, args, world[20])
++    # Force discovery to miss the recipient: fresh action checks must still use identity.
++    monkeypatch.setattr(mg, "protected_watchdogs", lambda *a: set())
++    assert_actions_refused(monkeypatch, mg, args, world[10])
++
++
++def test_unreadable_cwd_with_relative_argv_is_protected(monkeypatch, mg, args):
++    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"work/boot/123"})
++    original_read = mg.read
++    def unreadable(path):
++        raise PermissionError(path)
++    monkeypatch.setattr(mg.os, "readlink", unreadable)
++    monkeypatch.setattr(mg, "read", lambda path, mode="r":
++                        b"/usr/bin/python3\0-u\0guard-alias\0" if path == "/proc/10/cmdline"
++                        else original_read(path, mode))
++    assert 10 in mg.protected_watchdogs(world, [])
++    assert mg.find_jobs(world, args, set()) == ({}, {})
++    monkeypatch.setattr(mg, "protected_watchdogs", lambda *a: set())
++    assert_actions_refused(monkeypatch, mg, args, world[10])
++    # Absolute-only argv do not depend on cwd readability.
++    assert not mg.watchdog_argv(b"/nonexistent/python3\0/nonexistent/worker.py\0", 10)
++
++
++@pytest.mark.parametrize("with_record", [False, True])
++def test_verified_wrapper_is_permanently_excluded(monkeypatch, mg, args, with_record):
++    record = dict(name="work", pid=10, pgid=10)
++    world = mock_world(monkeypatch, mg, {1: proc(1, ppid=0), 10: proc(10, comm="bash"),
++                       11: proc(11, ppid=10)}, {}, [record])
++    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
++                        b"work/boot/123" if p in {10, 11} and marker == "GEMMA_JOB_ID" else None)
++    if not with_record:
++        monkeypatch.setattr(mg, "running_jobs", lambda: [])
++    targets, jobs = mg.find_jobs(world, args, set())
++    assert set(targets) == {11}
++    job = next(iter(jobs.values()))
++    assert_actions_refused(monkeypatch, mg, args, world[10], jobs)
++    # Also refuse a wrapper first recognised after the protection scan.
++    monkeypatch.setattr(mg, "protected_watchdogs", lambda *a: set())
++    assert_actions_refused(monkeypatch, mg, args, world[10], jobs)
++    sent = []
++    def kill(fd, sig):
++        sent.append((fd, mg.time.monotonic()))
++        # Keep the child present beyond the old grace window to exercise every poll.
++        if mg.time.monotonic() >= 4:
++            world.pop(fd, None)
++    monkeypatch.setattr(mg.os, "pidfd_open", lambda p: p)
++    monkeypatch.setattr(mg.signal, "pidfd_send_signal", kill)
++    killed, survivors = mg.kill_tree(job, args, set(), lambda _: None)
++    assert killed == [11] and survivors == []
++    assert sent and {p for p, _ in sent} == {11}
++    assert max(t for _, t in sent) >= 4
++    assert 10 in world
+
+ succeeded in 3895ms:
+........................................................................ [ 76%]
+......................                                                   [100%]
+94 passed in 3.88s
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/tests/test_memguard.py'); s=p.read_text(); a=s.index('def test_self_job_siblings_are_excluded'); b=s.index('\\ndef test_failed_signal',a); c=s[a:b].replace('20: proc(20, pgid=20)}', '20: proc(20, pgid=20),\\n        21: proc(21, ppid=20, pgid=20)}').replace('(10, 11, 12, 20)', '(10, 11, 12, 20, 21)').replace('assert mg.find_jobs(world, args, {10, 11})[0] == {}', 'assert set(mg.find_jobs(world, args, {10, 11})[0]) == {21}'); s=s[:a]+c+s[b:]; p.write_text(s)
+PY" in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ succeeded in 0ms:
+codex
+The live run passed: **94 passed**. The diff is limited to `bin/memguard` and its tests; the existing boot filtering, membership history, process identity, and session protections remain in place. I’m checking the final line references for the finding-by-finding report.
+exec
+/bin/bash -lc 'PATH=/home/ubuntu/.cache/uv/archive-v0/I-wK8SrerlMrtw3S/bin:$PATH python3 -m pytest eval/tests/test_memguard.py -q && git diff --check && git status --short && rg -n '"'"'^MEMGUARD_|''^def (watchdog_argv|runs_memguard|verified_wrapper|watchdog_record|eligible|action_eligible|kill_tree)|''^def test_(watchdog_inode_identity|unreadable_cwd|verified_wrapper)'"' bin/memguard eval/tests/test_memguard.py" in /home/ubuntu/work/gemma-wt/codex-memguard-fix6
+ succeeded in 286ms:
+......................s................................................. [ 76%]
+......................                                                   [100%]
+93 passed, 1 skipped in 0.23s
+ M bin/memguard
+ M eval/tests/test_memguard.py
+eval/tests/test_memguard.py:865:def test_watchdog_inode_identity_protects_aliases(monkeypatch, mg, args, tmp_path, kind, index):
+eval/tests/test_memguard.py:902:def test_unreadable_cwd_with_relative_argv_is_protected(monkeypatch, mg, args):
+eval/tests/test_memguard.py:920:def test_verified_wrapper_is_permanently_excluded(monkeypatch, mg, args, with_record):
+bin/memguard:24:MEMGUARD_STAT = os.stat(os.path.join(REPO, "bin/memguard"))
+bin/memguard:25:MEMGUARD_IDENTITY = (MEMGUARD_STAT.st_dev, MEMGUARD_STAT.st_ino)
+bin/memguard:174:def watchdog_argv(cmdline, pid):
+bin/memguard:199:def runs_memguard(pid):
+bin/memguard:218:def verified_wrapper(cmdline):
+bin/memguard:224:def watchdog_record(pid, cmdline, job_id, records):
+bin/memguard:297:def eligible(pid, procs, args, protected=(), records=(), known_jobs=None):
+bin/memguard:366:def action_eligible(d, args, known_jobs=None):
+bin/memguard:454:def kill_tree(job, args, self_pids, log):
+
+codex
+Implemented Round 6 on `codex/memguard-fix6`, preserving rounds 1–5.
+
+1. **Watchdog identity:** cached inode identity at [bin/memguard:24](/home/ubuntu/work/gemma-wt/codex-memguard-fix6/bin/memguard:24); updated `watchdog_argv()` at line 174, `runs_memguard()` at 199, and `watchdog_record()` at 224. Every argv position uses recipient-relative resolution, with unreadable cwd failing closed. Existing name triggers remain.
+   Regressions: `test_watchdog_inode_identity_protects_aliases`, `test_unreadable_cwd_with_relative_argv_is_protected`.
+
+2. **Permanent wrapper exclusion:** added `verified_wrapper()` at [line 218](/home/ubuntu/work/gemma-wt/codex-memguard-fix6/bin/memguard:218), enforced it in `eligible()` at 297 and `action_eligible()` at 366, and removed the grace window from `kill_tree()` at 454.
+   Regression: `test_verified_wrapper_is_permanently_excluded` verifies no wrapper signal or OOM write while its child is killed.
+
+Tests, using cached pytest offline:
+
+- Standard: **93 passed, 1 skipped**
+- `MEMGUARD_LIVE=1`: **94 passed**
+- `git diff --check`: passed
+
+Open issues: none. Sandbox prevented cross-mount hardlinks; regressions use a temporary installation under `/tmp`. System Python lacked pytest, so validation used an existing cached environment.
+
+Only memguard and its tests changed. No commit created.
+tokens used
+58,188
