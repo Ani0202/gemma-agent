@@ -26,3 +26,4 @@
 2026-11-04T23:55:23Z | dec 008 applied: overrun claim corrected in RULES_FINDINGS/COMPETITION | docs/RULES_FINDINGS.md
 2026-11-05T00:05Z | cycle 21: gold-wait still running, no action | ops/jobs/gold-wait.log
 2026-11-05T00:08Z | gold v3 all-TypeError (adapter result shape); diagnostics added, smoke kernel pushed | eval/kaggle/gold_calibration.py
+2026-11-05T00:12Z | smoke TypeError not from shape check; added 'where' traceback loc, repushed smoke | eval/kaggle/gold_calibration.py

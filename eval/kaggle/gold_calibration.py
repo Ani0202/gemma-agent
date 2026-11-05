@@ -236,6 +236,10 @@ def worker(args):
                                 f'Phase 2 unresolved (exit_code={exit_code}; includes JUnit validation)')
     except Exception as exc:
         row['error'] = f'Verification/setup exception ({type(exc).__name__})'
+        import traceback
+        # Location only (file:line:function), never messages or values.
+        row['where'] = ' <- '.join(f'{Path(f.filename).name}:{f.lineno}:{f.name}'
+                                   for f in reversed(traceback.extract_tb(exc.__traceback__)[-4:]))
     row['duration_seconds'] = round(time.monotonic() - start, 3)
     args.result.write_text(json.dumps(row) + '\n', encoding='utf-8')
 
