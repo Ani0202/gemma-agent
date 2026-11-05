@@ -2081,3 +2081,2367 @@ class SubprocessManager(BaseSandbox):
 490:        env = build_sanitized_env(
 503:    async def exec_async(
 
+exec
+/bin/bash -lc "sed -n '418,503p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py; cat > /tmp/edit_setup.py <<'PY'
+from pathlib import Path
+p=Path('eval/kaggle/agent_timing.py')
+s=p.read_text().replace(\"PIP_PREFIX = 'PIP_NO_INDEX=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_RETRIES=0 PIP_TIMEOUT=5'\\n\",'')
+s=s.replace(\"return (PIP_PREFIX + ' python3 /tmp/setup.py ' +\", \"return ('python3 /tmp/setup_observer.py /tmp/setup.py ' +\")
+s=s.replace(\"OTEL_SDK_DISABLED='true', OTEL_PYTHON_DISABLED='true', PIP_NO_INDEX='1')\", \"OTEL_SDK_DISABLED='true', OTEL_PYTHON_DISABLED='true')\")
+s=s.replace(\"'--force-reinstall', *wheels], check=True)\",\"'--no-index', '--force-reinstall', *wheels], check=True)\")
+s=s.replace(\"duration_s=0.0, rc=None, stdout='', stderr='')\", \"duration_s=0.0, rc=None, stdout='', stderr='', retrying_lines=0)\")
+s=s.replace(\"row['rc'] = getattr(result, 'exit_code', 0)\",\"row['rc'] = getattr(result, 'exit_code', getattr(result, 'returncode', 0))\")
+s=s.replace(\"value = getattr(result, field, '') or ''\\n            row[field]\", \"value = getattr(result, field, '') or ''\\n            row['retrying_lines'] += sum('Retrying' in line for line in value.splitlines())\\n            row[field]\")
+a=s.index('        sp = next(iter(sorted(')
+b=s.index('        return current',a)
+s=s[:a]+'''        fixed = os.environ.get('SETUP_FIX', '1') == '1'
+        current['setup_fix'] = int(fixed)
+        venv = docker.sandboxes[container_id]['venv']
+        sp = next(iter(sorted(venv.glob('lib/python3*/site-packages'))))
+        if not fixed:
+            # Preserve the original injector's wheel selection and base tar exactly.
+            def original_base():
+                base, large, _modules, _requirements = cs._inspect_wheels_dir(wheels)
+                if large:
+                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+                current['wheel_tags_chosen'] = [p.name for p in base]
+                with tarfile.open(cs._build_unpacked_wheels_tar(
+                        base, 'sp_base_local', '.swegemma_base_injected')) as tf:
+                    tf.extractall(sp, filter='data')
+            setup_step(current, 'base_tar_extraction', original_base)
+        else:
+            # A subprocess venv otherwise exposes every kernel package via _host_env.pth.
+            # Only the scorer's image tools and public base wheels belong here.
+            def isolate_venv():
+                for pth in sp.glob('_host_env.pth'):
+                    pth.unlink()
+                cfg = venv / 'pyvenv.cfg'
+                if cfg.exists():
+                    cfg.write_text(cfg.read_text().replace(
+                        'include-system-site-packages = true', 'include-system-site-packages = false'))
+            setup_step(current, 'venv_fidelity', isolate_venv)
+            pip_wheel = fallback_wheel(wheels, 'pip')
+            def bootstrap_pip():
+                if pip_wheel:
+                    current['setup_calls'][-1]['source'] = str(pip_wheel)
+                    import zipfile
+                    with zipfile.ZipFile(pip_wheel) as zf:
+                        zf.extractall(sp)
+                else:
+                    current['setup_calls'][-1]['source'] = copy_runtime_package('pip', sp)
+                    if current['setup_calls'][-1]['source'] == 'missing':
+                        raise RuntimeError('No offline pip source available')
+                return docker.exec(container_id, 'python3 -m pip --version', timeout=30)
+            result = setup_step(current, 'pip_bootstrap', bootstrap_pip)
+            if result.exit_code "'!= 0:
+                raise RuntimeError('"'Sandbox pip bootstrap failed')
+            probe = (\"import sys,json;from pip._vendor.packaging.tags import sys_tags;\"
+                     \"print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()]}))\")
+            result = setup_step(current, 'interpreter_probe', lambda: docker.exec(
+                container_id, 'python3 -c ' + shlex.quote(probe), timeout=30))
+            if result.exit_code "'!= 0:
+                raise RuntimeError('"'Sandbox interpreter probe failed')
+            identity = json.loads(result.stdout)
+            current['interpreter_version'] = identity['version']
+            selected = compatible_wheels(wheels, identity['tags'])
+            # The image pins pytest-timeout, even if a newer wheel is present.
+            selected.pop('pytest-timeout', None)
+            for path in wheels.glob('pytest_timeout-2.1.0-*.whl'):
+                if {str(t) for t in parse_wheel_filename(path.name)[3]} & set(identity['tags']):
+                    selected['pytest-timeout'] = path
+            current['wheel_tags_chosen'] = [p.name for p in selected.values()]
+            def extract_base():
+                missing = [n for n in SCORER_TOOLS if n not in selected and n not in ('pip', 'pytest-timeout')]
+                if missing:
+                    raise RuntimeError('Required compatible tools missing: ' + ', '.join(missing))
+                base = [p for name, p in selected.items() if name not in BASE_SKIP]
+                if any(p.stat().st_size >= cs._LARGE_WHEEL_THRESHOLD_BYTES for p in base):
+                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+                key = hashlib.sha256(json.dumps([(str(p.resolve()), p.stat().st_size,
+                        p.stat().st_mtime_ns) for p in base]).encode()).hexdigest()[:24]
+                with tarfile.open(cs._build_unpacked_wheels_tar(base, 'timing_' + key,
+                                                              '.swegemma_base_injected')) as tf:
+                    tf.extractall(sp, filter='data')
+            setup_step(current, 'base_tar_extraction', extract_base)
+            def timeout_source():
+                source = selected.get('pytest-timeout')
+                current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
+            setup_step(current, 'pytest_timeout_source', timeout_source)
+            def install_tools():
+                for path in selected.values():
+                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+                tools = ['/wheels/' + selected[n].name for n in SCORER_TOOLS
+                         if n in selected and n "'!= '"'pip']
+                return docker.exec(container_id,
+                    'python3 -m pip install --ignore-installed --no-index --find-links=/wheels ' +
+                    ' '.join(shlex.quote(n) for n in tools), timeout=60)
+            result = setup_step(current, 'tool_install', install_tools)
+            if result.exit_code "'!= 0:
+                raise RuntimeError('"'Offline scorer tool installation failed')
+        def run_setup():
+            docker.copy_to(container_id, setup, '/tmp/setup.py')
+            # All observer files are scratch files, never workspace patch inputs.
+            observer = docker.sandboxes[container_id]['tmp'] / 'setup_observer.py'
+            observer.write_text(SETUP_OBSERVER)
+            return docker.exec(container_id, setup_command(repo, fast_path), timeout=280)
+        try:
+            setup_step(current, 'setup.py', run_setup)
+        finally:
+            log = docker.sandboxes[container_id]['tmp'] / 'setup_subprocesses.json'
+            calls = json.loads(log.read_text()) if log.exists() else []
+            current['setup_subprocesses'] = calls
+            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls']) + sum(
+                c['retrying_lines'] for c in calls)
+            editable = [c for c in calls if isinstance(c['argv'], list) and '-e' in c['argv']]
+            current['editable_rc'] = editable[0]['rc'] if editable else None
+            current['editable_final_rc'] = editable[-1]['rc'] if editable else None
+            if calls:
+                current['interpreter_version'] = calls[0]['interpreter_version']
+            else:
+                current.setdefault('interpreter_version', None)
+''' +s[b:]
+# insert helpers before patch function
+pos=s.index('def patch_subprocess_deps')
+helpers='''def fallback_wheel(wheels, package):
+    \"\"\"Prefer the wheelhouse, then the running interpreter's ensurepip bundle.\"\"\"
+    from packaging.utils import parse_wheel_filename
+    found = list(Path(wheels).glob(package + '-*-py3-none-any.whl'))
+    if not found and package == 'pip':
+        try:
+            import ensurepip
+            found = list((Path(ensurepip.__file__).parent / '_bundled').glob('pip-*.whl'))
+        except ImportError:
+            pass
+    return max(found, key=lambda p: parse_wheel_filename(p.name)[1]) if found else None
+
+
+def copy_runtime_package(name, destination):
+    \"\"\"Copy only the pure Python image package and metadata; no host path injection.\"\"\"
+    from importlib.metadata import distribution, PackageNotFoundError
+    try:
+        dist = distribution(name)
+    except PackageNotFoundError:
+        return 'missing'
+    if name == 'pytest-timeout' and dist.version "'!= '"'2.1.0':
+        return 'missing'
+    module = 'pytest_timeout' if name == 'pytest-timeout' else name
+    files = [p for p in dist.files or [] if p.parts[0] in (module, module + '.py')
+             or p.parts[0].endswith('.dist-info')]
+    if not files or any(str(p).endswith(('.so', '.pyd')) for p in files):
+        return 'missing'
+    for entry in files:
+        target = destination / entry
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(dist.locate_file(entry), target)
+    return 'runtime-site-packages:' + str(dist.locate_file(''))
+
+
+# Capture setup.py's otherwise discarded subprocess output without changing setup.py.
+# Write after EVERY call so an outer timeout still leaves completed calls visible.
+SETUP_OBSERVER = r\\'''import json, runpy, subprocess, sys, time
+from pathlib import Path
+original = subprocess.run
+calls = []
+log = Path(__file__).with_name('setup_subprocesses.json')
+log.write_text('[]')
+def run(*args, **kwargs):
+    start = time.perf_counter()
+    argv = args[0] if args else kwargs.get('args')
+    result = None
+    try:
+        result = original(*args, **kwargs)
+        return result
+    finally:
+        def decode(value):
+            return value.decode(errors='replace') if isinstance(value, bytes) else (value or '')
+        out, err = decode(getattr(result, 'stdout', '')), decode(getattr(result, 'stderr', ''))
+        calls.append(dict(argv=argv, duration_s=time.perf_counter()-start,
+            start_offset_s=start-origin, rc=getattr(result, 'returncode', None),
+            stdout=out[-2048:], stderr=err[-2048:], stdout_full=out, stderr_full=err,
+            retrying_lines=sum('Retrying' in line for line in (out+'\\\\n'+err).splitlines()),
+            interpreter_version=sys.version))
+        log.write_text(json.dumps(calls))
+origin = time.perf_counter()
+subprocess.run = run
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+\\'''
+
+
+'''
+s=s[:pos]+helpers+s[pos:]
+p.write_text(s)
+PY
+python3 /tmp/edit_setup.py" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+    def exec(
+        self, sandbox_id: str, command: str, *, timeout: int | None = None
+    ) -> ExecutionResult:
+        """Execute a command in the local sandbox workspace and isolated venv."""
+        with self._lock:
+            if sandbox_id not in self._sandboxes:
+                raise ValueError(f'Unknown sandbox_id: {sandbox_id}')
+            paths = dict(self._sandboxes[sandbox_id])
+        workspace_dir = paths['workspace']
+        tmp_dir = paths['tmp']
+        wheels_dir = paths['wheels']
+        venv_dir = paths['venv']
+        timeout = timeout if timeout is not None else self.timeout_seconds
+
+        root_dir_str = str(paths['root'])
+        sentinel = '__SWEGEMMA_SANDBOX_ROOT__'
+        translated_cmd = command.replace(root_dir_str, sentinel)
+        translated_cmd = re.sub(
+            r'(?<![\w.-])/(?:\.\.?/)+(tmp|workspace|usr/local/bin|wheels)(?![\w.-])',
+            r'/\1',
+            translated_cmd,
+        )
+
+        translated_cmd = re.sub(
+            r'(?<![\w.-])/tmp(?![\w.-])', str(tmp_dir), translated_cmd
+        )
+        translated_cmd = re.sub(
+            r'(?<![\w.-])/workspace(?![\w.-])',
+            str(workspace_dir),
+            translated_cmd,
+        )
+
+        bin_dir = paths['venv'] / 'bin'
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        translated_cmd = re.sub(
+            r'(?<![\w.-])/usr/local/bin(?![\w.-])',
+            str(bin_dir),
+            translated_cmd,
+        )
+
+        if wheels_dir.exists() and any(wheels_dir.glob('*.whl')):
+            active_wheels = wheels_dir
+        else:
+            active_wheels = None
+            for wh_cand in [
+                Path('/kaggle/input/competition-data/wheels'),
+                Path('/kaggle/input/datasets/ryanholbrook/gemma4swe-wheelhouses'),
+                Path('build/wheelhouse'),
+                Path('data/wheels'),
+                Path('wheels'),
+                Path('/tmp/wheelhouse'),
+            ]:
+                if wh_cand.exists() and any(wh_cand.glob('*.whl')):
+                    active_wheels = wh_cand.resolve()
+                    break
+
+        if active_wheels:
+            translated_cmd = re.sub(
+                r'(?<![\w.-])/wheels(?![\w.-])',
+                str(active_wheels),
+                translated_cmd,
+            )
+
+        translated_cmd = translated_cmd.replace(sentinel, root_dir_str)
+
+        venv_bin = venv_dir / 'bin'
+        host_bin = str(Path(sys.executable).parent)
+        extra_env = {
+            'VIRTUAL_ENV': str(venv_dir),
+            'PATH': f'{venv_bin}:{host_bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+            'PYTHONPATH': str(workspace_dir),
+        }
+        env = build_sanitized_env(
+            work_dir=workspace_dir,
+            tmp_dir=tmp_dir,
+            extra_env=extra_env,
+        )
+        return execute_subprocess_command(
+            command=['/bin/bash', '-c', translated_cmd],
+            cwd=workspace_dir,
+            env=env,
+            timeout=timeout,
+            shell=False,
+        )
+
+    async def exec_async(
+
+exec
+/bin/bash -lc "tail -70 /home/ubuntu/work/gemma/data/raw/sandbox/setup.py; rg -n 'setup.py|/workspace|/wheels' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/execution.py; ls eval/repro; rg -n 'pyimg|bwrap|wheelhouse' eval/repro/* | head -35" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+) -> None:
+    args = list(sys.argv[1:])
+    parsed_repo = repo
+    parsed_fast_path = fast_path
+    parsed_workspace = Path(workspace) if workspace else None
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("--fast-path", "-f"):
+            parsed_fast_path = True
+        elif arg == "--no-fast-path":
+            parsed_fast_path = False
+        elif arg in ("--workspace", "-w") and i + 1 < len(args):
+            parsed_workspace = Path(args[i + 1])
+            i += 1
+        elif not arg.startswith("-") and parsed_repo is None:
+            parsed_repo = arg
+        i += 1
+
+    if parsed_repo is None:
+        parsed_repo = ""
+
+    ws = parsed_workspace if parsed_workspace is not None else (Path("/workspace") if Path("/workspace").exists() else Path.cwd())
+
+    setup_git_exclude(ws)
+    install_editable_package(ws)
+
+    should_fast_path = parsed_fast_path if parsed_fast_path is not None else is_prebaked_env()
+
+    if should_fast_path:
+        print(f"Executing fast-path dependency injection for repo={parsed_repo} in {ws}...")
+        execute_fast_path(ws, repo=parsed_repo)
+        print("Fast-path dependency injection complete.")
+        return
+
+    # Slow path: resolve available wheels and install
+    available = get_available_packages()
+    print(f"Available wheels: {len(available)} packages")
+
+    all_deps: list[str] = []
+    pyproject_path = ws / "pyproject.toml"
+    if pyproject_path.exists():
+        all_deps.extend(collect_from_pyproject(pyproject_path))
+    all_deps.extend(collect_from_requirements_files(ws))
+
+    to_install: list[Path] = []
+    for dep in set(all_deps):
+        norm = normalize_pkg_name(dep)
+        if norm in available:
+            to_install.append(WHEELS_DIR / available[norm])
+
+    if to_install:
+        print(f"Installing {len(to_install)} resolved wheels via pip...")
+        cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            f"--find-links={WHEELS_DIR}",
+            "--no-build-isolation",
+        ] + [str(w) for w in to_install]
+        subprocess.run(cmd, check=False)
+
+    execute_fast_path(ws, repo=parsed_repo)
+
+
+if __name__ == "__main__":
+    main()
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/execution.py: IO error for operation on /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/execution.py: No such file or directory (os error 2)
+__pycache__
+plan003_kernel_setup.py
+plan003_pipfb_v1.sh
+plan003_pipfb_v2.sh
+eval/repro/plan003_pipfb_v2.sh:5:PY=$(ls /home/ubuntu/gemma-local/pyimg/cpython-3.13*/bin/python3.13 | head -1)
+eval/repro/plan003_pipfb_v1.sh:5:PY=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/python3.13
+eval/repro/plan003_pipfb_v1.sh:6:[ -x $PY ] || PY=$(ls /home/ubuntu/gemma-local/pyimg/cpython-3.13*/bin/python3.13 | head -1)
+eval/repro/plan003_kernel_setup.py:5:      --wheels-dir /path/to/complete/wheelhouse --output /tmp/setup-acceptance.json
+eval/repro/plan003_kernel_setup.py:6:The wheelhouse must include pip and pytest-timeout==2.1.0 as well as public wheels.
+eval/repro/plan003_kernel_setup.py:26:    parser.add_argument('--inside-bwrap', action='store_true', help=argparse.SUPPRESS)
+eval/repro/plan003_kernel_setup.py:28:    if not args.inside_bwrap:
+eval/repro/plan003_kernel_setup.py:29:        command = ['bwrap', '--dev-bind', '/', '/', '--unshare-net', sys.executable,
+eval/repro/plan003_kernel_setup.py:30:                   str(Path(__file__).resolve()), *sys.argv[1:], '--inside-bwrap']
+
+codex
+I found plan 004 and decision 027 in the main checkout and confirmed their requirements. I also checked the harness: the CPU path will use its default `SubprocessManager` creation and setup sequence, with no patched venv creation. The observer will retain pip’s full captured output and retry counts in both modes.
+
+exec
+/bin/bash -lc "ls /home/ubuntu/work/gemma/data/raw/wheels | head; rg -n 'setup_container_wheels|snapshots|base_snapshot' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py | head -25; sed -n '416,459p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py; sed -n '1,95p' eval/repro/plan003_pipfb_v2.sh" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+Flask-2.2.5-py3-none-any.whl
+annotated_types-0.7.0-py3-none-any.whl
+annotated_types-0.8.0-py3-none-any.whl
+anyio-4.14.1-py3-none-any.whl
+anyio-4.14.2-py3-none-any.whl
+certifi-2026.6.17-py3-none-any.whl
+certifi-2026.7.22-py3-none-any.whl
+charset_normalizer-3.4.7-py3-none-any.whl
+charset_normalizer-3.4.9-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+charset_normalizer-3.5.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+39:    setup_container_wheels,
+484:    base_snapshot_path: Path | None = None,
+554:        await asyncio.to_thread(setup_container_wheels, docker, sandbox_id, config)
+565:            base_snapshot_path=base_snapshot_path,
+def extract_snapshot(
+    docker: BaseSandboxManager,
+    container_id: str,
+    snapshot_path: Path,
+    *,
+    patch_path: Path | None = None,
+    base_snapshot_path: Path | None = None,
+) -> None:
+    """Copies a snapshot tarball (or base snapshot + patch) into the container and extracts it into /workspace."""
+    tar_to_copy = (
+        base_snapshot_path if base_snapshot_path is not None else snapshot_path
+    )
+    extracted = False
+    extract_fn = getattr(docker, 'extract_archive_to_container', None)
+    if callable(extract_fn):
+        extracted = bool(
+            extract_fn(
+                container_id, tar_to_copy, '/workspace'
+            )
+        )
+        if not extracted:
+            logger.warning(
+                'Direct archive extraction of %s into /workspace failed on container %s; falling back to copy + tar',
+                tar_to_copy.name,
+                container_id,
+            )
+    if not extracted:
+        docker.copy_to(container_id, tar_to_copy, '/tmp')
+        ext_res = docker.exec(
+            container_id,
+            f'(tar --no-same-owner -I pigz -xf /tmp/{tar_to_copy.name} -C /workspace 2>/dev/null || tar --no-same-owner -xzf /tmp/{tar_to_copy.name} -C /workspace) && rm -f /tmp/{tar_to_copy.name}',
+        )
+        if ext_res.exit_code != 0:
+            msg = f'Failed to extract snapshot {tar_to_copy.name} on container {container_id}: {ext_res.stderr or ext_res.stdout}'
+            logger.error(msg)
+            raise ContainerSetupError(msg)
+
+    # Apply incremental patch if provided
+    if patch_path is not None and patch_path.exists():
+        docker.copy_to(container_id, patch_path, '/tmp')
+        exit_code, stdout, stderr = apply_patch_in_container(
+            docker,
+            container_id,
+            f'/tmp/{patch_path.name}',
+#!/usr/bin/env bash
+# Plan 003 repro v2: HTTPS index (pip ignores plain-http untrusted hosts). Reuses the venvs/projects from pipfb.sh (without backends: recreate).
+set -u
+O=$1; cd $O
+PY=$(ls /home/ubuntu/gemma-local/pyimg/cpython-3.13*/bin/python3.13 | head -1)
+for be in poetry pdm; do
+  rm -rf venv2-$be; $PY -m venv venv2-$be; P=venv2-$be/bin/python
+  for mode in hang dns; do
+    url=https://10.255.255.1/simple; [ $mode = dns ] && url=https://pypi.invalid/simple
+    s=$(date +%s.%N); env PIP_INDEX_URL=$url $P -m pip install --no-deps -e proj-$be > log-$be-$mode.txt 2>&1; rc=$?
+    echo "$be fallback-$mode: $(python3 -c "print(round($(date +%s.%N)-$s,1))") s rc=$rc retries=$(grep -c 'Retrying' log-$be-$mode.txt)"
+  done
+done
+
+exec
+/bin/bash -lc "cat > /tmp/add_cpu.py <<'PY'
+from pathlib import Path
+p=Path('eval/kaggle/agent_timing.py'); s=p.read_text()
+s=s.replace(\"TASK_IDS = []\", \"TASK_IDS = []\\nSETUP_ONLY = False\\nSETUP_FIX = 1\")
+s=s.replace(\"if 'cutlass' in w.name.lower():\", \"if 'cutlass' in w.name.lower() or (os.environ.get('SETUP_ONLY') == '1' and w.name.lower().startswith(('vllm-', 'torch-', 'triton-', 'nvidia_'))):\")
+pos=s.index('def main():')
+s=s[:pos]+'''def setup_task(data_dir, wheels_dir, iid, repo, state):
+    \"\"\"Real agent_runner setup path through dependency installation; no agent/verification.\"\"\"
+    from types import SimpleNamespace
+    from swegemma.sandbox import SubprocessManager
+    import swegemma.harness.container_setup as cs
+    current = dict(instance_id=iid, setup_fix=int(os.environ.get('SETUP_FIX', '1')),
+                   started=time.perf_counter(), setup_calls=[], setup_failed=False,
+                   editable_rc=None, retrying_lines=0, interpreter_version=None,
+                   wheel_tags_chosen=[], setup_subprocesses=[])
+    state.set(current)
+    manager = SubprocessManager(timeout_seconds=300)
+    install_deps = patch_subprocess_deps(data_dir, state)
+    try:
+        sid = setup_step(current, 'venv', manager.start)
+        config = SimpleNamespace(wheels_dir=wheels_dir, tasks_path=data_dir / 'tasks.jsonl',
+                                 snapshots_dir=data_dir / 'snapshots')
+        setup_step(current, 'setup_container_wheels', lambda: cs.setup_container_wheels(manager, sid, config))
+        setup_step(current, 'extract_snapshot', lambda: cs.extract_snapshot(
+            manager, sid, data_dir / 'snapshots' / (iid + '.tgz')))
+        setup_step(current, 'setup_git_exclude', lambda: cs.setup_git_exclude(manager, sid))
+        setup_step(current, 'install_editable_package', lambda: cs.install_editable_package(manager, sid))
+        install_deps(manager, sid, repo)
+    except Exception as exc:
+        current.update(setup_failed=True, error=type(exc).__name__ + ': ' + str(exc)[:2048])
+    finally:
+        current['setup_s_total'] = round(time.perf_counter()-current['started'], 6)
+        setup_step(current, 'teardown', manager.cleanup_all)
+        current.pop('started')
+    return current
+
+
+def setup_only_main():
+    from contextvars import ContextVar
+    WORK.mkdir(parents=True, exist_ok=True)
+    with (WORK / 'setup_check.jsonl').open('w') as journal:
+        append(journal, dict(_schema='kaggle_setup_cpu_check_v1', task_ids=TASK_IDS,
+                             setup_fix=int(os.environ.get('SETUP_FIX', '1')), git_sha=GIT_SHA,
+                             concurrency=1, interpreter_version=sys.version))
+        n = 0
+        try:
+            install()
+            from swegemma.models import load_tasks
+            inventory = {t.instance_id: t.repo for t in load_tasks(DATA / 'tasks.jsonl')}
+            if not TASK_IDS or len(set(TASK_IDS)) "'!= len(TASK_IDS) or set(TASK_IDS)-inventory.keys():
+                raise ValueError('"'Nonempty unique known task IDs required')
+            state = ContextVar('setup_check')
+            for iid in TASK_IDS:
+                append(journal, setup_task(DATA, DATA / 'wheels' if (DATA / 'wheels').is_dir()
+                                          else WHEELHOUSE, iid, inventory[iid], state))
+                n += 1
+        except BaseException as exc:
+            append(journal, dict(_stopped=type(exc).__name__))
+            raise
+        finally:
+            append(journal, dict(_done=dict(n=n)))
+
+
+''' + s[pos:]
+s=s.replace(\"def main():\\n    started\", \"def main():\\n    os.environ.setdefault('SETUP_FIX', str(SETUP_FIX))\\n    if SETUP_ONLY:\\n        os.environ.setdefault('SETUP_ONLY', '1')\\n    if os.environ.get('SETUP_ONLY') == '1':\\n        return setup_only_main()\\n    started\")
+s=s.replace(\"setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],\", \"setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],\\n                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),\\n                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),\")
+p.write_text(s)
+PY
+python3 /tmp/add_cpu.py
+python3 -m py_compile eval/kaggle/agent_timing.py" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+exec
+/bin/bash -lc "cat > /tmp/edit_push.py <<'PY'
+from pathlib import Path
+p=Path('eval/kaggle/timing_push.sh');s=p.read_text()
+s=s.replace('if [[ "'$# -lt 3'"', '''setup_only=0
+setup_fix=1
+if [[ "'${1:-} == --setup-only ]]; then
+  setup_only=1
+  setup_fix=${2:?SETUP_FIX required}
+  [[ $setup_fix == 0 || $setup_fix == 1 ]] || { echo '"'SETUP_FIX must be 0 or 1' >&2; exit 2; }
+  shift 2
+  [[ "'$# -ge 2 && $# -le 3 ]] || { echo '"'Usage: timing_push.sh [--dry-run] --setup-only SETUP_FIX USER/SLUG IDS_FILE [BUDGET_SECONDS]' >&2; exit 2; }
+  set -- \""'$1" - "$2" "${3:-1800}"
+fi
+if [[ $# -lt 3'"''')
+s=s.replace('\""'$budget" <<'"\\'PY\\'', '\""'$budget" "$setup_only" "$setup_fix" <<'"\\'PY\\'')
+s=s.replace('kernel_id, bundle_arg, ids_arg, budget_arg = sys.argv[3:]', 'kernel_id, bundle_arg, ids_arg, budget_arg, setup_only_arg, setup_fix_arg = sys.argv[3:]\\nsetup_only = setup_only_arg == \"1\"')
+a=s.index('models = set()'); b=s.index('constants = dict',a)
+s=s[:a]+'buf = io.BytesIO()\\nmodel = None\\nif not setup_only:\\n'+''.join('    '+line if line.strip() else line for line in s[a:b].splitlines(keepends=True))+s[b:]
+s=s.replace('KERNEL_BUDGET_SECONDS=budget)', 'KERNEL_BUDGET_SECONDS=budget, SETUP_ONLY=setup_only, SETUP_FIX=int(setup_fix_arg))')
+s=s.replace('enable_gpu=True, enable_internet=False', 'enable_gpu=not setup_only, enable_internet=False')
+s=s.replace(\"model_sources=[f'google/gemma-4/Other/{model}/2']\", \"model_sources=[] if setup_only else [f'google/gemma-4/Other/{model}/2']\")
+s=s.replace('else\\n  # \\'NvidiaL4\\'', '''elif [[ "'$setup_only == 1 ]]; then
+  kaggle kernels push -p "$stage_dir" -t "$((budget + 1800))"
+else
+  # '"'NvidiaL4' '''.rstrip())
+p.write_text(s)
+PY
+python3 /tmp/edit_push.py
+cat > eval/kaggle/setup_check_push.sh <<'SH'
+#"'!/usr/bin/env bash
+# CPU-only setup check, pinned to timing_push.sh'"'s image; no model attached.
+# Usage: setup_check_push.sh [--dry-run] USER/SLUG SETUP_FIX IDS_FILE [BUDGET_SECONDS]
+set -euo pipefail
+args=()
+if [[ "'${1:-} == --dry-run ]]; then args+=(--dry-run); shift; fi
+if [[ $# -lt 3 || $# -gt 4 ]]; then
+  echo "Usage: $0 [--dry-run] USER/SLUG SETUP_FIX IDS_FILE [BUDGET_SECONDS]" >&2
+  exit 2
+fi
+exec bash "$(dirname -- "${BASH_SOURCE[0]}")/timing_push.sh" "${args[@]}" --setup-only "$2" "$1" "$3" "${4:-1800}"
+SH
+chmod +x eval/kaggle/setup_check_push.sh
+bash -n eval/kaggle/timing_push.sh
+cat > eval/kaggle/setup_check_summary.py <<'"'PY'
+\"\"\"Summarize a CPU setup journal without dropping failures or missing task IDs.\"\"\"
+import argparse
+import json
+from pathlib import Path
+
+
+def diagnose(row):
+    calls = [c for c in row.get('setup_subprocesses', [])
+             if isinstance(c.get('argv'), list) and '-e' in c['argv']]
+    if not calls:
+        return dict(cause='unobserved', evidence=[])
+    first = calls[0]
+    if first['rc'] == 0:
+        return dict(cause='offline_install_succeeded', evidence=[])
+    output = first.get('stdout_full', first.get('stdout', '')) + '\\n' + first.get('stderr_full', first.get('stderr', ''))
+    lower = output.lower()
+    if 'no module named pip' in lower:
+        cause = 'pip_absent_in_venv'
+    elif any(s in lower for s in ('backendunavailable', 'cannot import', 'no module named', 'backend is not available')):
+        cause = 'build_backend_absent_in_venv'
+    elif any(s in lower for s in ('not a supported wheel', 'no matching distribution', 'could not find a version')):
+        cause = 'wheel_or_abi_failure_stop_and_report'
+    else:
+        cause = 'unresolved_offline_install_failure'
+    evidence = [line for line in output.splitlines() if any(s in line.lower() for s in
+                ('error', 'no module named', 'cannot import', 'backendunavailable', 'not a supported wheel'))]
+    return dict(cause=cause, evidence=evidence[-12:])
+
+
+def summarize(path):
+    records = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    header = records[0]
+    if header.get('_schema') "'!= '"'kaggle_setup_cpu_check_v1':
+        raise ValueError('Unexpected journal schema')
+    rows = [r for r in records if 'instance_id' in r]
+    ids = [r['instance_id'] for r in rows]
+    expected = header['task_ids']
+    complete = bool(expected) and len(set(ids)) == len(ids) and sorted(ids) == sorted(expected)
+    done = [r['_done']['n'] for r in records if '_done' in r]
+    complete = complete and done == [len(expected)] and not any('_stopped' in r for r in records)
+    for row in rows:
+        if row['setup_fix'] == 0:
+            row['offline_install_diagnosis'] = diagnose(row)
+    gates = dict(complete=complete,
+                 per_task_setup_le_30s=all(isinstance(r.get('setup_s_total'), (float, int)) and
+                                          0 <= r['setup_s_total'] <= 30 for r in rows),
+                 editable_rc_zero=all(r.get('editable_rc') == 0 for r in rows),
+                 zero_retrying_lines=all(r.get('retrying_lines') == 0 for r in rows),
+                 no_setup_failures=all(not r.get('setup_failed', True) for r in rows))
+    return dict(_schema='kaggle_setup_cpu_check_v1', task_ids=expected, n=len(rows),
+                rows=rows, gates=gates, decision='PASS' if all(gates.values()) else 'FAIL')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('journal', type=Path)
+    parser.add_argument('--output', type=Path)
+    args = parser.parse_args()
+    text = json.dumps(summarize(args.journal), indent=2) + '\\n'
+    if args.output:
+        args.output.write_text(text)
+    else:
+        print(text, end='')
+
+
+if __name__ == '__main__':
+    main()
+PY" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+exec
+/bin/bash -lc "cat > eval/repro/plan003_kernel_setup.py <<'PY'
+\"\"\"Offline setup acceptance using one rich and one fastapi frozen dev snapshot.
+
+Builder command OUTSIDE the Codex sandbox (runs BOTH SETUP_FIX=0 and =1):
+  /home/ubuntu/gemma-local/venv/bin/python eval/repro/plan003_kernel_setup.py
+
+Optional --setup-fix 0|1 selects a single mode. Defaults use the main checkout's
+public data/wheelhouse; override with --data-dir and --wheels-dir. Output defaults
+to results/plan003_kernel_setup_acceptance.json, including per-step durations and
+full observed pip errors. bwrap --unshare-net is mandatory; no PIP_* overrides,
+venv monkeypatching, model, agent, verification, downloads, or holdout access.
+\"\"\"
+import argparse
+from contextvars import ContextVar
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--data-dir', type=Path, default=Path('/home/ubuntu/work/gemma/data/raw'))
+    parser.add_argument('--wheels-dir', type=Path)
+    parser.add_argument('--output', type=Path, default=Path('results/plan003_kernel_setup_acceptance.json'))
+    parser.add_argument('--setup-fix', choices=('0', '1'))
+    parser.add_argument('--inside-bwrap', action='store_true', help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if not args.inside_bwrap:
+        command = ['bwrap', '--dev-bind', '/', '/', '--unshare-net', sys.executable,
+                   str(Path(__file__).resolve()), *sys.argv[1:], '--inside-bwrap']
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode and 'bwrap:' in result.stderr:
+            args.output.write_text(json.dumps(dict(status='blocked', rc=result.returncode,
+                stderr=result.stderr[-2048:], rows=[]), indent=2) + '\\n')
+        print(result.stdout, end='')
+        print(result.stderr, end='', file=sys.stderr)
+        return result.returncode
+    os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
+    spec = importlib.util.spec_from_file_location('timing', Path(__file__).parents[1] / 'kaggle/agent_timing.py')
+    timing = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(timing)
+    state = ContextVar('acceptance')
+    rows = []
+    with tempfile.TemporaryDirectory(prefix='kernel-setup-') as temp:
+        root = Path(temp)
+        wheels = (args.wheels_dir or args.data_dir / 'wheels').resolve()
+        (root / 'wheels').symlink_to(wheels)
+        (root / 'sandbox').symlink_to((args.data_dir / 'sandbox').resolve())
+        (root / 'snapshots').symlink_to((args.data_dir / 'snapshots').resolve())
+        for mode in [args.setup_fix] if args.setup_fix else ['0', '1']:
+            os.environ['SETUP_FIX'] = mode
+            for iid, repo in [('rich_3006', 'Textualize/rich'), ('fastapi_14986', 'fastapi/fastapi')]:
+                row = timing.setup_task(root, wheels, iid, repo, state)
+                rows.append(row)
+                print(json.dumps(dict(instance_id=iid, setup_fix=int(mode),
+                    steps={c['step']: c['duration_s'] for c in row['setup_calls']},
+                    editable_rc=row['editable_rc'], retrying_lines=row['retrying_lines'])), flush=True)
+    # The unfixed mode is diagnostic; only fixed rows must pass the setup gate.
+    fixed = [r for r in rows if r['setup_fix'] == 1]
+    passed = all(not r['setup_failed'] and r['editable_rc'] == 0 and
+                 r['retrying_lines'] == 0 and r['setup_s_total'] <= 30 for r in fixed)
+    args.output.write_text(json.dumps(dict(status='passed' if passed else 'failed', rows=rows), indent=2) + '\\n')
+    return int(not passed)
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
+PY
+python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/tests/test_agent_timing.py');s=p.read_text()
+a=s.index('def test_setup_command_offline_prefix():'); b=s.index('\\ndef test_wheels_follow',a)
+s=s[:a]+s[b:]
+s=s.replace('    import tarfile\\n    from types import ModuleType', '    import tarfile\\n    import zipfile\\n    from types import ModuleType')
+s=s.replace(\"(wheels / f'{tool.replace(\\\"-\\\", \\\"_\\\")}-{version}-py3-none-any.whl').touch()\", \"with zipfile.ZipFile(wheels / f'{tool.replace(\\\"-\\\", \\\"_\\\")}-{version}-py3-none-any.whl', 'w'):\\n            pass\")
+s=s.replace(\"    commands = []\\n    class SubprocessManager:\", \"    commands = []\\n    (tmp_path / 'tmp').mkdir()\\n    class SubprocessManager:\")
+s=s.replace(\"sandboxes = {'id': {'venv': tmp_path / 'venv'}}\", \"sandboxes = {'id': {'venv': tmp_path / 'venv', 'tmp': tmp_path / 'tmp'}}\")
+s=s.replace(\"'interpreter_probe', 'base_tar_extraction', 'pip_bootstrap', 'tool_install', 'setup.py']\", \"'venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'base_tar_extraction',\\n        'pytest_timeout_source', 'tool_install', 'setup.py']\")
+s=s.replace(\"    assert any('bootstrap-pip.whl' in c and 'extractall' in c for c in commands)\\n    assert commands[-1].startswith(timing.PIP_PREFIX)\", \"    assert commands[-1].startswith('python3 /tmp/setup_observer.py /tmp/setup.py')\")
+p.write_text(s)
+PY
+LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/venv/bin/python -m pytest eval/tests/test_agent_timing.py -q" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ exited 1 in 0ms:
+/home/ubuntu/gemma-local/venv/bin/python: No module named pytest
+
+exec
+/bin/bash -lc "ls /home/ubuntu/gemma-local/venv/bin; ls /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages | head; command -v pytest; python3 -c 'import pytest;print(pytest.__file__)'; ls /home/ubuntu/work/gemma/data/raw/wheels/pytest*; ls /home/ubuntu/gemma-local/wh | head" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+activate
+activate.bat
+activate.csh
+activate.fish
+activate.nu
+activate.ps1
+activate.xsh
+activate_this.py
+adk
+cffi-gen-src
+deactivate.bat
+distro
+dotenv
+fastapi
+hf
+httpx
+httpx2
+huggingface-cli
+idna
+jp.py
+jsonschema
+lite
+litellm
+litellm-proxy
+markdown-it
+mcp
+normalizer
+pydoc.bat
+pygmentize
+python
+python3
+python3.13
+swegemma
+tiny-agents
+tqdm
+uvicorn
+watchmedo
+websockets
+README.txt
+__pycache__
+_distutils_hack
+_pytest
+annotated_doc
+annotated_doc-0.0.5.dist-info
+distutils-precedence.pth
+editables
+editables-0.6.dist-info
+flit_core
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ModuleNotFoundError: No module named 'pytest'
+/home/ubuntu/work/gemma/data/raw/wheels/pytest-6.2.5-py3-none-any.whl
+/home/ubuntu/work/gemma/data/raw/wheels/pytest-8.3.4-py3-none-any.whl
+/home/ubuntu/work/gemma/data/raw/wheels/pytest-9.1.1-py3-none-any.whl
+adk_submission-0.2.13-py3-none-any.whl
+
+exec
+/bin/bash -lc 'LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/python3.13 -m pytest eval/tests/test_agent_timing.py -q' in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 242ms:
+...............                                                          [100%]
+15 passed in 0.17s
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/kaggle/agent_timing.py');s=p.read_text()
+s=s.replace(\"stdout=out[-2048:], stderr=err[-2048:], stdout_full=out, stderr_full=err,\", \"stdout=out.encode()[-2048:].decode(errors='ignore'),\\n            stderr=err.encode()[-2048:].decode(errors='ignore'), stdout_full=out, stderr_full=err,\")
+s=s.replace(\"current['setup_subprocesses'] = calls\\n            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls']) + sum(\\n                c['retrying_lines'] for c in calls)\", \"current['setup_subprocesses'] = calls\\n            setup_row = next(c for c in reversed(current['setup_calls']) if c['step'] == 'setup.py')\\n            setup_row['subprocesses'] = calls\\n            setup_row['retrying_lines'] += sum(c['retrying_lines'] for c in calls)\\n            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])\")
+p.write_text(s)
+PY
+cat > eval/tests/test_setup_check.py <<'PY'
+\"\"\"Offline fidelity toggle, subprocess observation, CPU staging and failure gates.\"\"\"
+import contextvars
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tarfile
+from types import ModuleType, SimpleNamespace
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def load(name):
+    spec = importlib.util.spec_from_file_location(name, ROOT / 'eval/kaggle' / f'{name}.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+timing = load('agent_timing')
+summary = load('setup_check_summary')
+
+
+def test_observer_preserves_captured_output_and_original_argv(tmp_path):
+    wrapper = tmp_path / 'setup_observer.py'
+    wrapper.write_text(timing.SETUP_OBSERVER)
+    script = tmp_path / 'setup.py'
+    script.write_text('''import subprocess, sys
+assert sys.argv[1:] == ['--fast-path', 'example/repo']
+r = subprocess.run([sys.executable, '-c', \"import sys; print('x'*6000); print('ERROR: No module named pip', file=sys.stderr); print('Retrying', file=sys.stderr); sys.exit(7)\"], capture_output=True, text=True)
+assert r.returncode == 7 and len(r.stdout) == 6001
+''')
+    subprocess.run([sys.executable, str(wrapper), str(script), '--fast-path', 'example/repo'], check=True)
+    call, = json.loads((tmp_path / 'setup_subprocesses.json').read_text())
+    assert call['rc'] == 7 and call['retrying_lines'] == 1
+    assert len(call['stdout_full']) == 6001
+    assert len(call['stdout'].encode()) == 2048
+    assert 'No module named pip' in call['stderr_full']
+    assert call['duration_s'] >= 0 and call['start_offset_s'] >= 0
+
+
+def test_original_injector_has_only_base_and_observed_setup(tmp_path, monkeypatch):
+    monkeypatch.setenv('SETUP_FIX', '0')
+    cs = ModuleType('swegemma.harness.container_setup')
+    cs.install_test_dependencies = lambda *a, **kw: None
+    wheels = tmp_path / 'wheels'
+    wheels.mkdir()
+    base = wheels / 'original-cp313.whl'
+    base.touch()
+    cs._inspect_wheels_dir = lambda path: ([base], {}, {}, {})
+    archive = tmp_path / 'base.tar'
+    with tarfile.open(archive, 'w'):
+        pass
+    def build(paths, key, marker):
+        assert paths == [base] and key == 'sp_base_local'
+        return archive
+    cs._build_unpacked_wheels_tar = build
+    for name in ('swegemma', 'swegemma.harness'):
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    monkeypatch.setitem(sys.modules, 'swegemma.harness.container_setup', cs)
+    sp = tmp_path / 'venv/lib/python3.13/site-packages'
+    sp.mkdir(parents=True)
+    scratch = tmp_path / 'tmp'
+    scratch.mkdir()
+    commands = []
+    class SubprocessManager:
+        sandboxes = {'sid': dict(venv=tmp_path / 'venv', tmp=scratch)}
+        def copy_to(self, *args):
+            pass
+        def exec(self, sid, command, **kw):
+            commands.append(command)
+            (scratch / 'setup_subprocesses.json').write_text(json.dumps([
+                dict(argv=['python3', '-m', 'pip', '-e', '/workspace'], rc=1,
+                     stderr_full='No module named pip', retrying_lines=0, interpreter_version='3.13')]))
+            return SimpleNamespace(exit_code=0, stdout='', stderr='')
+    state = contextvars.ContextVar('test')
+    current = dict(started=timing.time.perf_counter(), setup_calls=[], setup_failed=False)
+    state.set(current)
+    timing.patch_subprocess_deps(tmp_path, state)(SubprocessManager(), 'sid', 'example/repo')
+    assert [c['step'] for c in current['setup_calls']] == ['base_tar_extraction', 'setup.py']
+    assert commands == ['python3 /tmp/setup_observer.py /tmp/setup.py --fast-path example/repo']
+    assert current['editable_rc'] == 1 and current['interpreter_version'] == '3.13'
+    assert current['setup_calls'][-1]['subprocesses'] == current['setup_subprocesses']
+
+
+@pytest.mark.parametrize('mode', ['0', '1'])
+def test_cpu_staging_without_kaggle_or_model(tmp_path, mode):
+    ids = tmp_path / 'ids'
+    ids.write_text('rich_3006\\nfastapi_14986\\n')
+    result = subprocess.run(['bash', str(ROOT / 'eval/kaggle/setup_check_push.sh'),
+        '--dry-run', 'example/setup-check', mode, str(ids)], check=True, capture_output=True, text=True)
+    stage = Path(result.stdout.split('Dry run: no push. Staged: ')[1].strip())
+    try:
+        metadata = json.loads((stage / 'kernel-metadata.json').read_text())
+        assert metadata['enable_gpu'] is False and metadata['enable_internet'] is False
+        assert metadata['model_sources'] == []
+        assert metadata['docker_image'] in (ROOT / 'eval/kaggle/timing_push.sh').read_text()
+        namespace = {'__name__': 'staged'}
+        exec(compile((stage / 'agent_timing.py').read_text(), 'staged', 'exec'), namespace)
+        assert namespace['SETUP_ONLY'] is True and namespace['SETUP_FIX'] == int(mode)
+        assert namespace['TASK_IDS'] == ['rich_3006', 'fastapi_14986']
+    finally:
+        import shutil
+        shutil.rmtree(stage)
+
+
+def test_setup_only_routes_before_bundle_model_and_agent(monkeypatch):
+    monkeypatch.setenv('SETUP_ONLY', '1')
+    calls = []
+    monkeypatch.setattr(timing, 'setup_only_main', lambda: calls.append('cpu'))
+    monkeypatch.setattr(timing, 'extract_bundle', lambda *a: pytest.fail('bundle accessed'))
+    monkeypatch.setattr(timing, 'start_server', lambda *a: pytest.fail('vLLM accessed'))
+    timing.main()
+    assert calls == ['cpu']
+
+
+def test_summary_diagnoses_first_editable_failure_and_missing_rows(tmp_path):
+    path = tmp_path / 'journal'
+    header = dict(_schema='kaggle_setup_cpu_check_v1', task_ids=['a'])
+    row = dict(instance_id='a', setup_fix=0, setup_s_total=30, editable_rc=1, retrying_lines=0,
+               setup_failed=False, setup_subprocesses=[dict(argv=['python', '-m', 'pip', '-e'],
+               rc=1, stderr_full='ERROR: No module named pip')])
+    def write(rows):
+        path.write_text('\\n'.join(json.dumps(r) for r in rows))
+    write([header, row, dict(_done=dict(n=1))])
+    result = summary.summarize(path)
+    assert result['decision'] == 'FAIL'
+    assert result['rows'][0]['offline_install_diagnosis'] == dict(cause='pip_absent_in_venv', evidence=['ERROR: No module named pip'])
+    row.update(setup_fix=1, editable_rc=0)
+    write([header, row, dict(_done=dict(n=1))])
+    assert summary.summarize(path)['decision'] == 'PASS'
+    row['setup_s_total'] = 30.001
+    write([header, row, dict(_done=dict(n=1))])
+    assert summary.summarize(path)['decision'] == 'FAIL'
+    row.update(setup_s_total=1, retrying_lines=1)
+    write([header, row, dict(_done=dict(n=1))])
+    assert summary.summarize(path)['decision'] == 'FAIL'
+    write([header, dict(_done=dict(n=0))])
+    assert summary.summarize(path)['gates']['complete'] is False
+    write([header, row, row, dict(_done=dict(n=2))])
+    assert summary.summarize(path)['gates']['complete'] is False
+
+
+def test_pip_source_precedence_and_runtime_copy(tmp_path, monkeypatch):
+    wheel = tmp_path / 'pip-99-py3-none-any.whl'
+    wheel.touch()
+    assert timing.fallback_wheel(tmp_path, 'pip') == wheel
+    wheel.unlink()
+    import ensurepip
+    bundled = tmp_path / '_bundled'
+    bundled.mkdir()
+    (tmp_path / '__init__.py').touch()
+    monkeypatch.setattr(ensurepip, '__file__', str(tmp_path / '__init__.py'))
+    bundled_wheel = bundled / 'pip-98-py3-none-any.whl'
+    bundled_wheel.touch()
+    assert timing.fallback_wheel(tmp_path, 'pip') == bundled_wheel
+    bundled_wheel.unlink()
+    assert timing.fallback_wheel(tmp_path, 'pip') is None
+    import importlib.metadata as metadata
+    root = tmp_path / 'runtime'
+    (root / 'pip').mkdir(parents=True)
+    (root / 'pip/__init__.py').write_text('pure python')
+    (root / 'pip-1.dist-info').mkdir()
+    (root / 'pip-1.dist-info/METADATA').write_text('Version: 1')
+    dist = SimpleNamespace(version='1', files=[Path('pip/__init__.py'), Path('pip-1.dist-info/METADATA')], locate_file=lambda p: root / p)
+    monkeypatch.setattr(metadata, 'distribution', lambda name: dist)
+    target = tmp_path / 'target'
+    assert timing.copy_runtime_package('pip', target).startswith('runtime-site-packages:')
+    assert (target / 'pip/__init__.py').read_text() == 'pure python'
+    assert (target / 'pip-1.dist-info/METADATA').exists()
+    assert timing.copy_runtime_package('pytest-timeout', target) == 'missing'
+PY
+LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/python3.13 -m pytest eval/tests/test_agent_timing.py eval/tests/test_setup_check.py -q" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 460ms:
+......................                                                   [100%]
+22 passed in 0.36s
+
+codex
+The toggle, CPU staging path, summarizer, and acceptance runner are implemented. The focused tests pass: 22 tests covering subprocess output capture, the original injector path, fallback sources, and CPU dry-run staging in both modes. Next I’ll run the full offline suite and attempt the mandatory network-isolated acceptance run.
+
+exec
+/bin/bash -lc "git diff --stat; git diff --check; sed -n '1,165p' eval/kaggle/timing_push.sh; git status --short" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+ eval/kaggle/agent_timing.py        | 312 +++++++++++++++++++++++++++++--------
+ eval/kaggle/timing_push.sh         |  56 ++++---
+ eval/repro/plan003_kernel_setup.py | 113 +++++---------
+ eval/tests/test_agent_timing.py    |  20 +--
+ 4 files changed, 326 insertions(+), 175 deletions(-)
+#!/usr/bin/env bash
+# Stage a self-contained private GPU timing kernel. --dry-run never invokes Kaggle.
+set -euo pipefail
+dry_run=false
+if [[ ${1:-} == --dry-run ]]; then dry_run=true; shift; fi
+setup_only=0
+setup_fix=1
+if [[ ${1:-} == --setup-only ]]; then
+  setup_only=1
+  setup_fix=${2:?SETUP_FIX required}
+  [[ $setup_fix == 0 || $setup_fix == 1 ]] || { echo 'SETUP_FIX must be 0 or 1' >&2; exit 2; }
+  shift 2
+  [[ $# -ge 2 && $# -le 3 ]] || { echo 'Usage: timing_push.sh [--dry-run] --setup-only SETUP_FIX USER/SLUG IDS_FILE [BUDGET_SECONDS]' >&2; exit 2; }
+  set -- "$1" - "$2" "${3:-1800}"
+fi
+if [[ $# -lt 3 || $# -gt 4 || ! $1 =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]]; then
+  echo "Usage: $0 [--dry-run] KAGGLE_USER/SLUG BUNDLE_DIR IDS_FILE [BUDGET_SECONDS]" >&2
+  exit 2
+fi
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+stage_dir=$(mktemp -d /tmp/timing-kernel-push.XXXXXX)
+# Dry runs retain the generated artifact for inspection.
+if ! $dry_run; then trap 'rm -rf -- "$stage_dir"' EXIT; fi
+budget=${4:-10800}
+python3 - "$script_dir" "$stage_dir" "$1" "$2" "$3" "$budget" "$setup_only" "$setup_fix" <<'PY'
+import ast
+import base64
+import gzip
+import io
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tarfile
+
+source, stage = map(Path, sys.argv[1:3])
+kernel_id, bundle_arg, ids_arg, budget_arg, setup_only_arg, setup_fix_arg = sys.argv[3:]
+setup_only = setup_only_arg == "1"
+bundle, ids_file = Path(bundle_arg).resolve(), Path(ids_arg)
+budget = int(budget_arg)
+if budget <= 0:
+    raise ValueError('Budget must be positive')
+ids = [s.strip() for s in ids_file.read_text().splitlines() if s.strip() and not s.lstrip().startswith('#')]
+if not ids or len(ids) != len(set(ids)) or any(not re.fullmatch(r'[A-Za-z0-9_.-]+', s) for s in ids):
+    raise ValueError('Nonempty unique safe task IDs required')
+# PyYAML is not required on the push host. agent.yaml uses a scalar model declaration.
+buf = io.BytesIO()
+model = None
+if not setup_only:
+    models = set()
+    for path in [bundle / 'agent.yaml', *sorted((bundle / 'sub_agents').rglob('*.yaml')), *sorted((bundle / 'sub_agents').rglob('*.yml'))]:
+        for line in path.read_text().splitlines():
+            match = re.fullmatch(r'\s*model:\s*[\'"]?(gemma-4-(?:31b|12b|e4b|e2b)-it-qat-w4a16-ct)[\'"]?\s*(?:#.*)?', line)
+            if match:
+                models.add(match[1])
+    if len(models) != 1:
+        raise ValueError('Expected one allowed scalar model declaration')
+    model = models.pop()
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode='wb', mtime=0) as gz:
+        with tarfile.open(fileobj=gz, mode='w') as tf:
+            for path in sorted(bundle.rglob('*')):
+                if path.is_symlink() or not (path.is_file() or path.is_dir()):
+                    raise ValueError('Bundle contains symlink or special file')
+                tf.add(path, arcname=path.relative_to(bundle).as_posix(), recursive=False)
+constants = dict(BUNDLE_B64=base64.b64encode(buf.getvalue()).decode(), TASK_IDS=ids,
+                 GIT_SHA=subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip(),
+                 KERNEL_BUDGET_SECONDS=budget, SETUP_ONLY=setup_only, SETUP_FIX=int(setup_fix_arg))
+text = (source / 'agent_timing.py').read_text()
+lines = text.splitlines(keepends=True)
+for node in reversed(ast.parse(text).body):
+    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id in constants:
+        key = node.targets[0].id
+        lines[node.lineno-1:node.end_lineno] = [f'{key} = {constants.pop(key)!r}\n']
+if constants:
+    raise ValueError('Missing template constants')
+generated = ''.join(lines)
+compile(generated, 'agent_timing.py', 'exec')
+(stage / 'agent_timing.py').write_text(generated)
+# No network per task constraint. Assumption: Kaggle model_sources accepts versioned model handles.
+metadata = dict(id=kernel_id, title=kernel_id.split('/')[1], code_file='agent_timing.py', language='python',
+                kernel_type='script', is_private=True, enable_gpu=not setup_only, enable_internet=False,
+                dataset_sources=['metric/gemma-4-developer-agent-wheelhouse'],
+                competition_sources=['gemma-4-developer-agent'], model_sources=[] if setup_only else [f'google/gemma-4/Other/{model}/2'], kernel_sources=[],
+                # Pin the starter notebook's image (Python 3.12; wheelhouse binaries are cp312).
+                # Source: kaggle kernels pull ryanholbrook/getting-started-gemma-4-developer-agent -m (2026-11-05).
+                docker_image='gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461')
+(stage / 'kernel-metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
+print(json.dumps(metadata, indent=2))
+print(f'Generated script: {len(generated.encode())} bytes; stage: {stage}')
+print('Metadata assumption (offline): model_sources uses google/gemma-4/Other/<model>/2 (starter casing); docker_image pinned to starter')
+PY
+if $dry_run; then
+  echo "Dry run: no push. Staged: $stage_dir"
+elif [[ $setup_only == 1 ]]; then
+  kaggle kernels push -p "$stage_dir" -t "$((budget + 1800))"
+else
+  # 'NvidiaL4' is the starter notebook's machine_shape; unknown names (e.g. NvidiaL4X4) silently fall back to T4 x2.
+  kaggle kernels push -p "$stage_dir" --accelerator NvidiaL4 -t "$((budget + 1800))"
+  shape_dir=$(mktemp -d /tmp/timing-kernel-shape.XXXXXX)
+  kaggle kernels pull "$1" -p "$shape_dir" -m >/dev/null
+  shape=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["machine_shape"])' "$shape_dir/kernel-metadata.json")
+  rm -rf -- "$shape_dir"
+  echo "Server machine_shape: $shape"
+  if [[ $shape != NvidiaL4 ]]; then echo "WARNING: accelerator is $shape, not NvidiaL4; kernel will abort at the GPU check" >&2; fi
+fi
+ M eval/kaggle/agent_timing.py
+ M eval/kaggle/timing_push.sh
+ M eval/repro/plan003_kernel_setup.py
+ M eval/tests/test_agent_timing.py
+?? eval/kaggle/setup_check_push.sh
+?? eval/kaggle/setup_check_summary.py
+?? eval/tests/test_setup_check.py
+
+exec
+/bin/bash -lc 'LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/python3.13 -m pytest eval/tests -q' in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+exec
+/bin/bash -lc "git check-ignore -v results/plan003_kernel_setup_acceptance.json; cat results/plan003_kernel_setup_acceptance.json; sed -n '75,355p' eval/kaggle/agent_timing.py; df -h ." in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+{
+  "status": "blocked",
+  "rc": 1,
+  "stderr": "bwrap: loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted\n",
+  "rows": []
+}
+    print('langsmith uninstall rc=', result.returncode, flush=True)
+    for name in ('LiteLLM', 'LiteLLM Router', 'LiteLLM Proxy', 'litellm', 'httpx', 'httpcore',
+                 'openai', 'urllib3', 'opentelemetry', 'opentelemetry.context'):
+        lg = logging.getLogger(name); lg.setLevel(logging.WARNING)
+        if 'litellm' in name.lower():
+            lg.propagate = False
+            lg.handlers.clear()
+
+SCORER_TOOLS = ('pip', 'pdm-backend', 'setuptools', 'wheel', 'poetry-core',
+                'hatchling', 'flit-core', 'editables', 'pytest', 'pytest-timeout', 'typer')
+BASE_SKIP = {'pytest', 'pytest-timeout', 'pytest-asyncio', 'pytest-httpbin',
+             'pytest-xdist', 'pluggy', 'pip', 'setuptools', 'wheel'}
+
+
+def setup_command(repo, fast_path=True):
+    return ('python3 /tmp/setup_observer.py /tmp/setup.py ' +
+            ('--fast-path ' if fast_path else '') + shlex.quote(repo))
+
+
+def compatible_wheels(wheels, tags):
+    """Highest version per distribution, with sandbox PEP 425 tags (never host tags)."""
+    from packaging.utils import parse_wheel_filename
+    rank = {tag: i for i, tag in enumerate(tags)}
+    selected = {}
+    for path in sorted(Path(wheels).glob('*.whl')):
+        name, version, build, wheel_tags = parse_wheel_filename(path.name)
+        matches = [rank[str(tag)] for tag in wheel_tags if str(tag) in rank]
+        if not matches:
+            continue
+        score = (version, -min(matches), build)
+        if name not in selected or score > selected[name][0]:
+            selected[name] = (score, path)
+    return {name: item[1] for name, item in selected.items()}
+
+
+def setup_step(current, name, action):
+    """Bound output in the journal; never serialize commands, task objects or exceptions."""
+    start = time.perf_counter()
+    row = dict(step=name, start_offset_s=round(start-current['started'], 6),
+               duration_s=0.0, rc=None, stdout='', stderr='', retrying_lines=0)
+    current['setup_calls'].append(row)
+    try:
+        result = action()
+        row['rc'] = getattr(result, 'exit_code', getattr(result, 'returncode', 0))
+        for field in ('stdout', 'stderr'):
+            value = getattr(result, field, '') or ''
+            row['retrying_lines'] += sum('Retrying' in line for line in value.splitlines())
+            row[field] = value.encode('utf-8', errors='replace')[-2048:].decode('utf-8', errors='ignore')
+        return result
+    except Exception as exc:
+        row.update(rc=-1, stderr=type(exc).__name__)
+        current['setup_failed'] = True
+        raise
+    finally:
+        row['duration_s'] = round(time.perf_counter()-start, 6)
+        if row['rc'] != 0:
+            current['setup_failed'] = True
+
+
+def fallback_wheel(wheels, package):
+    """Prefer the wheelhouse, then the running interpreter's ensurepip bundle."""
+    from packaging.utils import parse_wheel_filename
+    found = list(Path(wheels).glob(package + '-*-py3-none-any.whl'))
+    if not found and package == 'pip':
+        try:
+            import ensurepip
+            found = list((Path(ensurepip.__file__).parent / '_bundled').glob('pip-*.whl'))
+        except ImportError:
+            pass
+    return max(found, key=lambda p: parse_wheel_filename(p.name)[1]) if found else None
+
+
+def copy_runtime_package(name, destination):
+    """Copy only the pure Python image package and metadata; no host path injection."""
+    from importlib.metadata import distribution, PackageNotFoundError
+    try:
+        dist = distribution(name)
+    except PackageNotFoundError:
+        return 'missing'
+    if name == 'pytest-timeout' and dist.version != '2.1.0':
+        return 'missing'
+    module = 'pytest_timeout' if name == 'pytest-timeout' else name
+    files = [p for p in dist.files or [] if p.parts[0] in (module, module + '.py')
+             or p.parts[0].endswith('.dist-info')]
+    if not files or any(str(p).endswith(('.so', '.pyd')) for p in files):
+        return 'missing'
+    for entry in files:
+        target = destination / entry
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(dist.locate_file(entry), target)
+    return 'runtime-site-packages:' + str(dist.locate_file(''))
+
+
+# Capture setup.py's otherwise discarded subprocess output without changing setup.py.
+# Write after EVERY call so an outer timeout still leaves completed calls visible.
+SETUP_OBSERVER = r'''import json, runpy, subprocess, sys, time
+from pathlib import Path
+original = subprocess.run
+calls = []
+log = Path(__file__).with_name('setup_subprocesses.json')
+log.write_text('[]')
+def run(*args, **kwargs):
+    start = time.perf_counter()
+    argv = args[0] if args else kwargs.get('args')
+    result = None
+    try:
+        result = original(*args, **kwargs)
+        return result
+    finally:
+        def decode(value):
+            return value.decode(errors='replace') if isinstance(value, bytes) else (value or '')
+        out, err = decode(getattr(result, 'stdout', '')), decode(getattr(result, 'stderr', ''))
+        calls.append(dict(argv=argv, duration_s=time.perf_counter()-start,
+            start_offset_s=start-origin, rc=getattr(result, 'returncode', None),
+            stdout=out.encode()[-2048:].decode(errors='ignore'),
+            stderr=err.encode()[-2048:].decode(errors='ignore'), stdout_full=out, stderr_full=err,
+            retrying_lines=sum('Retrying' in line for line in (out+'\n'+err).splitlines()),
+            interpreter_version=sys.version))
+        log.write_text(json.dumps(calls))
+origin = time.perf_counter()
+subprocess.run = run
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+'''
+
+
+def patch_subprocess_deps(data_dir, state=None):
+    """Install scorer tools in each venv, using that interpreter's ABI, entirely offline."""
+    import swegemma.harness.container_setup as cs
+    from packaging.utils import parse_wheel_filename
+    orig = getattr(cs.install_test_dependencies, '_timing_original', cs.install_test_dependencies)
+    wheels = data_dir / 'wheels'
+    if not wheels.is_dir():
+        wheels = WHEELHOUSE
+    setup = data_dir / 'sandbox' / 'setup.py'
+    if not setup.exists():
+        setup = next(iter(data_dir.rglob('setup.py')), setup)
+
+    def install(docker, container_id, repo='', *, fast_path=True, config=None):
+        if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
+            return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+        current = state.get() if state is not None else dict(
+            started=time.perf_counter(), setup_calls=[], setup_failed=False)
+        fixed = os.environ.get('SETUP_FIX', '1') == '1'
+        current['setup_fix'] = int(fixed)
+        venv = docker.sandboxes[container_id]['venv']
+        sp = next(iter(sorted(venv.glob('lib/python3*/site-packages'))))
+        if not fixed:
+            # Preserve the original injector's wheel selection and base tar exactly.
+            def original_base():
+                base, large, _modules, _requirements = cs._inspect_wheels_dir(wheels)
+                if large:
+                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+                current['wheel_tags_chosen'] = [p.name for p in base]
+                with tarfile.open(cs._build_unpacked_wheels_tar(
+                        base, 'sp_base_local', '.swegemma_base_injected')) as tf:
+                    tf.extractall(sp, filter='data')
+            setup_step(current, 'base_tar_extraction', original_base)
+        else:
+            # A subprocess venv otherwise exposes every kernel package via _host_env.pth.
+            # Only the scorer's image tools and public base wheels belong here.
+            def isolate_venv():
+                for pth in sp.glob('_host_env.pth'):
+                    pth.unlink()
+                cfg = venv / 'pyvenv.cfg'
+                if cfg.exists():
+                    cfg.write_text(cfg.read_text().replace(
+                        'include-system-site-packages = true', 'include-system-site-packages = false'))
+            setup_step(current, 'venv_fidelity', isolate_venv)
+            pip_wheel = fallback_wheel(wheels, 'pip')
+            def bootstrap_pip():
+                if pip_wheel:
+                    current['setup_calls'][-1]['source'] = str(pip_wheel)
+                    import zipfile
+                    with zipfile.ZipFile(pip_wheel) as zf:
+                        zf.extractall(sp)
+                else:
+                    current['setup_calls'][-1]['source'] = copy_runtime_package('pip', sp)
+                    if current['setup_calls'][-1]['source'] == 'missing':
+                        raise RuntimeError('No offline pip source available')
+                return docker.exec(container_id, 'python3 -m pip --version', timeout=30)
+            result = setup_step(current, 'pip_bootstrap', bootstrap_pip)
+            if result.exit_code != 0:
+                raise RuntimeError('Sandbox pip bootstrap failed')
+            probe = ("import sys,json;from pip._vendor.packaging.tags import sys_tags;"
+                     "print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()]}))")
+            result = setup_step(current, 'interpreter_probe', lambda: docker.exec(
+                container_id, 'python3 -c ' + shlex.quote(probe), timeout=30))
+            if result.exit_code != 0:
+                raise RuntimeError('Sandbox interpreter probe failed')
+            identity = json.loads(result.stdout)
+            current['interpreter_version'] = identity['version']
+            selected = compatible_wheels(wheels, identity['tags'])
+            # The image pins pytest-timeout, even if a newer wheel is present.
+            selected.pop('pytest-timeout', None)
+            for path in wheels.glob('pytest_timeout-2.1.0-*.whl'):
+                if {str(t) for t in parse_wheel_filename(path.name)[3]} & set(identity['tags']):
+                    selected['pytest-timeout'] = path
+            current['wheel_tags_chosen'] = [p.name for p in selected.values()]
+            def extract_base():
+                missing = [n for n in SCORER_TOOLS if n not in selected and n not in ('pip', 'pytest-timeout')]
+                if missing:
+                    raise RuntimeError('Required compatible tools missing: ' + ', '.join(missing))
+                base = [p for name, p in selected.items() if name not in BASE_SKIP]
+                if any(p.stat().st_size >= cs._LARGE_WHEEL_THRESHOLD_BYTES for p in base):
+                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+                key = hashlib.sha256(json.dumps([(str(p.resolve()), p.stat().st_size,
+                        p.stat().st_mtime_ns) for p in base]).encode()).hexdigest()[:24]
+                with tarfile.open(cs._build_unpacked_wheels_tar(base, 'timing_' + key,
+                                                              '.swegemma_base_injected')) as tf:
+                    tf.extractall(sp, filter='data')
+            setup_step(current, 'base_tar_extraction', extract_base)
+            def timeout_source():
+                source = selected.get('pytest-timeout')
+                current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
+            setup_step(current, 'pytest_timeout_source', timeout_source)
+            def install_tools():
+                for path in selected.values():
+                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+                tools = ['/wheels/' + selected[n].name for n in SCORER_TOOLS
+                         if n in selected and n != 'pip']
+                return docker.exec(container_id,
+                    'python3 -m pip install --ignore-installed --no-index --find-links=/wheels ' +
+                    ' '.join(shlex.quote(n) for n in tools), timeout=60)
+            result = setup_step(current, 'tool_install', install_tools)
+            if result.exit_code != 0:
+                raise RuntimeError('Offline scorer tool installation failed')
+        def run_setup():
+            docker.copy_to(container_id, setup, '/tmp/setup.py')
+            # All observer files are scratch files, never workspace patch inputs.
+            observer = docker.sandboxes[container_id]['tmp'] / 'setup_observer.py'
+            observer.write_text(SETUP_OBSERVER)
+            return docker.exec(container_id, setup_command(repo, fast_path), timeout=280)
+        try:
+            setup_step(current, 'setup.py', run_setup)
+        finally:
+            log = docker.sandboxes[container_id]['tmp'] / 'setup_subprocesses.json'
+            calls = json.loads(log.read_text()) if log.exists() else []
+            current['setup_subprocesses'] = calls
+            setup_row = next(c for c in reversed(current['setup_calls']) if c['step'] == 'setup.py')
+            setup_row['subprocesses'] = calls
+            setup_row['retrying_lines'] += sum(c['retrying_lines'] for c in calls)
+            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+            editable = [c for c in calls if isinstance(c['argv'], list) and '-e' in c['argv']]
+            current['editable_rc'] = editable[0]['rc'] if editable else None
+            current['editable_final_rc'] = editable[-1]['rc'] if editable else None
+            if calls:
+                current['interpreter_version'] = calls[0]['interpreter_version']
+            else:
+                current.setdefault('interpreter_version', None)
+        return current
+    install._timing_original = orig
+    for name, module in list(sys.modules.items()):
+        if name.startswith('swegemma.') and hasattr(module, 'install_test_dependencies'):
+            module.install_test_dependencies = install
+    return install
+
+def classify_patch(patch, repo, protected=None, test_targets=()):
+    """Parse file headers outside hunks, including quoted paths and renames."""
+    files, new = set(), set()
+    current, added, in_hunk = set(), False, False
+    def path_value(raw):
+        raw = raw.split('\t', 1)[0]
+        value = json.loads(raw) if raw.startswith('"') else raw
+        return value[2:] if value.startswith(('a/', 'b/')) else value
+    for line in patch.splitlines() + ['diff --git ']:
+        if line.startswith('diff --git '):
+            files.update(current)
+            if added:
+                new.update(current)
+            current, added, in_hunk = set(), False, False
+            match = re.match(r'^diff --git ("a/.*?"|a/.*?) ("b/.*?"|b/.*)$', line)
+            if match:
+                current.update(path_value(p) for p in match.groups())
+        elif line.startswith('@@'):
+            in_hunk = True
+        elif not in_hunk:
+            if line.startswith(('--- ', '+++ ')):
+                p = path_value(line[4:])
+                if p != '/dev/null':
+                    current.add(p)
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1       145G   57G   88G  40% /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+
+exec
+/bin/bash -lc "git ls-files results/plan003_kernel_setup_acceptance.json; sed -n '510,612p' eval/kaggle/agent_timing.py; rg -n 'WHEELS_DIR|sys.path|site-packages' /home/ubuntu/work/gemma/data/raw/sandbox/setup.py | tail -20; cat /proc/self/oom_score_adj" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+results/plan003_kernel_setup_acceptance.json
+                counts, tokens, seconds = {}, dict(prompt_tokens=None, completion_tokens=None), {}
+                error = (error or '') + ' trace parse (' + type(exc).__name__ + ')'
+            code = result.test_exit_code if result else None
+            raw_error = (result.error or '') if result else error or ''
+            try:
+              append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
+                llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
+                tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
+                completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
+                **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+                timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+            except Exception as exc:
+                append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+                                     wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
+            raw = WORK / 'runs' / iid
+            raw.mkdir(parents=True, exist_ok=True)
+            (raw / 'agent.patch').write_text(patch)
+            (raw / 'trace.json').write_text(json.dumps(evaluator.trace.to_dict(format='legacy') if evaluator.trace else {}, default=str))
+            (raw / 'result.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result else {'error': error}, default=str))
+    finally:
+        ev.verify_task, vf.strip_protected_files_from_patch = original_verify, original_strip
+
+def start_server(holder):
+    import torch
+    from adk_submission import VllmConfig, VllmServer, discover_adapters
+    from adk_submission.discovery import discover_declared_models
+    from swegemma.config import ALLOWED_ADAPTER_EXTENSIONS
+    MODEL_VLLM_EXTRA_ARGS = {'gemma-4-12b-it-qat-w4a16-ct': (
+        '--hf-overrides', '{"architectures": ["Gemma4ForCausalLM"], "model_type": "gemma4"}')}
+    _SAFE_PATH_COMPONENT = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
+    declared_models = discover_declared_models(BUNDLE)
+    assert len(declared_models) == 1, f'Expected exactly 1 declared model, got: {sorted(declared_models)}'
+    declared_model = next(iter(declared_models))
+    assert declared_model in {'gemma-4-' + x + '-it-qat-w4a16-ct' for x in ('31b', '12b', 'e4b', 'e2b')}, 'Unsupported declared model'
+    MODEL_PATH = Path(f'/kaggle/input/models/google/gemma-4/other/{declared_model}/2')
+    assert MODEL_PATH.exists(), f'Model weights not found at {MODEL_PATH}. Ensure the model input is attached.'
+    adapters = discover_adapters(str(BUNDLE), adapter_extensions=ALLOWED_ADAPTER_EXTENSIONS)
+    adapter_map = getattr(adapters, 'adapters', None) or {}
+    for adapter_name in adapter_map:
+        assert _SAFE_PATH_COMPONENT.fullmatch(adapter_name), 'Unsafe adapter name'
+    detected_ranks = [r for info in adapter_map.values() if (r := getattr(info, 'rank', None)) is not None and r > 0]
+    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    tp_size = 4 if gpu_count >= 4 else (2 if gpu_count >= 2 else 1)
+    vllm_cfg = VllmConfig(
+        model=str(MODEL_PATH), port=8000, host='127.0.0.1',
+        tool_call_parser='gemma4', reasoning_parser='gemma4', max_model_len=32768,
+        dtype='bfloat16' if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else 'auto',
+        gpu_memory_utilization=0.90, enable_auto_tool_choice=True,
+        enable_lora=bool(adapter_map), max_loras=max(1, len(adapter_map)),
+        max_lora_rank=max(detected_ranks) if detected_ranks else 128,
+        scheduler_reserve_full_isl=False, tensor_parallel_size=tp_size, startup_timeout=60 * 20,
+        extra_args=MODEL_VLLM_EXTRA_ARGS.get(declared_model, ()),
+    )
+    server_instance = VllmServer(vllm_cfg, adapter_manifest=adapters)
+    holder.append(server_instance)
+    start = time.perf_counter()
+    server_instance.start()
+    startup = time.perf_counter() - start
+    return server_instance, adapters, declared_model, startup
+
+class WrongAccelerator(RuntimeError):
+    pass
+
+
+def setup_task(data_dir, wheels_dir, iid, repo, state):
+    """Real agent_runner setup path through dependency installation; no agent/verification."""
+    from types import SimpleNamespace
+    from swegemma.sandbox import SubprocessManager
+    import swegemma.harness.container_setup as cs
+    current = dict(instance_id=iid, setup_fix=int(os.environ.get('SETUP_FIX', '1')),
+                   started=time.perf_counter(), setup_calls=[], setup_failed=False,
+                   editable_rc=None, retrying_lines=0, interpreter_version=None,
+                   wheel_tags_chosen=[], setup_subprocesses=[])
+    state.set(current)
+    manager = SubprocessManager(timeout_seconds=300)
+    install_deps = patch_subprocess_deps(data_dir, state)
+    try:
+        sid = setup_step(current, 'venv', manager.start)
+        config = SimpleNamespace(wheels_dir=wheels_dir, tasks_path=data_dir / 'tasks.jsonl',
+                                 snapshots_dir=data_dir / 'snapshots')
+        setup_step(current, 'setup_container_wheels', lambda: cs.setup_container_wheels(manager, sid, config))
+        setup_step(current, 'extract_snapshot', lambda: cs.extract_snapshot(
+            manager, sid, data_dir / 'snapshots' / (iid + '.tgz')))
+        setup_step(current, 'setup_git_exclude', lambda: cs.setup_git_exclude(manager, sid))
+        setup_step(current, 'install_editable_package', lambda: cs.install_editable_package(manager, sid))
+        install_deps(manager, sid, repo)
+    except Exception as exc:
+        current.update(setup_failed=True, error=type(exc).__name__ + ': ' + str(exc)[:2048])
+    finally:
+        current['setup_s_total'] = round(time.perf_counter()-current['started'], 6)
+        setup_step(current, 'teardown', manager.cleanup_all)
+        current.pop('started')
+    return current
+
+
+def setup_only_main():
+28:WHEELS_DIR = Path("/wheels")
+42:    """Finds the primary site-packages directory for the current Python interpreter."""
+54:    for p in sys.path:
+56:        if candidate.name == "site-packages" and candidate.exists() and os.access(candidate, os.W_OK):
+114:def get_available_packages(wheels_dir: Path = WHEELS_DIR) -> dict[str, str]:
+201:        f"--find-links={WHEELS_DIR}",
+301:        print("Warning: No site-packages directory found.", file=sys.stderr)
+307:    # Configure workspace_paths.pth in site-packages
+377:            to_install.append(WHEELS_DIR / available[norm])
+387:            f"--find-links={WHEELS_DIR}",
+1000
+
+ exited 1 in 16774ms:
+........................s........................................... [ 15%]
+..........F............................................................. [ 31%]
+........................................................................ [ 47%]
+........................................................................ [ 63%]
+........................................................................ [ 79%]
+.......................................................s................ [ 95%]
+.........ss.........                                                     [100%]
+=================================== FAILURES ===================================
+________________ test_memguard_kills_job_tree_and_spares_dummy _________________
+
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-37/test_memguard_kills_job_tree_a0')
+
+    def test_memguard_kills_job_tree_and_spares_dummy(tmp_path):
+        marker = "GEMMA_MGTEST_" + uuid.uuid4().hex[:8]
+        root = tmp_path / "jobcwd"; root.mkdir()
+        rcfile = tmp_path / "rc"; log = tmp_path / "memguard.log"
+        env_clean = {k: v for k, v in os.environ.items() if not k.startswith("GEMMA_MGTEST_")}
+    
+        dummy = subprocess.Popen([sys.executable, "-c", ALLOC], cwd="/", env=env_clean)
+        job = subprocess.Popen(
+            ["bash", "-c", f'{sys.executable} -c "$CHILD_SRC"; echo $? > {rcfile}'],
+            cwd=root, env={**env_clean, marker: "test", "CHILD_SRC": CHILD})
+        mg = None
+        try:
+            time.sleep(3.0)  # dummy reaches ~1.2G; job grandchild is ramping
+            pids = [job.pid] + tree(job.pid)
+            assert len(pids) >= 3, f"synthetic tree not built: {pids}"
+            mg = subprocess.Popen(
+                [sys.executable, str(MG), "--marker", marker, "--max-total", "0.8", "--min-available", "0",
+                 "--unmarked-rss", "0.5", "--interval", "0.5", "--roots", str(tmp_path),
+                 "--log", str(log), "--no-mail"], env=env_clean,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = time.time() + 30
+            while time.time() < deadline and "survivors=" not in (log.read_text() if log.exists() else ""):
+                time.sleep(0.5)
+            text = log.read_text()
+            assert "KILL" in text and "survivors=[]" in text, text
+            job.wait(timeout=10)
+            for p in pids:
+                assert not alive(p), f"survivor {p}"
+            assert rcfile.read_text().strip() == "137"
+            assert alive(dummy.pid), "dummy non-target was killed"
+>           assert Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip() == "0"
+E           AssertionError: assert '1000' == '0'
+E             
+E             - 0
+E             + 1000
+
+eval/tests/test_memguard.py:82: AssertionError
+----------------------------- Captured stderr call -----------------------------
+bash: line 1:    55 Killed                  /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/python3.13 -c "$CHILD_SRC"
+=========================== short test summary info ============================
+FAILED eval/tests/test_memguard.py::test_memguard_kills_job_tree_and_spares_dummy
+1 failed, 443 passed, 4 skipped, 4 subtests passed in 15.26s
+
+exec
+/bin/bash -lc "git diff -- eval/kaggle/agent_timing.py | head -85; sed -n '1,75p' eval/tests/test_memguard.py; rg -n 'oom_score_adj|1000' eval/tests/test_memguard.py; ls /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pytest_timeout*" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+diff --git a/eval/kaggle/agent_timing.py b/eval/kaggle/agent_timing.py
+index 656ff4e..b6b1a7d 100644
+--- a/eval/kaggle/agent_timing.py
++++ b/eval/kaggle/agent_timing.py
+@@ -25,6 +25,8 @@ import time
+ 
+ BUNDLE_B64 = ""  # embedded by timing_push.sh
+ TASK_IDS = []
++SETUP_ONLY = False
++SETUP_FIX = 1
+ GIT_SHA = ""
+ KERNEL_BUDGET_SECONDS = 3 * 3600
+ DATA = Path('/kaggle/input/competitions/gemma-4-developer-agent')
+@@ -39,7 +41,7 @@ def install():
+                VLLM_ENGINE_READY_TIMEOUT_S='1200', VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS='1',
+                NCCL_DEBUG='WARN', LITELLM_LOCAL_MODEL_COST_MAP='True', LITELLM_TELEMETRY='False',
+                LITELLM_LOG='WARNING', PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True',
+-               OTEL_SDK_DISABLED='true', OTEL_PYTHON_DISABLED='true', PIP_NO_INDEX='1')
++               OTEL_SDK_DISABLED='true', OTEL_PYTHON_DISABLED='true')
+     os.environ.update(env)
+     for key in ('OPENAI_API_KEY', 'LOCAL_API_KEY'):
+         os.environ.setdefault(key, 'EMPTY')
+@@ -53,7 +55,7 @@ def install():
+     staged = Path('/tmp/wheelhouse')
+     staged.mkdir(exist_ok=True)
+     for w in WHEELHOUSE.glob('*.whl'):
+-        if 'cutlass' in w.name.lower():
++        if 'cutlass' in w.name.lower() or (os.environ.get('SETUP_ONLY') == '1' and w.name.lower().startswith(('vllm-', 'torch-', 'triton-', 'nvidia_'))):
+             continue
+         name = w.name.replace('cu128', '+cu128') if 'cu128' in w.name and '+' not in w.name else w.name
+         target = staged / name
+@@ -66,7 +68,7 @@ def install():
+     if not wheels:
+         raise RuntimeError('No wheelhouse wheels')
+     subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '--no-deps',
+-                    '--force-reinstall', *wheels], check=True)
++                    '--no-index', '--force-reinstall', *wheels], check=True)
+     importlib.invalidate_caches()
+     os.environ['PYTEST_ADDOPTS'] = (os.environ.get('PYTEST_ADDOPTS', '') + ' -p no:langsmith_plugin').strip()
+     result = subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 'langsmith'], capture_output=True)
+@@ -78,7 +80,6 @@ def install():
+             lg.propagate = False
+             lg.handlers.clear()
+ 
+-PIP_PREFIX = 'PIP_NO_INDEX=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_RETRIES=0 PIP_TIMEOUT=5'
+ SCORER_TOOLS = ('pip', 'pdm-backend', 'setuptools', 'wheel', 'poetry-core',
+                 'hatchling', 'flit-core', 'editables', 'pytest', 'pytest-timeout', 'typer')
+ BASE_SKIP = {'pytest', 'pytest-timeout', 'pytest-asyncio', 'pytest-httpbin',
+@@ -86,7 +87,7 @@ BASE_SKIP = {'pytest', 'pytest-timeout', 'pytest-asyncio', 'pytest-httpbin',
+ 
+ 
+ def setup_command(repo, fast_path=True):
+-    return (PIP_PREFIX + ' python3 /tmp/setup.py ' +
++    return ('python3 /tmp/setup_observer.py /tmp/setup.py ' +
+             ('--fast-path ' if fast_path else '') + shlex.quote(repo))
+ 
+ 
+@@ -110,13 +111,14 @@ def setup_step(current, name, action):
+     """Bound output in the journal; never serialize commands, task objects or exceptions."""
+     start = time.perf_counter()
+     row = dict(step=name, start_offset_s=round(start-current['started'], 6),
+-               duration_s=0.0, rc=None, stdout='', stderr='')
++               duration_s=0.0, rc=None, stdout='', stderr='', retrying_lines=0)
+     current['setup_calls'].append(row)
+     try:
+         result = action()
+-        row['rc'] = getattr(result, 'exit_code', 0)
++        row['rc'] = getattr(result, 'exit_code', getattr(result, 'returncode', 0))
+         for field in ('stdout', 'stderr'):
+             value = getattr(result, field, '') or ''
++            row['retrying_lines'] += sum('Retrying' in line for line in value.splitlines())
+             row[field] = value.encode('utf-8', errors='replace')[-2048:].decode('utf-8', errors='ignore')
+         return result
+     except Exception as exc:
+@@ -129,6 +131,73 @@ def setup_step(current, name, action):
+             current['setup_failed'] = True
+ 
+ 
++def fallback_wheel(wheels, package):
++    """Prefer the wheelhouse, then the running interpreter's ensurepip bundle."""
++    from packaging.utils import parse_wheel_filename
++    found = list(Path(wheels).glob(package + '-*-py3-none-any.whl'))
++    if not found and package == 'pip':
++        try:
++            import ensurepip
+"""bin/memguard end-to-end test (dec 021 item 1d). Run only under bin/job (allocates ~2.5G peak).
+
+A synthetic job (bash wrapper -> python child -> python grandchild that allocates in 200M steps)
+must be killed with no survivors, and the wrapper must record exit 137. A dummy non-target process
+at the same RSS (no marker, cwd outside --roots) must survive with its oom_score_adj untouched.
+Uses a private marker so neither this test's own bin/job nor the real memguard is involved.
+"""
+import os, subprocess, sys, time, uuid
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+MG = REPO / "bin" / "memguard"
+STEP = 200 * 1024 * 1024
+
+ALLOC = f"""
+import time
+held = []
+for _ in range(6):            # up to 1.2G, touched (non-zero) so it is resident
+    held.append(b"\\x01" * {STEP})
+    time.sleep(0.4)
+time.sleep(120)
+"""
+
+CHILD = f"""
+import subprocess, sys, time
+subprocess.Popen([sys.executable, "-c", {ALLOC!r}])
+time.sleep(120)
+"""
+
+
+def alive(pid):
+    try:
+        st = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return st.rsplit(") ", 1)[-1][:1] != "Z"
+
+
+def tree(pid):
+    out, stack = [], [pid]
+    while stack:
+        p = stack.pop()
+        try:
+            kids = Path(f"/proc/{p}/task/{p}/children").read_text().split()
+        except OSError:
+            kids = []
+        for k in map(int, kids):
+            out.append(k); stack.append(k)
+    return out
+
+
+def test_memguard_kills_job_tree_and_spares_dummy(tmp_path):
+    marker = "GEMMA_MGTEST_" + uuid.uuid4().hex[:8]
+    root = tmp_path / "jobcwd"; root.mkdir()
+    rcfile = tmp_path / "rc"; log = tmp_path / "memguard.log"
+    env_clean = {k: v for k, v in os.environ.items() if not k.startswith("GEMMA_MGTEST_")}
+
+    dummy = subprocess.Popen([sys.executable, "-c", ALLOC], cwd="/", env=env_clean)
+    job = subprocess.Popen(
+        ["bash", "-c", f'{sys.executable} -c "$CHILD_SRC"; echo $? > {rcfile}'],
+        cwd=root, env={**env_clean, marker: "test", "CHILD_SRC": CHILD})
+    mg = None
+    try:
+        time.sleep(3.0)  # dummy reaches ~1.2G; job grandchild is ramping
+        pids = [job.pid] + tree(job.pid)
+        assert len(pids) >= 3, f"synthetic tree not built: {pids}"
+        mg = subprocess.Popen(
+            [sys.executable, str(MG), "--marker", marker, "--max-total", "0.8", "--min-available", "0",
+             "--unmarked-rss", "0.5", "--interval", "0.5", "--roots", str(tmp_path),
+             "--log", str(log), "--no-mail"], env=env_clean,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + 30
+        while time.time() < deadline and "survivors=" not in (log.read_text() if log.exists() else ""):
+            time.sleep(0.5)
+        text = log.read_text()
+5:at the same RSS (no marker, cwd outside --roots) must survive with its oom_score_adj untouched.
+82:        assert Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip() == "0"
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pytest_timeout.py
+
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pytest_timeout-2.1.0.dist-info:
+INSTALLER
+LICENSE
+METADATA
+RECORD
+REQUESTED
+WHEEL
+entry_points.txt
+top_level.txt
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/kaggle/agent_timing.py');s=p.read_text()
+s=s.replace('\"\"\"Bound output in the journal; never serialize commands, task objects or exceptions.\"\"\"', '\"\"\"Time setup steps and retain bounded output plus retry counts.\"\"\"')
+s=s.replace(\"    try:\\n        result = original(*args, **kwargs)\\n        return result\\n    finally:\", \"    try:\\n        result = original(*args, **kwargs)\\n        return result\\n    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:\\n        result = exc\\n        raise\\n    finally:\")
+s=s.replace(\"    install_deps = patch_subprocess_deps(data_dir, state)\\n    try:\\n        sid\", \"    try:\\n        install_deps = patch_subprocess_deps(data_dir, state)\\n        sid\")
+s=s.replace(\"        setup_step(current, 'teardown', manager.cleanup_all)\\n        current.pop('started')\", \"        try:\\n            setup_step(current, 'teardown', manager.cleanup_all)\\n        except Exception as exc:\\n            current['teardown_error'] = type(exc).__name__\\n        current.pop('started')\")
+s=s.replace(\"    os.environ.setdefault('SETUP_FIX', str(SETUP_FIX))\\n    if SETUP_ONLY:\", \"    os.environ.setdefault('SETUP_FIX', str(SETUP_FIX))\\n    if os.environ['SETUP_FIX'] not in ('0', '1'):\\n        raise ValueError('SETUP_FIX must be 0 or 1')\\n    if SETUP_ONLY:\")
+p.write_text(s)
+PY
+cat >> eval/tests/test_setup_check.py <<'PY'
+
+
+@pytest.mark.parametrize('fail_install', [False, True])
+def test_setup_task_uses_harness_creation_sequence_and_always_tears_down(tmp_path, monkeypatch, fail_install):
+    cs = ModuleType('swegemma.harness.container_setup')
+    sandbox = ModuleType('swegemma.sandbox')
+    calls = []
+    class SubprocessManager:
+        def __init__(self, **kw):
+            # Match Evaluator's default system_site_packages/venv behavior.
+            assert kw == dict(timeout_seconds=300)
+        def start(self):
+            calls.append('start')
+            return 'sid'
+        def cleanup_all(self):
+            calls.append('cleanup')
+    sandbox.SubprocessManager = SubprocessManager
+    for name in ('setup_container_wheels', 'extract_snapshot', 'setup_git_exclude', 'install_editable_package'):
+        setattr(cs, name, lambda *a, _name=name, **kw: calls.append(_name))
+    for name in ('swegemma', 'swegemma.harness'):
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    monkeypatch.setitem(sys.modules, 'swegemma.sandbox', sandbox)
+    monkeypatch.setitem(sys.modules, 'swegemma.harness.container_setup', cs)
+    def install(*args):
+        calls.append('install')
+        if fail_install:
+            raise RuntimeError('offline failure')
+    monkeypatch.setattr(timing, 'patch_subprocess_deps', lambda *a: install)
+    state = contextvars.ContextVar('sequence')
+    row = timing.setup_task(tmp_path, tmp_path / 'wheels', 'rich_3006', 'Textualize/rich', state)
+    assert calls == ['start', 'setup_container_wheels', 'extract_snapshot', 'setup_git_exclude',
+                     'install_editable_package', 'install', 'cleanup']
+    assert row['setup_failed'] == fail_install
+    assert 'started' not in row and row['setup_s_total'] >= 0
+    assert row['setup_calls'][-1]['step'] == 'teardown'
+PY
+LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/python3.13 -m pytest eval/tests --ignore=eval/tests/test_memguard.py -q" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 9834ms:
+........................s........................................... [ 15%]
+........................................................................ [ 31%]
+........................................................................ [ 47%]
+........................................................................ [ 63%]
+........................................................................ [ 79%]
+.....................................................s.................. [ 95%]
+.......ss...........                                                     [100%]
+444 passed, 4 skipped, 4 subtests passed in 8.35s
+
+codex
+The full suite ran: 443 passed, 4 skipped, and the known memguard test failed on `oom_score_adj=1000` versus `0`. I’ve left memguard untouched.
+
+Bubblewrap also failed before any task could start: `Failed to create NETLINK_ROUTE socket: Operation not permitted`. I can’t report per-step timings or an observed pip failure from this sandbox. The runner now documents a single Builder command that attempts both modes and writes the acceptance artifact.
+
+exec
+/bin/bash -lc "git diff --check; git status --short; sed -n '20,45p' eval/repro/plan003_kernel_setup.py; sed -n '1,80p' eval/kaggle/setup_check_summary.py" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+ M eval/kaggle/agent_timing.py
+ M eval/kaggle/timing_push.sh
+ M eval/repro/plan003_kernel_setup.py
+ M eval/tests/test_agent_timing.py
+ M results/plan003_kernel_setup_acceptance.json
+?? eval/kaggle/setup_check_push.sh
+?? eval/kaggle/setup_check_summary.py
+?? eval/tests/test_setup_check.py
+import tempfile
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--data-dir', type=Path, default=Path('/home/ubuntu/work/gemma/data/raw'))
+    parser.add_argument('--wheels-dir', type=Path)
+    parser.add_argument('--output', type=Path, default=Path('results/plan003_kernel_setup_acceptance.json'))
+    parser.add_argument('--setup-fix', choices=('0', '1'))
+    parser.add_argument('--inside-bwrap', action='store_true', help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if not args.inside_bwrap:
+        command = ['bwrap', '--dev-bind', '/', '/', '--unshare-net', sys.executable,
+                   str(Path(__file__).resolve()), *sys.argv[1:], '--inside-bwrap']
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode and 'bwrap:' in result.stderr:
+            args.output.write_text(json.dumps(dict(status='blocked', rc=result.returncode,
+                stderr=result.stderr[-2048:], rows=[]), indent=2) + '\n')
+        print(result.stdout, end='')
+        print(result.stderr, end='', file=sys.stderr)
+        return result.returncode
+    os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
+    spec = importlib.util.spec_from_file_location('timing', Path(__file__).parents[1] / 'kaggle/agent_timing.py')
+    timing = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(timing)
+"""Summarize a CPU setup journal without dropping failures or missing task IDs."""
+import argparse
+import json
+from pathlib import Path
+
+
+def diagnose(row):
+    calls = [c for c in row.get('setup_subprocesses', [])
+             if isinstance(c.get('argv'), list) and '-e' in c['argv']]
+    if not calls:
+        return dict(cause='unobserved', evidence=[])
+    first = calls[0]
+    if first['rc'] == 0:
+        return dict(cause='offline_install_succeeded', evidence=[])
+    output = first.get('stdout_full', first.get('stdout', '')) + '\n' + first.get('stderr_full', first.get('stderr', ''))
+    lower = output.lower()
+    if 'no module named pip' in lower:
+        cause = 'pip_absent_in_venv'
+    elif any(s in lower for s in ('backendunavailable', 'cannot import', 'no module named', 'backend is not available')):
+        cause = 'build_backend_absent_in_venv'
+    elif any(s in lower for s in ('not a supported wheel', 'no matching distribution', 'could not find a version')):
+        cause = 'wheel_or_abi_failure_stop_and_report'
+    else:
+        cause = 'unresolved_offline_install_failure'
+    evidence = [line for line in output.splitlines() if any(s in line.lower() for s in
+                ('error', 'no module named', 'cannot import', 'backendunavailable', 'not a supported wheel'))]
+    return dict(cause=cause, evidence=evidence[-12:])
+
+
+def summarize(path):
+    records = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    header = records[0]
+    if header.get('_schema') != 'kaggle_setup_cpu_check_v1':
+        raise ValueError('Unexpected journal schema')
+    rows = [r for r in records if 'instance_id' in r]
+    ids = [r['instance_id'] for r in rows]
+    expected = header['task_ids']
+    complete = bool(expected) and len(set(ids)) == len(ids) and sorted(ids) == sorted(expected)
+    done = [r['_done']['n'] for r in records if '_done' in r]
+    complete = complete and done == [len(expected)] and not any('_stopped' in r for r in records)
+    for row in rows:
+        if row['setup_fix'] == 0:
+            row['offline_install_diagnosis'] = diagnose(row)
+    gates = dict(complete=complete,
+                 per_task_setup_le_30s=all(isinstance(r.get('setup_s_total'), (float, int)) and
+                                          0 <= r['setup_s_total'] <= 30 for r in rows),
+                 editable_rc_zero=all(r.get('editable_rc') == 0 for r in rows),
+                 zero_retrying_lines=all(r.get('retrying_lines') == 0 for r in rows),
+                 no_setup_failures=all(not r.get('setup_failed', True) for r in rows))
+    return dict(_schema='kaggle_setup_cpu_check_v1', task_ids=expected, n=len(rows),
+                rows=rows, gates=gates, decision='PASS' if all(gates.values()) else 'FAIL')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('journal', type=Path)
+    parser.add_argument('--output', type=Path)
+    args = parser.parse_args()
+    text = json.dumps(summarize(args.journal), indent=2) + '\n'
+    if args.output:
+        args.output.write_text(text)
+    else:
+        print(text, end='')
+
+
+if __name__ == '__main__':
+    main()
+
+exec
+/bin/bash -lc "git diff -- results/plan003_kernel_setup_acceptance.json; git diff --numstat; git diff -- eval/repro/plan003_kernel_setup.py | head -80; rg -n 'setup_subprocesses|started.*setup_calls' eval/kaggle/agent_timing.py" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+diff --git a/results/plan003_kernel_setup_acceptance.json b/results/plan003_kernel_setup_acceptance.json
+index 8df54d1..fc2d242 100644
+--- a/results/plan003_kernel_setup_acceptance.json
++++ b/results/plan003_kernel_setup_acceptance.json
+@@ -2,29 +2,5 @@
+   "status": "blocked",
+   "rc": 1,
+   "stderr": "bwrap: loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted\n",
+-  "rows": [],
+-  "_schema": "plan003_kernel_setup_acceptance_v1",
+-  "script": "eval/repro/plan003_kernel_setup.py",
+-  "local_data_dir": "/home/ubuntu/work/gemma/data/raw",
+-  "task_ids": [
+-    "rich_3006",
+-    "fastapi_14986"
+-  ],
+-  "setup_durations_s": null,
+-  "wheelhouse_preflight": {
+-    "missing": [
+-      "pip",
+-      "pytest-timeout==2.1.0"
+-    ],
+-    "note": "The local data/raw/wheels directory lacks these required wheels; no downloads attempted."
+-  },
+-  "tests": {
+-    "command": "/home/ubuntu/gemma-local/venv/bin/python3 -c \"import sys;sys.path.append('/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages');import pytest;raise SystemExit(pytest.main(['-q','eval/tests']))\"",
+-    "passed": 437,
+-    "skipped": 4,
+-    "failed": 1,
+-    "subtests_passed": 4,
+-    "failure": "test_memguard_kills_job_tree_and_spares_dummy: dummy oom_score_adj was 1000; expected 0",
+-    "note": "Resetting the test launcher oom_score_adj to 0 did not remove this failure."
+-  }
++  "rows": []
+ }
+253	69	eval/kaggle/agent_timing.py
+36	20	eval/kaggle/timing_push.sh
+38	75	eval/repro/plan003_kernel_setup.py
+8	12	eval/tests/test_agent_timing.py
+1	25	results/plan003_kernel_setup_acceptance.json
+diff --git a/eval/repro/plan003_kernel_setup.py b/eval/repro/plan003_kernel_setup.py
+index a667b43..39cb30d 100644
+--- a/eval/repro/plan003_kernel_setup.py
++++ b/eval/repro/plan003_kernel_setup.py
+@@ -1,107 +1,70 @@
+-"""Offline acceptance for the timing injector, using two frozen dev snapshots.
++"""Offline setup acceptance using one rich and one fastapi frozen dev snapshot.
+ 
+-Run with the harness interpreter and its pytest/image packages available:
+-  python eval/repro/plan003_kernel_setup.py --data-dir /path/to/data/raw \
+-      --wheels-dir /path/to/complete/wheelhouse --output /tmp/setup-acceptance.json
+-The wheelhouse must include pip and pytest-timeout==2.1.0 as well as public wheels.
+-No downloads, task text, gold patches, tests, or holdout inventory are used.
++Builder command OUTSIDE the Codex sandbox (runs BOTH SETUP_FIX=0 and =1):
++  /home/ubuntu/gemma-local/venv/bin/python eval/repro/plan003_kernel_setup.py
++
++Optional --setup-fix 0|1 selects a single mode. Defaults use the main checkout's
++public data/wheelhouse; override with --data-dir and --wheels-dir. Output defaults
++to results/plan003_kernel_setup_acceptance.json, including per-step durations and
++full observed pip errors. bwrap --unshare-net is mandatory; no PIP_* overrides,
++venv monkeypatching, model, agent, verification, downloads, or holdout access.
+ """
+ import argparse
+ from contextvars import ContextVar
+ import importlib.util
+ import json
++import os
+ from pathlib import Path
+ import subprocess
+ import sys
+ import tempfile
+-import time
+-from unittest.mock import patch
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+-    parser.add_argument('--data-dir', type=Path, required=True)
+-    parser.add_argument('--wheels-dir', type=Path, required=True)
+-    parser.add_argument('--output', type=Path, required=True)
++    parser.add_argument('--data-dir', type=Path, default=Path('/home/ubuntu/work/gemma/data/raw'))
++    parser.add_argument('--wheels-dir', type=Path)
++    parser.add_argument('--output', type=Path, default=Path('results/plan003_kernel_setup_acceptance.json'))
++    parser.add_argument('--setup-fix', choices=('0', '1'))
+     parser.add_argument('--inside-bwrap', action='store_true', help=argparse.SUPPRESS)
+     args = parser.parse_args()
++    args.output.parent.mkdir(parents=True, exist_ok=True)
+     if not args.inside_bwrap:
+         command = ['bwrap', '--dev-bind', '/', '/', '--unshare-net', sys.executable,
+                    str(Path(__file__).resolve()), *sys.argv[1:], '--inside-bwrap']
+         result = subprocess.run(command, capture_output=True, text=True)
+-        if result.returncode:
+-            # Bubblewrap startup can fail before the child creates an artifact.
+-            if not args.output.exists():
+-                args.output.write_text(json.dumps(dict(status='blocked', rc=result.returncode,
+-                    stderr=result.stderr[-2048:], rows=[]), indent=2) + '\n')
++        if result.returncode and 'bwrap:' in result.stderr:
++            args.output.write_text(json.dumps(dict(status='blocked', rc=result.returncode,
++                stderr=result.stderr[-2048:], rows=[]), indent=2) + '\n')
+         print(result.stdout, end='')
+         print(result.stderr, end='', file=sys.stderr)
+         return result.returncode
++    os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
+     spec = importlib.util.spec_from_file_location('timing', Path(__file__).parents[1] / 'kaggle/agent_timing.py')
+     timing = importlib.util.module_from_spec(spec)
+     spec.loader.exec_module(timing)
+-    from swegemma.sandbox import SubprocessManager
+-    import swegemma.sandbox.subprocess as sb
+-    from swegemma.harness.container_setup import extract_snapshot
+     state = ContextVar('acceptance')
+     rows = []
+-    failure = None
+-    try:
+-        with tempfile.TemporaryDirectory(prefix='kernel-setup-') as temp:
+-            root = Path(temp)
+-            (root / 'wheels').symlink_to(args.wheels_dir.resolve())
+-            (root / 'sandbox').symlink_to((args.data_dir / 'sandbox').resolve())
+-            install = timing.patch_subprocess_deps(root, state)
++    with tempfile.TemporaryDirectory(prefix='kernel-setup-') as temp:
++        root = Path(temp)
+174:log = Path(__file__).with_name('setup_subprocesses.json')
+220:            started=time.perf_counter(), setup_calls=[], setup_failed=False)
+314:            log = docker.sandboxes[container_id]['tmp'] / 'setup_subprocesses.json'
+316:            current['setup_subprocesses'] = calls
+491:            times = dict(verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+521:                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+532:                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+590:                   started=time.perf_counter(), setup_calls=[], setup_failed=False,
+592:                   wheel_tags_chosen=[], setup_subprocesses=[])
+
+exec
+/bin/bash -lc "rg -n -A10 'subprocess.run' /home/ubuntu/work/gemma/data/raw/sandbox/setup.py; sed -n '55,75p' eval/repro/plan003_kernel_setup.py" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+208:        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+209-        if res.returncode != 0:
+210-            fallback = [sys.executable, "-m", "pip", "install", "--no-deps", "-e", str(workspace)]
+211:            subprocess.run(fallback, capture_output=True, text=True, check=False)
+212-    except Exception as e:
+213-        print(f"Notice: install_editable_package skipped: {e}", file=sys.stderr)
+214-
+215-
+216-def configure_workspace_pytest_ini(workspace: Path) -> None:
+217-    """Configures pytest.ini in the workspace root for robust test discovery."""
+218-    ini_path = workspace / "pytest.ini"
+219-    existing = ""
+220-    if ini_path.exists():
+221-        try:
+--
+390:        subprocess.run(cmd, check=False)
+391-
+392-    execute_fast_path(ws, repo=parsed_repo)
+393-
+394-
+395-if __name__ == "__main__":
+396-    main()
+            os.environ['SETUP_FIX'] = mode
+            for iid, repo in [('rich_3006', 'Textualize/rich'), ('fastapi_14986', 'fastapi/fastapi')]:
+                row = timing.setup_task(root, wheels, iid, repo, state)
+                rows.append(row)
+                print(json.dumps(dict(instance_id=iid, setup_fix=int(mode),
+                    steps={c['step']: c['duration_s'] for c in row['setup_calls']},
+                    editable_rc=row['editable_rc'], retrying_lines=row['retrying_lines'])), flush=True)
+    # The unfixed mode is diagnostic; only fixed rows must pass the setup gate.
+    fixed = [r for r in rows if r['setup_fix'] == 1]
+    passed = all(not r['setup_failed'] and r['editable_rc'] == 0 and
+                 r['retrying_lines'] == 0 and r['setup_s_total'] <= 30 for r in fixed)
+    args.output.write_text(json.dumps(dict(status='passed' if passed else 'failed', rows=rows), indent=2) + '\n')
+    return int(not passed)
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
+
+exec
+/bin/bash -lc "head -90 /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/__init__.py; ls /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages | rg '"'^(torch|vllm|adk_submission)'"' ; sed -n '1,90p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/__init__.py; git diff --check" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+"""SWE-bench evaluation system for coding agents."""
+
+import logging
+import os
+
+from swegemma.budget import EvaluationBudget, HarnessLimits, TokenBudget
+from swegemma.config import EvalConfig
+from swegemma.context import SwegemmaContext
+from swegemma.deduplication import (
+    DeduplicationSummary,
+    apply_patch_to_dir,
+    clean_circular_symlinks,
+    clean_repo_name,
+    create_binary_patch,
+    create_patch_from_archives,
+    deduplicate_snapshots,
+    get_base_snapshot_filename,
+    get_task_cl,
+    identify_base_snapshot,
+    identify_base_snapshots,
+    purge_tar_gz_archives,
+    reconstruct_snapshot,
+    resolve_task_snapshot_paths,
+    validate_archive_extensions,
+    validate_patch_reconstruction,
+    verify_byte_identical_trees,
+)
+from swegemma.difficulty import (
+    DifficultyWeights,
+    TaskDifficultyMetrics,
+    TaskDifficultyResult,
+    analyze_task,
+    analyze_tasks_file,
+    compute_dimension_scores,
+    extract_task_metrics,
+    generate_difficulty_summary,
+    render_summary_markdown,
+)
+from swegemma.edit import EditResult, apply_replacement
+from swegemma.evaluate import Evaluator
+from swegemma.harness.sample_verification import (
+    ALL_BENCHMARK_REPOS,
+    LATENCY_SLA_THRESHOLD_SECONDS,
+    SampleVerificationResult,
+    SweepSummary,
+    load_all_benchmark_tasks,
+    resolve_task_snapshot,
+    run_sample_verification_sweep,
+    select_sample_tasks,
+    verify_sample_task_airgapped,
+)
+from swegemma.models import EvaluationResult, Task, TaskResult, load_tasks
+from swegemma.results import append_task_result, save_results
+from swegemma.sandbox import (
+    BaseSandboxManager,
+    ContainerConfig,
+    ContainerManager,
+    ExecResult,
+    SubprocessManager,
+)
+
+__version__ = '0.2.11'
+
+# Suppress OpenTelemetry detach errors and verbose third-party client logs
+os.environ.setdefault("LITELLM_LOG", "WARNING")
+logging.getLogger("opentelemetry.context").setLevel(logging.CRITICAL)
+logging.getLogger("opentelemetry").setLevel(logging.CRITICAL)
+for _noisy_logger in (
+    "LiteLLM",
+    "LiteLLM Router",
+    "LiteLLM Proxy",
+    "litellm",
+    "httpx",
+    "httpcore",
+    "openai",
+    "urllib3",
+):
+    _lg = logging.getLogger(_noisy_logger)
+    _lg.setLevel(logging.WARNING)
+    if "litellm" in _noisy_logger.lower():
+        _lg.propagate = False
+
+try:
+    import litellm
+
+    litellm.drop_params = True
+except ImportError:
+    pass
+
+__all__ = [
+adk_submission
+adk_submission-0.2.13.dist-info
+"""Sandboxed ADK agent compiler for Kaggle competition submissions.
+
+Compile ADK agents from declarative YAML configs without permitting
+arbitrary code execution. All tools, models, skills, and callbacks are resolved
+through closed registries provided by the competition organizer.
+
+Quick start::
+
+    from adk_submission import (
+        compile_submission, discover_adapters, discover_skills,
+        ToolRegistry, ModelRegistry, SkillRegistry, CallbackRegistry,
+        CallbackType, SubmissionLimits
+    )
+
+    # 1. Initialize and populate registries with custom callables
+    tools = ToolRegistry()
+    # `custom_google_search_fn` represents a user-provided tool callable
+    tools.register("google_search", custom_google_search_fn)
+
+    models = ModelRegistry()
+    models.register("fast", "gemini-2.5-flash")
+
+    skills = SkillRegistry()
+    callbacks = CallbackRegistry()
+    limits = SubmissionLimits()
+
+    # 2. Discover adapters and skills from the unpacked submission directory
+    submission_path = "/path/to/unpacked/submission"
+    adapter_manifest = discover_adapters(submission_path, adapter_extensions={".safetensors"})
+    adapter_manifest.register_all(models, lambda info: f"hosted_vllm/llama3:{info.name}")
+
+    skill_manifest = discover_skills(submission_path, limits=limits)
+    skill_manifest.register_all(skills, lambda info: load_skill_from_dir(info.path))
+
+    # 3. Compile the submission into a runnable ADK agent
+    agent = compile_submission(
+        submission_dir=submission_path,
+        tool_registry=tools,
+        model_registry=models,
+        skill_registry=skills,
+        callback_registry=callbacks,
+        limits=limits,
+    )
+"""
+
+from typing import TYPE_CHECKING, Any
+
+from .compiler import compile_submission
+from .discovery import (
+    AdapterInfo,
+    AdapterManifest,
+    SkillInfo,
+    SkillManifest,
+    SubmissionDirectory,
+    discover_adapters,
+    discover_declared_models,
+    discover_skills,
+    find_root_config,
+    validate_directory,
+)
+from .errors import (
+    AdapterNotFoundError,
+    CallbackNotFoundError,
+    LimitExceededError,
+    ModelNotFoundError,
+    PathTraversalError,
+    ServerStartupError,
+    SkillNotFoundError,
+    SubmissionError,
+    SubmissionSchemaError,
+    SubmissionValidationError,
+    ToolNotFoundError,
+)
+from .limits import GenerationConstraints, NumericRange, SubmissionLimits
+from .registry import (
+    CallbackRegistry,
+    CallbackType,
+    ModelRegistry,
+    SkillRegistry,
+    ToolRegistry,
+)
+
+if TYPE_CHECKING:
+    from .server import (
+        BaseInferenceServer,
+        TransformersConfig,
+        TransformersServer,
+        VllmConfig,
+        VllmServer,
+        spawn_server,
+
+exec
+/bin/bash -lc "rg -n 'resolve_task_snapshot_paths|snapshot_path =' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py; rg -n -A65 '"'^def resolve_task_snapshot_paths'"' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/deduplication.py; ls /home/ubuntu/work/gemma/data/raw/snapshots/rich_3006* /home/ubuntu/work/gemma/data/raw/snapshots/fastapi_14986*" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+19:from swegemma.deduplication import resolve_task_snapshot_paths
+271:        snapshot_path, base_snapshot_path, patch_path = resolve_task_snapshot_paths(
+277:                snapshot_path, base_snapshot_path, patch_path = resolve_task_snapshot_paths(
+1311:def resolve_task_snapshot_paths(
+1312-    snapshots_dir: Path | str,
+1313-    instance_id: str,
+1314-    repo: str,
+1315-) -> tuple[Path, Path | None, Path | None]:
+1316-    """Resolves (effective_snapshot_path, base_snapshot_path, patch_path) for task execution.
+1317-
+1318-    Resolution order:
+1319-    1. Check for fallback standalone archive: snapshots_dir/fallbacks/{instance_id}.tgz
+1320-    2. Check for deduplicated base + patch:
+1321-       Base candidates:
+1322-         - snapshots_dir/base_snapshots/base_{clean_repo}.tgz
+1323-         - snapshots_dir/base_{clean_repo}.tgz
+1324-       Patch candidates:
+1325-         - snapshots_dir/patches/{instance_id}.patch
+1326-         - snapshots_dir/{instance_id}.patch
+1327-    3. Check for standalone archive:
+1328-       - snapshots_dir/{instance_id}.tgz
+1329-       - snapshots_dir/{instance_id}.tar.gz
+1330-    4. Default missing path: snapshots_dir/{instance_id}.tgz
+1331-
+1332-    Returns:
+1333-        tuple (effective_snapshot_path, base_snapshot_path, patch_path)
+1334-    """
+1335-    s_dir = Path(snapshots_dir).resolve()
+1336-    iid = instance_id.strip()
+1337-
+1338-    # 1. Fallback archive
+1339-    fallback_cand = s_dir / 'fallbacks' / f'{iid}.tgz'
+1340-    if fallback_cand.exists():
+1341-        return fallback_cand, None, None
+1342-
+1343-    # 2. Deduplicated base snapshot + patch
+1344-    base_candidates = [
+1345-        s_dir / 'base_snapshots' / get_base_snapshot_filename(repo),
+1346-        s_dir / get_base_snapshot_filename(repo),
+1347-    ]
+1348-    base_file = next((b for b in base_candidates if b.exists()), None)
+1349-    if base_file is not None:
+1350-        patch_candidates = [
+1351-            s_dir / 'patches' / f'{iid}.patch',
+1352-            s_dir / f'{iid}.patch',
+1353-        ]
+1354-        patch_file = next((p for p in patch_candidates if p.exists()), None)
+1355-        if patch_file is not None:
+1356-            valid_patch = (
+1357-                patch_file if patch_file.stat().st_size > 0 else None
+1358-            )
+1359-            return base_file, base_file, valid_patch
+1360-
+1361-    # 3. Direct standalone archive
+1362-    for ext in ('.tgz', '.tar.gz'):
+1363-        direct = s_dir / f'{iid}{ext}'
+1364-        if direct.exists():
+1365-            return direct, None, None
+1366-
+1367-    # 4. Not found fallback
+1368-    return s_dir / f'{iid}.tgz', None, None
+/home/ubuntu/work/gemma/data/raw/snapshots/fastapi_14986.tgz
+/home/ubuntu/work/gemma/data/raw/snapshots/rich_3006.tgz
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/kaggle/agent_timing.py');s=p.read_text()
+s=s.replace(\"        if 'cutlass' in w.name.lower() or (os.environ.get('SETUP_ONLY') == '1' and w.name.lower().startswith(('vllm-', 'torch-', 'triton-', 'nvidia_'))):\", \"        gpu_wheel = w.name.lower().startswith(('vllm-', 'torch-', 'triton-', 'nvidia_'))\\n        if 'cutlass' in w.name.lower() or (os.environ.get('SETUP_ONLY') == '1' and gpu_wheel):\")
+s=s.replace(\"    from swegemma.sandbox import SubprocessManager\\n    import swegemma.harness.container_setup as cs\\n    current\", \"    from swegemma.sandbox import SubprocessManager\\n    from swegemma.deduplication import resolve_task_snapshot_paths\\n    import swegemma.harness.container_setup as cs\\n    current\")
+s=s.replace(\"        setup_step(current, 'extract_snapshot', lambda: cs.extract_snapshot(\\n            manager, sid, data_dir / 'snapshots' / (iid + '.tgz')))\", \"        snapshot, base, patch = resolve_task_snapshot_paths(data_dir / 'snapshots', iid, repo)\\n        setup_step(current, 'extract_snapshot', lambda: cs.extract_snapshot(\\n            manager, sid, snapshot, base_snapshot_path=base, patch_path=patch))\")
+p.write_text(s)
+p=Path('eval/tests/test_setup_check.py');s=p.read_text()
+s=s.replace(\"    cs = ModuleType('swegemma.harness.container_setup')\\n    sandbox = ModuleType('swegemma.sandbox')\", \"    cs = ModuleType('swegemma.harness.container_setup')\\n    dedup = ModuleType('swegemma.deduplication')\\n    dedup.resolve_task_snapshot_paths = lambda path, iid, repo: (path / (iid + '.tgz'), None, None)\\n    monkeypatch.setitem(sys.modules, 'swegemma.deduplication', dedup)\\n    sandbox = ModuleType('swegemma.sandbox')\")
+p.write_text(s)
+p=Path('eval/kaggle/timing_push.sh');s=p.read_text().replace('# Stage a self-contained private GPU timing kernel.', '# Stage a self-contained private GPU timing or CPU setup kernel.')
+s=s.replace(\"print('Metadata assumption (offline): model_sources uses google/gemma-4/Other/<model>/2 (starter casing); docker_image pinned to starter')\", \"print('CPU setup check; no model; starter image pinned' if setup_only else\\n      'Metadata assumption (offline): model_sources uses google/gemma-4/Other/<model>/2 (starter casing); docker_image pinned to starter')\")
+p.write_text(s)
+PY
+LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/python3.13 -m pytest eval/tests --ignore=eval/tests/test_memguard.py -q" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix

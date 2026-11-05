@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 18:25Z (cycle 70, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 18:28Z (cycle 71, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -18,15 +18,15 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
-## Running jobs (18:12Z)
+## Running jobs (18:28Z)
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
-- codex-kernel-setup-check, codex-sandbox-limits3, review-memguard-fix2-light.
-- Done this cycle: pipfb2-light (plan 003), scout (ops/scout/2026-11-05-timing-caps.md; RULES_FINDINGS C1-C3).
+- codex-kernel-setup-check (round 2 of kernel setup), codex-memguard-fix3, sandbox-limits3-hosttest (full eval/tests on host, branch 9d610b5).
 
 ## bin/job, memguard, owner patch (cycles 62-66)
 - Linger=yes since ~18:05Z (dec 025): the scope path (MemoryMax=5G) is normal; Codex works under it.
 - Owner patch v2 = ONE diff (dec 024 item 3; dec 026: HOLD for Aniket, low urgency, after the critical path; keep the RLIMIT_DATA comment): ops/patches/bin-job-fallback.diff. v2 review ops/codex/review-20261105T180811.md: 3 BLOCKING (grep regex marker -> use grep -F; PID reuse between scan and signal plus cached group_ok -> bind identities (pidfd); legacy 3/4-field records -> refuse destructive signalling without identity evidence). Plan v3: a small Python helper using pidfds (like memguard) called from bin/job kill. NOT started (low urgency).
-- memguard-fix: round 2 adae3eb; host tests offline 41 pass/1 skip, live 42 pass (job memguard-fix-livetest, ops/codex/memguard-fix-livetest.sh). Review job review-memguard-fix2-light. Merge only with no BLOCKING; deploy as memguard-light, new one BEFORE stopping pid 7933.
+- memguard-fix: round 2 adae3eb review ops/codex/review-20261105T182108.md: 2 BLOCKING (legacy history merge in setdefault; two guards target each other). Round 3 job codex-memguard-fix3 (spec ops/codex/build-memguard-fix3.spec): history merge + protect every memguard process/wrapper. DEPLOY CHANGED: no overlap. With no heavy jobs running, stop pid 7933, then start memguard-light at once. Then host livetest (ops/codex/memguard-fix-livetest.sh) + re-review; merge only with no BLOCKING.
+- sandbox-limits round 3 9d610b5 (wait4 ru_maxrss peak; Codex 459 pass/4 skip). Host test job sandbox-limits3-hosttest; if green -> codex-review -> merge eval/ only.
 
 ## Dec 027 (report 004 approved, option B with fidelity changes): plan 004 pre-registered (eval/plans/004.md)
 - FIDELITY: the timing kernel may only reproduce Dockerfile.public (pip + the line-9 tool set, offline). NO PIP_NO_INDEX/retry prefixes. setup_calls logging is mandatory.
@@ -71,6 +71,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
 ## Next 3
-1. When codex-kernel-setup-fix finishes: launch the build-kernel-setup-check follow-up; review it; codex-review it; push CPU stage 2a (record it in ops/budget/kaggle.md).
-2. Act on reviews: review-job-patch2-light (then mail the Director, on HOLD for Aniket per dec 026), review-memguard-fix-light (merge, deploy memguard-light), codex-sandbox-limits2 (re-review, merge eval/ only).
-3. Dec 022 item 4 levers from ask-item4-light; EV-1 + the cpu8 gold/null run after the sandbox-limits merge.
+1. When codex-kernel-setup-check finishes: run eval/repro/plan003_kernel_setup.py locally (both modes), codex-review, push CPU stage 2a (record it in ops/budget/kaggle.md).
+2. sandbox-limits3-hosttest -> codex-review -> merge; codex-memguard-fix3 -> livetest -> review -> deploy (no overlap).
+3. EV-1 + the cpu8 gold/null run after the sandbox-limits merge; plan 005 A/B needs GPU (ask in report 005).

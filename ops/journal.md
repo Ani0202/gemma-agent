@@ -122,3 +122,5 @@
 2026-11-05T18:19Z | kernel-setup-fix round 1 (c57bd65); follow-up setup-check build launched (fidelity: prefix removed, pip sourcing, CPU mode) | ops/codex/build-kernel-setup-fix.md, ops/codex/build-kernel-setup-check.spec
 2026-11-05T18:20Z | memguard-fix round 2: host 41+1skip offline, 42 live pass; review launched | ops/jobs/memguard-fix-livetest.log
 2026-11-05T18:24Z | item 4 scoped: submit_patch freezes the patch; fallback diff otherwise; no trimming knobs; compaction faithful to starter. Draft prompt + plan 005 | ops/codex/ask-20261105T181222.md, bundles/drafts/item4-system.md, eval/plans/005.md
+2026-11-05T18:27Z | review memguard-fix round 2: 2 BLOCKING (legacy history lost when a new member initialises the job; old+new guards target each other). Round 3 launched; deploy is now stop-old-then-start-new, no overlap | ops/codex/review-20261105T182108.md, ops/codex/build-memguard-fix3.spec
+2026-11-05T18:27Z | sandbox-limits round 3 built (9d610b5, wait4 peak RSS; Codex 459 pass); host test job launched | ops/codex/build-sandbox-limits3.md, ops/codex/sandbox-limits3-hosttest.sh

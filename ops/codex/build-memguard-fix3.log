@@ -1,0 +1,1197 @@
+Reading additional input from stdin...
+OpenAI Codex v0.165.0
+--------
+workdir: /home/ubuntu/work/gemma-wt/codex-memguard-fix
+model: gpt-6.1-sol
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR]
+reasoning effort: medium
+reasoning summaries: none
+session id: 01a1acf7-3ece-7cc2-b0b2-c8ce7db7d789
+--------
+user
+Read AGENTS.md (your role: implementer) and CLAUDE.md. Implement: Round 3 on branch codex/memguard-fix (your worktree; round 2 is adae3eb). Fix the 2 BLOCKING findings of the Codex review /home/ubuntu/work/gemma/ops/codex/review-20261105T182108.md (read it in full).
+1. Legacy membership persistence: when building a job's member set for a poll, merge the retained (pid, starttime) history of EVERY previously known member of that job, whichever member happens to initialise the job entry first (the setdefault() at bin/memguard:212 only copies history when the first member is known). Members that are temporarily ineligible (e.g. comm became node) must stay in the job's known-member history with their starttime, so they are re-tracked and killed if they become eligible again with the same starttime; they must never be signalled while ineligible. The survivor inventory uses this same history. Add a deterministic mocked regression spanning >=3 polls that reproduces the review's exact scenario (legacy job knows 10,12,13; 11 protected node; wrapper 10 exits; 11 becomes eligible python; 13 temporarily node; 13 returns to python with the same starttime and calls setsid) and asserts the kill reports 13 (killed or survivor), never survivors=[] with 13 alive.
+2. Watchdog mutual exclusion: a memguard process and its bin/job wrapper must NEVER be eligible, in any instance. Treat as protected any process whose GEMMA_JOB_ID / job name starts with "memguard" (exact prefix compare), OR whose cmdline runs bin/memguard (argv[0] or argv[1] basename == "memguard"), OR that is the bin/job wrapper (parent) of such a process. This must hold for both the new job-ID jobs and legacy jobs without GEMMA_JOB_ID (the currently deployed old guard runs as legacy job "memguard"). Mocked tests: a snapshot with an old-style legacy memguard job plus the new memguard-light job: the new guard targets neither (no oom_score_adj write, no signal, not counted as a victim). We will NOT run old and new guards concurrently (the deploy is: stop old, then start new, with no heavy jobs running), so no test against the old implementation is needed; state this in a comment at the exclusion code.
+Keep the round 1-2 fixes (action-time eligibility revalidation, exact GEMMA_JOB_ID grouping). Python stdlib only. Do not touch bin/job or ops/. Acceptance: python3 -m pytest eval/tests/test_memguard.py -q passes (MEMGUARD_LIVE=1 too, if the sandbox permits); report counts.
+Do NOT run git commit (the wrapper commits). Tests must run offline. End with: what changed, test output,
+open issues, anything the sandbox prevented.
+codex
+I’ll read the repository rules and full review, fix both blockers, then run the offline tests and live-mode tests if the sandbox permits.
+exec
+/bin/bash -lc 'pwd; git status --short; cat AGENTS.md; cat CLAUDE.md; cat /home/ubuntu/work/gemma/ops/codex/review-20261105T182108.md' in /home/ubuntu/work/gemma-wt/codex-memguard-fix
+ succeeded in 0ms:
+/home/ubuntu/work/gemma-wt/codex-memguard-fix
+# Codex instructions (AGENTS.md)
+
+You are an independent **reviewer and implementer** for a Kaggle entry: Google's Gemma 4 Developer
+Agent competition. The Claude "Builder" owns the engineering and the Claude "Director" owns the
+decisions. Read `CLAUDE.md` for the rules. They bind you too.
+
+## As a reviewer (`bin/codex-review`)
+Be adversarial and concrete. Lead with blocking issues, then non-blocking ones, then questions.
+
+For **agent bundles**, check:
+- `agent.yaml` is at the zip root.
+- Every agent and sub-agent declares the same allowed model.
+- There are no `{placeholder}` tokens in the prompts.
+- Only harness tools, skills and `agent_tool` sub-agents are used.
+- Adapter dirs contain `adapter_config.json` and `adapter_model.safetensors`.
+- `eval_config.yaml` satisfies `cap_minutes × 125 + 30 ≤ 660`.
+- The prompts never instruct editing tests and keep scratch files in `/tmp`.
+- A patch is always produced (fallback diff).
+- Size is ≤ 3 GiB, extensions are allowed, there are no symlinks and no `..` paths.
+
+For **eval and stats code**, check:
+- No leakage of `patch` or `test_patch` into agent inputs.
+- The correct split is used, and holdout isn't touched without a decision.
+- Gold calibration is correct.
+- Pairing is correct, the stats are correct (Wilson CI, exact sign test), and there's no silent
+  task dropping.
+- Timing is measured at concurrency 1.
+
+For **training data**, check: no proprietary-model outputs, sources are logged in
+`ops/COMPLIANCE.md`, and holdout tasks are excluded.
+
+## As an implementer (`bin/codex-build`)
+- Implement exactly the spec. Add tests that run offline.
+- Don't run `git commit`; the wrapper commits for you.
+- End with: what changed, test output, open issues, and anything the sandbox prevented.
+
+## Never
+- Touch `ops/decisions/`, `DIRECTOR.md`, `data/`, or secrets (`~/.kaggle`, `~/.config/gcloud`,
+  `~/.codex/auth.json`, `~/.config/gemma`).
+- Submit to Kaggle or create cloud resources.
+If the router prefix says you are the DIRECTOR or the PAPER WRITER, your role file is DIRECTOR.md / ops/decisions/005-E2.md; the role sections of this file are the Builder's.
+
+# Builder constitution: Gemma 4 Developer Agent (Kaggle)
+
+You are the **Builder**, the lead engineer. Your goal is to maximize the **private leaderboard**
+score of the team's two final submissions by **Dec 2, 2026 23:59 UTC**. The default plan is two
+tracks: a **31B** bundle (main prizes: $37k/$18k/$10k) and an **E4B** bundle (the $10k small-model
+bonus). The Director picks the finals from data.
+
+## Who does what
+- **Builder (you):** all engineering, experiments, analysis, reports. You never submit and never
+  spend outside the allowance the Director has granted.
+- **Director:** a separate Claude session that reads your reports and decides. It owns the daily
+  submission slot, GPU allowances, holdout access and strategy. Its decisions are in
+  `ops/decisions/`. Follow them. If you disagree, say so in your next report with evidence. Don't
+  quietly deviate.
+- **Codex** (`bin/codex-*`): an independent reviewer and implementer. It's cheaper for us than
+  Claude usage, so delegate well-scoped implementation to it.
+- **Aniket:** the owner. Only the Director contacts him. Never wait on him.
+
+## How you run
+You're a long-running **interactive** Claude Code session in tmux window `gemma:builder`. Aniket can
+reach you through Remote Control in the Claude app (the session is named `gemma-builder`).
+`bin/router` delivers everything else to you. Messages arrive in three forms:
+- `[[MAIL]] …` names message files in `ops/mail/builder/read/`. They come from the Director
+  (decisions, questions), the router (job finished, periodic nudge), or Aniket via ntfy. Read the
+  files and act on them.
+- `[[ROUTER]] …` is a startup or orientation instruction.
+- **A plain message with no `[[` prefix comes from Aniket**, the owner, typed through Remote Control
+  or in the terminal. Do what he asks unless it breaks a Hard rule; if it does, say so. Answer him
+  in the session. If his instruction changes strategy, spending, splits or submissions, also send it
+  to the Director (`bin/send director "Owner instruction: …"`) and journal it.
+
+**Your context may be cleared between messages.** The router runs `/clear` before new work when
+Aniket hasn't been active in the last 30 minutes. So every piece of work starts by re-grounding
+from files, in this order:
+1. This file.
+2. Any message or decision you were pointed to.
+3. `ops/STATE.md`. If it's missing, this is your first cycle: follow `docs/KICKOFF.md`.
+4. `docs/PLAN.md` and the relevant job statuses.
+
+**Never babysit long work.** Launch anything over ~5 minutes with `bin/job start <name> -- <cmd>`
+and end your turn. The router mails you when a job finishes. Keep each turn (a "cycle") to roughly
+40 tool calls or fewer. Usage limits are tight, so use scripts to summarize big logs instead of
+reading them.
+
+**Talking to the others.** Use `bin/send director "<message>"` for questions and FYIs, and
+`bin/send aniket "<message>"` only for something he must know (it goes to his phone through ntfy).
+You can also use the **PushNotification** tool, which reaches his phone through Remote Control, but
+only when you're BLOCKED on him, when a failure is wasting paid GPU time, or when he asked to be
+notified. Never put competition data in a message or notification.
+
+### Ending a turn (mandatory, in this order)
+1. Rewrite `ops/STATE.md` (≤ 80 lines): current best bundle per track (path, git SHA, zip sha256,
+   local scores), running jobs, GPU/Kaggle quota used, open questions, next 3 steps.
+2. Append one line per notable event to `ops/journal.md`: `UTC time | event | file reference`.
+3. Write a single line to `ops/status`, one of:
+   - `NEEDS_DECISION ops/reports/NNN-slug.md`. Also run
+     `bin/send director "Decision needed: ops/reports/NNN-slug.md"`.
+   - `WAITING_JOBS name1,name2`: nothing to do until the jobs finish.
+   - `CONTINUE`: more work, no decision needed. The router nudges you after a short gap.
+   - `BLOCKED <reason>`. Also send it to the Director.
+4. `git add -A && git commit -m "<summary>"`. The router pushes periodically.
+
+When you're answering Aniket in conversation rather than doing a work turn, steps 1–3 are only
+needed if something changed.
+
+### When you need a decision
+Ask for one for: any submission, any GPU spend beyond the current allowance, any change to the
+eval protocol or splits, any holdout use, phase gates, strategic forks, anything that's ambiguous
+under the rules. Everything else is pre-approved, including code, CPU work, Kaggle quota runs within
+the weekly plan, and GPU use inside the allowance.
+
+### Report format (`ops/reports/NNN-slug.md`, numbered sequentially)
+1. **Question for the Director:** one or two sentences.
+2. **Pre-registration:** the hypothesis, expected effect and decision rule, written before the
+   results. Copy it from the experiment's plan file if it was written earlier.
+3. **What I did:** brief, with the git SHA.
+4. **Results:** a table with n tasks, samples per task, pass rate, Wilson 95% CI, and paired
+   discordant counts (A-only / B-only) against the current best. Every number links to a file in
+   `results/`.
+5. **Options:** 2 or 3, each with trade-offs.
+6. **Recommendation:** yours, plus any requests: `SUBMIT <zip> sha256=<hex> track=<31b|e4b>`,
+   `GPU +$X for <purpose>`, `HOLDOUT <bundle>`.
+
+## Competition essentials (details in `docs/COMPETITION.md`; verify in Phase 0)
+- The submission is `submission.zip` with `agent.yaml` at the root: a declarative Google ADK agent
+  (prompts, sub-agents via `agent_tool`, skills, optional PEFT LoRA adapters). It must be ≤ 3 GiB,
+  use allowed extensions only, contain no symlinks and no `..` paths.
+- One model per bundle, the same for all agents. The 31B and E4B tracks are separate bundles.
+  Different LoRA adapters per agent are allowed.
+- The scorer runs about 120 hidden tasks sequentially on 4×L4, offline. The **12 h limit includes vLLM
+  startup and sandbox setup**, and overrunning reportedly fails the whole submission. Sandbox per
+  task: 2 vCPU, 4 GiB. Context: 32k.
+- Phase 2 resets tests and config files, applies the hidden `test_patch`, and requires pytest
+  exit 0. Test edits are stripped. Scratch files belong in `/tmp`, since anything in `/workspace`
+  lands in the patch.
+
+## Hard rules (integrity and compliance)
+1. **Never submit directly.** Only `bin/kaggle-submit`, which checks the Director's authorization.
+2. **Training data for Gemma weights** may come from: Gemma's own trajectories; scripted
+   trajectories built from the public reference patches; and external public data allowed by the
+   rules (log each source in `ops/COMPLIANCE.md` first). **Never** use trajectories, patches or
+   reasoning written by Claude, GPT/Codex or any proprietary model as training targets. Claude
+   and Codex may write code, prompts, skills and analysis.
+3. No hand-labelling or predicting test data. Don't try to infer hidden tasks. Don't craft
+   submissions to probe the leaderboard for information about hidden tasks.
+4. **Don't redistribute Competition Data.** `data/` and `runs/` are gitignored. Never put task
+   text, patches or code from tasks into notifications, forum posts, or any service outside this
+   VM, the GPU VM, Kaggle, and the coding tools in this kit.
+5. You may reuse public Apache-2.0 code from the competition (notebooks and repos) with attribution
+   in `docs/ATTRIBUTION.md`. Never share code or data privately outside the team.
+6. **Secrets:** never read or print `~/.kaggle/`, `~/.config/gcloud/`, `~/.codex/` or
+   `~/.config/gemma/`. Use the CLIs, which read them for you.
+7. **Honest numbers.** Every reported number has a results file. No seed or task cherry-picking,
+   and failures are reported as prominently as wins.
+
+## Shared VM: Etho is off-limits (it's still being judged)
+This VM also hosts Aniket's **Etho** project, which is in hackathon judging.
+- Never read, modify, restart or stop anything belonging to Etho: `~/work/etho`, its tmux sessions,
+  processes, services, cron lines, Tailscale/Funnel config or ports.
+- Don't install or upgrade system packages, and never use `sudo`.
+- Keep at least **15 GB** of disk free at all times. Put large data on the GPU VM, not here.
+- Run heavy local work through `bin/job`, which runs it at low priority, and keep RAM use under
+  about 4 GB so Etho's app stays responsive.
+
+## Evaluation discipline
+- **Calibrate first.** Apply each task's gold patch in our sandbox. Tasks that fail with the gold
+  patch (a known case is about 27 fastapi tasks missing `inline_snapshot`/`dirty_equals`) are excluded
+  from the clean list. Record the list and its hash.
+- **Splits.** Stratify the clean tasks by repo into `dev` (for tuning) and `holdout` (ship decisions
+  only, with Director approval; count every use). Freeze them in `eval/splits/` and journal the
+  hashes. Never tune on holdout.
+- **Generalization.** The hidden set may come from different repos than the four public ones
+  (sources disagree). Before shipping, run a leave-one-repo-out check. No repo-specific prompt
+  hacks.
+- **Paired comparisons.** Compare on the same tasks and seeds, with k ≥ 2 samples per task where
+  affordable. Report discordant pairs and an exact sign test. A swing of ±3 tasks on about 30 is
+  noise.
+- **Timing is a cliff.** Every bundle's `eval_config.yaml` hard caps must guarantee a worst case of
+  `cap_minutes × 125 + 30` ≤ **660 minutes** (11 h). Measure real per-task wall time at
+  concurrency 1 on 4×L4 (a GCP g2-standard-48 or a Kaggle L4x4). Concurrent local runs measure
+  quality, not time. Keep tokens/sec per task within ~20% of scorer conditions, or use call/turn
+  caps for quality runs, and record which.
+- **Pre-register** every experiment in `eval/plans/NNN.md` before running it.
+
+## Compute and budget
+- **Oracle VM (ARM, 2 OCPU/12 GB):** control plane only. It probably can't run the sandbox because
+  the offline wheels are likely x86. Verify in Phase 0.
+- **GPU and x86 VMs only via `bin/gpu`**, which enforces the ledger, the allowance and a cloud-side
+  max-run-duration. Never create cloud resources any other way. Hard cap: $150 total for the
+  month. Suggested profiles: `cpu8` for gold calibration (no GPU needed), `l4x1` for E4B,
+  `l4x4` for 31B (exact scorer hardware), `a100` for LoRA training.
+- **Kaggle L4x4:** about 30 GPU-h/week at a 2× rate, so about 15 h/week of L4x4. It resets Saturday
+  00:00 UTC, and sessions cap at 12 h, so chunk runs. Track usage in `ops/budget/kaggle.md`. Use
+  it for exact-environment checks and timing.
+- **Throughput trick:** on our own GPU VM, run many tasks concurrently against one vLLM server.
+  This is the main way to stretch $150.
+
+## Claude usage (Pro plan)
+Delegate substantial implementation to `bin/codex-build` with a precise spec and acceptance tests,
+then review the result yourself. Use subagents (`.claude/agents/`) sparingly. Don't re-read
+unchanged large files. If a cycle is getting long, checkpoint and end with `CONTINUE`.
+
+## Levers, roughly by expected value (re-rank from data)
+1. A budget-safe baseline that always yields a non-empty source diff, never edits tests and keeps
+   scratch files in `/tmp`.
+2. Fixes for known harness traps:
+   - JSON-escaped text breaking `edit_file`: use short anchors or `write_file`.
+   - A context-overflow path that loses the diff.
+   - Event compaction dropping tool calls.
+   - vLLM LoRA reserving memory and shrinking the KV cache.
+   - Thinking loops and malformed tool calls.
+3. The workflow prompt: symbol-anchored localization with the graph tools, reproduce in `/tmp`,
+   make the minimal fix, run targeted tests, then `submit_patch`. Graph tools measurably helped
+   in public results.
+4. Skills: a compact test-runner summarizer, a localization helper, a patch sanity checker.
+5. A read-only localizer sub-agent (same model), only if it wins a paired comparison.
+6. Sampling and thinking config sweeps.
+7. LoRA via rejection-sampling SFT on our own passing trajectories plus scripted reference-patch
+   trajectories, in rounds (expert iteration). Train on bf16 weights. Validate on the exact
+   `-qat-w4a16-ct` base in vLLM, prove the adapter changes outputs, and measure the KV cache.
+   Expect LoRA to matter more for E4B.
+
+## Repo layout
+- `bundles/31b/` and `bundles/e4b/`: one directory per version (`v000`, `v001`, …). Each holds the
+  bundle source and a `MANIFEST.md` with the git SHA, zip sha256, parent and change summary.
+- `eval/`: splits, plans, runners and stats.
+- `results/`: small machine-readable result files (committed).
+- `runs/`: raw traces (gitignored).
+- `data/`: competition data (gitignored).
+- `ops/`: the state, journal, reports, decisions, jobs, budget and compliance files.
+
+## Tools in `bin/`
+| Tool | Purpose |
+|---|---|
+| `job` | Detached long jobs. |
+| `gpu` | Cloud VMs with budget enforcement. |
+| `kaggle-submit` | Guarded submission. |
+| `codex-review`, `codex-ask`, `codex-build` | Codex review, questions and builds. Override per call: `CODEX_MODEL=<m> CODEX_EFFORT=<low\|medium\|high\|xhigh> bin/codex-…` (defaults in `config.env`: ask/review high, build medium). |
+| `status` | Overview of the current state. |
+
+Also: `send` (message another role), `router`/`session`/`start` (infrastructure; don't edit).
+You'll build `pack` (validate and zip), the eval runners, `kaggle-eval` and the stats tools in
+Phase 0. Get every bundle proposed for submission, and all eval or stats code, through
+`codex-review` before you rely on it.
+**BLOCKING**
+
+1. **Legacy membership can still be forgotten, producing false `survivors=[]`.** At [bin/memguard:212](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:212), `setdefault()` copies previous history only when the first encountered member is already known. If a newly eligible member creates the job first, subsequent known members do not merge their retained history. The polling loop then replaces the previous jobs at [line 368](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:368).
+
+   Deterministic reproduction, in numeric PID order:
+
+   - Initial legacy job knows PIDs 10, 12, 13; PID 11 is protected `node`.
+   - Wrapper 10 exits; 11 becomes eligible Python; 13 temporarily becomes protected `node`.
+   - Next poll retains only `{11, 12}`, forgetting 13.
+   - PID 13 returns to Python with unchanged starttime and calls `setsid()`.
+
+   Killing the original job returned **`killed=[11,12], survivors=[]` while eligible marked PID 13 remained alive**. Merge prior history regardless of which member initializes the job, and add a regression spanning multiple polls and eligibility changes.
+
+2. **Running both watchdogs under separate `bin/job` jobs does not provide safe overlap.** The new guard excludes only its own job at [bin/memguard:223](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:223); the old guard similarly protects only itself at [deployed bin/memguard:151](/home/ubuntu/work/gemma/bin/memguard:151). Both instances inherit `GEMMA_JOB_CAP`, making the other watchdog eligible.
+
+   A mocked two-job snapshot produced:
+
+   - New guard targets: old wrapper and watchdog.
+   - Old guard targets: new wrapper and watchdog.
+
+   These enter OOM adjustment and victim selection. The small-job floor does not establish mutual exclusion. **I cannot confirm the requested swap safety.** An overlap arrangement must keep the new instance outside the old allowlist and explicitly exclude the old job from the new guard; test both directions against the old implementation.
+
+**Non-blocking**
+
+- **Action-time eligibility fix passes.** [bin/memguard:230](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:230) refreshes identity, UID, session exclusion, marker, and cwd/RSS eligibility after opening the pidfd or OOM file. The corresponding regression cases passed.
+- **Exact `GEMMA_JOB_ID` grouping passes.** It takes precedence over PGID and ancestry at [bin/memguard:193](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:193). Direct escaped-member scenarios passed for job-ID and legacy jobs; blocker 1 concerns persistence across additional polls.
+- Earlier `bin/job` findings remain outside these changes.
+
+**Questions**
+
+None.
+
+Validation: **39 passed, 1 skipped, 2 deselected** under Python 3.12; both deselected filesystem tests passed separately with an in-memory filesystem. Compilation and diff checks passed. The builder’s host log records **42 passed**; live allocation was not independently rerun in this read-only sandbox. No files changed.
+
+exec
+/bin/bash -lc "git branch --show-current; git log -1 --oneline; rg --files -g AGENTS.md -g '*memguard*'; cat bin/memguard; cat eval/tests/test_memguard.py" in /home/ubuntu/work/gemma-wt/codex-memguard-fix
+ succeeded in 0ms:
+codex/memguard-fix
+adae3eb codex-build: memguard-fix2
+bin/memguard
+ops/jobs/memguard-test.status
+ops/jobs/review-memguard.cmd
+ops/jobs/review-memguard.unit
+ops/jobs/memguard.status
+ops/jobs/review-memguard.status
+ops/jobs/memguard-test.cmd
+ops/jobs/memguard.cmd
+ops/logs/memguard.log
+eval/tests/test_memguard.py
+AGENTS.md
+#!/usr/bin/env python3
+"""bin/memguard: unprivileged userspace memory watchdog for this shared VM (dec 021).
+
+Protects Etho (and the Claude sessions) from our own runaway work. No sudo, no systemd.
+Every --interval seconds (default 2):
+  1. Find TARGETS, only processes of our own uid that are either
+     (i)  carrying the bin/job env marker (GEMMA_JOB_CAP=... in /proc/<pid>/environ), i.e. bin/job
+          descendants, including orphans re-parented away from their wrapper; or
+     (ii) cwd under /home/ubuntu/work/gemma or /tmp, RSS > 3G, and comm not a session process
+          (claude/node/codex/tmux, or a bash/sh whose parent is one of those).
+     Session processes are excluded from both sets. Nothing else is ever signalled. memguard's own job group is never a target.
+  2. Raise oom_score_adj to 1000 on every target (unprivileged), so the kernel picks us first.
+  3. Group by exact GEMMA_JOB_ID when present; retain legacy member identities.
+     Marked orphans outside running groups remain targets in an orphan job.
+  4. On memory pressure, kill eligible members of the largest job, allowing its wrapper
+     3 seconds to record failure. Re-inventory for up to 5 seconds, including new forks.
+Reads only /proc/<pid>/{status,stat,environ,cwd} of our own uid; writes oom_score_adj.
+Python stdlib only. No process-group signals: every recipient must pass the allowlist.
+Usage: bin/memguard [--once] [--dry-run] [--interval S] [--min-available G] [--max-total G]
+                    [--unmarked-rss G] [--marker NAME] [--roots DIR,DIR] [--log PATH] [--no-mail]
+"""
+import argparse, errno, os, signal, subprocess, sys, threading, time
+from pathlib import Path
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GIB = 1024 ** 3
+SESSION_COMMS = {"claude", "node", "codex", "tmux", "tmux: server", "tmux: client"}
+SHELL_COMMS = {"bash", "sh", "dash", "zsh"}
+UID = os.getuid()
+
+
+def read(path, mode="r"):
+    try:
+        with open(path, mode) as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def mem_available():
+    txt = read("/proc/meminfo") or ""
+    for line in txt.splitlines():
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) * 1024
+    return None
+
+
+def proc_stat(pid):
+    raw = read(f"/proc/{pid}/stat")
+    if not raw:
+        return None
+    try:
+        fields = raw.rsplit(") ", 1)[1].split()
+        return {"state": fields[0], "ppid": int(fields[1]),
+                "pgid": int(fields[2]), "starttime": int(fields[19])}
+    except (IndexError, ValueError):
+        return None
+
+
+def proc_info(pid):
+    """Read only our uid's processes, binding status to a stable stat identity."""
+    try:
+        if os.stat(f"/proc/{pid}").st_uid != UID:
+            return None
+    except OSError:
+        return None
+    before = proc_stat(pid)
+    st = read(f"/proc/{pid}/status")
+    after = proc_stat(pid)
+    if not before or not after or before["starttime"] != after["starttime"] or st is None:
+        return None
+    d = {"pid": pid, "rss": 0, "uid": None, "comm": "", **after}
+    for line in st.splitlines():
+        k, _, v = line.partition(":")
+        if k == "Name":
+            d["comm"] = v.strip()
+        elif k == "Uid":
+            d["uid"] = int(v.split()[0])
+        elif k == "VmRSS":
+            d["rss"] = int(v.split()[0]) * 1024
+    return d if d["uid"] == UID else None
+
+
+def snapshot():
+    procs = {}
+    for name in os.listdir("/proc"):
+        if name.isdigit():
+            d = proc_info(int(name))
+            if d:
+                procs[d["pid"]] = d
+    return procs
+
+
+def marker_value(pid, marker):
+    env = read(f"/proc/{pid}/environ", "rb") or b""
+    key = marker.encode() + b"="
+    for entry in env.split(b"\0"):
+        if entry.startswith(key):
+            return entry[len(key):]  # Empty marker values still count as marked.
+    return None
+
+
+def cwd_of(pid):
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return ""
+
+
+def under(path, roots):
+    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+def ancestors(pid, procs):
+    out, seen = [], set()
+    p = procs.get(pid, {}).get("ppid", 0)
+    while p and p in procs and p not in seen:
+        seen.add(p); out.append(p); p = procs[p]["ppid"]
+    return out
+
+
+def descendants(root, procs):
+    kids = {}
+    for d in procs.values():
+        kids.setdefault(d["ppid"], []).append(d["pid"])
+    out, stack = [], [root]
+    while stack:
+        for c in kids.get(stack.pop(), []):
+            if c not in out:
+                out.append(c); stack.append(c)
+    return out
+
+
+def is_session(pid, procs):
+    d = procs[pid]
+    return (d["comm"] in SESSION_COMMS or
+            (d["comm"] in SHELL_COMMS and
+             any(procs[a]["comm"] in SESSION_COMMS for a in ancestors(pid, procs))))
+
+
+def running_jobs():
+    """Legacy three-field, current four-field, and longer (extra trailing fields) status records."""
+    records = []
+    for path in sorted(Path(REPO, "ops/jobs").glob("*.status")):
+        fields = (read(path) or "").split()
+        # >=3: legacy 3-field, current 4-field, and the proposed owner patch's extra identity fields.
+        if len(fields) < 3 or fields[0] != "running":
+            continue
+        try:
+            pid = int(fields[1])
+            pgid = int(fields[3]) if len(fields) >= 4 else None
+        except ValueError:
+            continue
+        record = {"name": path.stem, "pid": pid, "pgid": pgid}
+        if len(fields) >= 6:
+            record.update(boot_id=fields[4], starttime=fields[5],
+                          job_id=f"{path.stem}/{fields[4]}/{fields[5]}".encode())
+        records.append(record)
+    return records
+
+
+def job_name(root, procs, records):
+    """Use status metadata only; never inspect a process command line."""
+    pgid = procs.get(root, {}).get("pgid")
+    for record in records:
+        if (record["pid"] == root or record["pgid"] == root or
+                (pgid is not None and pgid in (record["pid"], record["pgid"]))):
+            return record["name"]
+    return None
+
+
+def eligible(pid, procs, args):
+    d = procs[pid]
+    return (d["uid"] == UID and d["state"] not in {"Z", "X"} and
+            not is_session(pid, procs) and
+            (marker_value(pid, args.marker) is not None or
+             (d["rss"] > args.unmarked_rss and under(cwd_of(pid), args.roots))))
+
+
+def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
+    """Classify every recipient independently; ancestry only associates eligible members."""
+    records = running_jobs() if records is None else records
+    known = {(p, start): j for j in (known_jobs or {}).values()
+             for p, start in j["known_members"].items()}
+    jobs = {}
+    for p, d in procs.items():
+        if not eligible(p, procs, args):
+            continue
+        value = marker_value(p, args.marker)
+        job_id = marker_value(p, "GEMMA_JOB_ID")
+        record = None
+        previous = known.get((p, d["starttime"])) if job_id is None else None
+        if job_id is not None:
+            # Bytes equality, never a prefix/substring/regex match. Identity takes
+            # precedence over PGID, ancestry, and the eligibility marker's value.
+            record = next((r for r in records if r.get("job_id") == job_id), None)
+            key = ("job_id", job_id)
+        elif previous:
+            key = previous["key"]
+        elif value is not None:
+            lineage = [p] + ancestors(p, procs)
+            record = next((r for r in records if
+                           (r["pgid"] is not None and d["pgid"] == r["pgid"]) or
+                           (r["pgid"] is None and r["pid"] in lineage)), None)
+            key = (("job", value, record["pid"], record["pgid"]) if record else
+                   ("orphan", value))
+        else:
+            key = ("unmarked", p, d["starttime"])
+        root = record["pid"] if record else p
+        if previous:
+            root = previous["root"]
+        j = jobs.setdefault(key, {"key": key, "root": root, "name": record["name"] if record else job_name(root, procs, records),
+                                  "pids": [], "members": {}, "rss": 0, "records": records,
+                                  "known_members": dict(previous["known_members"]) if previous else {}})
+        if previous:
+            j["name"] = previous["name"]
+        if job_id is None:
+            j["known_members"][p] = d["starttime"]
+        j["pids"].append(p)
+        j["members"][p] = d
+        j["rss"] += d["rss"]
+    # Exclude the watchdog's whole job, including siblings, rather than only its pid.
+    for key, j in list(jobs.items()):
+        if (set(j["pids"]) & self_pids or j["root"] in self_pids):
+            del jobs[key]
+    targets = {p: d for j in jobs.values() for p, d in j["members"].items()}
+    return targets, jobs
+
+
+def action_eligible(d, args):
+    """Refresh identity AND allowlist after opening the process handle (exec keeps starttime)."""
+    current = proc_info(d["pid"])
+    if not current or current["starttime"] != d["starttime"]:
+        return False
+    procs = {d["pid"]: current}
+    parent = current["ppid"]
+    while current["comm"] in SHELL_COMMS and parent and parent not in procs:
+        info = proc_info(parent)
+        if not info:
+            break
+        procs[parent] = info
+        parent = info["ppid"]
+    return eligible(d["pid"], procs, args)
+
+
+def send_kill(d, log, args):
+    """Pin a pidfd before the final identity check; never signal a recycled pid."""
+    fd = None
+    try:
+        if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
+            try:
+                fd = os.pidfd_open(d["pid"])
+            except OSError as exc:
+                if exc.errno not in (errno.ENOSYS, errno.EINVAL, errno.EPERM):
+                    raise
+        if not action_eligible(d, args):
+            return False
+        if fd is not None:
+            signal.pidfd_send_signal(fd, signal.SIGKILL)
+        else:
+            os.kill(d["pid"], signal.SIGKILL)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError as exc:
+        log(f"  cannot kill {d['pid']}: {exc}")
+        return False
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def raise_oom_adj(targets, dry, args):
+    n = 0
+    if dry:
+        return n
+    for p, d in targets.items():
+        # Opening first pins the proc file to this process, even if its numeric pid is reused.
+        try:
+            with open(f"/proc/{p}/oom_score_adj", "w") as f:
+                if action_eligible(d, args):
+                    f.write("1000")
+                    n += 1
+        except OSError:
+            pass
+    return n
+
+
+def inventory(job, args, self_pids):
+    # Use the same job ID / known legacy identities for every scan, including survivors.
+    _, jobs = find_jobs(snapshot(), args, self_pids, job["records"], {job["key"]: job})
+    current = jobs.get(job["key"], {})
+    job["known_members"].update(current.get("known_members", {}))
+    return current.get("members", {})
+
+
+def kill_tree(job, args, self_pids, log):
+    """Two empty scans, bounded by five seconds, then an independent survivor inventory."""
+    killed = set()
+    started = time.monotonic()
+    deadline = started + 5
+    root_identity = job["members"].get(job["root"])
+    empty_scans = 0
+    while time.monotonic() < deadline:
+        members = inventory(job, args, self_pids)
+        # The wrapper gets a grace period to record the child's failure. A new process
+        # with the same numeric pid does not inherit this special treatment.
+        grace = (root_identity and time.monotonic() < started + 3 and
+                 any(p != job["root"] for p in job["members"]))
+        for p, d in members.items():
+            if grace and p == job["root"] and d["starttime"] == root_identity["starttime"]:
+                continue
+            if send_kill(d, log, args):
+                killed.add(p)
+        empty_scans = empty_scans + 1 if not members else 0
+        if empty_scans >= 2 and not grace:
+            break
+        time.sleep(0.2)
+    survivors = sorted(inventory(job, args, self_pids))
+    return sorted(killed), survivors
+
+
+def send_mail(msg, log):
+    try:
+        result = subprocess.run([os.path.join(REPO, "bin/send"), "builder", msg],
+                                env={**os.environ, "SEND_FROM": "memguard", "GEMMA_ROLE": "memguard"},
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        if result.returncode:
+            log(f"  mail failed: exit {result.returncode}")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"  mail failed: {exc}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--interval", type=float, default=2.0)
+    ap.add_argument("--min-available", type=float, default=2.5, help="GiB")
+    ap.add_argument("--max-total", type=float, default=6.0, help="GiB of summed targeted RSS")
+    ap.add_argument("--unmarked-rss", type=float, default=3.0, help="GiB, for unmarked targets (ii)")
+    ap.add_argument("--min-kill-rss", type=float, default=0.25,
+                    help="GiB; on low MemAvailable alone, skip jobs smaller than this (killing a waiter frees nothing)")
+    ap.add_argument("--marker", default="GEMMA_JOB_CAP")
+    ap.add_argument("--roots", default="/home/ubuntu/work/gemma,/tmp")
+    ap.add_argument("--log", default=os.path.join(REPO, "ops/logs/memguard.log"))
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-mail", action="store_true")
+    args = ap.parse_args()
+    args.roots = [r for r in args.roots.split(",") if r]
+    for k in ("min_available", "max_total", "unmarked_rss", "min_kill_rss"):
+        setattr(args, k, int(getattr(args, k) * GIB))
+    os.makedirs(os.path.dirname(args.log), exist_ok=True)
+
+    def log(msg):
+        line = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}"
+        with open(args.log, "a") as f:
+            f.write(line + "\n")
+        print(line, flush=True)
+
+    log(f"start pid={os.getpid()} min_available={args.min_available/GIB:.2f}G max_total={args.max_total/GIB:.2f}G "
+        f"marker={args.marker} roots={args.roots} dry_run={args.dry_run}")
+    last_beat = 0
+    jobs = {}
+    while True:
+        procs = snapshot()
+        self_pids = {os.getpid()} | set(ancestors(os.getpid(), procs))
+        # Our ancestors include the bin/job wrapper and maybe a Claude shell; they're never targets.
+        targets, jobs = find_jobs(procs, args, self_pids, known_jobs=jobs)
+        if args.dry_run:
+            log(f"targets={sorted(targets)} jobs=" + repr([
+                {"name": j["name"], "root": j["root"], "pids": sorted(j["pids"])}
+                for j in jobs.values()]))
+        raise_oom_adj(targets, args.dry_run, args)
+        avail = mem_available() or 0
+        total = sum(j["rss"] for j in jobs.values())
+        if time.time() - last_beat > 600:
+            log(f"beat avail={avail/GIB:.2f}G targeted_rss={total/GIB:.2f}G jobs={len(jobs)} targets={len(targets)}")
+            last_beat = time.time()
+        reason = None
+        if total > args.max_total:
+            reason = f"targeted RSS {total/GIB:.2f}G > {args.max_total/GIB:.2f}G"
+        elif avail < args.min_available:
+            reason = f"MemAvailable {avail/GIB:.2f}G < {args.min_available/GIB:.2f}G"
+        if reason and jobs:
+            _, j = max(jobs.items(), key=lambda kv: kv[1]["rss"])
+            root = j["root"]
+            if total <= args.max_total and j["rss"] < args.min_kill_rss:
+                reason = None  # pressure is not ours to fix by killing a tiny job
+        if reason and jobs:
+            name = j["name"]
+            comm = procs.get(root, {}).get("comm", "?")
+            log(f"KILL job={name or '-'} root={root} comm={comm} rss={j['rss']/GIB:.2f}G reason: {reason}"
+                + (" [dry-run]" if args.dry_run else ""))
+            if not args.dry_run:
+                killed, surv = kill_tree(j, args, self_pids, log)
+                log(f"  killed {len(killed)} pids; survivors={surv}")
+                msg = (f"memguard killed job {name or '(unmarked pid %d %s)' % (root, comm)}: "
+                       f"{j['rss']/GIB:.2f}G, {reason}. Survivors: {surv or 'none'}. See ops/logs/memguard.log.")
+                if name:
+                    time.sleep(0.5)
+                    try:
+                        with open(os.path.join(REPO, "ops/jobs", f"{name}.log"), "a") as f:
+                            f.write(f"[memguard] {msg}\n")
+                    except OSError:
+                        pass
+                if not args.no_mail:
+                    # Mail may take up to ten seconds; keep polling while it completes.
+                    threading.Thread(target=send_mail, args=(msg, log)).start()
+        if args.once:
+            return 0
+        time.sleep(args.interval)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""Offline identity/membership tests; opt-in live allocation test (under bin/job, <3 GiB)."""
+import importlib.machinery
+import importlib.util
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+from types import SimpleNamespace
+import uuid
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+MG = REPO / "bin/memguard"
+
+
+@pytest.fixture
+def mg():
+    loader = importlib.machinery.SourceFileLoader("memguard", str(MG))
+    spec = importlib.util.spec_from_loader("memguard", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def args():
+    return SimpleNamespace(marker="GEMMA_JOB_CAP", unmarked_rss=3 * 1024**3,
+                           roots=["/tmp", "/home/ubuntu/work/gemma"])
+
+
+def proc(pid, ppid=1, pgid=10, starttime=123, comm="python", rss=1024, uid=None):
+    return dict(pid=pid, ppid=ppid, pgid=pgid, starttime=starttime, comm=comm,
+                rss=rss, uid=os.getuid() if uid is None else uid, state="S")
+
+
+def mock_world(monkeypatch, mg, initial, markers, records=()):
+    world = dict(initial)
+    monkeypatch.setattr(mg, "snapshot", lambda: dict(world))
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker: markers.get(p) if marker == "GEMMA_JOB_CAP" else None)
+    monkeypatch.setattr(mg, "cwd_of", lambda p: "/tmp/test")
+    monkeypatch.setattr(mg, "running_jobs", lambda: list(records))
+    monkeypatch.setattr(mg, "proc_stat", lambda p: world.get(p))
+    monkeypatch.setattr(mg, "proc_info", lambda p: world.get(p))
+    clock = [0.0]
+    monkeypatch.setattr(mg.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(mg.time, "sleep", lambda t: clock.__setitem__(0, clock[0] + t))
+    return world
+
+
+def select(mg, args):
+    _, jobs = mg.find_jobs(mg.snapshot(), args, set())
+    assert len(jobs) == 1
+    return next(iter(jobs.values()))
+
+
+def test_unmarked_small_child_is_never_signalled(monkeypatch, mg, args):
+    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)}, {10: b"cap"})
+    sent = []
+
+    def kill(d, log, args):
+        sent.append(d["pid"])
+        world.pop(d["pid"])
+        return True
+
+    monkeypatch.setattr(mg, "send_kill", kill)
+    killed, survivors = mg.kill_tree(select(mg, args), args, set(), lambda _: None)
+    assert killed == sent == [10]
+    assert survivors == []
+    assert 11 in world
+
+
+@pytest.mark.parametrize("pidfd", [False, True])
+def test_pid_reuse_is_not_signalled(monkeypatch, mg, args, pidfd):
+    calls = []
+    monkeypatch.setattr(mg, "proc_info", lambda p: proc(p, starttime=999))
+    monkeypatch.setattr(mg.os, "kill", lambda *a: calls.append(a))
+    if pidfd:
+        monkeypatch.setattr(mg.os, "pidfd_open", lambda p: 42)
+        monkeypatch.setattr(mg.signal, "pidfd_send_signal", lambda *a: calls.append(a))
+        closed = []
+        monkeypatch.setattr(mg.os, "close", closed.append)
+    else:
+        monkeypatch.delattr(mg.os, "pidfd_open", raising=False)
+    assert not mg.send_kill(proc(10), lambda _: None, args)
+    assert calls == []
+    if pidfd:
+        assert closed == [42]
+
+
+def test_pidfd_is_opened_before_identity_check(monkeypatch, mg, args):
+    calls = []
+    monkeypatch.setattr(mg.os, "pidfd_open", lambda p: calls.append("open") or 42)
+    monkeypatch.setattr(mg, "proc_info", lambda p: calls.append("check") or proc(p, ppid=0))
+    monkeypatch.setattr(mg, "marker_value", lambda *a: b"cap")
+    monkeypatch.setattr(mg.signal, "pidfd_send_signal", lambda *a: calls.append("signal"))
+    monkeypatch.setattr(mg.os, "close", lambda fd: calls.append("close"))
+    assert mg.send_kill(proc(10), lambda _: None, args)
+    assert calls == ["open", "check", "signal", "close"]
+
+
+def test_oom_write_skips_reused_identity(monkeypatch, mg, args):
+    import io
+    class File(io.StringIO):
+        def close(self):
+            pass
+    output = File()
+    monkeypatch.setattr("builtins.open", lambda *a, **k: output)
+    monkeypatch.setattr(mg, "proc_info", lambda p: proc(p, starttime=999))
+    assert mg.raise_oom_adj({10: proc(10)}, False, args) == 0
+    assert output.getvalue() == ""
+
+
+def test_marked_orphans_and_separate_wrappers(monkeypatch, mg, args):
+    records = [dict(name="a", pid=10, pgid=10), dict(name="b", pid=20, pgid=20)]
+    world = mock_world(monkeypatch, mg, {
+        11: proc(11, pgid=10), 21: proc(21, pgid=20), 31: proc(31, pgid=30)},
+        {11: b"cap", 21: b"cap", 31: b"cap"}, records)
+    _, jobs = mg.find_jobs(world, args, set())
+    assert sorted(sorted(j["pids"]) for j in jobs.values()) == [[11], [21], [31]]
+    for j in list(jobs.values()):
+        monkeypatch.setattr(mg, "send_kill", lambda d, log, args: world.pop(d["pid"]) is not None)
+        assert mg.kill_tree(j, args, set(), lambda _: None) == (j["pids"], [])
+    assert not world
+
+
+def test_fork_during_kill_is_found_after_root_grace(monkeypatch, mg, args):
+    records = [dict(name="job", pid=10, pgid=10)]
+    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+                       {10: b"cap", 11: b"cap", 12: b"cap"}, records)
+    sent = []
+
+    def kill(d, log, args):
+        sent.append(d["pid"])
+        world.pop(d["pid"])
+        if d["pid"] == 10:
+            world[12] = proc(12)  # new orphan discovered after wrapper grace/kill
+        return True
+
+    monkeypatch.setattr(mg, "send_kill", kill)
+    assert mg.kill_tree(select(mg, args), args, set(), lambda _: None) == ([10, 11, 12], [])
+    assert sent == [11, 10, 12]
+
+
+def test_survivors_use_independent_final_inventory(monkeypatch, mg, args):
+    mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap", 99: b"cap"})
+    job = select(mg, args)
+    inventories = iter([{}, {}, {99: proc(99)}])
+    monkeypatch.setattr(mg, "inventory", lambda *a: next(inventories))
+    monkeypatch.setattr(mg, "send_kill", lambda *a: pytest.fail("no signal expected"))
+    assert mg.kill_tree(job, args, set(), lambda _: None) == ([], [99])
+
+
+@pytest.mark.parametrize("comm", ["claude", "node", "codex", "tmux", "bash"])
+def test_markers_do_not_override_session_exclusion(monkeypatch, mg, args, comm):
+    world = mock_world(monkeypatch, mg, {9: proc(9, comm="claude"),
+                       10: proc(10, ppid=9, comm=comm)}, {10: b"cap"})
+    assert mg.find_jobs(world, args, set())[0] == {}
+
+
+def test_legacy_status_and_job_names(monkeypatch, mg, args, tmp_path):
+    directory = tmp_path / "ops/jobs"
+    directory.mkdir(parents=True)
+    (directory / "legacy.status").write_text("running 10 2026-11-05T00:00:00Z\n")
+    (directory / "current.status").write_text("running 20 now 20\n")
+    (directory / "done.status").write_text("done 0 now\n")
+    monkeypatch.setattr(mg, "REPO", str(tmp_path))
+    records = mg.running_jobs()
+    assert records == [dict(name="current", pid=20, pgid=20), dict(name="legacy", pid=10, pgid=None)]
+    world = {10: proc(10), 11: proc(11, ppid=10), 21: proc(21, pgid=20)}
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                        b"cap" if marker == args.marker else None)
+    targets, jobs = mg.find_jobs(world, args, set())
+    assert set(targets) == {10, 11, 21}
+    assert {j["name"]: sorted(j["pids"]) for j in jobs.values()} == {"legacy": [10, 11], "current": [21]}
+
+
+def test_job_name_matches_pid_and_process_group(mg):
+    records = [dict(name="wrapper", pid=10, pgid=20), dict(name="legacy", pid=30, pgid=None)]
+    procs = {10: proc(10, pgid=20), 11: proc(11, pgid=20), 31: proc(31, pgid=30)}
+    assert mg.job_name(10, procs, records) == "wrapper"
+    assert mg.job_name(11, procs, records) == "wrapper"
+    assert mg.job_name(20, procs, records) == "wrapper"
+    assert mg.job_name(31, procs, records) == "legacy"
+    assert mg.job_name(99, procs, records) is None
+
+
+@pytest.mark.parametrize("failure", [7, "timeout"])
+def test_mail_failure_is_bounded_and_logged(monkeypatch, mg, failure):
+    def run(*a, **kw):
+        assert kw["timeout"] == 10
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(a[0], 10)
+        return SimpleNamespace(returncode=failure)
+    monkeypatch.setattr(mg.subprocess, "run", run)
+    messages = []
+    mg.send_mail("test", messages.append)
+    assert len(messages) == 1 and "mail failed" in messages[0]
+
+
+
+def test_final_root_is_reclassified_before_signal(monkeypatch, mg, args):
+    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+                       {10: b"cap", 11: b"cap"})
+    job = select(mg, args)
+    sent = []
+
+    def kill(d, log, args):
+        sent.append(d["pid"])
+        world.pop(d["pid"])
+        # The wrapper execs a protected session process during its grace period.
+        world[10] = proc(10, comm="node")
+        return True
+
+    monkeypatch.setattr(mg, "send_kill", kill)
+    assert mg.kill_tree(job, args, set(), lambda _: None) == ([11], [])
+    assert sent == [11]
+
+
+def test_other_uid_and_small_unmarked_are_excluded(monkeypatch, mg, args):
+    world = mock_world(monkeypatch, mg, {
+        10: proc(10, uid=os.getuid() + 1), 11: proc(11),
+        12: proc(12, rss=4 * 1024**3)}, {10: b"cap"})
+    assert set(mg.find_jobs(world, args, set())[0]) == {12}
+
+
+def test_self_job_siblings_are_excluded(monkeypatch, mg, args):
+    records = [dict(name="guard", pid=10, pgid=10), dict(name="work", pid=20, pgid=20)]
+    world = mock_world(monkeypatch, mg, {
+        10: proc(10), 11: proc(11, ppid=10), 12: proc(12, ppid=10), 20: proc(20, pgid=20)},
+        {p: b"cap" for p in (10, 11, 12, 20)}, records)
+    assert set(mg.find_jobs(world, args, {10, 11})[0]) == {20}
+
+
+def test_failed_signal_stops_at_deadline_and_reports_survivor(monkeypatch, mg, args):
+    mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"})
+    monkeypatch.setattr(mg, "send_kill", lambda *a: False)
+    assert mg.kill_tree(select(mg, args), args, set(), lambda _: None) == ([], [10])
+    assert 5 <= mg.time.monotonic() < 5.3
+
+
+def test_proc_stat_field_22_and_allowed_reads(monkeypatch, mg):
+    fields = ["S", "1", "10"] + ["0"] * 16 + ["987654"]
+    reads = []
+
+    def read(path, mode="r"):
+        reads.append(path)
+        if path.endswith("/stat"):
+            return "10 (name with ) spaces) " + " ".join(fields)
+        if path.endswith("/status"):
+            return f"Name: python\nUid: {os.getuid()}\nVmRSS: 4 kB\n"
+        pytest.fail(f"forbidden read: {path}")
+
+    monkeypatch.setattr(mg, "read", read)
+    monkeypatch.setattr(mg.os, "stat", lambda p: SimpleNamespace(st_uid=os.getuid()))
+    info = mg.proc_info(10)
+    assert info["starttime"] == 987654
+    assert info["pgid"] == 10
+    assert info["rss"] == 4096
+    assert set(reads) == {"/proc/10/stat", "/proc/10/status"}
+
+STEP = 200 * 1024 * 1024
+ALLOC = f"""
+import time
+held = []
+for _ in range(6):
+    held.append(b"\\x01" * {STEP})
+    time.sleep(0.4)
+time.sleep(120)
+"""
+CHILD = f"""
+import subprocess, sys, time
+subprocess.Popen([sys.executable, "-c", {ALLOC!r}])
+time.sleep(120)
+"""
+
+
+def marked_live(mg, marker):
+    return {p for p, d in mg.snapshot().items()
+            if d["state"] not in {"Z", "X"} and mg.marker_value(p, marker) is not None}
+
+
+@pytest.mark.skipif(os.environ.get("MEMGUARD_LIVE") != "1", reason="set MEMGUARD_LIVE=1 under bin/job")
+def test_memguard_kills_job_tree_and_spares_dummy(tmp_path, mg, args):
+    assert "GEMMA_JOB_CAP" in os.environ, "run the live test under bin/job"
+    marker = "GEMMA_MGTEST_" + uuid.uuid4().hex
+    root = tmp_path / "jobcwd"
+    root.mkdir()
+    rcfile = tmp_path / "rc"
+    log = tmp_path / "memguard.log"
+    env_clean = {k: v for k, v in os.environ.items()
+                 if k not in {"GEMMA_JOB_CAP", "GEMMA_JOB_ID"} and not k.startswith("GEMMA_MGTEST_")}
+    # Both allocators peak at 1.2 GiB each, with only small interpreter/wrapper overhead.
+    dummy = subprocess.Popen([sys.executable, "-c", ALLOC], cwd="/", env=env_clean)
+    baseline = Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip()
+    job = subprocess.Popen(["bash", "-c", '"$PYTHON" -c "$CHILD_SRC"; echo $? > "$RCFILE"'],
+                           cwd=root, start_new_session=True,
+                           env={**env_clean, marker: "test", "CHILD_SRC": CHILD,
+                                "PYTHON": sys.executable, "RCFILE": str(rcfile)})
+    guard = None
+    try:
+        time.sleep(3)
+        assert len(marked_live(mg, marker)) >= 3
+        guard = subprocess.Popen(
+            [sys.executable, str(MG), "--marker", marker, "--max-total", "0.8", "--min-available", "0",
+             "--unmarked-rss", "0.5", "--interval", "0.5", "--roots", str(tmp_path),
+             "--log", str(log), "--no-mail"], env=env_clean,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and "survivors=" not in (log.read_text() if log.exists() else ""):
+            time.sleep(0.2)
+        text = log.read_text()
+        assert "KILL" in text and "survivors=[]" in text, text
+        job.wait(timeout=10)
+        assert marked_live(mg, marker) == set(), "fresh inventory found marked survivors"
+        assert rcfile.read_text().strip() == "137"
+        assert mg.proc_info(dummy.pid)["state"] not in {"Z", "X"}
+        assert mg.marker_value(dummy.pid, "GEMMA_JOB_CAP") is None
+        assert Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip() == baseline
+        assert text.count("KILL") == 1, text
+    finally:
+        if guard and guard.poll() is None:
+            guard.kill()
+            guard.wait(timeout=5)
+        # Discover descendants and marked orphans BEFORE killing their parents.
+        procs = mg.snapshot()
+        cleanup = set(mg.descendants(job.pid, procs)) | marked_live(mg, marker)
+        for p in sorted(cleanup - {job.pid}):
+            d = procs.get(p)
+            if d:
+                mg.send_kill(d, lambda _: None, SimpleNamespace(
+                    marker=marker, unmarked_rss=args.unmarked_rss, roots=args.roots))
+        for child in (dummy, job):
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("survives", [False, True])
+def test_escaped_members_remain_in_job(monkeypatch, mg, args, legacy, survives):
+    record = dict(name="job", pid=10, pgid=None if legacy else 10)
+    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+                       {10: b"cap", 11: b"cap"}, [record])
+    if not legacy:
+        record.update(job_id=b"job/boot/123")
+        monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                            b"job/boot/123" if marker == "GEMMA_JOB_ID" else b"cap")
+    job = select(mg, args)
+    # Change membership after discovery, as setsid/reparenting would do.
+    world[11] = proc(11, ppid=1, pgid=11)
+    # Normal polling and the kill/final inventories must agree.
+    _, jobs = mg.find_jobs(world, args, set(), known_jobs={job["key"]: job})
+    assert set(jobs[job["key"]]["members"]) == {10, 11}
+    sent = []
+
+    def kill(d, log, args):
+        sent.append(d["pid"])
+        if survives and d["pid"] == 11:
+            return False
+        world.pop(d["pid"])
+        return True
+
+    monkeypatch.setattr(mg, "send_kill", kill)
+    assert mg.kill_tree(job, args, set(), lambda _: None) == (
+        [10] if survives else [10, 11], [11] if survives else [])
+    assert 11 in sent
+
+
+def test_job_id_is_exact_primary_key_and_keeps_allowlist(monkeypatch, mg, args):
+    world = mock_world(monkeypatch, mg, {
+        10: proc(10), 11: proc(11, pgid=99), 12: proc(12),
+        13: proc(13, comm="node"), 14: proc(14)},
+        {10: b"cap", 11: b"different-cap", 12: b"cap", 13: b"cap"})
+    ids = {10: b"job/[boot]/123", 11: b"job/[boot]/123",
+           12: b"job/[boot]/1234", 13: b"job/[boot]/123", 14: b"job/[boot]/123"}
+    caps = {10: b"cap", 11: b"different-cap", 12: b"cap", 13: b"cap"}
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                        ids.get(p) if marker == "GEMMA_JOB_ID" else caps.get(p))
+    targets, jobs = mg.find_jobs(world, args, set())
+    assert set(targets) == {10, 11, 12}
+    assert sorted(sorted(j["pids"]) for j in jobs.values()) == [[10, 11], [12]]
+
+
+def test_legacy_known_members_do_not_follow_reused_pid(monkeypatch, mg, args):
+    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+                       {10: b"cap", 11: b"cap"}, [dict(name="job", pid=10, pgid=None)])
+    job = select(mg, args)
+    world[11] = proc(11, pgid=11, starttime=999)
+    assert set(mg.inventory(job, args, set())) == {10}
+
+
+@pytest.mark.parametrize("action", ["signal", "oom"])
+@pytest.mark.parametrize("change", ["node", "uid", "shell", "marker", "cwd", "rss"])
+def test_action_revalidates_allowlist_after_handle_open(monkeypatch, mg, args, action, change):
+    import io
+    marked = {} if change in {"cwd", "rss"} else {10: b"cap"}
+    rss = 4 * 1024**3 if change in {"cwd", "rss"} else 1024
+    world = mock_world(monkeypatch, mg, {10: proc(10, rss=rss)}, marked)
+    targets, _ = mg.find_jobs(world, args, set())
+    assert 10 in targets
+    class File(io.StringIO):
+        def close(self):
+            pass
+    writes = File()
+
+    def change_eligibility():
+        if change == "node":
+            world[10] = proc(10, comm="node")
+        elif change == "uid":
+            world[10] = proc(10, uid=os.getuid() + 1)
+        elif change == "shell":
+            world[10] = proc(10, comm="bash", ppid=9)
+            world[9] = proc(9, comm="claude")
+        elif change == "marker":
+            marked.clear()
+        elif change == "cwd":
+            monkeypatch.setattr(mg, "cwd_of", lambda p: "/elsewhere")
+        elif change == "rss":
+            world[10] = proc(10, rss=1024)
+
+    sent, closed = [], []
+    def pidfd_open(p):
+        change_eligibility()
+        return 42
+    monkeypatch.setattr(mg.os, "pidfd_open", pidfd_open)
+    monkeypatch.setattr(mg.os, "close", closed.append)
+    monkeypatch.setattr(mg.signal, "pidfd_send_signal", lambda *a: sent.append(a))
+    monkeypatch.setattr(mg.os, "kill", lambda *a: sent.append(a))
+    if action == "signal":
+        assert not mg.send_kill(targets[10], lambda _: None, args)
+        assert closed == [42]
+    else:
+        def open_oom(path, mode):
+            assert path == "/proc/10/oom_score_adj"
+            change_eligibility()
+            return writes
+        monkeypatch.setattr("builtins.open", open_oom)
+        assert mg.raise_oom_adj(targets, False, args) == 0
+    assert sent == []
+    assert writes.getvalue() == ""
+
+
+def test_six_field_status_retains_identity_and_names_escaped_job(monkeypatch, mg, args, tmp_path):
+    directory = tmp_path / "ops/jobs"
+    directory.mkdir(parents=True)
+    (directory / "new.status").write_text("running 10 now 10 boot-id 123\n")
+    monkeypatch.setattr(mg, "REPO", str(tmp_path))
+    records = mg.running_jobs()
+    assert records == [dict(name="new", pid=10, pgid=10, boot_id="boot-id",
+                            starttime="123", job_id=b"new/boot-id/123")]
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                        b"new/boot-id/123" if marker == "GEMMA_JOB_ID" else b"cap")
+    _, jobs = mg.find_jobs({11: proc(11, pgid=11)}, args, set())
+    job = next(iter(jobs.values()))
+    assert job["name"] == "new"
+    assert job["root"] == 10
+    assert job["pids"] == [11]
+
