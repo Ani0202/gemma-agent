@@ -1,0 +1,1 @@
+bash -c cd\ /home/ubuntu/work/gemma\;\ while\ \[\ \!\ -f\ ops/jobs/review-kernel-probes-light.status\ \]\ \|\|\ grep\ -q\ \"\^running\"\ ops/jobs/review-kernel-probes-light.status\;\ do\ sleep\ 60\;\ done\;\ export\ CODEX_EFFORT=medium\;\ exec\ bash\ ops/jobs/review-memguard-fix6-light.cmd 

@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 21:38Z (cycle 93, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 21:32Z (cycle 94, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
@@ -21,23 +21,18 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Linger check (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`; if not, tell the Director. After the NEXT reboot, once: `systemctl --user list-units --type=service --state=running`, names only; report non-ours units to the Director, never inspect or touch them (may be Etho).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
-## Running jobs (21:13Z): review-kernel-setup-fix5c-light (starts 23:08Z), review-e4b-v002-light (23:09Z), review-memguard-fix6d-light
-  (waits for v002 AND fix5c to finish, per Director FYI 21:05Z: Codex order fix5c -> v002, nothing stacked before them; fix6c killed), memguard 7933
+## Running jobs (21:30Z): review-kernel-setup-fix5c-light + review-e4b-v002-light (start 23:08/23:09Z), review-kernel-probes-light
+  (waits for both), review-memguard-fix6e-light (waits for probes), memguard 7933 (0 kills).
 - KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
   dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
 - Kernel fix5 branch codex/kernel-setup-fix5 @87001e4: merge after fix5c review clean, then host eval/tests on main.
-- memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
-- Item 6: docker-order MERGED to main 8c55985 (review clean ops/codex/review-20261105T192407.md; nit fixed 374eb6d). Main host
-  eval/tests: 469p/3s/1f (ops/jobs/hosttests-main-dockerorder.log); the 1 fail = main's stale test_memguard oom_score_adj
-  assertion (dummy inherits bin/job's 1000); fix6's test uses a baseline, so it is fixed by the fix6 merge.
-- memguard-fix6 eedf84b+0f5de3d: livetest GREEN (94 passed, ops/jobs/hosttests-fix6-dockerorder.log). review-memguard-fix6-light
-  queued as review-memguard-fix6d-light. No BLOCKING -> merge + full eval/tests on main + deploy (stop 7933, start memguard-light at once). BLOCKING -> stop, short report.
-- Item 7: plan eval/plans/006.md pre-registered (31B timing, cap from e4b-v001 S/F, <= 4 quota-h, same 8 ids). After report 005.
+- Item 6 docker-order MERGED 8c55985; main eval/tests 469p/3s/1f (stale test_memguard oom_score_adj; fixed by the fix6 merge).
+- memguard-fix6 eedf84b+0f5de3d livetest GREEN. Review clean -> merge + full eval/tests + deploy (stop 7933, start memguard-light). BLOCKING -> short report.
 - NOTE: bin/codex-build always branches from main HEAD; for follow-up rounds create the worktree on the previous commit manually,
   write the spec, sed the previous build-*.sh, and bin/job start codex-<name>.
 ## bin/job, memguard, owner patch (cycles 62-66)
 - Linger=yes since ~18:05Z (dec 025): the scope path (MemoryMax=5G) is normal; Codex works under it.
-- Owner patch v2 = ONE diff (dec 024 item 3; dec 026: HOLD for Aniket, low urgency, after the critical path; keep the RLIMIT_DATA comment): ops/patches/bin-job-fallback.diff. v2 review ops/codex/review-20261105T180811.md: 3 BLOCKING (grep regex marker -> use grep -F; PID reuse between scan and signal plus cached group_ok -> bind identities (pidfd); legacy 3/4-field records -> refuse destructive signalling without identity evidence). Plan v3: a small Python helper using pidfds (like memguard) called from bin/job kill. NOT started (low urgency).
+- Owner patch v2 (ops/patches/bin-job-fallback.diff): HOLD for Aniket (dec 026), 3 BLOCKING in ops/codex/review-20261105T180811.md; plan v3 = pidfd helper. NOT started.
 - sandbox-limits round 3 9d610b5 (wait4 ru_maxrss peak; Codex 459 pass/4 skip). Host test job sandbox-limits3-hosttest; if green -> codex-review -> merge eval/ only.
 ## Dec 027 still in force (superseded parts closed by dec 028)
 - FIDELITY: kernel reproduces Dockerfile.public only (pip + line-9 tools, offline); NO PIP_* prefixes; setup_calls logging mandatory.
@@ -45,8 +40,7 @@ Builder on Opus (dec 010: local-first, two-strike).
   empty submit loses everything; draft prompt bundles/drafts/item4-system.md; plan 005 (paired A/B at v002 cap, needs GPU: ask in report 005).
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
-- Kaggle GPU this week: 5.18/30 h per `kaggle quota` 21:05Z (v5 +1.45). Earlier: 0.07 h used (v1+v2 failed fast, per `kaggle quota`); 3.48 quota-h used after v3 (~1.74 L4x4 h). Log: ops/budget/kaggle.md. Resets Sat 00:00Z.
-
+- Kaggle GPU this week: 5.18/30 h per `kaggle quota` 21:05Z. Plan 006 cap 4.0 ~2.4 quota-h (-> ~7.6). Log: ops/budget/kaggle.md. Resets Sat 00:00Z.
 ## Live caveats
 - Job naming (dec 024): waiters, codex-ask and codex-review jobs end in -light; builds, test suites and evals never do.
 - LORO with only 2 repos (rich, fastapi) is weak; report 002 must say so (dec 014 item 3).
@@ -55,26 +49,31 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Any Kaggle GPU kernel must pin the starter docker_image (py3.12, cp312 wheelhouse).
 - Hosted-LLM-API data question OPEN; no new third-party services.
 - One pending Kaggle submission at a time; no partial credit on timeout (docs/RULES_FINDINGS.md).
-
 ## Timing facts (results/kaggle_timing_e4b_v000_setup.json)
 - Harness sandbox setup ~210 s/task, outside max_time_minutes (the budget clock starts after setup); flat across repos.
 - vLLM startup 5.39 min; verification ~410 s (excluded from the 12 h). Agent clock p90 144 s at cap 5.
 
 ## Open decisions / instructions in force
-- Dec 022 (report 003): interim timing rule = (cap + max measured setup) x125 + 30 <= 660. Item 2 setup root-cause IN PROGRESS (ask-setup-210s + scout). Item 3: v001 (cap 1.4) may be built/packed now, but the re-time can't be pushed until item 2 concludes; ONE Kaggle timing run. Item 4 (truncation-safe diff, patch hygiene, tool-output trimming) to start. Item 5: no 31B timing yet. Report 004 next.
+- Dec 022: interim timing rule (cap + S) x125 + 30 <= 660 (S now per dec 034 hypotheses). Item 4 (truncation-safe diff, patch hygiene, tool-output trimming) pending = dec 032 item 8.
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
-## Dec 032 open items
-- Item 5: add note field to results/kaggle_timing_e4b_v001.json ("decision" = legacy projection, not the gate); NO value changes;
-  bundle with the next reviewed timing_summary change. NOT done yet.
-- Item 6 DONE (dec 032): results/setup_py_cause_v5.json (fallback 200.7 s constant; superseded by report 009).
-- Item 7: plan 006 addendum DONE (see Report 009 section); build + push next.
-- Item 8 after that: dec 022 item 4 empty-patch protection via codex-build.
-## Report 009 (NEEDS_DECISION, dec 033 item 3): scorer setup path. Verdict S_scorer likely <= ~16 s (subprocess, setup.py
-  skipped; p~0.6), H2 Docker air-gapped ~25-30 s (p~0.25), ~216 s (p~0.15). Forum question drafted (escalate). Phase 2
-  excluded: CONFIRMED verbatim. Caps unchanged until the Director rules. Plan 006 addendum written (cap 1.0 + P1-P3 probes; 31b-v001
-  also gets max_output_tokens 8192). Local stock-path S 2.2-4.9 s: results/stock_subprocess_setup_local.json.
+## Dec 032 open items: item 5 (note field, see Dec 034 block); item 8 = dec 022 item 4 empty-patch protection via codex-build (after the critical path).
+## Dec 034 (report 009 ruled: option C with gated step-up) — in force
+- 31b-v001 = TIMING bundle (cap 4.0, max_output_tokens 8192 x2): dist/31b-v001.zip sha256=3c3a264652ab1d72ff6b9c5609c482c34a2ab7af37eb600689e5cfa0bf810f6a,
+  pack PASS, load check results/bundle_load_check_31b_v001.json (8192/8192, 240 s). NOT a submission candidate.
+- Kernel probes P1-P3 + timing_summary --gate-mode minus-image: branch codex/kernel-probes 63127c8 (on fix5 87001e4), 117 tests pass,
+  dry-run OK. Review job review-kernel-probes-light (waits for fix5c + v002). Clean -> push plan 006 at cap 4.0, budget 6000 (eval/plans/006.md last section).
+  Kaggle slug/push command: same as v5 (ops/budget/kaggle.md); log quota.
+- Gates for that run: (a) 8/8 no harness error; (b) max(Phase-1 - emulation) <= 277 s; (d) vLLM <= 600 s; (e) >= 1 non-empty diff.
+- G1 = P2 no docker binary + no docker.sock AND P1 stock setup <= 30 s on all 8 AND gates pass -> request SUBMIT 31b-v001-hicap at cap <= 3.5 (report 010).
+- FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
+- e4b-v002 submit: record submit time, completion time, any runtime field from the Kaggle API/CLI in ops/budget/kaggle.md (weak evidence; never act on it alone).
+- Forum question: escalated to Aniket (E4); post only if he says yes; default by Nov 7 12:00Z = not posted.
+- OPEN eval-design question (dec 034 item 6): under H1, test deps come from the scorer's own site-packages, not setup.py. Before local
+  pass-rate evals start, pre-register which environment the local sandbox models and why. Don't act on it before then.
+- Dec 032 item 5: decision_note is in timing_summary (probes branch); add the same note field to results/kaggle_timing_e4b_v001.json at merge.
+- fix6 review requeued as review-memguard-fix6e-light (waits for the probes review; fix6d killed while still sleeping).
 ## Next 3
-1. 23:08Z fix5c review + 23:09Z v002 review -> evaluate (ii)/(iii) -> SUBMIT follow-up to Director (before ~23:45Z if possible).
-2. fix5c clean: merge branch, host eval/tests. Then memguard-fix6d review (auto after fix5c+v002) -> merge + deploy memguard-light.
-3. Build 31b-v001 + kernel P1-P3 probes (codex-build after the reviews) -> codex-review -> push plan 006 (<= 4 quota-h).
+1. 23:08Z fix5c + v002 reviews -> evaluate v002 SUBMIT conditions (ii)/(iii) -> SUBMIT mail to Director (slot cutoff ~23:45Z).
+2. fix5c clean: merge fix5 branch; probes review clean -> push plan 006 (cap 4.0) -> timing_summary --gate-mode minus-image -> report 010.
+3. fix6e review -> merge + deploy memguard-light. Then dec 032 item 8 (empty-patch protection, codex-build).

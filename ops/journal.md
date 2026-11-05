@@ -179,3 +179,8 @@
 2026-11-05T21:38Z | dec 033 read (v002 approve; cap derivation F=7 s; report 009 + plan 006 addendum asked); MANIFEST dup sha line removed (zip unchanged) | ops/decisions/033-20261105T210954-8812-from-builder.md
 2026-11-05T21:38Z | stock subprocess setup timed locally: 2.2-4.9 s/task, setup.py skipped (container_setup.py:512,529) | results/stock_subprocess_setup_local.json
 2026-11-05T21:38Z | report 009: scorer setup path, S likely <=16 s (p~0.6), forum question drafted; plan 006 addendum (cap 1.0 + probes P1-P3) | ops/reports/009-scorer-setup-path.md
+2026-11-05T21:22Z | Dec 034 received (report 009: option C approved; plan 006 at cap 4.0; G1 gated step-up; finals rule; forum Q escalated E4) | ops/decisions/034-009-scorer-setup-path.md
+2026-11-05T21:30Z | Built 31b-v001 timing bundle (cap 4.0, max_output_tokens 8192 x2), pack PASS, load check 8192/8192 240 s | bundles/31b/v001/MANIFEST.md, results/bundle_load_check_31b_v001.json
+2026-11-05T21:28Z | Kernel probes P1-P3 + timing_summary minus-image gate on codex/kernel-probes 63127c8; 117 tests pass; dry-run OK; local P1 rich_3063 2.14 s | eval/tests/test_kernel_probes.py
+2026-11-05T21:28Z | Queued review-kernel-probes-light (after fix5c+v002); fix6d killed while sleeping, requeued as fix6e after probes | ops/codex/review-kernel-probes.sh
+2026-11-05T21:30Z | Plan 006 dec-034 section appended (cap 4.0, gates a/b'/d/e, budget 6000, G1 legs) | eval/plans/006.md
