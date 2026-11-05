@@ -203,7 +203,13 @@ async def verify_gold(task, patch, data_dir, sandbox):
         except TypeError as exc:
             sig = inspect.signature(verify_task)
             req = [n for n, p in sig.parameters.items() if p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
-            raise RuntimeError('bind failed; sig=' + str(sig)[:300] + '; required=' + ','.join(req) + '; ctx=' + ','.join(sorted(context))[:300]) from None
+            import swegemma.evaluate as _ev, swegemma.harness.verification as _vf, re as _re
+            _src = (inspect.getsource(_ev) + '\n' + inspect.getsource(_vf)).splitlines()
+            _hits = [l.strip() for l in _src if _re.search(r'verify_task\(|snapshot_path\s*=|docker\s*=|SandboxManager\(|def _?(prepare|make|get)_?snapshot', l)]
+            _d1 = ' || '.join(_hits)[:1500]
+            import swegemma.sandbox as _sb
+            _d2 = ','.join(n for n in dir(_sb) if 'Manager' in n or 'Sandbox' in n)
+            raise RuntimeError('bind failed; SRC=' + _d1 + '; SB=' + _d2 + '; sig=' + str(sig)[:300] + '; required=' + ','.join(req) + '; ctx=' + ','.join(sorted(context))[:300]) from None
         result = verify_task(**kwargs)
         return await result if inspect.isawaitable(result) else result
 

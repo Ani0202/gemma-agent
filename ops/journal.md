@@ -30,3 +30,4 @@
 2026-11-05T00:15Z | smoke2 SyntaxError (__future__ import), removed, repushed v4; waiting gold-smoke-wait3 | eval/kaggle/gold_calibration.py
 2026-11-05T00:36Z | smoke3 cancelled after full-set run, no where info; repushed smoke v5 w/ where in log, job gold-smoke-wait4 | runs/gold-smoke3, ops/jobs/gold-smoke-wait4
 2026-11-05T00:41Z | smoke4: TypeError is inspect.bind in verify_gold (kwargs mismatch); added signature diagnostics, smoke v6, job gold-smoke-wait5 | runs/gold-smoke4
+2026-11-05T00:45Z | smoke5: verify_task needs docker+snapshot_path; added source diagnostics, smoke v8, job gold-smoke-wait6 | runs/gold-smoke5

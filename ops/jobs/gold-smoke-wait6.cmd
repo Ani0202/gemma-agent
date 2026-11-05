@@ -1,0 +1,1 @@
+bash -c while\ true\;\ do\ s=\$\(kaggle\ kernels\ status\ aniket0202/gemma-gold-smoke\ 2\>\&1\)\;\ echo\ \"\$s\"\|tail\ -1\;\ echo\ \"\$s\"\|grep\ -qE\ \"COMPLETE\|ERROR\|CANCEL\"\ \&\&\ break\;\ sleep\ 60\;\ done\;\ kaggle\ kernels\ output\ aniket0202/gemma-gold-smoke\ -p\ runs/gold-smoke6 
