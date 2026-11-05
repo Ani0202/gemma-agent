@@ -189,3 +189,4 @@
 2026-11-05T21:36:10Z | dec 037 read: review split confirmed, gate prompt already scoped to gate diff, queue priority fix5c/v002 first unchanged; no action needed | ops/decisions/037-20261105T213500-22819-from-builder.md
 2026-11-05T22:52:11Z | dec 038 read (paper evidence items 1-4); NOTE.md for e4b_v001 timing legacy decision written; trace-analyst launched on v5 (8 traces); fix5c/v002 reviews sleeping to Codex-limit reset ~23:08Z | ops/decisions/038-STATE.md results/kaggle_timing_e4b_v001.NOTE.md
 2026-11-05T22:52:50Z | dec 038 item 1 DONE: taxonomy n=8 (timeout 4 [1 empty-patch], submitted 2, vLLM-400 ctx overflow 1, test-file edit 1; nonempty src diff 7); verified no task text | results/failure_taxonomy_e4b_v001_v5.json
+2026-11-05T22:55:10Z | dec 039: taxonomy + NOTE accepted; time-aware budget lever pre-registered as candidate plan 007 (paired A/B, possible 2x2 with plan 005) | ops/decisions/039-20261105T225251-12413-from-builder.md eval/plans/007.md

@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 22:58Z (cycle 98, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 22:59Z (cycle 98, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - 31b: dist/31b-v000.zip sha256=4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161 (repo a12f0b7; static+codex static OK)
@@ -77,4 +77,4 @@ History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Build
 ## Next 3
 1. 23:08Z fix5c + v002 reviews -> evaluate v002 SUBMIT conditions (ii)/(iii) -> SUBMIT mail to Director (slot cutoff ~23:45Z).
 2. fix5c clean: merge fix5 branch; probes + probes-gate reviews clean -> push codex/kernel-probes-gate (cap 4.0) -> timing_summary --gate-mode stock-path -> report 010.
-3. fix6e review -> merge + deploy memguard-light. Then dec 032 item 8 (= dec 022 item 4 empty-patch protection, codex-build).
+3. fix6e review -> merge + deploy memguard-light. Then dec 032 item 8 (= dec 022 item 4, plan 005) + plan 007 time budget (dec 039) = first quality levers after report 010.
