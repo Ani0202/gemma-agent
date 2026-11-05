@@ -152,3 +152,4 @@
 2026-11-05T19:26Z | review-docker-order: no BLOCKING (1 nit: 16 MB -> 20 MiB docstring, fixed 374eb6d); merged to main 8c55985. fix6 livetest GREEN 94p | ops/codex/review-20261105T192407.md ops/jobs/hosttests-fix6-dockerorder.log
 2026-11-05T19:27Z | main host eval/tests 469p/3s/1f; the fail = stale main test_memguard oom_score_adj assertion (inherits bin/job's 1000), fixed by fix6's baseline test | ops/jobs/hosttests-main-dockerorder.log
 2026-11-05T19:28Z | kernel-setup-fix5 built aa116cb (80 offline pass); builder dry run OK (SKIP_VERIFICATION=True, compiles); launched review-kernel-setup-fix5-light + review-memguard-fix6-light | ops/codex/build-kernel-setup-fix5.md
+2026-11-05T19:31Z | Codex usage limit (reset ~23:04Z) killed review-kernel-setup-fix5-light + review-memguard-fix6-light (no verdict); reruns scheduled 23:08Z; report 006 NEEDS_DECISION | ops/reports/006-codex-limit-review-gate.md

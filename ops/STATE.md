@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 19:28Z (cycle 84, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 19:31Z (cycle 85, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -18,7 +18,10 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
-## Running jobs (19:28Z)
+## Running jobs (19:31Z)
+- CODEX USAGE LIMIT hit 19:28Z (resets ~23:04Z): both reviews below died with no verdict (logs review-20261105T192658/192750).
+  Auto-rerun at 23:08Z: review-kernel-setup-fix5b-light, review-memguard-fix6b-light (ops/codex/relaunch-after-limit.sh).
+  Report 006 NEEDS_DECISION: A wait / B Claude review + re-time from branch now, Codex gate before relying (recommended).
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
 - DEC 028 (report 005-prelim, option A APPROVED): 2a STOP met; artifact branch closed, 2b moot, no v000 re-time. CPU 2a dropped.
   Item 1-3: kernel-setup-fix5 BUILT aa116cb (branch codex/kernel-setup-fix5 on round-4 c4c9528; Codex 80 offline pass). Builder dry run
@@ -75,6 +78,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
 ## Next 3
-1. review-kernel-setup-fix5-light -> no BLOCKING: merge, host eval/tests, push e4b-v001 L4x4 re-time (-t ~3 quota-h).
+1. Director answer on report 006 (B: Claude-review fix5 diff, push re-time from branch) OR at 23:08Z Codex rerun -> merge, host eval/tests, re-time.
 2. Re-time result -> timing_summary gate -> report 005 (NEEDS_DECISION, SUBMIT request if pass).
 3. review-memguard-fix6-light -> merge + deploy memguard-light; then 31b-v001 per plan 006.
