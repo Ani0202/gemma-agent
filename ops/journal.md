@@ -70,3 +70,6 @@
 2026-11-05T15:12Z | fix 8b200ca: pin starter docker_image (py3.12) + 'Other' model handle; pushed timing v2; job e4b-timing-wait2 | eval/kaggle/timing_push.sh, ops/budget/kaggle.md
 2026-11-05T15:15:50Z | dec 017 (owner-approved context-clear fixes): CLAUDE.md top role line added; STATE.md trimmed to snapshot, history archived | ops/history/STATE-archive.md
 2026-11-05T15:15:50Z | router change drafted (clear logging, no clear for continue-nudge-only with 2h forced clear, explicit role files in orient); bash -n + scratch tests OK; codex-review job review-router | bin/.router.new, ops/codex/router-dec017.diff
+2026-11-05T15:18Z | Kaggle timing v2 FAILED: ran on T4 x2 (--accelerator NvidiaL4X4 is not a valid shape; Kaggle silently fell back), vLLM bf16 needs cc>=8.0; quota used 0.07 h week | runs/e4b-timing-v2-failed/
+2026-11-05T15:20Z | fix 178e273: machine_shape NvidiaL4 (starter's), fail-fast WrongAccelerator guard (needs 4x L4), post-push shape check; 11 timing tests pass; pushed v3, server shape NvidiaL4; job e4b-timing-wait3 | eval/kaggle/timing_push.sh, eval/kaggle/agent_timing.py
+2026-11-05T15:22Z | review-router BLOCKING (failed clear logged as success) fixed in bin/.router.new; owner activity keeps precedence over 2 h valve (commented). Swap + respawn DENIED by the permission system; escalated to Director | ops/codex/review-20261105T151510.md
