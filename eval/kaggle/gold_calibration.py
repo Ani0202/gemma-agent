@@ -193,6 +193,9 @@ async def verify_gold(task, patch, data_dir, sandbox):
         context.update(task=task, agent_patch=patch, config=config,
                        snapshots_dir=config.snapshots_dir, wheels_dir=config.wheels_dir,
                        timeout_seconds=300, verification_timeout_seconds=300)
+        from swegemma.deduplication import resolve_task_snapshot_paths
+        _paths = resolve_task_snapshot_paths(config.snapshots_dir, task.instance_id, task.repo)
+        context.update(snapshot_path=_paths[0], base_snapshot_path=_paths[1], patch_path=_paths[2])
         parameters = inspect.signature(verify_task).parameters
         if not {'task', 'agent_patch'} <= parameters.keys():
             raise RuntimeError('Unsupported verify_task signature')

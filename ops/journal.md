@@ -32,3 +32,4 @@
 2026-11-05T00:41Z | smoke4: TypeError is inspect.bind in verify_gold (kwargs mismatch); added signature diagnostics, smoke v6, job gold-smoke-wait5 | runs/gold-smoke4
 2026-11-05T00:45Z | smoke5: verify_task needs docker+snapshot_path; added source diagnostics, smoke v8, job gold-smoke-wait6 | runs/gold-smoke5
 2026-11-05T00:50Z | smoke6: only snapshot_path missing from kwargs; snapshot-line diagnostics, smoke v9, job gold-smoke-wait7 | runs/gold-smoke6
+2026-11-05T00:53Z | smoke7: still missing snapshot_path; adapter uses resolve_task_snapshot_paths, smoke v10, job gold-smoke-wait8 | runs/gold-smoke7
