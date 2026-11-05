@@ -66,7 +66,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - Forum question (dec 035, E4 YES): Aniket posts report 009 s6 from his own account; Builder posts NOTHING. When an answer appears, summarize it (no task data) in the next report. Nothing waits on it; G1 governs.
 - OPEN eval-design question (dec 034 item 6): under H1, test deps come from the scorer's own site-packages, not setup.py. Before local
   pass-rate evals start, pre-register which environment the local sandbox models and why. Don't act on it before then.
-- Dec 032 item 5: decision_note is in timing_summary (probes branch); add the same note field to results/kaggle_timing_e4b_v001.json at merge.
 ## Next 3
 1. Guard v6 REVIEW CLEAN (ops/codex/review-20261105T234411.md); Aniket told to apply ONLY ops/patches/kaggle-submit-kernel-v6.diff (23:47Z).
    When `git diff --stat bin/kaggle-submit config.env` shows it: commit (dec 041-048 + review), dry checks (unauthorized sha -> 3; wrong
