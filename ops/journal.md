@@ -80,3 +80,5 @@
 2026-11-05T15:35Z | codex-review job review-eval-runner-fix launched | ops/jobs/review-eval-runner-fix
 2026-11-05T15:50Z | codex review 153456: B4 BLOCKING (resume identity sha+bool) + N2 (nested caps overridden) fixed in worktree f3e63ca; 404 pass + 2 opt-in E2E pass; re-review job review-eval-runner-fix2 | ops/codex/review-20261105T153456.md
 2026-11-05T15:54Z | codex review 154832: BLOCKING setup.py unfingerprinted + N1 nested-cap validation fixed in worktree ac94b91 (411 pass); re-review job review-eval-runner-fix3 | ops/codex/review-20261105T154832.md
+2026-11-05T15:58Z | codex re-review of ac94b91 clean (1 non-blocking: count caps unvalidated); fixed d13ceac (budget.tool_calls/turns/total_tokens, max_llm_calls int-only) 421 pass; merged codex/eval-runner-fix to main | ops/codex/review-20261105T155357.md, 70c0d9f
+2026-11-05T15:59Z | launched gold-rerun-b5 (pre-reg B5: gold-local2 + gold-null2 in shared env) | ops/jobs/gold-rerun-b5.cmd
