@@ -103,6 +103,49 @@ def pytest_timeout_wheels(wheels):
             *sorted(extra_wheels().glob('pytest_timeout-2.1.0-*.whl'))]
 
 
+def missing_tool_closure(wheels):
+    """Approximate the sandbox tool_deps walk with the kernel interpreter's markers (same Python as the sandbox)."""
+    from importlib.metadata import distribution, PackageNotFoundError
+    from packaging.markers import default_environment
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name, parse_wheel_filename
+    available = {}
+    for path in [*Path(wheels).glob('*.whl'), *extra_wheels().glob('*.whl')]:
+        try:
+            name, version, _, _ = parse_wheel_filename(path.name)
+        except Exception:
+            continue
+        available.setdefault(canonicalize_name(name), []).append((version, path))
+    roots = [n for n in SCORER_TOOLS if n != 'pip']
+    queue = []
+    for n in roots:
+        hits = [(v, p) for v, p in available.get(canonicalize_name(n), []) if n != 'pytest-timeout' or str(v) == '2.1.0']
+        if hits:
+            queue.append(max(hits, key=lambda h: h[0])[1])
+    env, seen, missing = dict(default_environment(), extra=''), set(), []
+    while queue:
+        path = queue.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        for raw in wheel_metadata(path).get_all('Requires-Dist', []):
+            req = Requirement(raw)
+            if req.marker and not req.marker.evaluate(env):
+                continue
+            name = canonicalize_name(req.name)
+            hits = [(v, p) for v, p in available.get(name, []) if v in req.specifier]
+            if hits:
+                queue.append(max(hits, key=lambda h: h[0])[1])  # highest matching version, like compatible_wheels
+                continue
+            try:
+                runtime_ok = distribution(name).version in req.specifier
+            except PackageNotFoundError:
+                runtime_ok = False
+            if not runtime_ok and name not in missing:
+                missing.append(name)
+    return missing
+
+
 def check_tool_sources(wheels):
     """Before vLLM starts: every Dockerfile.public line-9 tool needs an offline wheel (or pip fallback)."""
     from packaging.utils import canonicalize_name, parse_wheel_filename
@@ -117,6 +160,7 @@ def check_tool_sources(wheels):
         missing.append('pytest-timeout==2.1.0')
     if fallback_wheel(wheels, 'pip') is None:
         missing.append('pip')
+    missing.extend(missing_tool_closure(wheels))
     if missing:
         raise RuntimeError('Offline scorer tool sources missing: ' + ', '.join(missing))
     return sorted(names)
@@ -328,7 +372,8 @@ def close_tool_dependencies(roots, wheels, tags, environment, destination, insta
                 row.update(source=sources.get(name, 'sandbox metadata'),
                            version_installed=current['Version'])
             else:
-                candidate = compatible_wheels(wheels, tags, req).get(name)
+                # Wheelhouse first, then the embedded official PyPI wheels (pip-installed like the image), then runtime copy.
+                candidate = compatible_wheels(wheels, tags, req).get(name) or compatible_wheels(extra_wheels(), tags, req).get(name)
                 current = None
                 if candidate:
                     result = install_wheel(candidate)

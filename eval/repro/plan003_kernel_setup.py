@@ -49,6 +49,15 @@ def main():
     timing = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(timing)
     timing.WORK = args.output.parent / (args.output.stem + '_artifacts')
+    # Same embedding as timing_push.sh: official PyPI wheels the offline wheelhouse lacks (vendor/SHA256SUMS).
+    import base64, hashlib
+    vendor = Path(__file__).parents[1] / 'kaggle/vendor'
+    timing.EXTRA_WHEELS = {}
+    for line in (vendor / 'SHA256SUMS').read_text().splitlines():
+        digest, name = line.split()
+        data = (vendor / name).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == digest, name
+        timing.EXTRA_WHEELS[name] = [digest, base64.b64encode(data).decode()]
     state = ContextVar('acceptance')
     rows = []
     with tempfile.TemporaryDirectory(prefix='kernel-setup-') as temp:

@@ -72,12 +72,17 @@ if not setup_only:
                 if path.is_symlink() or not (path.is_file() or path.is_dir()):
                     raise ValueError('Bundle contains symlink or special file')
                 tf.add(path, arcname=path.relative_to(bundle).as_posix(), recursive=False)
-# Official PyPI wheel (MIT); the scorer image pip-installs pytest-timeout==2.1.0 online (Dockerfile.public line 9).
-vendor = source / 'vendor' / 'pytest_timeout-2.1.0-py3-none-any.whl'
-vendor_bytes = vendor.read_bytes()
-if hashlib.sha256(vendor_bytes).hexdigest() != 'f6f50101443ce70ad325ceb4473c4255e9d74e3c7cd0ef827309dfa4c0d975c6':
-    raise ValueError('Vendored pytest-timeout wheel sha256 mismatch')
-extra_wheels = {vendor.name: [hashlib.sha256(vendor_bytes).hexdigest(), base64.b64encode(vendor_bytes).decode()]}
+# Official PyPI wheels the scorer image pip-installs online (Dockerfile.public line 9 and runtime deps)
+# but the offline wheelhouse lacks; pinned by vendor/SHA256SUMS, provenance in docs/ATTRIBUTION.md.
+extra_wheels = {}
+for line in (source / 'vendor' / 'SHA256SUMS').read_text().splitlines():
+    digest, name = line.split()
+    data = (source / 'vendor' / name).read_bytes()
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError('Vendored wheel sha256 mismatch: ' + name)
+    extra_wheels[name] = [digest, base64.b64encode(data).decode()]
+if 'pytest_timeout-2.1.0-py3-none-any.whl' not in extra_wheels:
+    raise ValueError('Vendored pytest-timeout 2.1.0 wheel missing')
 constants = dict(BUNDLE_B64=base64.b64encode(buf.getvalue()).decode(), TASK_IDS=ids, EXTRA_WHEELS=extra_wheels,
                  GIT_SHA=subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip(),
                  KERNEL_BUDGET_SECONDS=budget, SETUP_ONLY=setup_only, SETUP_FIX=int(setup_fix_arg),

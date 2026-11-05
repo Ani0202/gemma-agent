@@ -912,6 +912,7 @@ def test_pytest_timeout_prefers_wheelhouse_then_embedded(monkeypatch, tmp_path):
 
 
 def test_check_tool_sources(monkeypatch, tmp_path):
+    monkeypatch.setattr(timing, 'missing_tool_closure', lambda wheels: [])
     house = tmp_path / 'house'
     house.mkdir()
     names = {'pdm-backend': 'pdm_backend', 'setuptools': 'setuptools', 'wheel': 'wheel', 'poetry-core': 'poetry_core',
@@ -941,4 +942,54 @@ def test_push_embeds_vendored_wheel(tmp_path):
                          check=True, capture_output=True, text=True).stdout
     stage = Path(out.strip().splitlines()[-1].split('Staged: ')[1])
     text = (stage / 'agent_timing.py').read_text()
-    assert "EXTRA_WHEELS = {'pytest_timeout-2.1.0-py3-none-any.whl': ['f6f50101" in text
+    assert "'pytest_timeout-2.1.0-py3-none-any.whl': ['f6f50101" in text
+    for line in (ROOT / 'eval/kaggle/vendor/SHA256SUMS').read_text().splitlines():
+        digest, name = line.split()
+        assert f"'{name}': ['{digest}'" in text
+
+
+def _wheel(directory, name, version, requires=()):
+    import zipfile
+    dist = name.replace('-', '_')
+    path = directory / f'{dist}-{version}-py3-none-any.whl'
+    meta = f'Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n' + ''.join(f'Requires-Dist: {r}\n' for r in requires)
+    with zipfile.ZipFile(path, 'w') as z:
+        z.writestr(f'{dist}-{version}.dist-info/METADATA', meta)
+    return path
+
+
+def test_missing_tool_closure_uses_wheelhouse_extra_and_runtime(monkeypatch, tmp_path):
+    house, extra = tmp_path / 'house', tmp_path / 'extra'
+    house.mkdir(); extra.mkdir()
+    monkeypatch.setattr(timing, 'extra_wheels', lambda: extra)
+    monkeypatch.setattr(timing, 'SCORER_TOOLS', ('pip', 'hatchling', 'typer', 'pytest-timeout'))
+    _wheel(house, 'hatchling', '1.0', ['pathspec>=0.10', 'trove-classifiers', 'tomli; python_version < "3.0"'])
+    _wheel(house, 'typer', '1.0', ['shellingham>=1.3', 'zz-not-anywhere-pkg', 'zz-extra-only-pkg>=2'])
+    _wheel(house, 'zz-old-dep', '1.0', ['zz-legacy-only-pkg'])
+    _wheel(house, 'zz-old-dep', '2.0')
+    _wheel(extra, 'pytest-timeout', '2.1.0', ['pytest>=5', 'zz-old-dep'])
+    _wheel(extra, 'pathspec', '1.1.1')
+    missing = timing.missing_tool_closure(house)
+    assert 'pathspec' not in missing and 'tomli' not in missing
+    assert 'zz-legacy-only-pkg' not in missing  # highest matching version (2.0) is walked, not 1.0
+    assert 'zz-not-anywhere-pkg' in missing and 'zz-extra-only-pkg' in missing
+    _wheel(extra, 'zz-extra-only-pkg', '2.5')
+    assert 'zz-extra-only-pkg' not in timing.missing_tool_closure(house)
+
+
+def test_vendored_closure_complete_against_local_wheelhouse():
+    """The real offline wheelhouse copy plus vendored wheels must close the line-9 tool dependencies."""
+    wheels = Path('/home/ubuntu/work/gemma/data/raw/wheels')
+    if not wheels.is_dir():
+        pytest.skip('local wheelhouse copy not present')
+    import base64 as b64
+    vendor = ROOT / 'eval/kaggle/vendor'
+    extra = {}
+    for line in (vendor / 'SHA256SUMS').read_text().splitlines():
+        digest, name = line.split()
+        extra[name] = [digest, b64.b64encode((vendor / name).read_bytes()).decode()]
+    timing.EXTRA_WHEELS = extra
+    try:
+        assert timing.missing_tool_closure(wheels) == []
+    finally:
+        timing.EXTRA_WHEELS = {}
