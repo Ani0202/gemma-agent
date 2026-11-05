@@ -78,3 +78,4 @@
 2026-11-05T15:33Z | real bwrap probe FAILED locally: uv pyimg alias symlink under masked HOME -> venv python3 dangled, fell back to /usr/bin/python3 (no pytest). Fixed: ro-bind resolved prefix at alias path too + regression test; 401 pass incl real bwrap + HTTP E2E | worktree commit 5858d7d
 2026-11-05T15:34Z | repeated `bin/codex-review --help` mistake (ran tiny real review); deleted. Note: bin/codex-review has NO --help, read its header instead | bin/codex-review
 2026-11-05T15:35Z | codex-review job review-eval-runner-fix launched | ops/jobs/review-eval-runner-fix
+2026-11-05T15:50Z | codex review 153456: B4 BLOCKING (resume identity sha+bool) + N2 (nested caps overridden) fixed in worktree f3e63ca; 404 pass + 2 opt-in E2E pass; re-review job review-eval-runner-fix2 | ops/codex/review-20261105T153456.md

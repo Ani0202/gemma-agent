@@ -4586,3 +4586,3513 @@ patch capture, gold calibration, resume rejection and diagnostic row persistence
 The real bubblewrap probe skips only if bubblewrap is missing or denied by the
 execution sandbox. `--allow-foreign-python` is a unit-test escape hatch.
 
+exec
+/bin/bash -lc "sed -n '1,265p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py && sed -n '480,640p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/tools/_caller.py && sed -n '650,710p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+"""Configuration models for SWE-bench evaluation runs."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
+
+from adk_submission import (
+    AdapterManifest,
+    GenerationConstraints,
+    ModelRegistry,
+    NumericRange,
+    SubmissionLimits,
+)
+
+from swegemma.budget import EvaluationBudget, HarnessLimits
+
+MAX_SUBMISSION_SIZE_BYTES: int = 3 * 1024 * 1024 * 1024  # 3 GiB (3,221,225,472 bytes)
+ALLOWED_SUBMISSION_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        '.yaml',
+        '.yml',
+        '.md',
+        '.txt',
+        '.py',
+        '.json',
+        '.safetensors',
+    }
+)
+ALLOWED_ADAPTER_EXTENSIONS: frozenset[str] = frozenset({'.safetensors'})
+
+
+def build_submission_limits(
+    max_loop_iterations: int = 500,
+) -> tuple[SubmissionLimits, GenerationConstraints]:
+    """Assemble default competition submission limits and generation constraints.
+
+    Enforces a 3 GiB total unpacked submission size cap (including adapters/),
+    restricts file types to strictly required config/prompt/skill/LoRA formats
+    (.yaml, .yml, .md, .txt, .py, .json, .safetensors), and bounds token generation
+    parameters to the 4x L4 vLLM context length (32,768 tokens).
+    """
+    limits = SubmissionLimits(
+        max_total_size_bytes=MAX_SUBMISSION_SIZE_BYTES,
+        max_yaml_size_bytes=50 * 1024 * 1024,
+        max_skill_size_bytes=50 * 1024 * 1024,
+        max_file_count=10_000,
+        max_yaml_files=1_000,
+        max_instruction_chars=1_000_000,
+        max_total_instruction_chars=10_000_000,
+        max_agents=500,
+        max_sub_agent_depth=50,
+        max_skills=1_000,
+        max_loop_iterations=max_loop_iterations,
+        allowed_file_extensions=ALLOWED_SUBMISSION_EXTENSIONS,
+        adapter_extensions=ALLOWED_ADAPTER_EXTENSIONS,
+    )
+    gen_constraints = GenerationConstraints(
+        allowed_fields=None,
+        max_output_tokens=NumericRange(1, 32768),
+        thinking_budget=NumericRange(0, 32768),
+        defaults={
+            'max_output_tokens': 16384,
+            'thinking_config': {'thinking_budget': 4096},
+        },
+    )
+    return limits, gen_constraints
+
+if TYPE_CHECKING:
+    from google.adk.agents.context_cache_config import ContextCacheConfig
+    from google.adk.apps._configs import EventsCompactionConfig
+else:
+    try:
+        from google.adk.agents.context_cache_config import ContextCacheConfig
+    except ImportError:
+        ContextCacheConfig = Any
+
+    try:
+        from google.adk.apps._configs import EventsCompactionConfig
+    except ImportError:
+        try:
+            from google.adk.apps.app import EventsCompactionConfig
+        except ImportError:
+            EventsCompactionConfig = Any
+
+
+@dataclass
+class EvalConfig:
+    """Configuration for an evaluation run."""
+
+    tasks_path: Path
+    snapshots_dir: Path
+    results_dir: Path
+    submission_dir: Path
+    models: ModelRegistry
+    image: str = 'swebench-sandbox:latest'
+    sandbox: str = 'docker'  # 'docker' (default) or 'subprocess' (Kaggle/notebooks)
+    wheels_dir: Path | None = None
+    graph_dir: str = 'data/graphs'
+    embeddings_dir: str = 'data/embeddings'
+    budget: EvaluationBudget = field(default_factory=EvaluationBudget)
+    harness: HarnessLimits = field(default_factory=HarnessLimits)
+    # Direct convenience kwargs for flat configuration
+    timeout_seconds: int | None = None
+    verification_timeout_seconds: int | None = None
+    max_time_minutes: int | float | None = None
+    max_tool_calls: int | None = None
+    max_turns: int | None = None
+    max_llm_calls: int | None = None
+    task_ids: list[str] | None = None
+    verbose: bool = False
+    skip_agent_patch: bool = False
+    limits: SubmissionLimits | None = None
+    generation_constraints: GenerationConstraints | None = None
+    adapter_manifest: AdapterManifest | None = None
+    context_cache_config: ContextCacheConfig | None = None
+    events_compaction_config: EventsCompactionConfig | None = None
+    concurrency: int = 1
+    shard_index: int | None = None
+    num_shards: int | None = None
+    display_mode: Literal['auto', 'dashboard', 'single', 'quiet'] | str = 'auto'
+    enable_sandbox_testing: bool = True
+
+    def __post_init__(self) -> None:
+        """Merge flat kwargs into budget and harness if explicitly provided."""
+        valid_modes = {'auto', 'dashboard', 'single', 'quiet'}
+        if self.display_mode not in valid_modes:
+            raise ValueError(
+                f"Invalid display_mode {self.display_mode!r}, must be one of {valid_modes}"
+            )
+
+        if self.num_shards is not None and self.num_shards < 1:
+            raise ValueError(f'num_shards must be >= 1, got {self.num_shards}')
+        if self.shard_index is not None:
+            if self.num_shards is None or self.num_shards < 1:
+                raise ValueError('shard_index requires num_shards >= 1')
+            if self.shard_index < 0 or self.shard_index >= self.num_shards:
+                raise ValueError(
+                    f'shard_index ({self.shard_index}) must be in range [0, {self.num_shards})'
+                )
+
+        default_limits, default_gen_constraints = build_submission_limits()
+        if self.limits is None:
+            self.limits = default_limits
+        if self.generation_constraints is None:
+            self.generation_constraints = default_gen_constraints
+
+        t_min = (
+            self.max_time_minutes
+            if self.max_time_minutes is not None
+            else self.budget.time_minutes
+        )
+        tc = (
+            self.max_tool_calls
+            if self.max_tool_calls is not None
+            else self.budget.tool_calls
+        )
+        turns = (
+            self.max_turns
+            if self.max_turns is not None
+            else (
+                self.max_llm_calls
+                if self.max_llm_calls is not None
+                else self.budget.turns
+            )
+        )
+        object.__setattr__(
+            self,
+            'budget',
+            EvaluationBudget(
+                time_minutes=t_min,
+                tool_calls=tc,
+                turns=turns,
+                cost_usd=self.budget.cost_usd,
+                total_tokens=self.budget.total_tokens,
+            ),
+        )
+
+        cmd_timeout = (
+            self.timeout_seconds
+            if self.timeout_seconds is not None
+            else self.harness.command_timeout_seconds
+        )
+        ver_timeout = (
+            self.verification_timeout_seconds
+            if self.verification_timeout_seconds is not None
+            else self.harness.verification_timeout_seconds
+        )
+        object.__setattr__(
+            self,
+            'harness',
+            HarnessLimits(
+                command_timeout_seconds=cmd_timeout,
+                max_stdout_chars=self.harness.max_stdout_chars,
+                max_file_lines=self.harness.max_file_lines,
+                max_file_chars=self.harness.max_file_chars,
+                verification_timeout_seconds=ver_timeout,
+            ),
+        )
+
+        if self.tasks_path is not None:
+            tasks_parent = Path(self.tasks_path).parent
+            if self.graph_dir == 'data/graphs' and not Path(self.graph_dir).exists():
+                cand_graphs = tasks_parent / 'graphs'
+                if cand_graphs.is_dir():
+                    object.__setattr__(self, 'graph_dir', str(cand_graphs))
+            if (
+                self.embeddings_dir == 'data/embeddings'
+                and not Path(self.embeddings_dir).exists()
+            ):
+                cand_emb = tasks_parent / 'embeddings'
+                if cand_emb.is_dir():
+                    object.__setattr__(self, 'embeddings_dir', str(cand_emb))
+
+    tool_runner: An async callable that invokes the tool logic when no
+      before-tool callback overrides the response.
+
+  Returns:
+    The built function response Event, or None if response is deferred/omitted.
+  """
+  tool = prepared_call.tool
+  tool_context = prepared_call.tool_context
+  function_args = prepared_call.function_args
+  function_response: object | None = None
+  detected_error_type: Optional[str] = None
+  response_source: _instrumentation.ToolResponseSource | None = None
+
+  async def _run_with_trace() -> Event | None:
+    """Executes the tool with full lifecycle management and telemetry.
+
+    This function orchestrates the tool execution pipeline, including:
+    1. Running plugin and canonical before-tool callbacks.
+    2. Executing the actual tool logic.
+    3. Running plugin and canonical after-tool callbacks.
+    4. Detecting error types for telemetry.
+    5. Building the final FunctionResponse Event to be returned.
+    """
+    nonlocal function_response, detected_error_type, response_source
+
+    # Step 1: Check if plugin before_tool_callback overrides the function
+    # response.
+    function_response = (
+        await invocation_context.plugin_manager.run_before_tool_callback(
+            tool=tool, tool_args=function_args, tool_context=tool_context
+        )
+    )
+
+    # Step 2: If no overrides are provided from the plugins, further run the
+    # canonical callback.
+    if function_response is None:
+      function_response = await _run_callbacks(
+          agent.canonical_before_tool_callbacks,  # type: ignore[arg-type]
+          _stop_on_non_none,
+          tool=tool,
+          args=function_args,
+          tool_context=tool_context,
+      )
+    if function_response is not None:
+      response_source = 'before_tool_callback'
+
+    # A tool name that resolved to nothing is answered once the before-tool
+    # callbacks have had their chance to answer it themselves. The after-tool
+    # callbacks are skipped: they describe a tool run that did not happen.
+    if (
+        function_response is None
+        and prepared_call.tool_lookup_error is not None
+    ):
+      detected_error_type = type(prepared_call.tool_lookup_error).__name__
+      function_response = await _tool_error_handler.run_on_tool_error_callbacks(
+          invocation_context=invocation_context,
+          agent=agent,
+          tool=tool,
+          tool_args=function_args,
+          tool_context=tool_context,
+          error=prepared_call.tool_lookup_error,
+      )
+      if function_response is None:
+        logger.warning('%s', prepared_call.tool_lookup_error)
+        function_response = _tool_error_handler.build_tool_not_found_response(
+            tool.name, prepared_call.tools_dict
+        )
+      else:
+        response_source = 'on_tool_error_callback'
+      return _build_response_event(
+          tool, function_response, tool_context, invocation_context
+      )
+
+    # Step 3: No before-tool callback answered the call, so proceed calling
+    # the tool normally. A tool that requires confirmation is answered by the
+    # gate instead, so the gate holds for every tool rather than only the ones
+    # that check it themselves, and a gate that raises is handled like a tool
+    # that raises. A call that is cancelled -- by a failed parallel call, a
+    # node timeout or the caller -- reaches the error callbacks too, so what
+    # a before-tool callback set up can be released, and stays cancelled.
+    if function_response is None:
+      try:
+        with _use_sync_callable_context(tool_context):
+          function_response = await apply_confirmation_gate(
+              tool, function_args, tool_context
+          )
+          if function_response is None:
+            function_response = await tool_runner()
+          elif tool_context.tool_confirmation is None:
+            # The pause is not a tool result for the model to summarize; without
+            # this the flow re-invokes the model, which calls the tool again.
+            tool_context.actions.skip_summarization = True
+      except asyncio.CancelledError as cancelled:
+        await _tool_error_handler.notify_tool_cancelled(
+            invocation_context=invocation_context,
+            agent=agent,
+            tool=tool,
+            tool_args=function_args,
+            tool_context=tool_context,
+            cancelled=cancelled,
+        )
+        raise
+      except Exception as tool_error:
+        error_response = await _tool_error_handler.run_on_tool_error_callbacks(
+            invocation_context=invocation_context,
+            agent=agent,
+            tool=tool,
+            tool_args=function_args,
+            tool_context=tool_context,
+            error=tool_error,
+        )
+        if error_response is not None:
+          function_response = error_response
+          response_source = 'on_tool_error_callback'
+        else:
+          raise tool_error
+
+    # Step 4: Check if plugin after_tool_callback overrides the function
+    # response.
+    callback_tool_response = _as_callback_result(function_response)
+    altered_function_response = (
+        await invocation_context.plugin_manager.run_after_tool_callback(
+            tool=tool,
+            tool_args=function_args,
+            tool_context=tool_context,
+            result=callback_tool_response,
+        )
+    )
+
+    # Step 5: If no overrides are provided from the plugins, further run the
+    # canonical after_tool_callbacks.
+    if altered_function_response is None:
+      altered_function_response = await _run_callbacks(
+          agent.canonical_after_tool_callbacks,  # type: ignore[arg-type]
+          _stop_on_non_none,
+          tool=tool,
+          args=function_args,
+          tool_context=tool_context,
+          tool_response=callback_tool_response,
+      )
+
+    # Step 6: If alternative response exists from after_tool_callback, use it
+    # instead of the original function response.
+    if altered_function_response is not None:
+      if altered_function_response is not callback_tool_response:
+        response_source = 'after_tool_callback'
+      function_response = altered_function_response
+
+    if (
+        tool.is_long_running or tool._defers_response
+    ) and not function_response:
+      # The tool either runs long (FR will arrive later via session
+      # injection) or defers its response by design (e.g., the LlmAgent
+      # wrapper for task delegation synthesizes the FR after the
+      # sub-agent completes).  Either way, skip the auto-FR build when
+      # the tool returned nothing.  Truthiness is deliberate here, unlike
+      # the callback chains above: the real FR still arrives later, so an
+      # empty dict must not answer the call early.
+      return None
+
+    detected_error_type = _tool_error_handler.detect_error_type_for_telemetry(
+            )
+            file_display_mgr = EventDisplayManager(
+                ctx=context,
+                instance_id=task.instance_id,
+                repo=task.repo,
+                task_index=task_index,
+                total_tasks=total_tasks,
+                console=file_console,
+                enable_live=False,
+            )
+
+        def _on_event(event: Any) -> None:
+            trace.record_event(event)
+            if file_display_mgr is not None:
+                file_display_mgr.on_event(event)
+            context.handle_adk_event(event, agent_name=agent.name)
+
+        display_plugin = EventDisplayPlugin(
+            trace_callback=_on_event,
+            display_manager=display_mgr,
+        )
+        retry_plugin = ModelRetryPlugin()
+        tool_error_plugin = ToolErrorPlugin()
+
+        # Setup ADK Runner and App
+        session_service = InMemorySessionService()
+        session_state = {
+            'problem_description': task.problem_statement,
+        }
+        hints = getattr(task, 'hints_text', '') or ''
+        if isinstance(hints, str) and hints.strip():
+            session_state['hints'] = hints.strip()
+        session = await session_service.create_session(
+            app_name='swegemma_eval',
+            user_id='eval_user',
+            state=session_state,
+        )
+        app_kwargs: dict[str, Any] = {
+            'name': 'swegemma_eval',
+            'root_agent': agent,
+            'plugins': [display_plugin, retry_plugin, tool_error_plugin],
+        }
+        if config.context_cache_config is not None:
+            app_kwargs['context_cache_config'] = config.context_cache_config
+        if config.events_compaction_config is not None:
+            app_kwargs['events_compaction_config'] = config.events_compaction_config
+
+        app = App(**app_kwargs)
+        runner = Runner(app=app, session_service=session_service)
+
+        initial_prompt = build_agent_prompt(
+            task=task,
+            config=config,
+            workspace_tree=workspace_tree,
+            enable_sandbox_testing=enable_sandbox_testing,
+            declared_tools=_extract_declared_tools(agent),
+        )
+
+        user_message = genai_types.Content(
+            role='user',
+            parts=[genai_types.Part(text=initial_prompt)],
+
+exec
+/bin/bash -lc "rg -n 'open\\(|read_text|docker.exec|subprocess|graph_dir|embeddings_dir' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/*.py && sed -n '365,725p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/workspace.py:123:            content = local_file.read_text(encoding='utf-8', errors='replace')
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/workspace.py:197:            mkdir_res = ctx.docker.exec(ctx.container_id, f'mkdir -p {quoted_parent}')
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/workspace.py:249:            with open(local_file, encoding='utf-8', errors='replace', newline='') as f:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/workspace.py:271:            with open(local_file, 'w', encoding='utf-8', newline='') as f:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:149:            sstable_path=str(ctx.graph_dir)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:150:            if ctx.graph_dir
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:152:            embeddings_sstable_path=str(ctx.embeddings_dir)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:153:            if ctx.embeddings_dir
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:157:            graph_dir=str(ctx.graph_dir) if ctx.graph_dir else None,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:158:            embeddings_dir=str(ctx.embeddings_dir)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:159:            if ctx.embeddings_dir
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:247:            graphs_sstable_path=str(ctx.graph_dir)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:248:            if ctx.graph_dir
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:250:            embeddings_sstable_path=str(ctx.embeddings_dir)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:251:            if ctx.embeddings_dir
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:254:            graph_dir=str(ctx.graph_dir) if ctx.graph_dir else None,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:255:            embeddings_dir=str(ctx.embeddings_dir)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:256:            if ctx.embeddings_dir
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:352:            sstable_path=str(ctx.graph_dir)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:353:            if ctx.graph_dir
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:355:            embeddings_sstable_path=str(ctx.embeddings_dir)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:356:            if ctx.embeddings_dir
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:359:            graph_dir=str(ctx.graph_dir) if ctx.graph_dir else None,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:360:            embeddings_dir=str(ctx.embeddings_dir)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:361:            if ctx.embeddings_dir
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:47:    result = ctx.docker.exec(ctx.container_id, command, timeout=effective_timeout)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:86:    ctx.docker.exec(ctx.container_id, 'cd /workspace && git add -N .')
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:87:    res = ctx.docker.exec(
+        and not getattr(task, 'FAIL_TO_PASS', ())
+        and not getattr(task, 'PASS_TO_PASS', ())
+        and not getattr(task, 'test_files', None)
+        and not is_synthetic_mock_repo
+    ):
+        json_path = save_trace_artifact(trace, config.results_dir, task.instance_id)
+        return TaskResult(
+            instance_id=task.instance_id,
+            repo=task.repo,
+            resolved=False,
+            agent_patch=agent_patch,
+            test_output='',
+            test_exit_code=-1,
+            duration_seconds=time.perf_counter() - start_time,
+            error='Missing test specification (empty test_patch and FAIL_TO_PASS; secret hydration failed or unavailable)',
+            trace=trace,
+            trace_json_path=json_path,
+        )
+
+    eval_id = await sandbox_start(docker)
+    try:
+        # Setup wheels in container
+        await asyncio.to_thread(setup_container_wheels, docker, eval_id, config)
+
+        # Copy snapshot into eval container and extract (supports base + patch)
+        await asyncio.to_thread(
+            extract_snapshot,
+            docker,
+            eval_id,
+            snapshot_path,
+            patch_path=patch_path,
+            base_snapshot_path=base_snapshot_path,
+        )
+
+        # Setup synthetic environment stubs if provided by sandbox setup
+        await asyncio.to_thread(setup_synthetic_hardware, docker, eval_id)
+
+        # Configure git exclude to ignore bytecode and test cache artifacts
+        await asyncio.to_thread(setup_git_exclude, docker, eval_id)
+
+        # Install editable package
+        await asyncio.to_thread(install_editable_package, docker, eval_id)
+
+        # Install test dependencies (fast-path by default)
+        await asyncio.to_thread(
+            install_test_dependencies,
+            docker,
+            eval_id,
+            task.repo,
+            fast_path=fast_path,
+            config=config,
+        )
+
+        # Configure pytest.ini and conftest.py for hermetic test discovery
+        await asyncio.to_thread(
+            setup_workspace_test_config,
+            docker,
+            eval_id,
+            repo=task.repo,
+        )
+
+        # Create clean baseline commit so git checkout has a reliable HEAD
+        await asyncio.to_thread(setup_baseline_commit, docker, eval_id, 'eval_baseline')
+
+        target_test_files = (
+            list(task.test_files)
+            if task.test_files
+            else extract_test_files_from_patch(task.test_patch)
+        )
+
+        effective_agent_patch = (
+            strip_protected_files_from_patch(
+                agent_patch, extra_protected_paths=target_test_files
+            )
+            if not is_synthetic_mock_repo
+            else agent_patch
+        )
+
+        # Apply agent patch if present
+        if effective_agent_patch.strip():
+            with tempfile.NamedTemporaryFile('w', suffix='.patch', delete=False) as f:
+                f.write(
+                    effective_agent_patch
+                    if effective_agent_patch.endswith('\n')
+                    else effective_agent_patch + '\n'
+                )
+                patch_host_path = Path(f.name)
+
+            try:
+                await asyncio.to_thread(
+                    docker.copy_to, eval_id, patch_host_path, '/tmp/'
+                )
+                exit_code, stdout, stderr = await asyncio.to_thread(
+                    apply_patch_in_container,
+                    docker,
+                    eval_id,
+                    f'/tmp/{patch_host_path.name}',
+                )
+                if exit_code != 0:
+                    err_detail = stderr or stdout
+                    if 'Patch file not found:' in err_detail:
+                        raise ContainerSetupError(
+                            f'Agent patch file missing in container on task {task.instance_id}: {err_detail}'
+                        )
+                    logger.error(
+                        'Failed to apply agent patch on task %s: %s',
+                        task.instance_id,
+                        err_detail,
+                    )
+                    agent_error = f'Failed to apply agent patch: {err_detail}'
+                    json_path = save_trace_artifact(
+                        trace, config.results_dir, task.instance_id
+                    )
+                    return TaskResult(
+                        instance_id=task.instance_id,
+                        repo=task.repo,
+                        resolved=False,
+                        agent_patch=agent_patch,
+                        test_output=err_detail,
+                        test_exit_code=exit_code,
+                        duration_seconds=time.perf_counter() - start_time,
+                        error=agent_error,
+                        trace=trace,
+                        trace_json_path=json_path,
+                    )
+            finally:
+                patch_host_path.unlink(missing_ok=True)
+
+        # Collect any test files, conftest.py, or runner config files touched by agent_patch (including deleted/renamed sources)
+        agent_touched_files = extract_test_files_from_patch(agent_patch)
+        if agent_patch.strip():
+            for raw_line in agent_patch.splitlines():
+                if raw_line.startswith('diff --git '):
+                    m_git = re.match(r'^diff --git "?a/(.*?)"? "?b/(.*?)"?$', raw_line)
+                    if m_git:
+                        for grp in (m_git.group(1), m_git.group(2)):
+                            if grp and grp not in agent_touched_files:
+                                agent_touched_files.append(grp)
+                elif raw_line.startswith(('--- a/', '+++ b/')):
+                    rel_p = raw_line[6:].strip().strip('"')
+                    if rel_p and rel_p != '/dev/null' and rel_p not in agent_touched_files:
+                        agent_touched_files.append(rel_p)
+                elif raw_line.startswith('rename from '):
+                    rel_p = raw_line[len('rename from ') :].strip().strip('"')
+                    if rel_p and rel_p not in agent_touched_files:
+                        agent_touched_files.append(rel_p)
+            git_status_res = await sandbox_exec(
+                docker,
+                eval_id,
+                'cd /workspace && (git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null) || true',
+            )
+            for line in (git_status_res.stdout or '').splitlines():
+                rel_line = line.strip()
+                if rel_line and rel_line not in agent_touched_files:
+                    agent_touched_files.append(rel_line)
+
+        protected_agent_files = [
+            p for p in agent_touched_files if _is_protected_test_or_config_path(p)
+        ]
+        files_to_reset = list(
+            dict.fromkeys(
+                target_test_files
+                + protected_agent_files
+                + [
+                    'conftest.py',
+                    'pytest.ini',
+                    'sitecustomize.py',
+                    'usercustomize.py',
+                    '_swegemma_stubs.py',
+                ]
+            )
+        )
+
+        # Reset test and config files to baseline to prevent test tampering or conflicts with test_patch
+        if files_to_reset:
+            test_files_quoted = [shlex.quote(p) for p in files_to_reset]
+            test_files_str = ' '.join(test_files_quoted)
+            checkout_cmd = (
+                f'cd /workspace && tracked=$(git ls-tree -r --name-only HEAD -- {test_files_str} 2>/dev/null) '
+                f'&& [ -n "$tracked" ] && git ls-tree -r -z --name-only HEAD -- {test_files_str} '
+                f'| xargs -0 git checkout HEAD -- 2>/dev/null || true'
+            )
+            clean_cmd = (
+                f'cd /workspace && git clean -f -- {test_files_str} 2>/dev/null || true'
+            )
+            await sandbox_exec(docker, eval_id, checkout_cmd)
+            await sandbox_exec(docker, eval_id, clean_cmd)
+
+        # Apply test patch (verification tests)
+        if task.test_patch.strip():
+            with tempfile.NamedTemporaryFile('w', suffix='.patch', delete=False) as f:
+                f.write(
+                    task.test_patch
+                    if task.test_patch.endswith('\n')
+                    else task.test_patch + '\n'
+                )
+                test_patch_host_path = Path(f.name)
+
+            try:
+                await asyncio.to_thread(
+                    docker.copy_to, eval_id, test_patch_host_path, '/tmp/'
+                )
+                exit_code, stdout, stderr = await asyncio.to_thread(
+                    apply_patch_in_container,
+                    docker,
+                    eval_id,
+                    f'/tmp/{test_patch_host_path.name}',
+                )
+                if exit_code != 0:
+                    err_detail = stderr or stdout
+                    if 'Patch file not found:' in err_detail:
+                        raise ContainerSetupError(
+                            f'Test patch file missing in container on task {task.instance_id}: {err_detail}'
+                        )
+                    logger.error(
+                        'Failed to apply test patch on task %s: %s',
+                        task.instance_id,
+                        err_detail,
+                    )
+                    json_path = save_trace_artifact(
+                        trace, config.results_dir, task.instance_id
+                    )
+                    return TaskResult(
+                        instance_id=task.instance_id,
+                        repo=task.repo,
+                        resolved=False,
+                        agent_patch=agent_patch,
+                        test_output='',
+                        test_exit_code=-1,
+                        duration_seconds=time.perf_counter() - start_time,
+                        error=f'Failed to apply test_patch: {err_detail}',
+                        trace_json_path=json_path,
+                    )
+            finally:
+                test_patch_host_path.unlink(missing_ok=True)
+
+        # Refresh workspace paths, stubs, and pytest config after patches add new files/imports
+        await asyncio.to_thread(
+            install_test_dependencies,
+            docker,
+            eval_id,
+            task.repo,
+            fast_path=fast_path,
+            config=config,
+        )
+        await asyncio.to_thread(
+            setup_workspace_test_config,
+            docker,
+            eval_id,
+            repo=task.repo,
+            overwrite=True,
+        )
+
+        # Run pytest on verification test files (excluding conftest.py from positional test args)
+        pytest_targets = [
+            p
+            for p in target_test_files
+            if Path(p).name != 'conftest.py' and p.endswith('.py')
+        ] or target_test_files
+        test_files_quoted = [shlex.quote(p) for p in pytest_targets]
+        test_files_str = ' '.join(test_files_quoted) if test_files_quoted else '.'
+        junit_xml_path = f'/tmp/_swegemma_junit_{uuid.uuid4().hex[:12]}.xml'
+        await sandbox_exec(docker, eval_id, f'rm -f {junit_xml_path}')
+        pytest_cmd = (
+            f'cd /workspace && PYTHONSAFEPATH=1 PYTHONNOUSERSITE=1 python3 -s -m pytest {test_files_str} '
+            f'--junitxml={junit_xml_path} '
+            '-p no:anyio -o timeout=0 '
+            '-o python_classes="Test* *Test" -q'
+        )
+        verification_timeout = getattr(
+            config.harness, 'verification_timeout_seconds', None
+        )
+        if verification_timeout is None:
+            verification_timeout = config.harness.command_timeout_seconds
+        test_res = await sandbox_exec(
+            docker,
+            eval_id,
+            pytest_cmd,
+            timeout=verification_timeout,
+        )
+
+        resolved = test_res.exit_code == 0
+        junit_error: str | None = None
+        if resolved:
+            xml_res = await sandbox_exec(
+                docker,
+                eval_id,
+                f'cat {junit_xml_path} 2>/dev/null || true',
+            )
+            xml_content = xml_res.stdout or ''
+            is_real_sandbox = type(docker).__name__ in {
+                'ContainerManager',
+                'SubprocessManager',
+                'DockerSandbox',
+                'SubprocessSandbox',
+            }
+            stdout_text = (test_res.stdout or '').lower()
+            stdout_invalid = (
+                bool(re.search(r'\b0 passed\b', stdout_text))
+                or 'no tests ran' in stdout_text
+                or 'collected 0 items' in stdout_text
+                or (stdout_text.strip() != '' and 'passed' not in stdout_text)
+            )
+            if xml_content.strip():
+                junit_ok, junit_reason = _validate_junit_xml(
+                    xml_content,
+                    fail_to_pass=getattr(task, 'FAIL_TO_PASS', ()),
+                    pass_to_pass=getattr(task, 'PASS_TO_PASS', ()),
+                    test_patch=getattr(task, 'test_patch', ''),
+                )
+                if not junit_ok:
+                    resolved = False
+                    junit_error = junit_reason
+                elif stdout_invalid:
+                    resolved = False
+                    junit_error = 'Pytest stdout summary indicates zero or no passing tests'
+            elif is_real_sandbox or stdout_invalid or not stdout_text.strip():
+                resolved = False
+                junit_error = 'Missing JUnit XML report (possible premature os._exit(0))'
+
+        duration = time.perf_counter() - start_time
+
+        json_path = save_trace_artifact(trace, config.results_dir, task.instance_id)
+
+        return TaskResult(
+            instance_id=task.instance_id,
+            repo=task.repo,
+            resolved=resolved,
+            agent_patch=agent_patch,
+            test_output=f'STDOUT:\n{test_res.stdout}\nSTDERR:\n{test_res.stderr}',
+            test_exit_code=test_res.exit_code,
+            duration_seconds=duration,
+            error=(junit_error or agent_error) if not resolved else None,
+            trace=trace,
+            trace_json_path=json_path,
+        )
+    except ContainerSetupError:
+        raise
+    except Exception as e:
+        logger.exception(
+            'Error during evaluation container run for task %s', task.instance_id
+        )
+        return TaskResult(
+            instance_id=task.instance_id,
+            repo=task.repo,
+            resolved=False,
+            agent_patch=agent_patch,
+            test_output='',
+            test_exit_code=-1,
+            duration_seconds=time.perf_counter() - start_time,
+            error=f'Evaluation error: {e}',
+            trace=trace,
+        )
+    finally:
+        await sandbox_stop(docker, eval_id)
+
+exec
+/bin/bash -lc "sed -n '80,300p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/workspace.py && sed -n '1,150p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+                pass
+            raise ValueError(
+                f'Invalid integer for {param_name}: {val!r}'
+            ) from None
+    raise ValueError(f'Invalid integer for {param_name}: {val!r}')
+
+
+@budget_gated
+def read_file(
+    ctx: Any,
+    filepath: str,
+    start_line: int | None = None,
+    end_line: int | None = None,
+) -> str:
+    """Read the contents of a file from the repository workspace.
+
+    Supports reading specific line ranges using start_line and end_line (1-indexed).
+    To avoid overwhelming the context window, large files are automatically truncated
+    to a maximum number of lines (default: 150 lines) and characters (default: 10,000 characters).
+
+    Args:
+        ctx: Context instance.
+        filepath: Relative path within the workspace directory (e.g., "fastapi/main.py", "pyproject.toml").
+        start_line: Optional starting line number (1-indexed, inclusive).
+        end_line: Optional ending line number (1-indexed, inclusive).
+
+    Returns:
+        JSON string containing file content, line range, and truncation status.
+    """
+    try:
+        coerced_start = _coerce_optional_int(start_line, 'start_line')
+        coerced_end = _coerce_optional_int(end_line, 'end_line')
+
+        dest_path = _resolve_workspace_path(filepath, allow_root=False)
+        filename = dest_path.name
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_file = Path(tmpdir) / filename
+            ctx.docker.copy_from(ctx.container_id, str(dest_path), local_file)
+
+            if not local_file.exists():
+                raise FileNotFoundError(f"File '{filepath}' not found in workspace.")
+
+            content = local_file.read_text(encoding='utf-8', errors='replace')
+
+        lines = content.splitlines()
+        total_lines = len(lines)
+
+        if total_lines == 0:
+            return ok_response(
+                filepath=filepath,
+                content='',
+                start_line=1,
+                end_line=0,
+                total_lines=0,
+                is_truncated=False,
+            )
+
+        start = coerced_start if coerced_start is not None else 1
+        end = coerced_end if coerced_end is not None else total_lines
+
+        start = max(start, 1)
+        end = min(end, total_lines)
+
+        if start > end:
+            return error_response(
+                error_type='ValueError',
+                error_message=f'start_line ({start}) cannot be greater than end_line ({end})',
+                details={},
+            )
+
+        max_lines = getattr(ctx.harness, 'max_file_lines', 150)
+        max_chars = getattr(ctx.harness, 'max_file_chars', 10000)
+        is_truncated = False
+        if max_lines is not None and (end - start + 1) > max_lines:
+            end = start + max_lines - 1
+            is_truncated = True
+
+        selected_lines = lines[start - 1 : end]
+        snippet = '\n'.join(selected_lines)
+
+        if max_chars is not None and len(snippet) > max_chars:
+            snippet = snippet[:max_chars]
+            is_truncated = True
+
+        return ok_response(
+            filepath=filepath,
+            content=snippet,
+            start_line=start,
+            end_line=end,
+            total_lines=total_lines,
+            is_truncated=is_truncated,
+        )
+    except Exception as e:
+        return error_response(
+            error_type='FileReadError',
+            error_message=str(e),
+        )
+
+
+@budget_gated
+def write_file(ctx: Any, filepath: str, content: str) -> str:
+    """Create or overwrite a file in the workspace.
+
+    Args:
+        ctx: Context instance.
+        filepath: Relative path to the file to create or overwrite.
+        content: Full content of the file.
+    """
+    try:
+        dest_path = _resolve_workspace_path(filepath, allow_root=False)
+        quoted_parent = shlex.quote(str(dest_path.parent))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_file = Path(tmpdir) / dest_path.name
+            tmp_file.write_text(content, encoding='utf-8')
+
+            mkdir_res = ctx.docker.exec(ctx.container_id, f'mkdir -p {quoted_parent}')
+            if mkdir_res.exit_code != 0:
+                raise RuntimeError(
+                    f'Failed to create directory {dest_path.parent} inside container: {mkdir_res.stderr}'
+                )
+
+            ctx.docker.copy_to(ctx.container_id, tmp_file, f'{dest_path.parent}/')
+
+        return ok_response(
+            filepath=filepath,
+            size=len(content),
+        )
+    except Exception as e:
+        return error_response(
+            error_type='FileWriteError',
+            error_message=str(e),
+        )
+
+
+@budget_gated
+def edit_file(
+    ctx: Any,
+    filepath: str,
+    old_string: str,
+    new_string: str,
+    allow_multiple: bool = False,
+) -> str:
+    """Replace a contiguous block of text in an existing file.
+
+    More token-efficient than write_file for targeted changes. Provide 2-4 lines of unique
+    surrounding context in old_string to ensure an unambiguous match.
+
+    Args:
+        ctx: Context instance.
+        filepath: Relative path to the target file.
+        old_string: Text block to replace.
+        new_string: Replacement text block.
+        allow_multiple: Replace all occurrences of old_string if True.
+    """
+    try:
+        from swegemma.edit import apply_replacement
+
+        dest_path = _resolve_workspace_path(filepath, allow_root=False)
+        filename = dest_path.name
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_file = Path(tmpdir) / filename
+            ctx.docker.copy_from(ctx.container_id, str(dest_path), local_file)
+
+            if not local_file.exists():
+                raise FileNotFoundError(f"File '{filepath}' not found in workspace.")
+
+            with open(local_file, encoding='utf-8', errors='replace', newline='') as f:
+                content = f.read()
+
+            if len(content) == 0:
+                raise ValueError(
+                    f"File '{filepath}' is empty. Use write_file to populate an empty or newly created file."
+                )
+
+            coerced_allow_multiple = (
+                allow_multiple.strip().lower() in ('true', '1', 'yes')
+                if isinstance(allow_multiple, str)
+                else bool(allow_multiple)
+            )
+
+            res = apply_replacement(
+                content,
+                old_string,
+                new_string,
+                filepath=filepath,
+                allow_multiple=coerced_allow_multiple,
+            )
+
+            with open(local_file, 'w', encoding='utf-8', newline='') as f:
+                f.write(res.new_content)
+
+            ctx.docker.copy_to(ctx.container_id, local_file, f'{dest_path.parent}/')
+
+        max_chars = ctx.harness.max_stdout_chars
+        diff_str = res.diff
+        is_truncated = False
+        if max_chars is not None and len(diff_str) > max_chars:
+            diff_str = diff_str[:max_chars]
+            is_truncated = True
+
+        return ok_response(
+            filepath=filepath,
+            occurrences=res.occurrences,
+            strategy=res.strategy,
+            diff=diff_str,
+            is_truncated=is_truncated,
+        )
+    except Exception as e:
+        return error_response(
+            error_type='FileEditError',
+            error_message=str(e),
+        )
+
+
+def make_read_file(ctx: Any) -> Callable:
+    def read_file_tool(
+        filepath: str,
+        start_line: int | None = None,
+"""Graph inspection and semantic code search tools for SWE-gemma."""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import Callable
+from typing import Any, cast
+
+from swegemma.tools.base import (
+    budget_gated,
+    error_response,
+    ok_response,
+    parse_tool_response,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _coerce_int(val: Any, default: int, param_name: str) -> int:
+    """Coerce an integer tool parameter that may arrive as a string or None."""
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        raise TypeError(f'{param_name} must be an integer, got boolean {val}')
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float):
+        return int(val)
+    if isinstance(val, str):
+        s = val.strip()
+        if not s or s.lower() in ('none', 'null', 'nil'):
+            return default
+        try:
+            return int(s)
+        except ValueError:
+            try:
+                f = float(s)
+                if f.is_integer():
+                    return int(f)
+            except ValueError:
+                pass
+            raise ValueError(
+                f'Invalid integer for {param_name}: {val!r}'
+            ) from None
+    raise ValueError(f'Invalid integer for {param_name}: {val!r}')
+
+
+def _get_max_stdout_chars(ctx: Any) -> int | None:
+    """Resolve max_stdout_chars from context harness or fallback attribute."""
+    harness = getattr(ctx, 'harness', None)
+    if harness is not None and hasattr(harness, 'max_stdout_chars'):
+        return harness.max_stdout_chars
+    return getattr(ctx, 'max_stdout_chars', 5000)
+
+
+def _allocate_code_budgets(lengths: list[int], max_chars: int) -> list[int]:
+    """Divide max_chars across results with unused characters rolling over to larger nodes."""
+    if not lengths:
+        return []
+    if max_chars <= 0:
+        return [0] * len(lengths)
+    if sum(lengths) <= max_chars:
+        return list(lengths)
+
+    remaining = max_chars
+    unallocated = list(range(len(lengths)))
+    budgets = [0] * len(lengths)
+
+    while unallocated:
+        share = remaining // len(unallocated)
+        fitting = [i for i in unallocated if lengths[i] <= share]
+        if fitting:
+            for i in fitting:
+                budgets[i] = lengths[i]
+                remaining -= lengths[i]
+            fitting_set = set(fitting)
+            unallocated = [i for i in unallocated if i not in fitting_set]
+        else:
+            remainder = remaining % len(unallocated)
+            for rank_idx, i in enumerate(unallocated):
+                budgets[i] = share + (1 if rank_idx < remainder else 0)
+            break
+
+    return budgets
+
+
+@budget_gated
+def get_code_neighbors(
+    ctx: Any,
+    node: str,
+    edge_type: str | None = None,
+    max_neighbors: int = 50,
+) -> str:
+    """Discover structural code graph neighbors (callers and callees) for a given code node.
+
+    Args:
+        ctx: Context instance.
+        node: Dotted symbol name or suffix of the function, method, or class node (e.g. 'pkg.module.Class.method', 'Class.method', or 'parse_request').
+        edge_type: Optional edge relation filter (e.g. 'calls'; case-insensitive, default None for all edges).
+        max_neighbors: Maximum number of neighbor nodes to return (default: 50).
+
+    Returns:
+        JSON string with list of neighbor node names and count.
+    """
+    task = getattr(ctx, 'task', None)
+    task_repo = (
+        task.get('repo')
+        if isinstance(task, dict)
+        else getattr(task, 'repo', None)
+        if task
+        else None
+    )
+    repo_name = (
+        getattr(ctx, 'repo', None)
+        or task_repo
+        or getattr(ctx, 'graph_repo_key', None)
+    )
+    if not repo_name:
+        return error_response(
+            error_type='MissingRepoContext',
+            error_message='No repository configured for graph queries.',
+        )
+
+    try:
+        from swegemma import graph as sg
+
+        coerced_max_neighbors = _coerce_int(max_neighbors, 50, 'max_neighbors')
+        coerced_edge_type = edge_type
+        if isinstance(coerced_edge_type, str) and coerced_edge_type.strip().lower() in (
+            '',
+            'none',
+            'null',
+            'nil',
+        ):
+            coerced_edge_type = None
+
+        base_commit = getattr(task, 'base_commit', None) if task else None
+        if not base_commit and isinstance(task, dict):
+            base_commit = task.get('base_commit')
+        if base_commit and str(repo_name).endswith(f'_{base_commit}'):
+            base_commit = None
+
+        node_arg = node if ';' in str(node) else f'{repo_name};{node}'
+        neighbors = sg.get_neighbor(
+            node=node_arg,
+            max_neighbors=coerced_max_neighbors,
+            edge_type=coerced_edge_type,
+            sstable_path=str(ctx.graph_dir)
+            if ctx.graph_dir
+
+exec
+/bin/bash -lc '/home/ubuntu/gemma-local/venv/bin/python -B -m pytest --version && git diff --check main...codex/eval-runner-fix' in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ exited 1 in 0ms:
+/home/ubuntu/gemma-local/venv/bin/python: No module named pytest
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B -m pytest -p no:cacheprovider eval/tests/test_run_agent_eval.py eval/tests/test_eval_fixes.py -q -k 'not e2e and not tmp and not header and not patch_updates and not binding and not quoted and not real and not inventory and not shared and not dependency and not gold and not setup and not executor and not probe and not runtime and not bwrap and not config and not resume and not host'" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ exited 1 in 0ms:
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pytest/__main__.py", line 9, in <module>
+    raise SystemExit(_console_main())
+                     ~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 286, in _console_main
+    code = _main(prog=_get_prog_name(sys.argv))
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 253, in _main
+    config = _prepareconfig(new_args, plugins, prog=prog)
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 443, in _prepareconfig
+    config: Config = pluginmanager.hook.pytest_cmdline_parse(
+                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        pluginmanager=pluginmanager, args=args
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_caller.py", line 197, in __call__
+    return self._hookexec(
+           ~~~~~~~~~~~~~~^
+        self.name, self._hookimpls.copy(), call_kwargs, firstresult
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_manager.py", line 183, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 195, in _multicall
+    raise exception
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 167, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/helpconfig.py", line 126, in pytest_cmdline_parse
+    config = yield
+             ^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 147, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 1397, in pytest_cmdline_parse
+    self.parse(args)
+    ~~~~~~~~~~^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 1791, in parse
+    self.hook.pytest_load_initial_conftests(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        early_config=self, args=args, parser=self._parser
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_caller.py", line 197, in __call__
+    return self._hookexec(
+           ~~~~~~~~~~~~~~^
+        self.name, self._hookimpls.copy(), call_kwargs, firstresult
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_manager.py", line 183, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 195, in _multicall
+    raise exception
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 167, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/warnings.py", line 114, in pytest_load_initial_conftests
+    return (yield)
+            ^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 141, in _multicall
+    next(function_gen)  # first yield
+    ~~~~^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 170, in pytest_load_initial_conftests
+    capman.start_global_capturing()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 779, in start_global_capturing
+    self._global_capturing = _get_multicapture(self._method)
+                             ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 720, in _get_multicapture
+    return MultiCapture(in_=FDCapture(0), out=FDCapture(1), err=FDCapture(2))
+                                              ~~~~~~~~~^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 493, in __init__
+    TemporaryFile(buffering=0),
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 686, in TemporaryFile
+    prefix, suffix, dir, output_type = _sanitize_params(prefix, suffix, dir)
+                                       ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 128, in _sanitize_params
+    dir = gettempdir()
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 366, in gettempdir
+    return _os.fsdecode(_gettempdir())
+                        ~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 359, in _gettempdir
+    tempdir = _get_default_tempdir()
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 223, in _get_default_tempdir
+    raise FileNotFoundError(_errno.ENOENT,
+                            "No usable temporary directory found in %s" %
+                            dirlist)
+FileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma-wt/codex-eval-runner-fix']
+
+exec
+/bin/bash -lc "sed -n '1,215p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py && sed -n '61,110p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py && sed -n '318,440p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py && sed -n '520,575p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+"""Subprocess sandbox implementation of BaseSandbox for local non-containerized execution."""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import os
+import pathlib
+import shutil
+import signal
+import subprocess
+import time
+
+from adk_eval_core.errors import (
+    EvalCoreError,
+    SandboxFileNotFoundError,
+    SandboxPathTraversalError,
+)
+from adk_eval_core.sandbox.base import BaseSandbox, ExecutionResult
+
+logger = logging.getLogger(__name__)
+
+
+_SAFE_ENV_KEYS = (
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "USER",
+    "LOGNAME",
+    "SYSTEMROOT",
+    "LD_LIBRARY_PATH",
+    "TMPDIR",
+    "TEST_TMPDIR",
+)
+
+
+def build_sanitized_env(
+    work_dir: pathlib.Path,
+    tmp_dir: pathlib.Path | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a sanitized environment dictionary from _SAFE_ENV_KEYS."""
+    eff_tmp = tmp_dir if tmp_dir is not None else work_dir
+    sanitized_env: dict[str, str] = {
+        k: os.environ[k] for k in _SAFE_ENV_KEYS if k in os.environ
+    }
+    sanitized_env["HOME"] = str(eff_tmp)
+    sanitized_env["TMPDIR"] = str(eff_tmp)
+    sanitized_env["TEST_TMPDIR"] = str(eff_tmp)
+    sanitized_env["PYTHONNOUSERSITE"] = "1"
+    if extra_env:
+        sanitized_env.update(extra_env)
+    return sanitized_env
+
+
+def execute_subprocess_command(
+    command: str | list[str],
+    cwd: pathlib.Path,
+    env: dict[str, str],
+    timeout: float | None = 300,
+    *,
+    shell: bool | None = None,
+    max_output_chars: int = 10 * 1024 * 1024,
+) -> ExecutionResult:
+    """Execute a command in a new process group with timeout and SIGKILL cleanup."""
+    if shell is None:
+        shell = isinstance(command, str)
+    start = time.perf_counter()
+    try:
+        proc = subprocess.Popen(
+            command,
+            shell=shell,
+            cwd=str(cwd),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            start_new_session=True,
+        )
+    except (RuntimeError, OSError, ValueError, EvalCoreError) as e:
+        duration = time.perf_counter() - start
+        return ExecutionResult(
+            status="error",
+            stdout="",
+            stderr=str(e),
+            exit_code=-1,
+            duration_seconds=round(duration, 3),
+        )
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        duration = time.perf_counter() - start
+        stdout = stdout or ""
+        stderr = stderr or ""
+        if max_output_chars and len(stdout) > max_output_chars:
+            stdout = stdout[:max_output_chars] + "\n...[Output truncated at 10MB limit]\n"
+        if max_output_chars and len(stderr) > max_output_chars:
+            stderr = stderr[:max_output_chars] + "\n...[Output truncated at 10MB limit]\n"
+        status = "ok" if proc.returncode == 0 else "error"
+        return ExecutionResult(
+            status=status,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=proc.returncode,
+            duration_seconds=round(duration, 3),
+        )
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            stdout, stderr = proc.communicate(timeout=1.0)
+        except (subprocess.TimeoutExpired, Exception):  # noqa: BLE001
+            stdout, stderr = "", ""
+        duration = time.perf_counter() - start
+        return ExecutionResult(
+            status="timeout",
+            stdout=stdout or "",
+            stderr=stderr or "",
+            exit_code=124,
+            duration_seconds=round(duration, 3),
+        )
+    except (RuntimeError, OSError, ValueError, EvalCoreError) as e:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        duration = time.perf_counter() - start
+        return ExecutionResult(
+            status="error",
+            stdout="",
+            stderr=str(e),
+            exit_code=1,
+            duration_seconds=round(duration, 3),
+        )
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+
+class SubprocessSandbox(BaseSandbox):
+    """Local process sandbox operating within a host directory."""
+
+    def __init__(
+        self,
+        work_dir: str | pathlib.Path | None = None,
+        environment: dict[str, str] | None = None,
+    ) -> None:
+        if work_dir is None:
+            import tempfile
+            self._temp_dir = tempfile.TemporaryDirectory(prefix="adk_sandbox_")
+            self._work_dir = pathlib.Path(self._temp_dir.name).resolve()
+        else:
+            self._temp_dir = None
+            self._work_dir = pathlib.Path(work_dir).resolve()
+            self._work_dir.mkdir(parents=True, exist_ok=True)
+        self._environment: dict[str, str] = dict(environment) if environment else {}
+        self._initial_files: dict[str, str | bytes] = {}
+
+    def initialize(self, files: dict[str, str | bytes] | None = None) -> None:
+        """Ensure working directory exists and write initial files."""
+        self._work_dir.mkdir(parents=True, exist_ok=True)
+        if files is not None:
+            self._initial_files = dict(files)
+            self._write_files(files)
+
+    def _write_files(self, files: dict[str, str | bytes]) -> None:
+        for rel_path, content in files.items():
+            self.write_file(rel_path, content)
+
+    def run_command(
+        self,
+        command: str,
+        timeout: float | None = 300,
+        work_dir: str | None = None,
+    ) -> ExecutionResult:
+        """Execute a shell command via subprocess."""
+        target_dir = self._resolve_sandbox_path(work_dir) if work_dir else self._work_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        sanitized_env = build_sanitized_env(
+            work_dir=self._work_dir,
+            extra_env=self._environment,
+        )
+        return execute_subprocess_command(
+            command=command,
+            cwd=target_dir,
+            env=sanitized_env,
+            timeout=timeout,
+            shell=True,
+        )
+
+    def _resolve_sandbox_path(self, path: str | pathlib.Path) -> pathlib.Path:
+        p = pathlib.Path(path)
+        if not p.is_absolute():
+            p = self._work_dir / p
+        resolved = p.resolve()
+        if not resolved.is_relative_to(self._work_dir.resolve()):
+            raise SandboxPathTraversalError(f"Path escapes sandbox: {path!r}", path=str(path))
+        return resolved
+
+    def write_file(self, path: str, content: str | bytes) -> None:
+        """Write file to local workspace."""
+        full_path = self._resolve_sandbox_path(path)
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, str):
+            full_path.write_text(content, encoding="utf-8")
+        else:
+            full_path.write_bytes(content)
+
+def resolve_wheels_dir(config: EvalConfig | None = None) -> Path | None:
+    """Finds the local wheels directory containing task dependencies."""
+    if config and config.wheels_dir and config.wheels_dir.exists():
+        return config.wheels_dir
+    candidates = [
+        config.tasks_path.parent / 'wheels' if (config and config.tasks_path) else None,
+        config.tasks_path.parent / 'sandbox' / 'wheels'
+        if (config and config.tasks_path)
+        else None,
+        config.snapshots_dir.parent / 'wheels'
+        if (config and config.snapshots_dir)
+        else None,
+        Path(
+            '/kaggle/input/datasets/metric/gemma-4-developer-agent-metric-data/sandbox/wheels'
+        ),
+        Path('/kaggle/input/gemma-4-developer-agent-metric-data/sandbox/wheels'),
+        Path('/kaggle/input/competition-data/wheels'),
+        Path('data/competition_data/secret/sandbox/wheels'),
+        Path('wheels'),
+        Path('/wheels'),
+        Path('/tmp/wheels'),
+    ]
+    for cand in candidates:
+        if cand and cand.is_dir() and any(f.endswith('.whl') for f in os.listdir(cand)):
+            return cand
+    return None
+
+
+def _is_wheel_compatible_py313(filename: str) -> bool:
+    """Checks if a wheel filename is compatible with CPython 3.13 on Linux x86_64 under PEP 427."""
+    base = os.path.basename(filename)
+    if not base.endswith('.whl'):
+        return False
+    parts = base[:-4].split('-')
+    if len(parts) < 5:
+        return False
+    py_tag = parts[-3]
+    abi_tag = parts[-2]
+    if (
+        abi_tag in ('cp38', 'cp39', 'cp310', 'cp311', 'cp312')
+        and py_tag in ('cp38', 'cp39', 'cp310', 'cp311', 'cp312')
+    ):
+        return False
+    return abi_tag == 'none' or 'abi3' in abi_tag or 'cp313' in py_tag
+
+
+def _deduplicate_wheels(wheel_files: list[str]) -> list[Path]:
+    """Deduplicates compatible wheels to the highest version per normalized distribution name."""
+    import re
+
+def _ensure_container_site_packages(
+    docker: BaseSandboxManager,
+    container_id: str,
+    repo: str,
+    config: EvalConfig | None = None,
+) -> None:
+    """Dynamically injects cached unpacked wheels into container site-packages based on workspace imports."""
+    if not hasattr(docker, 'extract_archive_to_container'):
+        return
+
+    wheels_dir = resolve_wheels_dir(config)
+    if not wheels_dir:
+        return
+
+    base_wheels, large_wheels, module_to_pkg, pkg_requires = _inspect_wheels_dir(
+        wheels_dir
+    )
+    sp_dir = '/usr/local/lib/python3.13/site-packages'
+
+    # 1. Inject base wheels (<16MB) once per container
+    base_marker = f'{sp_dir}/.swegemma_base_injected'
+    if docker.exec(container_id, f'test -f {base_marker}').exit_code != 0:
+        base_tar = _build_unpacked_wheels_tar(
+            base_wheels, 'sp_base', '.swegemma_base_injected'
+        )
+        _extract_tar_into_site_packages(docker, container_id, base_tar)
+
+    if not large_wheels:
+        return
+
+    # 2. Discover top-level imported modules in /workspace and resolve transitive large wheels (>=16MB)
+    scan_cmd = (
+        'python3 -S -c "'
+        'import pathlib, re; mods = set(); '
+        '[mods.update(m.group(1).lower() for m in re.finditer(r\'^\\s*(?:import|from)\\s+([a-zA-Z0-9_]+)\', p.read_text(errors=\'ignore\'), re.M)) '
+        'for p in pathlib.Path(\'/workspace\').rglob(\'*.py\') if \'.git\' not in p.parts]; '
+        'print(\' \'.join(sorted(mods)))" 2>/dev/null'
+    )
+    scan_res = docker.exec(container_id, scan_cmd)
+    imported_mods = set((scan_res.stdout or '').split())
+    if repo:
+        repo_short = repo.rsplit('/', 1)[-1].lower()
+        imported_mods.add(repo_short)
+
+    needed_pkgs: set[str] = set()
+    queue: list[str] = []
+    for mod in imported_mods:
+        for pkg_norm in module_to_pkg.get(mod, ()):
+            if pkg_norm not in needed_pkgs:
+                needed_pkgs.add(pkg_norm)
+                queue.append(pkg_norm)
+
+    while queue:
+        curr = queue.pop()
+        for dep in pkg_requires.get(curr, ()):
+            if dep not in needed_pkgs:
+                needed_pkgs.add(dep)
+                queue.append(dep)
+            for p_cand in large_wheels:
+                if p_cand.startswith(curr + '_') and p_cand not in needed_pkgs:
+                    needed_pkgs.add(p_cand)
+                    queue.append(p_cand)
+
+    needed_large = sorted(p for p in needed_pkgs if p in large_wheels)
+    for pkg_norm in needed_large:
+        marker = f'{sp_dir}/.swegemma_whl_{pkg_norm}'
+        if docker.exec(container_id, f'test -f {marker}').exit_code != 0:
+            w_tar = _build_unpacked_wheels_tar(
+                [large_wheels[pkg_norm]],
+                f'sp_whl_{pkg_norm}',
+                f'.swegemma_whl_{pkg_norm}',
+            )
+            _extract_tar_into_site_packages(docker, container_id, w_tar)
+
+
+def setup_container_wheels(
+    docker: BaseSandboxManager, container_id: str, config: EvalConfig
+) -> None:
+    """Copies task wheels into the sandbox container if available on host and not already present."""
+    check_res = docker.exec(container_id, 'ls /wheels/*.whl 2>/dev/null | wc -l')
+    if check_res.exit_code == 0 and check_res.stdout.strip() not in ('0', ''):
+        logger.debug(
+            'Container %s already has wheels populated in /wheels, skipping copy.',
+            container_id,
+        )
+        return
+
+    # For real Docker containers with extract_archive_to_container, install_test_dependencies
+    # streams unpacked wheels directly into site-packages, avoiding a 1.7 GB /wheels tar copy per task.
+    if hasattr(docker, 'extract_archive_to_container'):
+        return
+
+    wheels_path = resolve_wheels_dir(config)
+    if wheels_path:
+        docker.exec(container_id, 'mkdir -p /wheels')
+        docker.copy_to(container_id, wheels_path, '/wheels')
+
+
+def extract_snapshot(
+    docker: BaseSandboxManager,
+    container_id: str,
+    snapshot_path: Path,
+    *,
+    patch_path: Path | None = None,
+    base_snapshot_path: Path | None = None,
+) -> None:
+    """Copies a snapshot tarball (or base snapshot + patch) into the container and extracts it into /workspace."""
+    tar_to_copy = (
+        base_snapshot_path if base_snapshot_path is not None else snapshot_path
+    )
+    extracted = False
+    extract_fn = getattr(docker, 'extract_archive_to_container', None)
+    if callable(extract_fn):
+        extracted = bool(
+            extract_fn(
+                container_id, tar_to_copy, '/workspace'
+            )
+        )
+        if not extracted:
+            logger.warning(
+                'Direct archive extraction of %s into /workspace failed on container %s; falling back to copy + tar',
+                tar_to_copy.name,
+                container_id,
+def install_test_dependencies(
+    docker: BaseSandboxManager,
+    container_id: str,
+    repo: str = '',
+    *,
+    fast_path: bool = True,
+    config: EvalConfig | None = None,
+) -> None:
+    """Installs test dependencies discovered from pyproject.toml and requirements files or via fast-path."""
+    if type(docker).__name__ in {'SubprocessManager', 'SubprocessSandbox'}:
+        return
+    _ensure_container_site_packages(docker, container_id, repo, config)
+
+    setup_script = resolve_sandbox_setup_script(config)
+    if setup_script and setup_script.exists():
+        docker.copy_to(container_id, setup_script, '/tmp/setup.py')
+        script_in_container = '/tmp/setup.py'
+    else:
+        check_res = docker.exec(container_id, 'test -f /sandbox/setup.py')
+        if check_res.exit_code == 0:
+            script_in_container = '/sandbox/setup.py'
+        else:
+            msg = f'setup.py not found on host or container for {container_id}'
+            is_subprocess = (
+                getattr(config, 'sandbox', 'docker') == 'subprocess'
+                or type(docker).__name__ in {'SubprocessManager', 'SubprocessSandbox'}
+            )
+            if config is not None and not is_subprocess:
+                logger.error(msg)
+                raise ContainerSetupError(msg)
+            logger.warning(msg)
+            return
+
+    fast_flag = '--fast-path' if fast_path else ''
+    cmd = f'python3 {script_in_container} {fast_flag} {repo}'.strip()
+    try:
+        res = docker.exec(container_id, cmd)
+        logger.debug('Install test deps stdout: %s', res.stdout)
+        if res.exit_code != 0:
+            details = f'stdout:\n{res.stdout}\nstderr:\n{res.stderr}'.strip()
+            if 'No such file or directory' in (res.stderr or ''):
+                msg = f'Failed to execute {script_in_container} on container {container_id}: {res.stderr}'
+                logger.error(msg)
+                raise ContainerSetupError(msg)
+            logger.warning(
+                'Failed to install test dependencies for %s (exit code %d):\n%s',
+                repo,
+                res.exit_code,
+                details,
+            )
+    finally:
+        if script_in_container == '/tmp/setup.py':
+            docker.exec(container_id, 'rm -f /tmp/setup.py')
+
+
+def setup_baseline_commit(
+
+exec
+/bin/bash -lc 'PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B -m pytest -s -p no:cacheprovider eval/tests/test_run_agent_eval.py::test_patch_classification eval/tests/test_run_agent_eval.py::test_patch_deletion_rename_and_hunk_header_lookalikes eval/tests/test_run_agent_eval.py::test_trace_usage_is_only_recorded_values eval/tests/test_run_agent_eval.py::test_trace_counts_does_not_infer_tool_duration eval/tests/test_run_agent_eval.py::test_observe_patch_before_repeated_stripping eval/tests/test_eval_fixes.py::test_git_c_quoted_utf8_octal_paths_and_diag_failure eval/tests/test_eval_fixes.py::test_leak_scan_records_tokens_only eval/tests/test_eval_fixes.py::test_timing_call_ids_errors_and_pending -q' in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 52ms:
+........
+8 passed in 0.04s
+
+codex
+I found no widening of gold access from the Python alias bind: both destinations receive the same resolved runtime prefix, and the exposure checks cover both paths. Verification still uses the installed harness’s protected-file reset and JUnit verdict logic. Eight selected offline tests pass; I’ll check the remaining resume and concurrency edge cases next.
+exec
+/bin/bash -lc "rg -n 'function_call_id|populate_client' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/tools/_functions.py && sed -n '1,195p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/tools/_functions.py && sed -n '1,200p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/plugins.py && rg -n 'ThreadPool|run_in_executor|to_thread' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/{google/adk/tools/function_tool.py,swegemma/tools/*.py}" in /home/ubuntu/work/gemma
+ exited 2 in 0ms:
+45:def generate_client_function_call_id() -> str:
+49:def _new_client_function_call_id() -> str:
+53:  `google.adk.flows.llm_flows.functions.generate_client_function_call_id` to
+60:  `generate_client_function_call_id()` directly would bypass those patches,
+65:  return functions.generate_client_function_call_id()
+68:def populate_client_function_call_id(model_response_event: Event) -> None:
+73:      function_call.id = _new_client_function_call_id()
+76:def remove_client_function_call_id(content: Optional[types.Content]) -> None:
+131:    auth_requests: Dict mapping function_call_id to AuthConfig.
+145:  for function_call_id, auth_config in auth_requests.items():
+148:      deduplicated_requests[function_call_id] = auth_config
+151:      deduplicated_requests[function_call_id] = auth_config
+153:  for function_call_id, auth_config in deduplicated_requests.items():
+154:    request_id = _new_client_function_call_id()
+159:            function_call_id=function_call_id,
+217:      function_call_id,
+221:        (fc for fc in function_calls if fc.id == function_call_id), None
+225:    request_id = _new_client_function_call_id()
+300:def find_event_by_function_call_id(
+302:    function_call_id: str,
+307:      if function_call.id == function_call_id:
+312:def _collect_function_call_ids(events: list[Event]) -> set[str]:
+339:  function_call_id = function_responses[0].id
+340:  if not function_call_id:
+348:  return find_event_by_function_call_id(search_space, function_call_id)
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Function call ID utilities, auth/confirmation event generation, and dispatch entry points."""
+
+from __future__ import annotations
+
+import logging
+from typing import Dict
+from typing import Optional
+from typing import TYPE_CHECKING
+
+from google.adk.platform import uuid as platform_uuid
+from google.genai import types
+
+from ....events.event import Event
+from ....tools.base_tool import BaseTool
+from ....tools.tool_confirmation import ToolConfirmation
+from ....utils._function_call_names import AF_FUNCTION_CALL_ID_PREFIX as AF_FUNCTION_CALL_ID_PREFIX
+from ....utils._function_call_names import REQUEST_CONFIRMATION_FUNCTION_CALL_NAME as REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
+from ....utils._function_call_names import REQUEST_EUC_FUNCTION_CALL_NAME as REQUEST_EUC_FUNCTION_CALL_NAME
+from ....utils._function_call_names import REQUEST_INPUT_FUNCTION_CALL_NAME as REQUEST_INPUT_FUNCTION_CALL_NAME
+from ..core._utils import require_agent_name as _require_agent_name
+from ._batch_executor import handle_function_call_list_async as _handle_function_call_list_async
+from ._live_caller import handle_function_calls_live as _handle_function_calls_live
+
+if TYPE_CHECKING:
+  from ....agents.invocation_context import InvocationContext
+  from ....auth.auth_tool import AuthConfig
+
+logger = logging.getLogger('google_adk.' + __name__)
+
+
+def generate_client_function_call_id() -> str:
+  return f'{AF_FUNCTION_CALL_ID_PREFIX}{platform_uuid.new_uuid()}'
+
+
+def _new_client_function_call_id() -> str:
+  """Generates a client function call id, resolved through the compat shim.
+
+  Callers monkeypatch
+  `google.adk.flows.llm_flows.functions.generate_client_function_call_id` to
+  make ids deterministic; `cli/agent_test_runner.py` does this when rebuilding
+  golden files, and so do tests outside ADK. Before this module was split out
+  of `functions.py`, every id in this module came from that one module global,
+  so a single patch covered all of them.
+
+  Going through the shim keeps that true. Calling the module-local
+  `generate_client_function_call_id()` directly would bypass those patches,
+  because the shim's re-export is a separate binding.
+  """
+  from .. import functions
+
+  return functions.generate_client_function_call_id()
+
+
+def populate_client_function_call_id(model_response_event: Event) -> None:
+  if not model_response_event.get_function_calls():
+    return
+  for function_call in model_response_event.get_function_calls():
+    if not function_call.id:
+      function_call.id = _new_client_function_call_id()
+
+
+def remove_client_function_call_id(content: Optional[types.Content]) -> None:
+  """Removes ADK-generated function call IDs from content before sending to LLM.
+
+  Strips client-side function call/response IDs that start with 'adk-' prefix
+  to avoid sending internal tracking IDs to the model.
+
+  Args:
+    content: Content containing function calls/responses to clean.
+  """
+  if content and content.parts:
+    for part in content.parts:
+      if (
+          part.function_call
+          and part.function_call.id
+          and part.function_call.id.startswith(AF_FUNCTION_CALL_ID_PREFIX)
+      ):
+        part.function_call.id = None
+      if (
+          part.function_response
+          and part.function_response.id
+          and part.function_response.id.startswith(AF_FUNCTION_CALL_ID_PREFIX)
+      ):
+        part.function_response.id = None
+
+
+def get_long_running_function_calls(
+    function_calls: list[types.FunctionCall],
+    tools_dict: dict[str, BaseTool],
+) -> set[str]:
+  long_running_tool_ids: set[str] = set()
+  for function_call in function_calls:
+    if (
+        function_call.name in tools_dict
+        and tools_dict[function_call.name].is_long_running
+        and function_call.id is not None
+    ):
+      long_running_tool_ids.add(function_call.id)
+
+  return long_running_tool_ids
+
+
+def build_auth_request_event(
+    invocation_context: InvocationContext,
+    auth_requests: Dict[str, AuthConfig],
+    *,
+    author: Optional[str] = None,
+    role: Optional[str] = None,
+) -> Event:
+  """Builds an auth request event with function calls for each auth request.
+
+  This is a shared helper used by both tool-level auth (when a tool requests
+  auth during execution) and toolset-level auth (before tool listing).
+
+  Args:
+    invocation_context: The invocation context.
+    auth_requests: Dict mapping function_call_id to AuthConfig.
+    author: The event author. Defaults to agent name.
+    role: The content role. Defaults to None.
+
+  Returns:
+    Event with auth request function calls.
+  """
+  from ....auth.auth_tool import AuthToolArguments
+
+  parts: list[types.Part] = []
+  long_running_tool_ids: set[str] = set()
+
+  deduplicated_requests: dict[str, AuthConfig] = {}
+  seen_keys = set()
+  for function_call_id, auth_config in auth_requests.items():
+    key = auth_config.credential_key
+    if not key:
+      deduplicated_requests[function_call_id] = auth_config
+    elif key not in seen_keys:
+      seen_keys.add(key)
+      deduplicated_requests[function_call_id] = auth_config
+
+  for function_call_id, auth_config in deduplicated_requests.items():
+    request_id = _new_client_function_call_id()
+    request_euc_function_call = types.FunctionCall(
+        name=REQUEST_EUC_FUNCTION_CALL_NAME,
+        id=request_id,
+        args=AuthToolArguments(
+            function_call_id=function_call_id,
+            auth_config=auth_config,
+        ).model_dump(mode='json', exclude_none=True, by_alias=True),
+    )
+    long_running_tool_ids.add(request_id)
+    parts.append(types.Part(function_call=request_euc_function_call))
+
+  return Event(
+      invocation_id=invocation_context.invocation_id,
+      author=author or _require_agent_name(invocation_context),
+      branch=invocation_context.branch,
+      content=types.Content(parts=parts, role=role),
+      long_running_tool_ids=long_running_tool_ids,
+  )
+
+
+def generate_auth_event(
+    invocation_context: InvocationContext,
+    function_response_event: Event,
+) -> Optional[Event]:
+  """Generates an auth request event from a function response event.
+
+  This is used for tool-level auth where a tool requests credentials during
+  execution.
+
+  Args:
+    invocation_context: The invocation context.
+    function_response_event: The function response event with auth requests.
+
+  Returns:
+    Event with auth request function calls, or None if no auth requested.
+  """
+  if not function_response_event.actions.requested_auth_configs:
+    return None
+
+  return build_auth_request_event(
+      invocation_context,
+sed: can't read /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/plugins.py: No such file or directory
+
+exec
+/bin/bash -lc "sed -n '1,29p' eval/tests/test_eval_fixes.py && sed -n '1,95p' eval/tests/test_run_agent_eval.py && git diff main...codex/eval-runner-fix -- eval/kaggle/gold_calibration.py | head -140 && rg -n 'calibrat|clean|_host_env|bwrap' docs/GOLD_CALIBRATION.md ops/codex/implement-20261105-eval-runner-fix.md" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+"""Offline isolation, protocol identity and real ADK execution contracts."""
+import asyncio
+import base64
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
+import tarfile
+from types import SimpleNamespace
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from eval import run_agent_eval as runner, sandbox_env as env, tool_timing as timing
+from eval.kaggle.stage_kernel import stage_kernel
+
+
+@pytest.fixture
+def harness():
+    pytest.importorskip('swegemma')
+
+
+def test_bwrap_argv_masks_before_reexposing_runtime(tmp_path):
+"""Fast offline contracts; the real harness smoke test is explicitly opt-in."""
+import io
+import asyncio
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import threading
+import tarfile
+import types
+import uuid
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from eval import run_agent_eval as runner
+from eval.stub_openai import make_server
+
+
+def header(**kwargs):
+    return dict(_schema='agent_eval_v1', bundle='bundle', bundle_sha256='sha',
+                caps={'max_turns': 3}, split={'path': 'dev', 'sha256': 'split'},
+                created_utc=kwargs.pop('created_utc', 'today'), **kwargs)
+
+
+def test_binding_assertion_catches_late_unpatched_module(monkeypatch):
+    patched = lambda: None
+    names = set(runner.BINDINGS) | {n for n, m in sys.modules.items()
+        if n.startswith('swegemma.') and hasattr(m, 'install_test_dependencies')}
+    for name in names:
+        monkeypatch.setitem(sys.modules, name, types.SimpleNamespace(install_test_dependencies=patched))
+    runner.assert_dependency_bindings(patched)
+    monkeypatch.setitem(sys.modules, 'swegemma.extra',
+                        types.SimpleNamespace(install_test_dependencies=lambda: None))
+    with pytest.raises(RuntimeError, match='swegemma.extra'):
+        runner.assert_dependency_bindings(patched)
+
+
+def test_patch_updates_every_original_binding(monkeypatch, tmp_path):
+    # No real harness import or filesystem setup is needed to exercise binding replacement.
+    swe = types.ModuleType('swegemma')
+    harness = types.ModuleType('swegemma.harness')
+    swe.harness = harness
+    monkeypatch.setitem(sys.modules, 'swegemma', swe)
+    monkeypatch.setitem(sys.modules, 'swegemma.harness', harness)
+    orig = lambda: None
+    for name in runner.BINDINGS + ('swegemma.cli', 'swegemma.extra'):
+        module = types.ModuleType(name)
+        module.install_test_dependencies = orig
+        monkeypatch.setitem(sys.modules, name, module)
+        parent, attr = name.rsplit('.', 1)
+        setattr(sys.modules[parent], attr, module)
+    patched = runner.patch_subprocess_deps(tmp_path)
+    runner.assert_dependency_bindings(patched)
+    assert patched is not orig
+
+
+def test_header_written_once_resume_failures_and_successes(tmp_path):
+    path = tmp_path / 'r.jsonl'
+    journal = runner.Journal(path, header())
+    for iid, resolved in [('a', True), ('b', False)]:
+        journal.append(dict(instance_id=iid, resolved=resolved))
+    journal.close()
+    journal = runner.Journal(path, header(created_utc='tomorrow'))
+    assert journal.finished == {'a', 'b'}
+    assert sorted({'a', 'b', 'c'} - journal.finished) == ['c']
+    journal.close()
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(lines) == 3
+    assert sum('_schema' in row for row in lines) == 1
+
+
+@pytest.mark.parametrize('key,value', [('bundle', 'other'), ('bundle_sha256', 'new'),
+                                     ('caps', {}), ('split', {})])
+def test_header_mismatch_and_force_new(tmp_path, key, value):
+    path = tmp_path / 'r.jsonl'
+    runner.Journal(path, header()).close()
+    changed = dict(header(), **{key: value})
+    with pytest.raises(ValueError, match='header mismatch'):
+        runner.Journal(path, changed)
+    journal = runner.Journal(path, changed, force=True)
+    assert not journal.finished
+    journal.close()
+    assert len(path.read_text().splitlines()) == 1
+
+
+def test_torn_append_repaired_but_complete_corruption_rejected(tmp_path):
+    path = tmp_path / 'r.jsonl'
+    runner.Journal(path, header()).close()
+    with path.open('a') as stream:
+        stream.write('{"instance_id":')
+    journal = runner.Journal(path, header())
+diff --git a/eval/kaggle/gold_calibration.py b/eval/kaggle/gold_calibration.py
+index 50f17cd..706dce5 100644
+--- a/eval/kaggle/gold_calibration.py
++++ b/eval/kaggle/gold_calibration.py
+@@ -175,62 +175,17 @@ def choose_sandbox():
+     return 'subprocess'
+ 
+ 
+-def patch_subprocess_deps(data_dir):
+-    """Emulate the docker-only dependency setup for the subprocess sandbox (swegemma skips it).
++# push.sh embeds this module here when staging the single-file Kaggle kernel.
++# BEGIN SHARED ENV IMPORT
++try:
++    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
++except ModuleNotFoundError:
++    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
++    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
++# END SHARED ENV IMPORT
+ 
+-    Contract (swegemma 0.2.11 container_setup): for docker, _ensure_container_site_packages
+-    unpacks every deduplicated (highest-version, py313-compatible) wheel from wheels_dir that is
+-    < 20 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
+-    site-packages, no resolver; large wheels are added only if imported by the workspace; then
+-    sandbox/setup.py runs with --fast-path. We replicate exactly that inside the sandbox venv.
+-    The sandbox venv uses system_site_packages=True, so the HOST python must mirror the image
+-    (Dockerfile.public: pytest, pytest-timeout==2.1.0, typer, build backends; nothing else).
+-    """
+-    import tarfile
+-    import swegemma.harness.container_setup as cs
+-    import swegemma.harness.verification as vf
+-    import swegemma.harness.sample_verification  # load all known by-name bindings
+-    import swegemma.evaluate
+-    import swegemma.cli
+-    import swegemma.harness.agent_runner
+-    orig = cs.install_test_dependencies
+-    wheels_src = Path(data_dir) / 'wheels'
+-    if not wheels_src.is_dir():
+-        wheels_src = WHEELHOUSE
+-    setup_py = Path(data_dir) / 'sandbox' / 'setup.py'
+-    if not setup_py.exists():
+-        setup_py = next(iter(Path(data_dir).rglob('setup.py')), setup_py)  # competition sandbox/setup.py
+-
+-    def install(docker, container_id, repo='', *, fast_path=True, config=None):
+-        if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
+-            return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+-        venv_dir = docker.sandboxes[container_id]['venv']
+-        sp_dir = next(iter(sorted(venv_dir.glob('lib/python3*/site-packages'))))
+-        base_wheels, large_wheels, _m2p, _req = cs._inspect_wheels_dir(wheels_src)
+-        selected = list(base_wheels)
+-        if large_wheels:  # public wheels have none; fail loudly rather than silently diverge
+-            raise RuntimeError('large wheels present; workspace-import scan not emulated')
+-        tar_path = cs._build_unpacked_wheels_tar(selected, 'sp_base_local', '.swegemma_base_injected')
+-        with tarfile.open(tar_path) as tf:
+-            tf.extractall(sp_dir, filter='data')
+-        docker.copy_to(container_id, setup_py, '/tmp/setup.py')
+-        flag = '--fast-path' if fast_path else ''
+-        docker.exec(container_id, f'python3 /tmp/setup.py {flag} {repo}'.strip(), timeout=280)
+-        probe_log = os.environ.get('GOLD_PROBE_LOG')  # diagnostic: which copy of the repo package is imported
+-        if probe_log:
+-            pkg = {'Textualize/rich': 'rich', 'encode/httpx': 'httpx', 'fastapi/fastapi': 'fastapi',
+-                   'psf/requests': 'requests'}.get(repo, repo.split('/')[-1])
+-            out = docker.exec(container_id, f'cd /workspace && PYTHONSAFEPATH=1 PYTHONNOUSERSITE=1 python3 -s -c '
+-                              f'"import {pkg};print({pkg}.__file__)"', timeout=60)
+-            with open(probe_log, 'a') as fh:
+-                fh.write(json.dumps({'container': str(container_id), 'repo': repo, 'probe': str(out)[:500]}) + '\n')
+-    for name, module in list(sys.modules.items()):
+-        if (name == 'swegemma' or name.startswith('swegemma.')) and getattr(module, 'install_test_dependencies', None) is orig:
+-            module.install_test_dependencies = install
+-    return install
+ 
+-
+-async def verify_gold(task, patch, data_dir, sandbox):
++async def verify_gold(task, patch, data_dir, sandbox, out_dir=None):
+     """The only swegemma API adapter; see docs/GOLD_CALIBRATION.md assumptions.
+ 
+     verify_task owns fresh sandbox staging, baseline setup, and test_patch.
+@@ -241,7 +196,9 @@ async def verify_gold(task, patch, data_dir, sandbox):
+     from swegemma.evaluate import Evaluator
+     from swegemma.harness.verification import verify_task
+ 
+-    with tempfile.TemporaryDirectory(prefix='gold-verify-', dir='/tmp') as scratch:
++    out_dir = Path(out_dir or WORKING_DIR).resolve()
++    out_dir.mkdir(parents=True, exist_ok=True)
++    with tempfile.TemporaryDirectory(prefix='gold-verify-', dir=out_dir) as scratch:
+         config = EvalConfig(tasks_path=data_dir / 'tasks.jsonl',
+                             snapshots_dir=data_dir / 'snapshots', wheels_dir=data_dir / 'wheels',
+                             results_dir=Path(scratch), submission_dir=data_dir / 'sample_submission',
+@@ -271,8 +228,12 @@ async def verify_gold(task, patch, data_dir, sandbox):
+             import swegemma.sandbox as _sb
+             _d2 = ','.join(n for n in dir(_sb) if 'Manager' in n or 'Sandbox' in n)
+             raise RuntimeError('bind failed; SRC=' + _d1 + '; SB=' + _d2 + '; sig=' + str(sig)[:300] + '; required=' + ','.join(req) + '; ctx=' + ','.join(sorted(context))[:300]) from None
+-        result = verify_task(**kwargs)
+-        return await result if inspect.isawaitable(result) else result
++        token = gold_artifact_dir.set(Path(scratch))
++        try:
++            result = verify_task(**kwargs)
++            return await result if inspect.isawaitable(result) else result
++        finally:
++            gold_artifact_dir.reset(token)
+ 
+ 
+ def worker(args):
+@@ -284,7 +245,10 @@ def worker(args):
+                exit_code=None, duration_seconds=0.0, error=None, sandbox=args.sandbox)
+     try:
+         if args.sandbox == 'subprocess':
+-            patch_subprocess_deps(args.data_dir)
++            environment = setup_scorer_env(
++                args.data_dir, out_dir=args.result.parent,
++                allow_unsandboxed=getattr(args, 'allow_unsandboxed', False))
++            row['sandbox'] = environment['sandbox']
+         from swegemma.models import load_tasks
+         task = next(t for t in load_tasks(args.data_dir / 'tasks.jsonl')
+                     if t.instance_id == args.worker)
+@@ -295,7 +259,7 @@ def worker(args):
+         if not isinstance(patch, str) or not patch.strip():
+             row['error'] = 'Missing or empty gold patch'
+         else:
+-            result = asyncio.run(verify_gold(task, patch, args.data_dir, args.sandbox))
++            result = asyncio.run(verify_gold(task, patch, args.data_dir, args.sandbox, out_dir=args.result.parent))
+             # Assumed result is a mapping or TaskResult-like object, never a bare bool.
+             get = result.get if isinstance(result, dict) else lambda k, d=None: getattr(result, k, d)
+             resolved = get('resolved')
+@@ -322,12 +286,14 @@ def worker(args):
+     args.result.write_text(json.dumps(row) + '\n', encoding='utf-8')
+ 
+ 
+-def run_one(task, data_dir, sandbox):
++def run_one(task, data_dir, sandbox, allow_unsandboxed=False):
+     start = time.monotonic()
+     with tempfile.TemporaryDirectory(prefix='gold-worker-', dir='/tmp') as scratch:
+         output = Path(scratch) / 'result.json'
+         command = [sys.executable, str(Path(__file__).resolve()), '--worker', task['instance_id'],
+                    '--data-dir', str(data_dir), '--sandbox', sandbox, '--result', str(output)]
++        if allow_unsandboxed:
++            command.append('--allow-unsandboxed')
+         try:
+             proc = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=3600)
+@@ -354,6 +320,8 @@ def main():
+ops/codex/implement-20261105-eval-runner-fix.md:20:  cannot select another base prefix. Gold host patch files and calibration
+ops/codex/implement-20261105-eval-runner-fix.md:63:pytest/JUnit verification and synthetic gold calibration. It also checks changed
+ops/codex/implement-20261105-eval-runner-fix.md:73:   `bwrap: loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted`.
+ops/codex/implement-20261105-eval-runner-fix.md:81:by Builder. No public gold clean-list recalibration was performed; synthetic gold
+ops/codex/implement-20261105-eval-runner-fix.md:84:offline. Subprocess calibration on a host without usable bubblewrap requires
+docs/GOLD_CALIBRATION.md:1:# Gold calibration on Kaggle
+docs/GOLD_CALIBRATION.md:14:eval/kaggle/push.sh YOUR_USERNAME/gemma-gold-calibration
+docs/GOLD_CALIBRATION.md:15:kaggle kernels status YOUR_USERNAME/gemma-gold-calibration
+docs/GOLD_CALIBRATION.md:16:mkdir -p runs/gold-calibration
+docs/GOLD_CALIBRATION.md:17:kaggle kernels output YOUR_USERNAME/gemma-gold-calibration -p runs/gold-calibration
+docs/GOLD_CALIBRATION.md:20:The helper stages `gold_calibration.py` and generates the CLI-required filename
+docs/GOLD_CALIBRATION.md:21:`kernel-metadata.json` from `gold_calibration_metadata.json` in `/tmp`. Its required
+docs/GOLD_CALIBRATION.md:76:  `agent_patch` parameters and owns the entire fresh Phase 2 setup/cleanup.
+docs/GOLD_CALIBRATION.md:93:python3 -m py_compile eval/kaggle/gold_calibration.py
+docs/GOLD_CALIBRATION.md:94:python3 -m unittest discover -s eval/tests -p test_gold_calibration.py -v
+docs/GOLD_CALIBRATION.md:100:section says: "a clean venv, pytest, the competition wheels, **and the missing test packages**" (author's own
+
+exec
+/bin/bash -lc 'PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B -m pytest -s -p no:cacheprovider eval/tests/test_eval_fixes.py::test_real_adk_parallel_tool_timings_and_concurrent_task_contexts eval/tests/test_run_agent_eval.py::test_harness_protected_rule_and_extra_targets eval/tests/test_run_agent_eval.py::test_env_guard eval/tests/test_run_agent_eval.py::test_binding_assertion_catches_late_unpatched_module -q' in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py | sed -n '490,540p' && rg -n 'def _run_async|executor|to_thread|run_async' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py && rg -n 'class ToolError|class EventDisplay' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma -g '*.py'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   490	    context: SwegemmaContext | None = None,
+   491	) -> tuple[str, str | None, SessionTrace]:
+   492	    """Runs the agent in the sandbox container to generate a patch."""
+   493	    sandbox_id = await sandbox_start(docker)
+   494	    agent_patch = ''
+   495	    agent_error: str | None = None
+   496	    log_file = None
+   497	    file_display_mgr: EventDisplayManager | None = None
+   498	
+   499	    trace = SessionTrace()
+   500	    trace.start()
+   501	
+   502	    try:
+   503	        # Set up per-task log file in <results_dir>/logs/<instance_id>.log
+   504	        logs_dir = config.results_dir / 'logs'
+   505	        logs_dir.mkdir(parents=True, exist_ok=True)
+   506	        safe_instance_id = task.instance_id.replace('/', '_')
+   507	        log_path = logs_dir / f'{safe_instance_id}.log'
+   508	        log_file = open(log_path, 'w', buffering=1, encoding='utf-8')  # noqa: SIM115
+   509	        file_console = Console(file=log_file, force_terminal=True, width=120)
+   510	
+   511	        slots_map = getattr(dashboard, 'slots', None) if dashboard is not None else None
+   512	        slot = (
+   513	            slots_map.get(slot_id)
+   514	            if isinstance(slots_map, dict) and slot_id is not None
+   515	            else None
+   516	        )
+   517	        if context is None and slot is not None and slot.context is not None:
+   518	            context = slot.context
+   519	
+   520	        if context is None:
+   521	            context = SwegemmaContext(
+   522	                docker_manager=docker,
+   523	                container_id=sandbox_id,
+   524	                problem_statement=task.problem_statement,
+   525	                hints_text=getattr(task, 'hints_text', '') or '',
+   526	                task=task,
+   527	                repo=task.repo,
+   528	                graph_dir=config.graph_dir,
+   529	                embeddings_dir=config.embeddings_dir,
+   530	                budget=config.budget,
+   531	                harness=config.harness,
+   532	            )
+   533	            if (
+   534	                dashboard is not None
+   535	                and slot_id is not None
+   536	                and hasattr(dashboard, 'attach_context')
+   537	            ):
+   538	                dashboard.attach_context(slot_id, context)
+   539	        else:
+   540	            context.docker = docker
+452:    # FunctionTool._invoke_callable / invoke / run_async). We check both the
+464:            "run_async",
+469:  async def run_async(
+591:    # run_async has already preprocessed and (when FUNCTION_TOOL_ARG_VALIDATION
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/display.py:93:class EventDisplayManager(_CoreEventDisplay):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:244:class ToolErrorPlugin(BasePlugin):
+
+ exited 1 in 2861ms:
+E...
+==================================== ERRORS ====================================
+_ ERROR at setup of test_real_adk_parallel_tool_timings_and_concurrent_task_contexts _
+
+    @pytest.fixture
+    def harness():
+>       pytest.importorskip('swegemma')
+
+eval/tests/test_eval_fixes.py:26: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../../../gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1404: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1369: in _find_and_load
+    ???
+<frozen importlib._bootstrap>:1340: in _find_and_load_unlocked
+    ???
+<frozen importlib._bootstrap>:935: in _load_unlocked
+    ???
+<frozen importlib._bootstrap_external>:1027: in exec_module
+    ???
+<frozen importlib._bootstrap>:488: in _call_with_frames_removed
+    ???
+../../../gemma-local/venv/lib/python3.13/site-packages/swegemma/__init__.py:84: in <module>
+    import litellm
+../../../gemma-local/venv/lib/python3.13/site-packages/litellm/__init__.py:1342: in <module>
+    from .llms.anthropic.common_utils import AnthropicModelInfo
+../../../gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/__init__.py:1: in <module>
+    from .batches.transformation import AnthropicBatchesConfig
+../../../gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/batches/__init__.py:1: in <module>
+    from .handler import AnthropicBatchesHandler
+../../../gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/batches/handler.py:21: in <module>
+    from ..common_utils import AnthropicModelInfo
+../../../gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/common_utils.py:37: in <module>
+    from litellm.llms.anthropic.wif import (
+../../../gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/wif.py:18: in <module>
+    from litellm.llms.base_llm.auth.client_credentials import keycloak_assertion_source
+../../../gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/__init__.py:1: in <module>
+    from litellm.llms.base_llm.auth.client_credentials import (
+../../../gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/client_credentials.py:25: in <module>
+    from litellm.llms.base_llm.auth.token_exchange import (
+../../../gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/token_exchange.py:942: in <module>
+    default_token_exchange_engine: Final = JwtBearerTokenExchangeEngine(shared_store=default_shared_token_store())
+                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/shared_token_store.py:182: in default_shared_token_store
+    return FileTokenStore(Path(tempfile.gettempdir()) / f"litellm-token-exchange-{os.getuid()}")
+                               ^^^^^^^^^^^^^^^^^^^^^
+../../../gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py:366: in gettempdir
+    return _os.fsdecode(_gettempdir())
+                        ^^^^^^^^^^^^^
+../../../gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py:359: in _gettempdir
+    tempdir = _get_default_tempdir()
+              ^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+dirlist = ['/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma-wt/codex-eval-runner-fix']
+
+    def _get_default_tempdir(dirlist=None):
+        """Calculate the default directory to use for temporary files.
+        This routine should be called exactly once.
+    
+        We determine whether or not a candidate temp dir is usable by
+        trying to create and write to a file in that directory.  If this
+        is successful, the test file is deleted.  To prevent denial of
+        service, the name of the test file must be randomized."""
+    
+        namer = _RandomNameSequence()
+        if dirlist is None:
+            dirlist = _candidate_tempdir_list()
+    
+        for dir in dirlist:
+            if dir != _os.curdir:
+                dir = _os.path.abspath(dir)
+            for seq in range(TMP_MAX):
+                name = next(namer)
+                filename = _os.path.join(dir, name)
+                try:
+                    fd = _os.open(filename, _bin_openflags, 0o600)
+                    try:
+                        try:
+                            _os.write(fd, b'blat')
+                        finally:
+                            _os.close(fd)
+                    finally:
+                        _os.unlink(filename)
+                    return dir
+                except FileExistsError:
+                    pass
+                except PermissionError:
+                    # See the comment in mkdtemp().
+                    if _os.name == 'nt' and _os.path.isdir(dir):
+                        continue
+                    break   # no point trying more names in this directory
+                except OSError:
+                    break   # no point trying more names in this directory
+>       raise FileNotFoundError(_errno.ENOENT,
+                                "No usable temporary directory found in %s" %
+                                dirlist)
+E       FileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma-wt/codex-eval-runner-fix']
+
+../../../gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py:223: FileNotFoundError
+=========================== short test summary info ============================
+ERROR eval/tests/test_eval_fixes.py::test_real_adk_parallel_tool_timings_and_concurrent_task_contexts
+3 passed, 1 error in 1.99s
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B - <<'PY'
+from pathlib import Path
+from types import SimpleNamespace
+from eval.run_agent_eval import build_config, config_snapshot
+settings = {'budget': {'time_minutes': 2}, 'harness': {'command_timeout_seconds': 7}}
+args = SimpleNamespace(data_dir=Path('/synthetic-data'), bundle=Path('/synthetic-bundle'), concurrency=1)
+caps = {key: settings.get(key, fallback) for key, fallback in [('max_tool_calls', None), ('max_turns', None), ('max_time_minutes', 5), ('timeout_seconds', 60)]}
+config = build_config(settings, args, {}, Path('/synthetic-out'), caps)
+print('requested budget.time_minutes=2; effective=', config.budget.time_minutes)
+print('requested harness.command_timeout_seconds=7; effective=', config.harness.command_timeout_seconds)
+PY" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ exited 1 in 2036ms:
+Traceback (most recent call last):
+  File "<stdin>", line 7, in <module>
+  File "/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py", line 268, in build_config
+    from swegemma import config as sc
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/__init__.py", line 84, in <module>
+    import litellm
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/__init__.py", line 1342, in <module>
+    from .llms.anthropic.common_utils import AnthropicModelInfo
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/__init__.py", line 1, in <module>
+    from .batches.transformation import AnthropicBatchesConfig
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/batches/__init__.py", line 1, in <module>
+    from .handler import AnthropicBatchesHandler
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/batches/handler.py", line 21, in <module>
+    from ..common_utils import AnthropicModelInfo
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/common_utils.py", line 37, in <module>
+    from litellm.llms.anthropic.wif import (
+    ...<4 lines>...
+    )
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/wif.py", line 18, in <module>
+    from litellm.llms.base_llm.auth.client_credentials import keycloak_assertion_source
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/__init__.py", line 1, in <module>
+    from litellm.llms.base_llm.auth.client_credentials import (
+    ...<3 lines>...
+    )
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/client_credentials.py", line 25, in <module>
+    from litellm.llms.base_llm.auth.token_exchange import (
+    ...<5 lines>...
+    )
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/token_exchange.py", line 942, in <module>
+    default_token_exchange_engine: Final = JwtBearerTokenExchangeEngine(shared_store=default_shared_token_store())
+                                                                                     ~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/shared_token_store.py", line 182, in default_shared_token_store
+    return FileTokenStore(Path(tempfile.gettempdir()) / f"litellm-token-exchange-{os.getuid()}")
+                               ~~~~~~~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 366, in gettempdir
+    return _os.fsdecode(_gettempdir())
+                        ~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 359, in _gettempdir
+    tempdir = _get_default_tempdir()
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 223, in _get_default_tempdir
+    raise FileNotFoundError(_errno.ENOENT,
+                            "No usable temporary directory found in %s" %
+                            dirlist)
+FileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma-wt/codex-eval-runner-fix']
+
+exec
+/bin/bash -lc "sed -n '15,120p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/shared_token_store.py && sed -n '244,292p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py && git status --porcelain" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final, Protocol
+
+from pydantic import SecretStr, ValidationError
+
+from litellm._logging import verbose_logger
+from litellm.types.llms.base import LiteLLMBaseModel
+
+CACHE_DIR_ENV: Final = "LITELLM_TOKEN_EXCHANGE_CACHE_DIR"
+
+
+@dataclass(frozen=True, slots=True)
+class StoredToken:
+    access_token: SecretStr
+    expires_at_epoch: float | None
+    assertion_sha256: str
+
+
+class SharedTokenStore(Protocol):
+    """Every method is best-effort: a store that cannot read, write, or lock degrades to a per-process
+    cache and never raises into the mint path."""
+
+    def load(self, key: str) -> StoredToken | None: ...
+
+    def save(self, key: str, token: StoredToken) -> None: ...
+
+    def delete(self, key: str) -> None: ...
+
+    def lock(self, key: str) -> contextlib.AbstractContextManager[None]: ...
+
+
+class _StoredTokenFile(LiteLLMBaseModel):
+    access_token: str
+    expires_at_epoch: float | None
+    assertion_sha256: str
+
+
+def _directory_is_private(directory: Path) -> bool:
+    try:
+        directory.mkdir(mode=0o700, exist_ok=True)
+        stat: Final = directory.stat()
+    except OSError as e:
+        verbose_logger.warning("Token exchange cache directory %s is unusable (%s); caching per process", directory, e)
+        return False
+    if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+        verbose_logger.warning(
+            "Token exchange cache directory %s must be owned by uid %d with mode 0700; caching per process",
+            directory,
+            os.getuid(),
+        )
+        return False
+    return True
+
+
+def _unlink(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink()
+
+
+def _write_token_file(directory: Path, key: str, body: bytes) -> None:
+    """The token is staged in its own file and renamed over the entry, so a reader never sees a
+    half-written one. Every failure unlinks the staging file, including the buffered write that only
+    reaches the disk when the handle closes: nothing else sweeps this directory, and that file holds
+    a token that still works. The rename leaves nothing behind for the unlink to find."""
+    descriptor, name = tempfile.mkstemp(dir=directory, prefix=f"{key}.")
+    os.close(descriptor)
+    staged: Final = Path(name)
+    try:
+        staged.write_bytes(body)
+        os.replace(staged, directory / f"{key}.json")
+    finally:
+        _unlink(staged)
+
+
+class FileTokenStore:
+    """One ``<cache key>.json`` (mode 0600) and one ``<cache key>.lock`` (flock) per identity under a
+    directory only the proxy's uid can enter; the directory is checked on first use, not at import."""
+
+    def __init__(self, directory: Path) -> None:
+        self._directory: Final = directory
+        self._ready_lock: Final = threading.Lock()
+        self._ready: bool | None = None
+
+    @property
+    def directory(self) -> Path:
+        return self._directory
+
+    def _usable(self) -> bool:
+        with self._ready_lock:
+            if self._ready is None:
+                self._ready = _directory_is_private(self._directory)
+            return self._ready
+
+    def load(self, key: str) -> StoredToken | None:
+        if not self._usable():
+            return None
+        try:
+            raw: Final = (self._directory / f"{key}.json").read_bytes()
+            parsed: Final = _StoredTokenFile.model_validate_json(raw)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValidationError) as e:
+            verbose_logger.debug("Ignoring unreadable token exchange cache entry: %s", e)
+            return None
+        return StoredToken(
+class ToolErrorPlugin(BasePlugin):
+    """ADK plugin that converts undeclared-tool and runtime tool errors into tool responses."""
+
+    def __init__(self, name: str = 'swegemma_tool_error') -> None:
+        super().__init__(name=name)
+
+    async def before_tool_callback(
+        self,
+        *,
+        tool: Any,
+        tool_args: dict[str, Any],
+        tool_context: Any,
+    ) -> dict[str, Any] | None:
+        """Coerce single-element list strings and validate skill tool arguments before execution."""
+        tool_name = getattr(tool, 'name', '') or ''
+        return _sanitize_skill_tool_args(tool_name, tool_args)
+
+    async def on_tool_error_callback(
+        self,
+        *,
+        tool: Any,
+        tool_args: dict[str, Any],
+        tool_context: Any,
+        error: Exception,
+    ) -> dict[str, Any] | None:
+        """Return tool lookup and runtime exceptions to the model as structured error dicts."""
+        tool_name = getattr(tool, 'name', 'unknown') or 'unknown'
+        logger.warning(
+            "Tool '%s' raised %s: %s",
+            tool_name,
+            type(error).__name__,
+            error,
+        )
+        return {
+            'status': 'error',
+            'error_type': type(error).__name__,
+            'error': str(error),
+        }
+
+
+_PRUNED_TOP_DIRS = (
+    'docs',
+    'docs_src',
+    'tests',
+    'test_data',
+    'examples',
+    'benchmarks',
+    'assets',
+    'imgs',
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True LITELLM_TOKEN_EXCHANGE_CACHE_DIR=/tmp/codex-unused-token-cache PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B - <<'PY'
+from pathlib import Path
+from types import SimpleNamespace
+from eval.run_agent_eval import build_config
+settings = {'budget': {'time_minutes': 2}, 'harness': {'command_timeout_seconds': 7}}
+args = SimpleNamespace(data_dir=Path('/synthetic-data'), bundle=Path('/synthetic-bundle'), concurrency=1)
+caps = {key: settings.get(key, fallback) for key, fallback in [('max_tool_calls', None), ('max_turns', None), ('max_time_minutes', 5), ('timeout_seconds', 60)]}
+config = build_config(settings, args, {}, Path('/synthetic-out'), caps)
+print('requested budget.time_minutes=2; effective=', config.budget.time_minutes)
+print('requested harness.command_timeout_seconds=7; effective=', config.harness.command_timeout_seconds)
+PY" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+exec
+/bin/bash -lc 'PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True LITELLM_TOKEN_EXCHANGE_CACHE_DIR=/tmp/codex-unused-token-cache PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B -m pytest -s -p no:cacheprovider eval/tests/test_eval_fixes.py::test_real_adk_parallel_tool_timings_and_concurrent_task_contexts -q' in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 3074ms:
+requested budget.time_minutes=2; effective= 5
+requested harness.command_timeout_seconds=7; effective= 60
+
+ succeeded in 4502ms:
+.
+1 passed in 3.17s
+
+exec
+/bin/bash -lc "rg -n 'test_patch|FAIL_TO_PASS|PASS_TO_PASS|secret|task\\.' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py && sed -n '1,150p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/__init__.py && sed -n '130,235p' eval/tests/test_gold_calibration.py" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+74:            task.problem_statement
+79:            task.hints_text if task and hasattr(task, 'hints_text') else ''
+85:            else (task.instance_id if task and hasattr(task, 'instance_id') else None)
+87:        self.repo = repo or (task.repo if task and hasattr(task, 'repo') else None)
+330:                return self.task.instance_id
+339:                base_commit = self.task.get('base_commit') or ''
+340:                repo = self.task.get('repo') or self.repo or ''
+"""Modular tools for SWE-gemma evaluation context."""
+
+from collections.abc import Callable
+from typing import Any
+
+from swegemma.tools.base import budget_gated, error_response, ok_response
+from swegemma.tools.execution import (
+    get_status,
+    make_get_status,
+    make_run_command,
+    make_submit_patch,
+    run_command,
+    submit_patch,
+)
+from swegemma.tools.graph import (
+    get_code_neighbors,
+    get_code_subgraph,
+    make_get_code_neighbors,
+    make_get_code_subgraph,
+    make_search_similar_code,
+    search_similar_code,
+)
+from swegemma.tools.workspace import (
+    _resolve_workspace_path,
+    edit_file,
+    make_edit_file,
+    make_read_file,
+    make_write_file,
+    read_file,
+    write_file,
+)
+
+
+def create_tools(ctx: Any) -> dict[str, Callable]:
+    """Create all standard evaluation tools bound to the provided context."""
+    return {
+        'run_command': make_run_command(ctx),
+        'read_file': make_read_file(ctx),
+        'write_file': make_write_file(ctx),
+        'edit_file': make_edit_file(ctx),
+        'submit_patch': make_submit_patch(ctx),
+        'get_status': make_get_status(ctx),
+        'get_code_neighbors': make_get_code_neighbors(ctx),
+        'search_similar_code': make_search_similar_code(ctx),
+        'get_code_subgraph': make_get_code_subgraph(ctx),
+    }
+
+
+__all__ = [
+    '_resolve_workspace_path',
+    'budget_gated',
+    'create_tools',
+    'edit_file',
+    'error_response',
+    'get_code_neighbors',
+    'get_code_subgraph',
+    'get_status',
+    'ok_response',
+    'read_file',
+    'run_command',
+    'search_similar_code',
+    'submit_patch',
+    'write_file',
+]
+        models.load_tasks = lambda path: [task]
+        with tempfile.TemporaryDirectory() as directory:
+            args = argparse.Namespace(data_dir=Path(directory), worker='a',
+                                      sandbox='subprocess', result=Path(directory) / 'result.json')
+            with patch.object(gold, 'load_inventory', return_value=[raw]), \
+                    patch.dict('sys.modules', {'swegemma.models': models}), \
+                    patch.object(gold, 'setup_scorer_env', return_value={'sandbox': 'bwrap'}), \
+                    patch.object(gold, 'verify_gold', side_effect=verifier):
+                gold.worker(args)
+            return json.loads(args.result.read_text())
+
+    def test_gold_patch_only_and_harness_verdict_preserved(self):
+        async def verify(task, patch_text, data_dir, sandbox, **kwargs):
+            self.assertEqual(patch_text, 'GOLD_PATCH_SECRET')
+            self.assertEqual(sandbox, 'subprocess')
+            # Exit 0 can still fail the harness's required-test/JUnit checks.
+            return dict(resolved=False, test_exit_code=0, error='TEST_PATCH_SECRET')
+        row = self.run_worker(verify)
+        self.assertFalse(row['resolved'])
+        self.assertEqual(row['exit_code'], 0)
+        self.assertNotIn('SECRET', json.dumps(row))
+        self.assertGreaterEqual(row['duration_seconds'], 0)
+
+    def test_exception_text_never_copied_into_result(self):
+        async def verify(*args, **kwargs):
+            raise RuntimeError('GOLD_PATCH_SECRET TASK_TEXT_SECRET')
+        row = self.run_worker(verify)
+        self.assertFalse(row['resolved'])
+        self.assertIsNone(row['exit_code'])
+        self.assertEqual(row['error'], 'Verification/setup exception (RuntimeError)')
+        self.assertNotIn('SECRET', json.dumps(row))
+
+    def test_null_patch_control_still_reaches_verifier(self):
+        async def verify(task, patch_text, data_dir, sandbox, **kwargs):
+            self.assertIn('NULL_CONTROL.txt', patch_text)
+            self.assertNotIn('GOLD_PATCH_SECRET', patch_text)
+            self.assertIn('out_dir', kwargs)
+            return dict(resolved=False, test_exit_code=1)
+        with patch.dict('os.environ', GOLD_NULL_PATCH='1'):
+            row = self.run_worker(verify)
+        self.assertFalse(row['resolved'])
+        self.assertEqual(row['sandbox'], 'bwrap')
+
+    def test_docker_unavailable_falls_back_without_network_pull(self):
+        with patch.object(gold.subprocess, 'run', side_effect=FileNotFoundError):
+            self.assertEqual(gold.choose_sandbox(), 'subprocess')
+        with patch.object(gold.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)) as run:
+            self.assertEqual(gold.choose_sandbox(), 'docker')
+            self.assertIn('--pull=never', run.call_args_list[0].args[0])
+            self.assertIn('--network=none', run.call_args_list[0].args[0])
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+exec
+/bin/bash -lc "cat .gitignore && git ls-files results | head -10 && nl -ba ops/codex/implement-20261105-eval-runner-fix.md | tail -14 && nl -ba eval/run_agent_eval.py | sed -n '330,386p' && rg -n '"'^def test|''^    def test'"' eval/tests/test_gold_calibration.py" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+data/
+runs/
+dist/
+*.zip
+*.tgz
+*.safetensors
+ops/logs/*.json
+ops/logs/*.err
+ops/jobs/*.log
+ops/.ntfy_since
+ops/PAUSE
+ops/STOP
+__pycache__/
+.venv/
+ops/rc/
+results/gold_calibration_per_task.jsonl
+results/gold_calibration_summary.json
+results/gold_failure_causes.jsonl
+results/gold_import_probe.jsonl
+results/gold_null_control.jsonl
+    72	1. Real bubblewrap: installed, but denied with
+    73	   `bwrap: loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted`.
+    74	   Fake-executor probe/mount/failure tests passed. Builder must run the real test
+    75	   in an environment that permits bubblewrap.
+    76	2. HTTP E2E: localhost socket creation denied. The in-memory handler variant passed.
+    77	3. YAML aliases: the existing fallback-parser parameter deliberately disables
+    78	   PyYAML; that parameter cannot support aliases.
+    79	
+    80	Open validation: real bubblewrap execution and socket-based E2E remain to be run
+    81	by Builder. No public gold clean-list recalibration was performed; synthetic gold
+    82	checks establish plumbing, not the continued validity of existing exclusions.
+    83	Kaggle execution itself was not launched; the staged single-file import was tested
+    84	offline. Subprocess calibration on a host without usable bubblewrap requires
+    85	`--allow-unsandboxed` or `GOLD_ALLOW_UNSANDBOXED=1`.
+   330	    if not split_ids <= read_ids(ROOT / 'eval/splits/dev.txt'):
+   331	        raise ValueError('Only frozen dev IDs are authorized; split contains non-dev IDs')
+   332	    selected = split_ids & set(args.ids.split(',')) if args.ids else split_ids
+   333	    if not selected:
+   334	        raise ValueError('No selected tasks')
+   335	    validate_inventory_ids(args.data_dir / 'tasks.jsonl')
+   336	    inventory = load_tasks(args.data_dir / 'tasks.jsonl')
+   337	    tasks = {t.instance_id: t for t in inventory}
+   338	    if not split_ids <= tasks.keys():
+   339	        raise ValueError('Split IDs missing from inventory')
+   340	    if any(not re.fullmatch(r'[A-Za-z0-9_.-]+', i) for i in split_ids):
+   341	        raise ValueError('Unsafe task ID')
+   342	    settings = args.bundle / 'eval_config.yaml'
+   343	    defaults = (yaml.safe_load(settings.read_text()) or {}).get('evaluation', {}) if settings.exists() else {}
+   344	    caps = {key: value if value is not None else defaults.get(key, fallback) for key, value, fallback in
+   345	            [('max_tool_calls', args.max_tool_calls, None), ('max_turns', args.max_turns, None),
+   346	             ('max_time_minutes', args.session_minutes, 5), ('timeout_seconds', args.command_timeout, 60)]}
+   347	    if any(v is not None and (not math.isfinite(v) or v <= 0) for v in caps.values()):
+   348	        raise ValueError('Caps must be positive finite numbers')
+   349	    if args.models_yaml and not args.models_yaml.is_file():
+   350	        raise ValueError('models.yaml missing')
+   351	    models = _build_cli_model_registry(args.bundle, args.models_yaml)
+   352	    # Force every alias to the one recorded endpoint (including models.yaml aliases).
+   353	    for name in models.list_available():
+   354	        model = models.get(name)
+   355	        model._additional_args['api_base'] = args.endpoint
+   356	    raw_dir = args.out / args.run_name
+   357	    raw_dir.mkdir(parents=True, exist_ok=True)
+   358	    config = build_config(defaults, args, models, raw_dir, caps)
+   359	    environment = setup_scorer_env(args.data_dir, out_dir=args.out, repo_root=ROOT,
+   360	                                   allow_unsandboxed=args.allow_unsandboxed)
+   361	    patched = environment['patched']
+   362	    assert_dependency_bindings(patched)
+   363	    header = dict(_schema='agent_eval_v2', fields=FIELDS, bundle=str(args.bundle),
+   364	                  bundle_sha256=bundle_sha(args.bundle), **runner_revision(),
+   365	                  tasks_sha256=sha_file(args.data_dir / 'tasks.jsonl'),
+   366	                  split=dict(path=str(args.split), sha256=sha_file(args.split)), caps=caps,
+   367	                  versions={name: importlib.metadata.version(name) for name in
+   368	                            ('swegemma', 'adk_submission', 'google-adk', 'litellm')},
+   369	                  python_version=sys.version, wheels_listing_sha256=wheels_listing_sha(environment['wheels_dir']),
+   370	                  sandbox=environment['sandbox'], bwrap_argv_template=environment['bwrap_argv_template'],
+   371	                  effective_config=config_snapshot(config),
+   372	                  concurrency=args.concurrency, endpoint=args.endpoint,
+   373	                  models_yaml=sha_file(args.models_yaml) if args.models_yaml else None,
+   374	                  data_dir=str(args.data_dir), created_utc=datetime.now(timezone.utc).isoformat())
+   375	    journal_path = (args.out / f'{args.run_name}.jsonl' if args.out_explicit else
+   376	                    ROOT / 'results' / f'{args.run_name}.jsonl')
+   377	    if args.force_new_out and journal_path.exists():
+   378	        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')
+   379	        journal_path.rename(journal_path.with_name(journal_path.stem + '-' + stamp + '.jsonl'))
+   380	        raw_dir.rename(raw_dir.with_name(raw_dir.name + '-' + stamp))
+   381	        raw_dir.mkdir()
+   382	    journal = Journal(journal_path, header, args.force_new)
+   383	    if not journal.finished <= split_ids:
+   384	        journal.close()
+   385	        raise ValueError('Resume records contain IDs outside the split')
+   386	    file_handler = logging.FileHandler(raw_dir / 'harness.log')
+23:    def test_success_and_failure_are_finished(self):
+29:    def test_last_completed_duplicate_wins(self):
+35:    def test_partial_tail_repaired_and_append_survives_second_resume(self):
+46:    def test_complete_last_record_without_newline(self):
+53:    def test_missing_file_and_empty_journal(self):
+58:    def test_corruption_is_not_silently_dropped(self):
+64:    def test_inventory_mismatch_and_duplicate_ids(self):
+73:    def test_all_tasks_counted_by_repo(self):
+92:    def test_empty_summary_and_short_reasons(self):
+98:    def test_main_fully_resumed_needs_no_harness(self):
+109:    def test_gold_ids_file_selects_inventory_before_resume(self):
+141:    def test_gold_patch_only_and_harness_verdict_preserved(self):
+153:    def test_exception_text_never_copied_into_result(self):
+162:    def test_null_patch_control_still_reaches_verifier(self):
+173:    def test_docker_unavailable_falls_back_without_network_pull(self):
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B - <<'PY'
+import io
+import json
+from unittest.mock import patch
+from eval import run_agent_eval as r
+class Buffer(io.BytesIO):
+    def close(self):
+        pass
+class Parent:
+    def mkdir(self, **kwargs):
+        pass
+class File:
+    parent = Parent()
+    def __init__(self, value):
+        self.buffer = Buffer(value)
+    def open(self, mode):
+        return self.buffer
+base_sha = r.runner_revision()['git_sha']
+headers = []
+for dirty_state in [b' M eval/run_agent_eval.py\\n', b' M eval/run_agent_eval.py\\n M eval/sandbox_env.py\\n']:
+    def fake_git(args, **kwargs):
+        return base_sha + '\\n' if args[1:3] == ['rev-parse', 'HEAD'] else dirty_state
+    with patch.object(r.subprocess, 'check_output', side_effect=fake_git):
+        headers.append(r.runner_revision())
+with patch.object(r.fcntl, 'flock'):
+    journal = r.Journal(File((json.dumps(headers[0]) + '\\n').encode()), headers[1])
+    print('two different dirty trees accepted:', headers[0] == headers[1])
+    journal.close()
+PY" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+two different dirty trees accepted: True
+
+exec
+/bin/bash -lc "sed -n '460,620p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py && rg -n 'thread|executor|invoke_sync|sync_callable|def invoke' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py && sed -n '540,552p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+        or curr.tb_frame.f_code.co_name
+        in (
+            "_invoke_callable",
+            "invoke",
+            "run_async",
+        )
+    )
+
+  @override
+  async def run_async(
+      self, *, args: dict[str, Any], tool_context: ToolContext
+  ) -> Any:
+    # Preprocess arguments (includes Pydantic model conversion and type
+    # validation). Validation errors are returned to the LLM so it can
+    # self-correct and retry with proper argument types.
+    preprocessed_args, validation_errors = (
+        self._preprocess_args_with_validation(args)
+    )
+
+    if validation_errors:
+      return self._build_validation_error_response(validation_errors)
+
+    args_to_call = self._prepare_invocation_args(
+        preprocessed_args, tool_context
+    )
+
+    # Before invoking the function, we check for if the list of args passed in
+    # has all the mandatory arguments or not.
+    # If the check fails, then we don't invoke the tool and let the Agent know
+    # that there was a missing input parameter. This will basically help
+    # the underlying model fix the issue and retry.
+    mandatory_args = self._get_mandatory_args()
+    missing_mandatory_args = [
+        arg for arg in mandatory_args if arg not in args_to_call
+    ]
+
+    if missing_mandatory_args:
+      missing_mandatory_args_str = "\n".join(missing_mandatory_args)
+      error_str = f"""Invoking `{self.name}()` failed as the following mandatory input parameters are not present:
+{missing_mandatory_args_str}
+You could retry calling this tool, but it is IMPORTANT for you to provide all the mandatory parameters."""
+      return {"error": error_str}
+
+    require_confirmation = await self.check_require_confirmation(
+        args, tool_context
+    )
+
+    if require_confirmation:
+      if not tool_context.tool_confirmation:
+        args_to_show = args_to_call.copy()
+        if self._context_param_name in args_to_show:
+          args_to_show.pop(self._context_param_name)
+
+        tool_context.request_confirmation(
+            hint=(
+                f"Please approve or reject the tool call {self.name}() by"
+                " responding with a FunctionResponse with an expected"
+                " ToolConfirmation payload."
+            ),
+        )
+        tool_context.actions.skip_summarization = True
+        return {
+            "error": (
+                "This tool call requires confirmation, please approve or"
+                " reject."
+            )
+        }
+      elif not tool_context.tool_confirmation.confirmed:
+        return {"error": "This tool call is rejected."}
+
+    try:
+      if self._should_run_generator_as_node(tool_context):
+        return await self._run_generator_as_node(
+            args_to_call=args_to_call, tool_context=tool_context
+        )
+      with _use_sync_callable_context(tool_context):
+        return await self._invoke_callable(self.func, args_to_call)
+    except TypeError as e:
+      if not self._spec.has_signature and self._is_invocation_type_error(
+          e, self.func
+      ):
+        logger.warning(
+            "Invocation of signature-less tool '%s' failed: %s",
+            self.name,
+            e,
+        )
+        return {
+            "error": (
+                f"Invoking `{self.name}()` failed: {e}. You could retry"
+                " calling this tool with valid parameters."
+            )
+        }
+      raise
+
+  def _should_run_generator_as_node(self, tool_context: ToolContext) -> bool:
+    """Returns whether a generator tool should run as a FunctionNode."""
+    if not self._spec.is_generator:
+      return False
+    if self._spec.has_signature and (
+        "input_stream" in self._spec.signature.parameters
+    ):
+      return False
+    ic = getattr(tool_context, "_invocation_context", None)
+    return ic is not None and ic.live_request_queue is None
+
+  def _get_generator_node(self) -> FunctionNode:
+    """Returns a cached FunctionNode configured for this generator tool."""
+    from ..workflow._function_node import FunctionNode
+
+    func = self._get_compatible_func()
+    cache_key = (self.name, func, self._context_param_name)
+    if (
+        self._generator_node_cache is not None
+        and self._generator_node_cache[0] == cache_key
+    ):
+      return self._generator_node_cache[1]
+
+    node_name = re.sub(r"[^a-zA-Z0-9_]", "_", self.name)
+    if not node_name or not node_name.isidentifier():
+      node_name = f"_{node_name}"
+
+    node = FunctionNode(
+        func=func,
+        name=node_name,
+        parameter_binding="node_input",
+        rerun_on_resume=True,
+    )
+    # Inject the context under the same parameter FunctionTool uses, so
+    # e.g. a plain `ctx: str` argument is bound from args rather than
+    # replaced by the node's own `ctx` convention.
+    node._context_param_name = self._context_param_name
+    # run_async has already preprocessed and (when FUNCTION_TOOL_ARG_VALIDATION
+    # is on) validated the arguments. Clearing the node's type hints makes it
+    # bind them as-is, so generator tools see the same values as other
+    # FunctionTools instead of a second TypeAdapter pass that would reject a
+    # `param: str = None` default or raise past the tool's error handling.
+    node._type_hints = {}
+    node._type_adapters = {}
+    self._generator_node_cache = (cache_key, node)
+    return node
+
+  async def _run_generator_as_node(
+      self,
+      *,
+      args_to_call: dict[str, Any],
+      tool_context: ToolContext,
+  ) -> Any:
+    """Executes a non-live generator FunctionTool via FunctionNode."""
+    from ._node_tool import _run_node_in_tool_context
+
+    return await _run_node_in_tool_context(
+        self._get_generator_node(),
+        tool_name=self.name,
+        node_input=args_to_call,
+        tool_context=tool_context,
+    )
+
+  def _detect_error_in_response(self, response: Any) -> Optional[str]:
+    """Telemetry hook: returns an error type if the response indicates an error."""
+    if isinstance(response, dict) and response.get("error"):
+      return "TOOL_ERROR"
+41:from ..utils._sync_runner import _use_sync_callable_context
+42:from ..utils._sync_runner import _use_sync_callable_runner  # noqa: F401
+416:      with _use_sync_callable_context(tool_context):
+535:      with _use_sync_callable_context(tool_context):
+            context.docker = docker
+            context.container_id = sandbox_id
+            if (
+                dashboard is not None
+                and slot_id is not None
+                and hasattr(dashboard, 'attach_context')
+                and (slot is None or slot.context is not context)
+            ):
+                dashboard.attach_context(slot_id, context)
+
+        context.set_phase('Starting')
+        context.set_activity('Setting up container...')
+
+
+exec
+/bin/bash -lc "rg -n '_invoke_callable' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py && cat /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py | head -220 && rg -n 'sync_callable_runner' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk -g '*.py' | head -25" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py:178:  """Binds fallback ``Context`` for nested ``_invoke_callable`` calls."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py:212:async def _invoke_callable(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py:221:    The function name `_invoke_callable` is part of the traceback frame contract
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py:40:from ..utils._sync_runner import _invoke_callable
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py:419:            await self._invoke_callable(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py:451:    # Traceback terminates in utils._sync_runner._invoke_callable (or
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py:452:    # FunctionTool._invoke_callable / invoke / run_async). We check both the
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py:459:        curr.tb_frame.f_code is _invoke_callable.__code__
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py:462:            "_invoke_callable",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py:536:        return await self._invoke_callable(self.func, args_to_call)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py:623:  async def _invoke_callable(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py:636:    return await _invoke_callable(target, args_to_call, unwrapped=unwrapped)
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Binds the executor that runs synchronous user callables.
+
+Synchronous callables in ``FunctionTool`` and ``FunctionNode`` resolve their
+runner from an explicit ``_use_sync_callable_runner`` scope when active, or
+otherwise from ``RunConfig.tool_thread_pool_config`` on the execution context.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable
+from collections.abc import Callable
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+import contextvars
+import inspect
+import threading
+from typing import Any
+from typing import TYPE_CHECKING
+import weakref
+
+if TYPE_CHECKING:
+  from ..agents.context import Context
+
+_SyncCallableRunner = Callable[
+    [Callable[..., Any], dict[str, Any]], Awaitable[Any]
+]
+_SYNC_CALLABLE_RUNNER: contextvars.ContextVar[_SyncCallableRunner | None] = (
+    contextvars.ContextVar("adk_sync_callable_runner", default=None)
+)
+_SYNC_CALLABLE_INLINE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "adk_sync_callable_inline", default=False
+)
+_SYNC_CALLABLE_CONTEXT: contextvars.ContextVar[Context | None] = (
+    contextvars.ContextVar("adk_sync_callable_context", default=None)
+)
+
+# Thread pool executors for running synchronous tools and nodes in background
+# threads, keyed by the event loop they serve and then by max_workers. A pool
+# dedicated to tools keeps blocking callables from starving the loop's own
+# default executor. A pool is released when its loop is closed or collected,
+# whichever happens first -- see _shutdown_closed_loop_pools.
+_TOOL_THREAD_POOLS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[int, ThreadPoolExecutor]
+] = weakref.WeakKeyDictionary()
+# Loops on other threads reach this registry concurrently.
+_TOOL_THREAD_POOL_LOCK = threading.Lock()
+
+
+def _shutdown_closed_loop_pools() -> None:
+  """Releases the pools of loops that are closed but not yet collected.
+
+  The registry is weak-keyed, so a pool is normally released when its loop is
+  collected. Collection is not guaranteed to follow closure: a coroutine that
+  raises leaves a traceback that references its frames, the frames reference
+  the loop, and the traceback can be held for as long as the caller keeps the
+  exception -- ``logging.exception`` keeps it on the log record. The loop is
+  already closed and will never run anything again, but its idle tool threads
+  stay alive with it.
+
+  A server that runs ``asyncio.run`` per request therefore accumulates threads
+  in proportion to the number of *failed* requests, not the number served, and
+  the accumulation does not stop until the process restarts. Sweeping on every
+  acquisition bounds it to the loops closed since the previous call.
+
+  The caller must hold ``_TOOL_THREAD_POOL_LOCK``.
+  """
+  # Materialize the keys first: popping inside the loop would mutate the
+  # mapping that is being iterated.
+  for closed_loop in [loop for loop in _TOOL_THREAD_POOLS if loop.is_closed()]:
+    for pool in _TOOL_THREAD_POOLS.pop(closed_loop, {}).values():
+      # wait=False so that whichever caller happens to sweep is not made to
+      # join another loop's tool threads. Work already submitted still runs;
+      # shutdown only stops new work and lets the threads exit after it.
+      pool.shutdown(wait=False)
+
+
+def _get_tool_thread_pool(max_workers: int = 4) -> ThreadPoolExecutor:
+  """Gets or creates the running loop's thread pool executor for tool execution.
+
+  The pool is only used for tool and node calls, so a blocking call cannot
+  starve work the loop itself submits to its default executor, such as name
+  resolution.
+
+  Args:
+    max_workers: Maximum number of worker threads in the pool.
+
+  Returns:
+    A ThreadPoolExecutor with the specified max_workers, shut down when the
+    event loop that created it is closed or collected.
+  """
+  loop = asyncio.get_running_loop()
+  with _TOOL_THREAD_POOL_LOCK:
+    _shutdown_closed_loop_pools()
+    pools = _TOOL_THREAD_POOLS.setdefault(loop, {})
+    pool = pools.get(max_workers)
+    if pool is None:
+      pool = ThreadPoolExecutor(
+          max_workers=max_workers, thread_name_prefix="adk_tool_executor"
+      )
+      pools[max_workers] = pool
+      weakref.finalize(loop, pool.shutdown, wait=False)
+    return pool
+
+
+@contextmanager
+def _use_sync_callable_runner(
+    runner: _SyncCallableRunner | None = None,
+) -> Iterator[None]:
+  """Binds the runner used for synchronous callables.
+
+  Passing ``None`` clears the binding, which stops a worker-owned nested call
+  from reusing the caller's runner or re-entering the thread pool.
+  """
+  token = _SYNC_CALLABLE_RUNNER.set(runner)
+  inline_token = _SYNC_CALLABLE_INLINE.set(runner is None)
+  try:
+    yield
+  finally:
+    _SYNC_CALLABLE_INLINE.reset(inline_token)
+    _SYNC_CALLABLE_RUNNER.reset(token)
+
+
+def _make_executor_sync_callable_runner(
+    executor: ThreadPoolExecutor,
+) -> _SyncCallableRunner:
+  """Creates a sync callable runner backed by ``executor``."""
+
+  async def run_sync_callable(
+      target: Callable[..., Any], call_args: dict[str, Any]
+  ) -> Any:
+    call_context = contextvars.copy_context()
+
+    def invoke() -> Any:
+      with _use_sync_callable_runner(None):
+        return target(**call_args)
+
+    return await asyncio.get_running_loop().run_in_executor(
+        executor,
+        lambda: call_context.run(invoke),
+    )
+
+  return run_sync_callable
+
+
+@contextmanager
+def _use_executor_for_sync_callables(
+    executor: ThreadPoolExecutor,
+) -> Iterator[None]:
+  """Binds a sync callable runner that calls each callable on ``executor``.
+
+  The callable runs with a copy of the caller's context variables and with no
+  runner bound, so a nested call it makes runs inline on its worker thread.
+  """
+  with _use_sync_callable_runner(_make_executor_sync_callable_runner(executor)):
+    yield
+
+
+@contextmanager
+def _use_sync_callable_context(
+    context: Context | None,
+) -> Iterator[None]:
+  """Binds fallback ``Context`` for nested ``_invoke_callable`` calls."""
+  token = _SYNC_CALLABLE_CONTEXT.set(context)
+  try:
+    yield
+  finally:
+    _SYNC_CALLABLE_CONTEXT.reset(token)
+
+
+def _resolve_sync_callable_runner() -> _SyncCallableRunner | None:
+  """Returns the active sync callable runner, falling back to bound context."""
+  runner = _SYNC_CALLABLE_RUNNER.get()
+  if runner is not None or _SYNC_CALLABLE_INLINE.get():
+    return runner
+  context = _SYNC_CALLABLE_CONTEXT.get()
+  # Tool and node tests often pass MagicMock / create_autospec contexts whose
+  # attributes either raise AttributeError or return child mocks instead of int.
+  run_config = getattr(context, "run_config", None)
+  thread_pool_config = getattr(run_config, "tool_thread_pool_config", None)
+  max_workers = getattr(thread_pool_config, "max_workers", None)
+  if isinstance(max_workers, int) and not isinstance(max_workers, bool):
+    return _make_executor_sync_callable_runner(
+        _get_tool_thread_pool(max_workers)
+    )
+  return None
+
+
+def _is_async_callable(target: Any) -> bool:
+  """Returns whether calling ``target`` returns a coroutine."""
+  return inspect.iscoroutinefunction(target) or (
+      hasattr(target, "__call__")
+      and inspect.iscoroutinefunction(target.__call__)
+  )
+
+
+async def _invoke_callable(
+    target: Callable[..., Any],
+    kwargs: dict[str, Any],
+    *,
+    unwrapped: Callable[..., Any] | None = None,
+) -> Any:
+  """Invokes a sync or async callable, using the sync runner when configured.
+
+  Note:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/workflow/_function_node.py:46:from ..utils._sync_runner import _resolve_sync_callable_runner
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/workflow/_function_node.py:47:from ..utils._sync_runner import _use_sync_callable_runner
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/workflow/_function_node.py:76:  runner = _resolve_sync_callable_runner()
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/workflow/_function_node.py:103:    with _use_sync_callable_runner(None):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/function_tool.py:42:from ..utils._sync_runner import _use_sync_callable_runner  # noqa: F401
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py:18:runner from an explicit ``_use_sync_callable_runner`` scope when active, or
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py:44:    contextvars.ContextVar("adk_sync_callable_runner", default=None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py:122:def _use_sync_callable_runner(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py:139:def _make_executor_sync_callable_runner(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py:150:      with _use_sync_callable_runner(None):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py:170:  with _use_sync_callable_runner(_make_executor_sync_callable_runner(executor)):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py:186:def _resolve_sync_callable_runner() -> _SyncCallableRunner | None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py:198:    return _make_executor_sync_callable_runner(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_sync_runner.py:228:  runner = _resolve_sync_callable_runner()
+
+exec
+/bin/bash -lc "rg -n 'tool_thread_pool|ToolThreadPool|RunConfig\\(' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/run_config.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py && sed -n '345,365p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/run_config.py && sed -n '710,735p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:801:                        run_config = RunConfig(max_llm_calls=remaining_turns)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/run_config.py:55:class ToolThreadPoolConfig(BaseModel):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/run_config.py:58:  Set through `RunConfig.tool_thread_pool_config`. Outside live mode,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/run_config.py:84:class RunConfig(BaseModel):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/run_config.py:199:  tool_thread_pool_config: Optional[ToolThreadPoolConfig] = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/run_config.py:248:    from google.adk.agents.run_config import RunConfig, ToolThreadPoolConfig
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/run_config.py:251:    run_config = RunConfig(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/run_config.py:252:        tool_thread_pool_config=ToolThreadPoolConfig(),
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/run_config.py:256:    run_config = RunConfig(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/run_config.py:257:        tool_thread_pool_config=ToolThreadPoolConfig(max_workers=8),
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/run_config.py:324:      run_config = RunConfig(
+  @model_validator(mode='before')
+  @classmethod
+  def check_for_deprecated_save_live_audio(cls, data: Any) -> Any:
+    """If save_live_audio is passed, use it to set save_live_blob."""
+    if isinstance(data, dict) and 'save_live_audio' in data:
+      warnings.warn(
+          'The `save_live_audio` config is deprecated and will be removed in a'
+          ' future release. Please use `save_live_blob` instead.',
+          DeprecationWarning,
+          stacklevel=2,
+      )
+      if data['save_live_audio']:
+        data['save_live_blob'] = True
+    return data
+
+  @field_validator('max_llm_calls', mode='after')
+  @classmethod
+  def validate_max_llm_calls(cls, value: int) -> int:
+    if value >= sys.maxsize:
+      raise ValueError(f'max_llm_calls should be less than {sys.maxsize}.')
+    elif value <= 0:
+            parts=[genai_types.Part(text=initial_prompt)],
+        )
+
+        # Execute agent within time and turn budgets
+        max_llm_calls = (
+            config.budget.turns if config.budget.turns is not None else 500
+        )
+
+        timeout_sec = (
+            config.budget.time_minutes * 60
+            if config.budget.time_minutes is not None
+            else None
+        )
+        disp_context = display_mgr if display_mgr else contextlib.nullcontext()
+        timeout_context = (
+            asyncio.timeout(timeout_sec)
+            if timeout_sec is not None
+            else contextlib.nullcontext()
+        )
+
+        # Record prompts into trace for TraceViewer and offline analysis
+        system_instruction = (
+            getattr(agent, 'instruction', None)
+            or getattr(agent, 'system_instruction', None)
+            or ''
+        )
+
+codex
+Two issues remain. The resume identity accepts different dirty source trees, while a run started from a clean checkout rejects resume after its own default results journal makes the tree dirty. I also reproduced bundle settings being overwritten: a nested 2-minute budget becomes 5 minutes, and a 7-second command timeout becomes 60. The real ADK test for parallel tools across concurrent task contexts passed independently.
+exec
+/bin/bash -lc 'PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True LITELLM_TOKEN_EXCHANGE_CACHE_DIR=/tmp/codex-unused-token-cache PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B -m pytest -s -p no:cacheprovider eval/tests/test_run_agent_eval.py::test_patch_classification eval/tests/test_run_agent_eval.py::test_patch_deletion_rename_and_hunk_header_lookalikes eval/tests/test_run_agent_eval.py::test_trace_usage_is_only_recorded_values eval/tests/test_run_agent_eval.py::test_trace_counts_does_not_infer_tool_duration eval/tests/test_run_agent_eval.py::test_observe_patch_before_repeated_stripping eval/tests/test_eval_fixes.py::test_git_c_quoted_utf8_octal_paths_and_diag_failure eval/tests/test_eval_fixes.py::test_leak_scan_records_tokens_only eval/tests/test_eval_fixes.py::test_timing_call_ids_errors_and_pending eval/tests/test_eval_fixes.py::test_real_adk_parallel_tool_timings_and_concurrent_task_contexts eval/tests/test_run_agent_eval.py::test_harness_protected_rule_and_extra_targets eval/tests/test_run_agent_eval.py::test_env_guard eval/tests/test_run_agent_eval.py::test_binding_assertion_catches_late_unpatched_module -q' in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 4430ms:
+............
+12 passed in 3.10s
+
+exec
+/bin/bash -lc "nl -ba eval/kaggle/gold_calibration.py | sed -n '244,263p' && git status --porcelain && git rev-parse HEAD" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+   244	    row = dict(instance_id=raw['instance_id'], repo=raw['repo'], resolved=False,
+   245	               exit_code=None, duration_seconds=0.0, error=None, sandbox=args.sandbox)
+   246	    try:
+   247	        if args.sandbox == 'subprocess':
+   248	            environment = setup_scorer_env(
+   249	                args.data_dir, out_dir=args.result.parent,
+   250	                allow_unsandboxed=getattr(args, 'allow_unsandboxed', False))
+   251	            row['sandbox'] = environment['sandbox']
+   252	        from swegemma.models import load_tasks
+   253	        task = next(t for t in load_tasks(args.data_dir / 'tasks.jsonl')
+   254	                    if t.instance_id == args.worker)
+   255	        patch = raw.get('patch')
+   256	        if os.environ.get('GOLD_NULL_PATCH'):  # control: no source change; tests should fail
+   257	            patch = ('diff --git a/NULL_CONTROL.txt b/NULL_CONTROL.txt\nnew file mode 100644\n'
+   258	                     '--- /dev/null\n+++ b/NULL_CONTROL.txt\n@@ -0,0 +1 @@\n+null\n')
+   259	        if not isinstance(patch, str) or not patch.strip():
+   260	            row['error'] = 'Missing or empty gold patch'
+   261	        else:
+   262	            result = asyncio.run(verify_gold(task, patch, args.data_dir, args.sandbox, out_dir=args.result.parent))
+   263	            # Assumed result is a mapping or TaskResult-like object, never a bare bool.
+5858d7d816136dc931e646765d0c3e80b8ddc944
+
+codex
+**BLOCKING**
+
+1. **B4 remains incomplete: dirty state does not identify the implementation.** [run_agent_eval.py:236](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:236) records only SHA plus a boolean. Different uncommitted implementations therefore share an identity; I reproduced `Journal` accepting two different dirty-tree states. Conversely, starting clean and writing the default, unignored results journal makes `git_dirty` change to true, causing an unchanged run to reject resume. The journal is created after fingerprinting at [line 375](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:375). Hash relevant working-tree source content, excluding generated artifacts, and test both cases.
+
+**Non-blocking**
+
+1. **N2 is partially fixed: nested settings are overwritten by fallback caps.** [run_agent_eval.py:344](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:344) supplies 5 minutes and 60 seconds even when the bundle specifies nested `budget`/`harness` settings. Those values override the nested configuration at [line 285](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:285). Reproduced: `budget.time_minutes: 2` becomes **5**, and `harness.command_timeout_seconds: 7` becomes **60**, without CLI overrides. Flat `verification_timeout_seconds` forwarding is fixed. Apply fallback defaults only when neither configuration form supplies a value.
+
+The remaining findings check out:
+
+| Finding | Assessment |
+|---|---|
+| **B1** | Fixed for the configured paths. Commands pass through bubblewrap; agent objects have gold fields cleared. The alias fix binds the **same resolved Python prefix** at both destinations, with source/destination exposure checks. I found no widening to inventory, splits, results, or runs. See [sandbox_env.py:49](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/sandbox_env.py:49) and [line 68](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/sandbox_env.py:68). |
+| **B2** | Fixed: absolute graph/embedding paths reach the supplied context at [run_agent_eval.py:436](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:436). Installed graph tools read them in the host process. |
+| **B3** | Fixed: timing uses monotonic callbacks and call IDs, with per-task `ContextVar` state. The real ADK parallel-tool/concurrent-context test passed independently. See [tool_timing.py:58](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/tool_timing.py:58). |
+| **B5** | Shared setup is fixed in both entrypoints: [runner:359](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:359), [calibration:248](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/kaggle/gold_calibration.py:248). Existing clean-list validity still needs calibration evidence. |
+| **N1** | Fixed: Git octal decoding works, and classification failures preserve diagnostics/results at [run_agent_eval.py:293](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:293). |
+| **N3** | Fixed: raw inventory IDs are checked before harness deduplication at [run_agent_eval.py:335](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:335). |
+
+Verification still delegates protected-file reset, test-patch application, pytest, and JUnit validation to installed swegemma. Results rows select metrics and sanitized error categories; I found no direct task-text or patch serialization into them. Raw artifacts remain separate at [run_agent_eval.py:459](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:459).
+
+**Questions**
+
+- Has gold/null-control calibration been rerun under the shared isolation setup? The [implementation report:81](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/ops/codex/implement-20261105-eval-runner-fix.md:81) says it has not. B5’s validation requirement remains open before relying on existing exclusions.
+
+Validation: **12 selected tests passed**. Read-only filesystem restrictions prevented a full-suite/E2E rerun; bubblewrap preflight was denied at `NETLINK_ROUTE` creation. Your reported **401 passed, 1 skipped** remains separate evidence. No files changed.
+tokens used
+125,397
