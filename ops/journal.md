@@ -44,3 +44,4 @@
 2026-11-05T14:15Z | owner: codex wrappers accept CODEX_MODEL/CODEX_EFFORT; defaults ask/review high, build medium | bin/codex-*
 2026-11-05T14:20Z | dec 011: thread 751487 reconciled — their env adds non-wheelhouse test pkgs + per-task pins; official harness = highest-version, no resolver; exclusions scorer_fail=assumed; eval-runner spec written | docs/GOLD_CALIBRATION.md, docs/EVAL_RUNNER_SPEC.md
 2026-11-05T14:21Z | owner: builder/director/paper -> opus high, sessions restarted (paper now via bin/session) | config.env
+2026-11-05T14:23Z | cycle 40: session restart; codex-build eval-runner launched (spec per docs/EVAL_RUNNER_SPEC.md); gold-local 78/129 | ops/codex/build-eval-runner.spec
