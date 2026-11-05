@@ -149,3 +149,6 @@
 2026-11-05T19:23Z | Director FYI: dec 028 codex-ask = ops/codex/ask-20261105T191502.md (noted). memguard-fix6 built eedf84b (93p/1s); host livetest job memguard-fix6-livetest launched | ops/mail/builder/read/20261105T191810-11049-from-director.md ops/codex/build-memguard-fix6.log
 2026-11-05T19:25Z | docker-order build done 6a20c1f (Codex 468p/1f sandbox-only); review-docker-order-light launched | ops/codex/build-sandbox-env-docker-order.md
 2026-11-05T19:25Z | memguard-fix6 livetest fail = test bug (wrapper killed -> no rc); fixed 0f5de3d; re-livetest + docker-order host tests in hosttests-fix6-dockerorder | ops/jobs/memguard-fix6-livetest.log
+2026-11-05T19:26Z | review-docker-order: no BLOCKING (1 nit: 16 MB -> 20 MiB docstring, fixed 374eb6d); merged to main 8c55985. fix6 livetest GREEN 94p | ops/codex/review-20261105T192407.md ops/jobs/hosttests-fix6-dockerorder.log
+2026-11-05T19:27Z | main host eval/tests 469p/3s/1f; the fail = stale main test_memguard oom_score_adj assertion (inherits bin/job's 1000), fixed by fix6's baseline test | ops/jobs/hosttests-main-dockerorder.log
+2026-11-05T19:28Z | kernel-setup-fix5 built aa116cb (80 offline pass); builder dry run OK (SKIP_VERIFICATION=True, compiles); launched review-kernel-setup-fix5-light + review-memguard-fix6-light | ops/codex/build-kernel-setup-fix5.md

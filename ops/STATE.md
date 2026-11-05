@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 19:25Z (cycle 83, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 19:28Z (cycle 84, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -18,22 +18,22 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
-## Running jobs (19:25Z)
+## Running jobs (19:28Z)
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
 - DEC 028 (report 005-prelim, option A APPROVED): 2a STOP met; artifact branch closed, 2b moot, no v000 re-time. CPU 2a dropped.
-  Item 1-3: codex-kernel-setup-fix5 RUNNING (branch codex/kernel-setup-fix5 on round-4 c4c9528; spec ops/codex/build-kernel-setup-fix5.spec):
-  SKIP_VERIFICATION, asyncio.timeout proxy (agent clock + fired), sandbox_start/stop/exec wrappers (finalization, teardown,
-  TOTAL Phase-1 wall), vLLM startup in header, timing_summary gate lines. Then ONE codex-review of the merge diff (round 4 +
-  fix5) -> no BLOCKING -> merge -> push e4b-v001 (bundles/e4b/v001, sha256 f2ced9c9...) on 004-gpu-retime-ids, -t ~3 quota-h.
+  Item 1-3: kernel-setup-fix5 BUILT aa116cb (branch codex/kernel-setup-fix5 on round-4 c4c9528; Codex 80 offline pass). Builder dry run
+  with main's eval/plans/004-gpu-retime-ids.txt (absent on branch): OK, SKIP_VERIFICATION = True, generated kernel compiles.
+  ONE merge-diff review RUNNING: review-kernel-setup-fix5-light (main...codex/kernel-setup-fix5). No BLOCKING -> merge -> host
+  eval/tests -> push e4b-v001 (bundles/e4b/v001, sha256 f2ced9c9...) on 004-gpu-retime-ids, -t ~3 quota-h.
   Gate (dec 028 item 4, pre-registered): (a) 8/8 no harness error (b) max Phase-1 <= 296 s (c) mean <= 270 s (d) vLLM <= 10 min
   (e) >= 1 non-empty source diff. Pass -> short report 005 NEEDS_DECISION, request SUBMIT (today if < ~23:00Z). NO kaggle-submit
   until an AUTHORIZE line exists. Fail (b)/(c) -> propose lower cap from max total wall. Report 005 also derives the v002 cap with
   F: (cap+S+F)x125+30<=660 and (cap+F+0.875+0.75S); don't build v002 before the Director sees it.
-- Item 6: docker-order BUILT 6a20c1f (Codex 468p/4s/1f; the 1 fail = memguard oom_score_adj, Codex-sandbox only). review-docker-order-light RUNNING;
-  host full eval/tests = second half of job hosttests-fix6-dockerorder. Both clean -> merge to main -> full eval/tests on main.
-- memguard-fix6 eedf84b: livetest 1 fail = TEST bug (bash wrapper carries the job marker, so it is killed and can't write rc).
-  Fixed the assertion (0f5de3d: wrapper returncode == -SIGKILL, no rc file). Re-livetest = first half of hosttests-fix6-dockerorder.
-  Green -> review-memguard-fix6-light; no BLOCKING -> merge + deploy (stop 7933, start memguard-light at once). Still BLOCKING -> stop, short report.
+- Item 6: docker-order MERGED to main 8c55985 (review clean ops/codex/review-20261105T192407.md; nit fixed 374eb6d). Main host
+  eval/tests: 469p/3s/1f (ops/jobs/hosttests-main-dockerorder.log); the 1 fail = main's stale test_memguard oom_score_adj
+  assertion (dummy inherits bin/job's 1000); fix6's test uses a baseline, so it is fixed by the fix6 merge.
+- memguard-fix6 eedf84b+0f5de3d: livetest GREEN (94 passed, ops/jobs/hosttests-fix6-dockerorder.log). review-memguard-fix6-light
+  RUNNING. No BLOCKING -> merge + full eval/tests on main + deploy (stop 7933, start memguard-light at once). BLOCKING -> stop, short report.
 - Item 7: plan eval/plans/006.md pre-registered (31B timing, cap from e4b-v001 S/F, <= 4 quota-h, same 8 ids). After report 005.
 - NOTE: bin/codex-build always branches from main HEAD; for follow-up rounds create the worktree on the previous commit manually,
   write the spec, sed the previous build-*.sh, and bin/job start codex-<name>.
@@ -75,6 +75,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
 ## Next 3
-1. codex-kernel-setup-fix5 done -> codex-review merge diff (round 4 + fix5) -> no BLOCKING: merge, dry-run, push e4b-v001 L4x4 re-time.
+1. review-kernel-setup-fix5-light -> no BLOCKING: merge, host eval/tests, push e4b-v001 L4x4 re-time (-t ~3 quota-h).
 2. Re-time result -> timing_summary gate -> report 005 (NEEDS_DECISION, SUBMIT request if pass).
-3. sandbox-env-docker-order + memguard-fix6 reviews/merges; then 31b-v001 per plan 006.
+3. review-memguard-fix6-light -> merge + deploy memguard-light; then 31b-v001 per plan 006.

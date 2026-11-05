@@ -7002,3 +7002,710 @@ PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/p
 ...................................................................      [100%]
 67 passed in 0.73s
 
+codex
+The offline suite passes so far: 67 tests, including setup-only tests. It checks return-value and exception forwarding, the 296-second gate boundary, and that a skipped-verification row has no harness error. I’m checking incomplete-row summaries and the explicit dry-run acceptance command next.
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/kaggle/timing_summary.py')
+s=p.read_text().replace(\"r['test_run']['share_of_agent_seconds']\", \"r.get('test_run', {}).get('share_of_agent_seconds')\").replace(\"r['test_run']['n']\", \"r.get('test_run', {}).get('n', 0)\").replace(\"bool(r['empty_patch'])\", \"bool(r.get('empty_patch', True))\").replace(\"bool(r['test_files_edited'])\", \"bool(r.get('test_files_edited', []))\").replace(\"bool(r['stray_files'])\", \"bool(r.get('stray_files', []))\").replace(\"len(r['test_files_edited'])\", \"len(r.get('test_files_edited', []))\").replace(\"len(r['stray_files'])\", \"len(r.get('stray_files', []))\")
+p.write_text(s)
+PY
+bash eval/kaggle/timing_push.sh --dry-run x/y bundles/e4b/v001 eval/plans/004-gpu-retime-ids.txt" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix5
+ exited 1 in 0ms:
+Traceback (most recent call last):
+  File "<stdin>", line 19, in <module>
+  File "/usr/lib/python3.12/pathlib.py", line 1029, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1015, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'eval/plans/004-gpu-retime-ids.txt'
+
+exec
+/bin/bash -lc 'git diff --check; git diff -- eval/kaggle/agent_timing.py' in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix5
+ succeeded in 0ms:
+diff --git a/eval/kaggle/agent_timing.py b/eval/kaggle/agent_timing.py
+index b6540f7..cd93967 100644
+--- a/eval/kaggle/agent_timing.py
++++ b/eval/kaggle/agent_timing.py
+@@ -26,6 +26,7 @@ import time
+ BUNDLE_B64 = ""  # embedded by timing_push.sh
+ TASK_IDS = []
+ SETUP_ONLY = False
++SKIP_VERIFICATION = True
+ SETUP_FIX = 1
+ GIT_SHA = ""
+ KERNEL_BUDGET_SECONDS = 3 * 3600
+@@ -621,6 +622,111 @@ def test_run_stats(trace, agent_seconds):
+ def should_stop(elapsed, cap_minutes, verification_timeout, observed_max, budget):
+     return elapsed + 1.5 * max(cap_minutes * 60 + verification_timeout, observed_max) > budget
+ 
++
++class AsyncioTimingProxy:
++    """Observe only agent_runner's timeout context, without changing asyncio itself."""
++    def __init__(self, original, state):
++        self._original, self._state = original, state
++
++    def __getattr__(self, name):
++        return getattr(self._original, name)
++
++    def timeout(self, *args, **kwargs):
++        cm = self._original.timeout(*args, **kwargs)
++        state = self._state
++        delay = args[0] if args else kwargs.get('delay')
++
++        class ObservedTimeout:
++            async def __aenter__(self):
++                self.current = state.get(None)
++                if self.current is not None:
++                    self.current.update(agent_timeout_seconds=delay, timeout_enter=time.perf_counter())
++                return await cm.__aenter__()
++
++            async def __aexit__(self, *exc_info):
++                exit_exc = exc_info[1]
++                try:
++                    return await cm.__aexit__(*exc_info)
++                except BaseException as exc:
++                    exit_exc = exc
++                    raise
++                finally:
++                    if self.current is not None:
++                        self.current.update(timeout_exit=time.perf_counter(),
++                            agent_timeout_fired=bool(getattr(cm, 'expired', lambda: False)())
++                                or isinstance(exit_exc, TimeoutError))
++
++        return ObservedTimeout()
++
++
++def observe_sandbox(original, state, name):
++    """Forward identical arguments/results/exceptions and time sandbox boundaries."""
++    async def observed(*args, **kwargs):
++        current = state.get(None)
++        start = time.perf_counter()
++        row = None
++        if current is not None:
++            if name == 'sandbox_start':
++                current['sandbox_start_begin'] = start
++            elif name == 'sandbox_exec' and current.get('timeout_exit') is not None:
++                cmd = args[2] if len(args) > 2 else kwargs.get('command', kwargs.get('cmd', ''))
++                row = dict(cmd=str(cmd)[:40], duration_s=None, rc=None)
++                current.setdefault('finalization_exec', []).append(row)
++        try:
++            result = await original(*args, **kwargs)
++            if row is not None:
++                row['rc'] = getattr(result, 'exit_code', None)
++            return result
++        except BaseException as exc:
++            if row is not None:
++                row['exception'] = type(exc).__name__
++            raise
++        finally:
++            end = time.perf_counter()
++            if current is not None:
++                if name in ('sandbox_start', 'sandbox_stop'):
++                    current[name + '_end'] = end
++                    current[name + '_duration'] = end - start
++                if row is not None:
++                    row['duration_s'] = end - start
++    return observed
++
++
++async def skip_verification(docker, config, task, snapshot_path, *, agent_patch='',
++                            agent_error=None, trace=None, start_time=0.0, **kwargs):
++    """Return the harness result type without starting Container B or running tests."""
++    from swegemma.models import TaskResult
++    result = TaskResult(instance_id=task.instance_id, repo=task.repo, resolved=False,
++        agent_patch=agent_patch, test_output='', test_exit_code=0,
++        duration_seconds=time.perf_counter() - start_time, error=agent_error, trace=trace)
++    # swegemma 0.2.11 annotates this field int, with assignment validation disabled.
++    result.test_exit_code = None
++    return result
++
++
++def phase1_fields(current, run_seconds, total, context, patch):
++    def difference(end, start):
++        return current[end] - current[start] if current.get(end) is not None and current.get(start) is not None else None
++    phase1 = difference('sandbox_stop_end', 'sandbox_start_begin')
++    source = 'sandbox_wrappers' if phase1 is not None else 'run_agent_sandbox'
++    phase1 = run_seconds if phase1 is None else phase1
++    submitted = bool(context.patch_submitted) if context is not None else None
++    return dict(agent_timeout_seconds=current.get('agent_timeout_seconds'),
++        agent_clock_seconds=difference('timeout_exit', 'timeout_enter'),
++        agent_timeout_fired=current.get('agent_timeout_fired'),
++        finalization_seconds=difference('sandbox_stop_end', 'timeout_exit'),
++        finalization_exec=current.get('finalization_exec', []),
++        teardown_seconds=current.get('sandbox_stop_duration'),
++        phase1_wall_seconds=phase1, phase1_source=source,
++        pre_agent_seconds=difference('timeout_enter', 'sandbox_start_begin'),
++        post_phase1_seconds=total - phase1, patch_submitted=submitted,
++        fallback_patch_used=(not submitted and bool(patch.strip())) if submitted is not None else None,
++        verification_skipped=SKIP_VERIFICATION)
++
++
++def harness_error(result, agent_error):
++    return 'Harness task failure' if (result is not None and result.error) or agent_error else None
++
+ def distribution(values):
+     values = sorted(values)
+     def percentile(q):
+@@ -647,13 +753,19 @@ async def evaluate(config, journal, started, caps, totals):
+     from swegemma.harness.verification import _is_protected_test_or_config_path
+     import swegemma.evaluate as ev
+     import swegemma.harness.verification as vf
++    import swegemma.harness.agent_runner as ar
+     state = ContextVar('timing')
++    original_asyncio = ar.asyncio
++    original_sandbox = {name: getattr(ar, name) for name in ('sandbox_start', 'sandbox_stop', 'sandbox_exec')}
++    ar.asyncio = AsyncioTimingProxy(original_asyncio, state)
++    for name, original in original_sandbox.items():
++        setattr(ar, name, observe_sandbox(original, state, name))
+     original_verify, original_strip = ev.verify_task, vf.strip_protected_files_from_patch
+     vf.strip_protected_files_from_patch = observe_patch_strip(original_strip, state)
+     async def verify(*args, **kwargs):
+         start = time.perf_counter()
+         try:
+-            return await original_verify(*args, **kwargs)
++            return await (skip_verification if SKIP_VERIFICATION else original_verify)(*args, **kwargs)
+         finally:
+             state.get()['verification'] = time.perf_counter() - start
+     ev.verify_task = verify
+@@ -681,7 +793,7 @@ async def evaluate(config, journal, started, caps, totals):
+             raise ValueError('Duplicate or missing task IDs')
+         patch_subprocess_deps(DATA, state)
+         for iid in TASK_IDS:
+-            if should_stop(time.monotonic()-started, caps['max_time_minutes'], caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
++            if should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
+                 append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+                 break
+             task = dataclasses.replace(inventory[iid], patch='')
+@@ -693,7 +805,7 @@ async def evaluate(config, journal, started, caps, totals):
+             start = time.perf_counter()
+             try:
+                 result = await evaluator.evaluate_task(task)
+-                error = 'Harness task failure' if result.error else None
++                error = harness_error(result, evaluator.agent_error)
+             except Exception as exc:
+                 error = 'Evaluation exception (' + type(exc).__name__ + ')'
+             finally:
+@@ -711,8 +823,12 @@ async def evaluate(config, journal, started, caps, totals):
+                 error = (error or '') + ' trace parse (' + type(exc).__name__ + ')'
+             code = result.test_exit_code if result else None
+             raw_error = (result.error or '') if result else error or ''
++            phase = phase1_fields(times, evaluator.agent_seconds, total,
++                                  getattr(evaluator, 'context', None),
++                                  result.agent_patch if result else evaluator.patch)
+             try:
+               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
++                **phase,
+                 wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+                 setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                 editable_failed=times.get('editable_failed', False),
+@@ -727,6 +843,7 @@ async def evaluate(config, journal, started, caps, totals):
+                 timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+             except Exception as exc:
+                 append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
++                                     **phase,
+                                      wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+                                      setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                 editable_failed=times.get('editable_failed', False),
+@@ -741,6 +858,9 @@ async def evaluate(config, journal, started, caps, totals):
+             (raw / 'result.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result else {'error': error}, default=str))
+     finally:
+         ev.verify_task, vf.strip_protected_files_from_patch = original_verify, original_strip
++        ar.asyncio = original_asyncio
++        for name, original in original_sandbox.items():
++            setattr(ar, name, original)
+ 
+ def start_server(holder):
+     import torch
+@@ -863,6 +983,20 @@ def main():
+                       bundle_sha256=None, agent_yaml_sha256=None, gpu_names=[], gpu_count=0,
+                       mcp_import_ok=None, vllm_startup_seconds=None,
+                       fields=dict(instance_id='Task ID', repo='Repository', wall_seconds='Agent (including setup), verification, total wall seconds',
++                          vllm_startup_seconds='Header: perf_counter seconds spent starting vLLM; null on startup failure',
++                          verification_skipped='Container B and verification tests skipped',
++                          agent_timeout_seconds='Delay passed to agent_runner asyncio.timeout, or null',
++                          agent_clock_seconds='Timeout context exit minus enter (perf_counter), or null',
++                          agent_timeout_fired='Real timeout expired or exit TimeoutError; null if not entered',
++                          finalization_seconds='Sandbox stop end minus timeout exit, or null',
++                          finalization_exec='Post-timeout sandbox_exec calls: cmd (first 40 chars), duration_s, rc or exception type',
++                          teardown_seconds='sandbox_stop duration including failed stop, or null',
++                          phase1_wall_seconds='sandbox_start begin to sandbox_stop end, otherwise _run_agent_sandbox duration',
++                          phase1_source='sandbox_wrappers or run_agent_sandbox fallback',
++                          pre_agent_seconds='Timeout enter minus sandbox_start begin, or null',
++                          post_phase1_seconds='Total wall seconds minus phase1_wall_seconds',
++                          patch_submitted='Context patch_submitted; null if no context',
++                          fallback_patch_used='No submitted patch and non-empty returned harness patch; null if no context',
+                           sandbox_setup_seconds='Sum of measured setup steps', setup_calls='Bounded setup command timings/output', setup_failed='Any setup failure', resolved='Harness verdict', exit_code='Verification exit code or null',
+                           error='Sanitized failure category or null', llm_turns='LLM calls or null', tool_calls='Total and per_tool requests',
+                           tool_seconds='Per-tool n,total,max call->response seconds, FIFO per name', test_run='Test requests n, matched total_seconds, share_of_agent_seconds',
+@@ -898,8 +1032,9 @@ def main():
+             caps = dict(timeout_seconds=int(section.get('timeout_seconds', 300)), verification_timeout_seconds=int(section.get('verification_timeout_seconds', 300)),
+                         max_tool_calls=int(section.get('max_tool_calls', 100)), max_time_minutes=float(section.get('max_time_minutes', 60.0)), max_turns=int(turns) if turns is not None else None)
+             header['caps'] = caps
+-            append(journal, header)
+             server, adapters, model, startup = start_server(servers)
++            header['vllm_startup_seconds'] = startup
++            append(journal, header)
+             append(journal, {'_vllm': dict(startup_seconds=startup)})
+             models = server.create_model_registry(aliases=[model], model_prefix='openai/', api_key=os.environ.get('LOCAL_API_KEY', 'EMPTY'))
+             limits, constraints = build_submission_limits()
+
+exec
+/bin/bash -lc "ls eval/plans; ls ops/decisions; sed -n '1,210p' eval/kaggle/timing_summary.py" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix5
+ succeeded in 0ms:
+001-timing-ids.txt
+001.md
+002.md
+003.md
+001-20261104T222015-31013-from-aniket.md
+002-001-v000-baseline-runtime-gate.md
+003-20261104T230227-32352-from-aniket.md
+004-002-001-v000-baseline-runtime-gate.md
+005-E2.md
+006-20261104T234038-4918-from-paper.md
+007-20261104T235052-3507-from-paper.md
+008-20261104T235435-28672-from-paper.md
+009-20261105T020840-1605-from-builder.md
+010-owner-builder-opus-process.md
+011-20261105T141321-20124-from-builder.md
+012-20261105T142515-1727-from-paper.md
+013-owner-rules-sweep-2026-11-05.md
+014-20261105T145123-1696-from-builder.md
+015-20261105T145428-1107-from-builder.md
+016-20261105T150127-10712-from-builder.md
+017-owner-context-clears-2026-11-05.md
+018-20261105T152156-9823-from-builder.md
+019-002-gold-rerun-b5-fastapi-env.md
+020-20261105T173757-28117-from-aniket.md
+021-owner-oom-hardening-2026-11-05.md
+022-003-e4b-v000-timing-gate-fail.md
+023-20261105T175337-12082-from-builder.md
+024-20261105T175902-14149-from-builder.md
+025-owner-linger-on-2026-11-05.md
+"""Summarize a downloaded kaggle_timing_v1 journal without reading raw task artifacts."""
+import argparse
+import json
+import math
+from pathlib import Path
+
+
+def distribution(values):
+    values = sorted(values)
+    def percentile(q):
+        pos = (len(values) - 1) * q
+        low = int(pos)
+        return values[low] + (values[min(low + 1, len(values) - 1)] - values[low]) * (pos - low)
+    return dict(mean=sum(values) / len(values), p50=percentile(.5), p90=percentile(.9), max=max(values)) if values else dict.fromkeys(('mean', 'p50', 'p90', 'max'))
+
+
+def setup_evidence(call):
+    """Count index fallback invocations and retry lines, without counting nested output twice."""
+    children = call.get('subprocesses', [])
+    retries = max(call.get('retrying_lines', 0), sum(c.get('retrying_lines', 0) for c in children))
+    fallbacks = 0
+    for child in children or [call]:
+        argv = child.get('argv') or []
+        if isinstance(argv, str):
+            import shlex
+            argv = shlex.split(argv)
+        fallbacks += int('install' in argv and '-e' in argv and '--no-index' not in argv)
+    return retries + fallbacks
+
+
+def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
+              gate_vllm_seconds=600, gate_min_nonempty=1):
+    records = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    if not records or records[0].get('_schema') != 'kaggle_timing_v1':
+        raise ValueError('Expected kaggle_timing_v1 header')
+    header, rows, startup, done, stopped = records[0], [], records[0].get('vllm_startup_seconds'), None, []
+    for row in records[1:]:
+        if 'instance_id' in row:
+            rows.append(row)
+        elif '_vllm' in row:
+            startup = row['_vllm']['startup_seconds']
+        elif '_done' in row:
+            done = row['_done']
+        elif '_stopped' in row:
+            stopped.append(row['_stopped'])
+        else:
+            raise ValueError('Unknown journal record')
+    ids = [r['instance_id'] for r in rows]
+    if len(ids) != len(set(ids)) or set(ids) - set(header['task_ids']):
+        raise ValueError('Duplicate or unexpected task records')
+    if done is not None and done['n'] != len(rows):
+        raise ValueError('Done count does not match task records')
+    def numbers(values):
+        if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in values):
+            raise ValueError('Invalid measurement')
+        return values
+    totals = distribution(numbers([r['wall_seconds']['total'] for r in rows]))
+    shares = distribution(numbers([r.get('test_run', {}).get('share_of_agent_seconds') for r in rows if r.get('test_run', {}).get('share_of_agent_seconds') is not None]))
+    runs = distribution(numbers([r.get('test_run', {}).get('n', 0) for r in rows]))
+    caps = header.get('caps') or {}
+    cap = caps.get('max_time_minutes')
+    numbers([v for v in (startup, cap) if v is not None])
+    timing_minutes = totals['p90'] * 125 / 60 + startup / 60 if totals['p90'] is not None and startup is not None else None
+    cap_minutes = cap * 125 + 30 if cap is not None else None
+    tasks = []
+    for row in rows:
+        source_files = set(row.get('patch_files', [])) - set(row.get('test_files_edited', [])) - set(row.get('stray_files', []))
+        tasks.append(dict(instance_id=row['instance_id'], repo=row.get('repo'),
+            setup_calls=[{key: call.get(key) for key in ('step', 'duration_s', 'rc', 'retrying_lines')}
+                         for call in row.get('setup_calls', [])],
+            **{key: row.get(key) for key in ('sandbox_setup_seconds', 'agent_clock_seconds',
+                'agent_timeout_fired', 'finalization_seconds', 'teardown_seconds',
+                'phase1_wall_seconds', 'error', 'fallback_patch_used')},
+            total=row['wall_seconds']['total'],
+            nonempty_source_diff=not row.get('empty_patch', True) and bool(source_files)))
+    def measured(key):
+        return numbers([r[key] for r in tasks if r[key] is not None])
+    phase1, setup = distribution(measured('phase1_wall_seconds')), distribution(measured('sandbox_setup_seconds'))
+    finalization = distribution(measured('finalization_seconds'))
+    complete = sum(r['error'] is None and r['phase1_wall_seconds'] is not None
+                   and not original.get('setup_failed', False)
+                   for r, original in zip(tasks, rows))
+    nonempty = sum(t['nonempty_source_diff'] for t in tasks)
+    def check(passed, value, threshold):
+        return dict(status='PASS' if passed else 'FAIL', value=value, threshold=threshold)
+    all_phase1 = bool(tasks) and len(measured('phase1_wall_seconds')) == len(tasks)
+    gate = dict(n_expected=len(rows),
+        a_all_tasks_complete_no_harness_error=check(bool(tasks) and complete == len(tasks), complete, len(tasks)),
+        b_max_phase1=check(all_phase1 and phase1['max'] <= gate_max_phase1, phase1['max'], gate_max_phase1),
+        c_mean_phase1=check(all_phase1 and phase1['mean'] <= gate_mean_phase1, phase1['mean'], gate_mean_phase1),
+        d_vllm_seconds=check(startup is not None and startup <= gate_vllm_seconds, startup, gate_vllm_seconds),
+        e_nonempty_source_diff=check(nonempty >= gate_min_nonempty, nonempty, gate_min_nonempty))
+    gate['status'] = 'PASS' if all(v['status'] == 'PASS' for v in gate.values() if isinstance(v, dict)) else 'FAIL'
+    return dict(_schema='kaggle_timing_summary_v1',
+                fields=dict(n='Number of task rows (gate expected n)',
+                    n_complete_no_error='Rows with phase1 measurement, no harness error and no setup failure',
+                    tasks='Per-task instance_id, repo, setup_calls [{step,duration_s,rc,retrying_lines}], sandbox_setup_seconds, agent_clock_seconds, agent_timeout_fired, finalization_seconds, teardown_seconds, phase1_wall_seconds, total, error, nonempty_source_diff, fallback_patch_used; unavailable measurements are null',
+                    nonempty_source_diff='Nonblank classified patch with a path outside protected/test and stray files',
+                    phase1_seconds='Phase-1 wall seconds: mean/p50/p90/max of available measurements',
+                    setup_seconds='Setup S seconds: mean/p50/p90/max of available measurements',
+                    finalization_max_seconds='Maximum finalization seconds, or null',
+                    fallback_count='Index-enabled editable fallback invocations plus Retrying lines across setup calls, nested output counted once',
+                    tasks_with_retrying_lines='Task count with setup retrying_lines > 0',
+                    timeout_fired_count='Tasks whose observed agent timeout fired',
+                    fallback_patch_count='Tasks using a non-empty fallback patch',
+                    vllm_startup_seconds='Measured vLLM startup seconds',
+                    gate='a-e checks: PASS/FAIL, observed value, CLI threshold; overall status requires all checks',
+                    total_seconds='Total task wall seconds distribution',
+                    test_run_share='Agent test time share distribution', test_runs_per_task='Test request count distribution',
+                    empty_patch_count='Blank patches', test_files_edited_count='Tasks editing protected/test files',
+                    stray_files_count='Tasks adding stray files', test_files_edited_files='Total protected/test paths',
+                    stray_files_files='Total stray paths', decision='Legacy total-wall/cap projection check',
+                    projected_minutes='p90 total seconds times 125 plus vLLM, in minutes',
+                    cap_worst_case_minutes='Configured cap times 125 plus 30 minutes', cap_minutes='Configured agent cap',
+                    missing_task_ids='Header task IDs absent from task rows', done_present='Journal contains _done', stopped='Journal stop reasons'),
+                tasks=tasks, gate=gate, n_complete_no_error=complete,
+                phase1_seconds=phase1, setup_seconds=setup, finalization_max_seconds=finalization['max'],
+                fallback_count=sum(setup_evidence(c) for r in rows for c in r.get('setup_calls', [])),
+                tasks_with_retrying_lines=sum(any(c.get('retrying_lines', 0) > 0 or
+                    any(s.get('retrying_lines', 0) > 0 for s in c.get('subprocesses', []))
+                    for c in r.get('setup_calls', [])) for r in rows),
+                fallback_patch_count=sum(bool(r.get('fallback_patch_used')) for r in rows),
+                timeout_fired_count=sum(bool(r.get('agent_timeout_fired')) for r in rows),
+                n=len(rows), vllm_startup_seconds=startup,
+                total_seconds=totals, test_run_share=shares, test_runs_per_task=runs,
+                empty_patch_count=sum(bool(r.get('empty_patch', True)) for r in rows),
+                test_files_edited_count=sum(bool(r.get('test_files_edited', [])) for r in rows),
+                stray_files_count=sum(bool(r.get('stray_files', [])) for r in rows),
+                test_files_edited_files=sum(len(r.get('test_files_edited', [])) for r in rows),
+                stray_files_files=sum(len(r.get('stray_files', [])) for r in rows),
+                decision='PASS' if timing_minutes is not None and cap_minutes is not None and timing_minutes <= 660 and cap_minutes <= 660 else 'FAIL',
+                projected_minutes=timing_minutes, cap_worst_case_minutes=cap_minutes,
+                cap_minutes=cap, missing_task_ids=[iid for iid in header['task_ids'] if iid not in ids],
+                done_present=done is not None, stopped=stopped)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('timing_jsonl', type=Path)
+    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--gate-max-phase1', type=float, default=296)
+    parser.add_argument('--gate-mean-phase1', type=float, default=270)
+    parser.add_argument('--gate-vllm-seconds', type=float, default=600)
+    parser.add_argument('--gate-min-nonempty', type=int, default=1)
+    args = parser.parse_args()
+    summary = summarize(args.timing_jsonl, gate_max_phase1=args.gate_max_phase1,
+                        gate_mean_phase1=args.gate_mean_phase1,
+                        gate_vllm_seconds=args.gate_vllm_seconds,
+                        gate_min_nonempty=args.gate_min_nonempty)
+    args.output.write_text(json.dumps(summary, indent=2, allow_nan=False) + '\n')
+    print(json.dumps(summary, indent=2, allow_nan=False))
+
+
+if __name__ == '__main__':
+    main()
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/tests/test_agent_timing.py')
+s=p.read_text().replace('def test_skip_verification_result_and_task_row(tmp_path, monkeypatch):', \"@pytest.mark.parametrize('failure', [None, 'runner', 'setup', 'cleanup'])\\ndef test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure):\")
+s=s.replace(\"    async def sandbox(*a, **kw):\\n        return 'sid'\", \"    async def sandbox(*a, **kw):\\n        if failure == 'setup':\\n            raise RuntimeError('container setup failed')\\n        return 'sid'\")
+s=s.replace(\"            self.docker = Entry(start=lambda: None, cleanup_all=lambda: None)\", \"            def cleanup():\\n                if failure == 'cleanup':\\n                    raise RuntimeError('cleanup failed')\\n            self.docker = Entry(start=lambda: None, cleanup_all=cleanup)\")
+s=s.replace(\"            sid = await ar.sandbox_start(self.docker)\\n            async with\", \"            if failure == 'runner':\\n                raise RuntimeError('runner failed')\\n            sid = await ar.sandbox_start(self.docker)\\n            async with\")
+s=s.replace(\"    assert row['verification_skipped'] is True and row['error'] is None\\n    assert row['resolved'] is False and row['exit_code'] is None\\n    assert row['fallback_patch_used'] is True\", \"    assert row['verification_skipped'] is True\\n    assert (row['error'] is not None) is bool(failure)\\n    assert row['resolved'] is False and row['exit_code'] is None\\n    assert row['fallback_patch_used'] is (failure not in ('runner', 'setup'))\\n    assert row['phase1_source'] == ('run_agent_sandbox' if failure in ('runner', 'setup') else 'sandbox_wrappers')\")
+s=s.replace(\"    ('phase1_wall_seconds', 296.00001, 'b_max_phase1'),\", \"    ('phase1_wall_seconds', 296.00001, 'b_max_phase1'),\\n    ('phase1_wall_seconds', 270.00001, 'c_mean_phase1'),\\n    ('setup_failed', True, 'a_all_tasks_complete_no_harness_error'),\")
+p.write_text(s)
+PY
+cat >> eval/tests/test_agent_timing.py <<'PY'
+
+
+@pytest.mark.parametrize('error', [TimeoutError('exit timeout'), ValueError('exit other')])
+def test_proxy_exit_exception_without_expired_is_unchanged(error):
+    import asyncio
+    from contextvars import ContextVar
+    state = ContextVar('exit_error')
+    state.set({})
+    class CM:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *exc):
+            raise error
+    proxy = timing.AsyncioTimingProxy(Entry(timeout=lambda **kw: CM()), state)
+    async def run():
+        async with proxy.timeout(delay=4):
+            pass
+    with pytest.raises(type(error)) as caught:
+        asyncio.run(run())
+    assert caught.value is error
+    assert state.get()['agent_timeout_fired'] is isinstance(error, TimeoutError)
+    assert state.get()['agent_timeout_seconds'] == 4
+
+
+def test_summary_incomplete_row_is_retained_and_fails_gate(tmp_path):
+    path = tmp_path / 'journal'
+    path.write_text('\\n'.join(json.dumps(row) for row in [
+        dict(_schema='kaggle_timing_v1', task_ids=['broken'], vllm_startup_seconds=500),
+        dict(instance_id='broken', wall_seconds=dict(total=5), error='Row build exception')]))
+    result = summary.summarize(path)
+    assert result['n'] == 1 and result['n_complete_no_error'] == 0
+    assert result['tasks'][0]['instance_id'] == 'broken'
+    assert result['gate']['status'] == 'FAIL'
+PY
+PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages /home/ubuntu/gemma-local/venv/bin/python -m pytest eval/tests/test_agent_timing.py eval/tests/test_setup_check.py -q" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix5
+ succeeded in 836ms:
+........................................................................ [ 96%]
+...                                                                      [100%]
+75 passed in 0.73s
+
+exec
+/bin/bash -lc "sed -n '1,35p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/models/task.py; rg -n 'class TaskResult|validate_assignment|def error|error_message|resolved|duration_seconds' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models*.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/*.py" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix5
+ exited 2 in 0ms:
+"""Task data models and parsers for SWE-bench evaluation."""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from adk_eval_core.models.base import BaseTaskResult
+from adk_eval_core.runner import EvaluationResult as _BaseEvaluationResult
+from pydantic import ConfigDict, Field
+
+
+def _unquote_git_path(raw: str) -> str:
+    """Unquotes a git diff file path and strips leading a/ or b/ prefixes."""
+    s = raw.strip()
+    if not s:
+        return ''
+    if s.startswith('"'):
+        end = 1
+        while end < len(s):
+            if s[end] == '"' and s[end - 1] != '\\':
+                break
+            end += 1
+        s = s[1:end].encode('utf-8').decode('unicode_escape')
+    else:
+        s = s.split('\t', 1)[0].strip()
+    if s.startswith(('a/', 'b/')):
+        s = s[2:]
+    return s.strip()
+
+
+def _normalize_test_nodes(val: Any) -> tuple[str, ...]:
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models*.py: No such file or directory (os error 2)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:73:    resolved: bool = Field(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:75:        description="Whether the task was successfully resolved according to benchmark criteria.",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:82:    duration_seconds: float = Field(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:85:        validation_alias=AliasChoices("duration_seconds", "wall_time_seconds"),
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:105:    error_message: str | None = Field(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:107:        validation_alias=AliasChoices("error_message", "error"),
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:139:    @field_validator("duration_seconds", "cost_usd", mode="before")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:172:    def error(self) -> str | None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:174:        return self.error_message
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:177:    def error(self, val: str | None) -> None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:178:        self.error_message = val
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:192:        return self.duration_seconds
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:196:        self.duration_seconds = val
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:253:    resolved_tasks: int = Field(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:256:        description="Total number of successfully resolved tasks.",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:262:        description="Fraction of resolved tasks (resolved / total).",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:269:    total_duration_seconds: float = Field(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:287:        resolved = sum(1 for r in results if r.resolved)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:288:        accuracy = (resolved / total) if total > 0 else 0.0
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:290:        total_duration = sum(getattr(r, "duration_seconds", 0.0) or 0.0 for r in results)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:294:            resolved_tasks=resolved,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:297:            total_duration_seconds=total_duration,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:306:            "resolved": self.resolved_tasks,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py:309:            "duration_seconds": self.total_duration_seconds,
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+Path('/tmp/timing-instrumentation-ids.txt').write_text('offline-task-1\\noffline-task-2\\n')
+PY
+bash eval/kaggle/timing_push.sh --dry-run x/y bundles/e4b/v001 /tmp/timing-instrumentation-ids.txt" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix5
+ succeeded in 0ms:
+{
+  "id": "x/y",
+  "title": "y",
+  "code_file": "agent_timing.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": false,
+  "dataset_sources": [
+    "metric/gemma-4-developer-agent-wheelhouse"
+  ],
+  "competition_sources": [
+    "gemma-4-developer-agent"
+  ],
+  "model_sources": [
+    "google/gemma-4/Other/gemma-4-e4b-it-qat-w4a16-ct/2"
+  ],
+  "kernel_sources": [],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461"
+}
+Generated script: 64267 bytes; stage: /tmp/timing-kernel-push.D2HwGt
+Metadata assumption (offline): model_sources uses google/gemma-4/Other/<model>/2 (starter casing); docker_image pinned to starter
+Dry run: no push. Staged: /tmp/timing-kernel-push.D2HwGt
+
+exec
+/bin/bash -lc "sed -n '50,74p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/models/base.py; /home/ubuntu/gemma-local/venv/bin/python -c \"from pathlib import Path; compile(Path('/tmp/timing-kernel-push.D2HwGt/agent_timing.py').read_text(), 'agent_timing.py', 'exec'); print('generated kernel compile: PASS')\"; git diff --check; git status --short" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix5
+ succeeded in 0ms:
+        super().__init__(**data)
+
+    @property
+    def instance_id(self) -> str:
+        """Backwards-compatibility alias for SWE-bench task identifier."""
+        return self.task_id
+
+    @property
+    def problem_id(self) -> str:
+        """Backwards-compatibility alias for Kaggle problem identifier."""
+        return self.task_id
+
+
+class BaseTaskResult(BaseModel):
+    """Standard base model for single-task evaluation outcomes across all benchmarks."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="allow", arbitrary_types_allowed=True)
+
+    task_id: str = Field(
+        ...,
+        validation_alias=AliasChoices("task_id", "instance_id", "problem_id"),
+        description="Unique task identifier.",
+    )
+    resolved: bool = Field(
+        default=False,
+generated kernel compile: PASS
+ M eval/kaggle/agent_timing.py
+ M eval/kaggle/timing_push.sh
+ M eval/kaggle/timing_summary.py
+ M eval/tests/test_agent_timing.py
+
+codex
+All 75 tests pass, and a dry run using synthetic task IDs generates a kernel that compiles. The exact acceptance command fails because `eval/plans/004-gpu-retime-ids.txt` is absent from this checkout. I’ve left that plan input untouched and verified generation with a temporary fixture; no Kaggle call was made.
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/tests/test_agent_timing.py')
+s=p.read_text().replace(\"@pytest.mark.parametrize('failure', [None, 'runner', 'setup', 'cleanup'])\\ndef test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure):\", \"@pytest.mark.parametrize('failure', [None, 'runner', 'setup', 'cleanup'])\\n@pytest.mark.parametrize('skip', [True, False])\\ndef test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, skip):\")
+s=s.replace(\"    async def forbidden(*a, **kw):\\n        pytest.fail('real verification must not run')\\n    ev.verify_task = forbidden\", \"    verification_calls = []\\n    async def original_verify(*a, **kw):\\n        assert not skip, 'real verification must not run when skipped'\\n        verification_calls.append((a, kw))\\n        result = await timing.skip_verification(*a, **kw)\\n        result.resolved, result.test_exit_code = True, 0\\n        return result\\n    ev.verify_task = original_verify\")
+s=s.replace(\"    monkeypatch.setattr(timing, 'SKIP_VERIFICATION', True)\\n    monkeypatch.setattr(timing, 'patch_subprocess_deps'\", \"    monkeypatch.setattr(timing, 'SKIP_VERIFICATION', skip)\\n    monkeypatch.setattr(timing, 'patch_subprocess_deps'\")
+s=s.replace(\"    assert row['verification_skipped'] is True\\n    assert (row['error'] is not None) is bool(failure)\\n    assert row['resolved'] is False and row['exit_code'] is None\", \"    assert row['verification_skipped'] is skip\\n    assert (row['error'] is not None) is bool(failure)\\n    verified = not skip and failure not in ('runner', 'setup')\\n    assert row['resolved'] is verified\\n    assert row['exit_code'] == (0 if verified else None)\\n    assert len(verification_calls) == int(verified)\")
+s=s.replace(\"    assert seen[0][2] == 0\\n    assert ev.verify_task is forbidden\", \"    assert seen[0][2] == (0 if skip else 300)\\n    assert ev.verify_task is original_verify\")
+p.write_text(s)
+PY
+cat >> eval/tests/test_agent_timing.py <<'PY'
+
+
+def test_kernel_header_contains_vllm_startup(tmp_path, monkeypatch):
+    import io
+    import sys
+    import tarfile
+    from types import ModuleType
+    bundle_stream = io.BytesIO()
+    with tarfile.open(fileobj=bundle_stream, mode='w:gz') as archive:
+        payload = b'model: gemma-4-e4b-it-qat-w4a16-ct\\n'
+        info = tarfile.TarInfo('agent.yaml')
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    monkeypatch.setattr(timing, 'BUNDLE_B64', base64.b64encode(bundle_stream.getvalue()).decode())
+    monkeypatch.setattr(timing, 'WORK', tmp_path)
+    monkeypatch.setattr(timing, 'BUNDLE', tmp_path / 'bundle')
+    monkeypatch.setattr(timing, 'install', lambda: None)
+    for name in ('mcp', 'torch', 'yaml', 'litellm', 'google', 'google.adk',
+                 'google.adk.agents', 'google.adk.agents.context_cache_config',
+                 'google.adk.apps', 'google.adk.apps._configs', 'swegemma', 'swegemma.config'):
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    torch = sys.modules['torch']
+    torch.cuda = Entry(device_count=lambda: 4, get_device_name=lambda i: 'L4')
+    sys.modules['google.adk.agents.context_cache_config'].ContextCacheConfig = lambda **kw: kw
+    sys.modules['google.adk.apps._configs'].EventsCompactionConfig = lambda **kw: kw
+    sys.modules['swegemma.config'].EvalConfig = lambda **kw: kw
+    sys.modules['swegemma.config'].build_submission_limits = lambda: (None, None)
+    server = Entry(create_model_registry=lambda **kw: {}, stop=lambda: None)
+    monkeypatch.setattr(timing, 'start_server', lambda holder: (server, None, 'model', 345.6))
+    async def evaluate(*args):
+        pass
+    monkeypatch.setattr(timing, 'evaluate', evaluate)
+    timing.main()
+    rows = [json.loads(line) for line in (tmp_path / 'timing.jsonl').read_text().splitlines()]
+    assert rows[0]['vllm_startup_seconds'] == 345.6
+    assert rows[1]['_vllm']['startup_seconds'] == 345.6
+    assert rows[-1]['_done']['startup_seconds'] == 345.6
+    expected_fields = timing.phase1_fields({}, 0, 0, None, '').keys()
+    assert set(expected_fields) <= rows[0]['fields'].keys()
+PY
+PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages /home/ubuntu/gemma-local/venv/bin/python -m pytest eval/tests/test_agent_timing.py eval/tests/test_setup_check.py -q" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix5
+ succeeded in 922ms:
+........................................................................ [ 90%]
+........                                                                 [100%]
+80 passed in 0.82s
+
+exec
+/bin/bash -lc 'git diff --check && git diff --stat && git status --short' in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix5
+ succeeded in 0ms:
+ eval/kaggle/agent_timing.py     | 143 +++++++++++++++-
+ eval/kaggle/timing_push.sh      |  20 ++-
+ eval/kaggle/timing_summary.py   | 101 +++++++++--
+ eval/tests/test_agent_timing.py | 361 ++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 605 insertions(+), 20 deletions(-)
+ M eval/kaggle/agent_timing.py
+ M eval/kaggle/timing_push.sh
+ M eval/kaggle/timing_summary.py
+ M eval/tests/test_agent_timing.py
+
+codex
+Implemented timing hooks, verification skip with `--with-verification`, schema-headed per-task summaries, and configurable gates. Fidelity constraints preserved.
+
+Offline tests: **80 passed**. Synthetic-ID dry run and generated-kernel compilation passed. No Kaggle call or commit made.
+
+Open issues: the referenced decision file and `004-gpu-retime-ids.txt` are absent, so the exact acceptance dry run could not complete.
+
+Sandbox prevented nothing.
+tokens used
+83,172
