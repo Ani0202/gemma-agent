@@ -307,9 +307,10 @@ def worker(args):
                 import re as _re
                 _out = get('test_output', '') or ''
                 _pat = _re.compile(r'ModuleNotFoundError|ImportError|fixture .* not found|unrecognized arguments|PluginValidationError|INTERNALERROR|^E  |^ERROR|error:|Error:|passed|failed', _re.M)
-                row['diag'] = dict(err=(get('error_message', None) or get('error', None) or '')[:300],
-                                   lines=[l[:200] for l in _out.splitlines() if _pat.search(l)][:25],
-                                   tail=_out[-600:])
+                # Keep diagnostics categorical: error/output text can contain task source.
+                row['diag'] = dict(error_present=bool(get('error_message') or get('error')),
+                                   matching_line_count=sum(bool(_pat.search(l)) for l in _out.splitlines()),
+                                   output_bytes=len(_out.encode('utf-8')))
                 # Harness exception/error text can embed patches or task source. Never copy it.
                 row['error'] = ('Harness verification error' if get('error') else
                                 f'Phase 2 unresolved (exit_code={exit_code}; includes JUnit validation)')
