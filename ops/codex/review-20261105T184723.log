@@ -3174,3 +3174,612 @@ exec
 results/plan003_pip_fallback_repro.json
 results/plan003_kernel_setup_acceptance_r3local.json
 
+exec
+/bin/bash -lc "nl -ba eval/kaggle/agent_timing.py | sed -n '300,590p'" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+   300	
+   301	    def install(docker, container_id, repo='', *, fast_path=True, config=None):
+   302	        if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
+   303	            return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+   304	        current = state.get() if state is not None else dict(
+   305	            started=time.perf_counter(), setup_calls=[], setup_failed=False)
+   306	        fixed = os.environ.get('SETUP_FIX', '1') == '1'
+   307	        current['setup_fix'] = int(fixed)
+   308	        venv = docker.sandboxes[container_id]['venv']
+   309	        sp = next(iter(sorted(venv.glob('lib/python3*/site-packages'))))
+   310	        if not fixed:
+   311	            # Preserve the original injector's wheel selection and base tar exactly.
+   312	            def original_base():
+   313	                base, large, _modules, _requirements = cs._inspect_wheels_dir(wheels)
+   314	                if large:
+   315	                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+   316	                current['wheel_tags_chosen'] = [p.name for p in base]
+   317	                with tarfile.open(cs._build_unpacked_wheels_tar(
+   318	                        base, 'sp_base_local', '.swegemma_base_injected')) as tf:
+   319	                    tf.extractall(sp, filter='data')
+   320	            setup_step(current, 'base_tar_extraction', original_base)
+   321	        else:
+   322	            # A subprocess venv otherwise exposes every kernel package via _host_env.pth.
+   323	            # Only the scorer's image tools and public base wheels belong here.
+   324	            def isolate_venv():
+   325	                for pth in sp.glob('_host_env.pth'):
+   326	                    pth.unlink()
+   327	                cfg = venv / 'pyvenv.cfg'
+   328	                if cfg.exists():
+   329	                    cfg.write_text(cfg.read_text().replace(
+   330	                        'include-system-site-packages = true', 'include-system-site-packages = false'))
+   331	            setup_step(current, 'venv_fidelity', isolate_venv)
+   332	            pip_wheel = fallback_wheel(wheels, 'pip')
+   333	            def bootstrap_pip():
+   334	                if pip_wheel:
+   335	                    current['setup_calls'][-1]['source'] = str(pip_wheel)
+   336	                    import zipfile
+   337	                    with zipfile.ZipFile(pip_wheel) as zf:
+   338	                        zf.extractall(sp)
+   339	                else:
+   340	                    current['setup_calls'][-1]['source'] = copy_runtime_package('pip', sp)
+   341	                    if current['setup_calls'][-1]['source'] == 'missing':
+   342	                        raise RuntimeError('No offline pip source available')
+   343	                return docker.exec(container_id, 'python3 -m pip --version', timeout=30)
+   344	            result = setup_step(current, 'pip_bootstrap', bootstrap_pip)
+   345	            if result.exit_code != 0:
+   346	                raise RuntimeError('Sandbox pip bootstrap failed')
+   347	            probe = ("import sys,json;from pip._vendor.packaging.tags import sys_tags;"
+   348	                     "from pip._vendor.packaging.markers import default_environment;"
+   349	                     "print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()],"
+   350	                     "'environment':default_environment()}))")
+   351	            result = setup_step(current, 'interpreter_probe', lambda: docker.exec(
+   352	                container_id, 'python3 -c ' + shlex.quote(probe), timeout=30))
+   353	            if result.exit_code != 0:
+   354	                raise RuntimeError('Sandbox interpreter probe failed')
+   355	            identity = json.loads(result.stdout)
+   356	            current['interpreter_version'] = identity['version']
+   357	            selected = compatible_wheels(wheels, identity['tags'])
+   358	            # The image pins pytest-timeout, even if a newer wheel is present.
+   359	            selected.pop('pytest-timeout', None)
+   360	            for path in wheels.glob('pytest_timeout-2.1.0-*.whl'):
+   361	                if {str(t) for t in parse_wheel_filename(path.name)[3]} & set(identity['tags']):
+   362	                    selected['pytest-timeout'] = path
+   363	            current['wheel_tags_chosen'] = [p.name for p in selected.values()]
+   364	            def extract_base():
+   365	                missing = [n for n in SCORER_TOOLS if n not in selected and n not in ('pip', 'pytest-timeout')]
+   366	                if missing:
+   367	                    raise RuntimeError('Required compatible tools missing: ' + ', '.join(missing))
+   368	                base = [p for name, p in selected.items() if name not in BASE_SKIP]
+   369	                if any(p.stat().st_size >= cs._LARGE_WHEEL_THRESHOLD_BYTES for p in base):
+   370	                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+   371	                key = hashlib.sha256(json.dumps([(str(p.resolve()), p.stat().st_size,
+   372	                        p.stat().st_mtime_ns) for p in base]).encode()).hexdigest()[:24]
+   373	                with tarfile.open(cs._build_unpacked_wheels_tar(base, 'timing_' + key,
+   374	                                                              '.swegemma_base_injected')) as tf:
+   375	                    tf.extractall(sp, filter='data')
+   376	            setup_step(current, 'base_tar_extraction', extract_base)
+   377	            def timeout_source():
+   378	                source = selected.get('pytest-timeout')
+   379	                current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
+   380	                if current['setup_calls'][-1]['source'] == 'missing':
+   381	                    raise RuntimeError('No offline pytest-timeout 2.1.0 source available')
+   382	            setup_step(current, 'pytest_timeout_source', timeout_source)
+   383	            def install_tools():
+   384	                for path in selected.values():
+   385	                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+   386	                tools = ['/wheels/' + selected[n].name for n in SCORER_TOOLS
+   387	                         if n in selected and n != 'pip']
+   388	                return docker.exec(container_id,
+   389	                    'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
+   390	                    ' '.join(shlex.quote(n) for n in tools), timeout=60)
+   391	            result = setup_step(current, 'tool_install', install_tools)
+   392	            if result.exit_code != 0:
+   393	                raise RuntimeError('Offline scorer tool installation failed')
+   394	            def tool_deps():
+   395	                from importlib.metadata import distributions
+   396	                roots = [wheel_metadata(selected[n]) for n in SCORER_TOOLS if n in selected]
+   397	                roots.extend(d.metadata for d in distributions(path=[str(sp)])
+   398	                             if d.metadata['Name'].lower() in ('pip', 'pytest-timeout')
+   399	                             and d.metadata['Name'].lower() not in selected)
+   400	                def install_dependency(path):
+   401	                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+   402	                    return docker.exec(container_id,
+   403	                        'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
+   404	                        shlex.quote('/wheels/' + path.name), timeout=60)
+   405	                entries, missing = close_tool_dependencies(
+   406	                    roots, wheels, identity['tags'], identity['environment'], sp, install_dependency)
+   407	                current['setup_calls'][-1]['dependencies'] = entries
+   408	                current['missing_tool_deps'] = missing
+   409	            setup_step(current, 'tool_deps', tool_deps)
+   410	            setup_step(current, 'pip_check', lambda: docker.exec(
+   411	                container_id, 'python3 -m pip check', timeout=30), fatal=False)
+   412	        def run_setup():
+   413	            docker.copy_to(container_id, setup, '/tmp/setup.py')
+   414	            # All observer files are scratch files, never workspace patch inputs.
+   415	            observer = docker.sandboxes[container_id]['tmp'] / 'setup_observer.py'
+   416	            observer.write_text(SETUP_OBSERVER)
+   417	            return docker.exec(container_id, setup_command(repo, fast_path), timeout=280)
+   418	        try:
+   419	            setup_step(current, 'setup.py', run_setup)
+   420	        finally:
+   421	            log = docker.sandboxes[container_id]['tmp'] / 'setup_subprocesses.json'
+   422	            calls = json.loads(log.read_text()) if log.exists() else []
+   423	            current['setup_subprocesses'] = calls
+   424	            setup_row = next(c for c in reversed(current['setup_calls']) if c['step'] == 'setup.py')
+   425	            setup_row['subprocesses'] = calls
+   426	            setup_row['retrying_lines'] += sum(c['retrying_lines'] for c in calls)
+   427	            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+   428	            editable = [c for c in calls if isinstance(c['argv'], list) and '-e' in c['argv']]
+   429	            current['editable_rc'] = editable[0]['rc'] if editable else None
+   430	            current['editable_final_rc'] = editable[-1]['rc'] if editable else None
+   431	            if calls:
+   432	                current['interpreter_version'] = calls[0]['interpreter_version']
+   433	            else:
+   434	                current.setdefault('interpreter_version', None)
+   435	        return current
+   436	    install._timing_original = orig
+   437	    for name, module in list(sys.modules.items()):
+   438	        if name.startswith('swegemma.') and hasattr(module, 'install_test_dependencies'):
+   439	            module.install_test_dependencies = install
+   440	    return install
+   441	
+   442	def classify_patch(patch, repo, protected=None, test_targets=()):
+   443	    """Parse file headers outside hunks, including quoted paths and renames."""
+   444	    files, new = set(), set()
+   445	    current, added, in_hunk = set(), False, False
+   446	    def path_value(raw):
+   447	        raw = raw.split('\t', 1)[0]
+   448	        value = json.loads(raw) if raw.startswith('"') else raw
+   449	        return value[2:] if value.startswith(('a/', 'b/')) else value
+   450	    for line in patch.splitlines() + ['diff --git ']:
+   451	        if line.startswith('diff --git '):
+   452	            files.update(current)
+   453	            if added:
+   454	                new.update(current)
+   455	            current, added, in_hunk = set(), False, False
+   456	            match = re.match(r'^diff --git ("a/.*?"|a/.*?) ("b/.*?"|b/.*)$', line)
+   457	            if match:
+   458	                current.update(path_value(p) for p in match.groups())
+   459	        elif line.startswith('@@'):
+   460	            in_hunk = True
+   461	        elif not in_hunk:
+   462	            if line.startswith(('--- ', '+++ ')):
+   463	                p = path_value(line[4:])
+   464	                if p != '/dev/null':
+   465	                    current.add(p)
+   466	                elif line.startswith('--- '):
+   467	                    added = True
+   468	            elif line.startswith('new file mode '):
+   469	                added = True
+   470	            elif line.startswith(('rename from ', 'rename to ')):
+   471	                current.add(path_value(line.split(' ', 2)[2]))
+   472	    if protected is None:
+   473	        protected = lambda p: bool(re.search(r'(^|/)(tests?/|test_[^/]*\.py$|conftest\.py$)|_test\.py$', p))
+   474	    tests = sorted(p for p in files if protected(p) or p in test_targets)
+   475	    package = repo.split('/')[-1].replace('-', '_').lower()
+   476	    source_roots = (package + '/', 'src/' + package + '/')
+   477	    stray = sorted(p for p in new if not (p.endswith('.py') and p.lower().startswith(source_roots)
+   478	                                         and p not in tests))
+   479	    return dict(patch_bytes=len(patch.encode()), patch_files=sorted(files),
+   480	                test_files_edited=tests, stray_files=stray, empty_patch=not patch.strip())
+   481	
+   482	def trace_counts(trace):
+   483	    entries = trace.entries if trace else []
+   484	    counts = Counter(e.tool_name for e in entries if e.event_type == 'tool_call')
+   485	    tokens = {}
+   486	    for key in ('prompt_tokens', 'completion_tokens'):
+   487	        values = [e.usage[key] for e in entries if e.usage and isinstance(e.usage.get(key), (int, float))]
+   488	        tokens[key] = sum(values) if values else None
+   489	    return dict(counts), tokens, tool_seconds(entries)
+   490	
+   491	def tool_seconds(entries):
+   492	    """Per tool name: wall seconds from each tool_call to its tool_response (FIFO per name)."""
+   493	    pending, out = {}, {}
+   494	    for e in entries:
+   495	        if e.event_type == 'tool_call':
+   496	            pending.setdefault(e.tool_name, []).append(e.timestamp)
+   497	        elif e.event_type == 'tool_response' and pending.get(e.tool_name):
+   498	            stat = out.setdefault(e.tool_name, dict(n=0, total=0.0, max=0.0))
+   499	            dt = max(0.0, e.timestamp - pending[e.tool_name].pop(0))
+   500	            stat['n'] += 1
+   501	            stat['total'] = round(stat['total'] + dt, 3)
+   502	            stat['max'] = round(max(stat['max'], dt), 3)
+   503	    return out
+   504	
+   505	def observe_patch_strip(original, state):
+   506	    """Retain the agent's diff before the harness removes protected edits."""
+   507	    def strip(patch, *pos, **kw):
+   508	        current = state.get(None)
+   509	        filtered = original(patch, *pos, **kw)
+   510	        if current is not None and current.get('agent_active'):
+   511	            if patch != current.get('filtered_patch'):
+   512	                current['raw_patch'] = patch
+   513	            current['filtered_patch'] = filtered
+   514	        return filtered
+   515	    return strip
+   516	
+   517	def test_run_stats(trace, agent_seconds):
+   518	    pending, n, total = {}, 0, 0.0
+   519	    for e in trace.entries if trace else []:
+   520	        if e.event_type == 'tool_call':
+   521	            command = (e.tool_args or {}).get('command', '')
+   522	            is_test = e.tool_name == 'run_command' and any(s in command for s in ('pytest', 'unittest', 'tox', 'nox', 'run_tests'))
+   523	            n += int(is_test)
+   524	            pending.setdefault(e.tool_name, []).append((e.timestamp, is_test))
+   525	        elif e.event_type == 'tool_response' and pending.get(e.tool_name):
+   526	            start, is_test = pending[e.tool_name].pop(0)
+   527	            if is_test:
+   528	                total += max(0.0, e.timestamp - start)
+   529	    return dict(n=n, total_seconds=total, share_of_agent_seconds=total / agent_seconds if agent_seconds else None)
+   530	
+   531	def should_stop(elapsed, cap_minutes, verification_timeout, observed_max, budget):
+   532	    return elapsed + 1.5 * max(cap_minutes * 60 + verification_timeout, observed_max) > budget
+   533	
+   534	def distribution(values):
+   535	    values = sorted(values)
+   536	    def percentile(q):
+   537	        x = (len(values) - 1) * q
+   538	        lo = int(x)
+   539	        return values[lo] + (values[min(lo + 1, len(values)-1)] - values[lo]) * (x-lo)
+   540	    return dict(mean=sum(values)/len(values), p50=percentile(.5), p90=percentile(.9), max=max(values)) if values else dict.fromkeys(('mean', 'p50', 'p90', 'max'))
+   541	
+   542	def extract_bundle(encoded, destination):
+   543	    payload = base64.b64decode(encoded, validate=True)
+   544	    destination.mkdir(parents=True, exist_ok=True)
+   545	    with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as tf:
+   546	        tf.extractall(destination, filter='data')
+   547	    return hashlib.sha256(payload).hexdigest(), hashlib.sha256((destination / 'agent.yaml').read_bytes()).hexdigest()
+   548	
+   549	def append(stream, row):
+   550	    stream.write(json.dumps(row, allow_nan=False) + '\n')
+   551	    stream.flush(); os.fsync(stream.fileno())
+   552	
+   553	async def evaluate(config, journal, started, caps, totals):
+   554	    from contextvars import ContextVar
+   555	    from swegemma.evaluate import Evaluator
+   556	    from swegemma.models import load_tasks
+   557	    from swegemma.harness.verification import _is_protected_test_or_config_path
+   558	    import swegemma.evaluate as ev
+   559	    import swegemma.harness.verification as vf
+   560	    state = ContextVar('timing')
+   561	    original_verify, original_strip = ev.verify_task, vf.strip_protected_files_from_patch
+   562	    vf.strip_protected_files_from_patch = observe_patch_strip(original_strip, state)
+   563	    async def verify(*args, **kwargs):
+   564	        start = time.perf_counter()
+   565	        try:
+   566	            return await original_verify(*args, **kwargs)
+   567	        finally:
+   568	            state.get()['verification'] = time.perf_counter() - start
+   569	    ev.verify_task = verify
+   570	    class TimingEvaluator(Evaluator):
+   571	        agent_seconds, patch, trace, agent_error = 0.0, '', None, ''
+   572	        def _hydrate_task_from_secret(self, task):
+   573	            return task
+   574	        def _get_secret_bundle_data(self):
+   575	            return {}, {}, None
+   576	        async def _run_agent_sandbox(self, task, *args, **kwargs):
+   577	            safe = dataclasses.replace(task, patch='', test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=())
+   578	            self.context = kwargs['context']
+   579	            self.context.task = safe
+   580	            start = time.perf_counter()
+   581	            state.get()['agent_active'] = True
+   582	            try:
+   583	                self.patch, self.agent_error, self.trace = await super()._run_agent_sandbox(safe, *args, **kwargs)
+   584	                return self.patch, self.agent_error, self.trace
+   585	            finally:
+   586	                self.agent_seconds = time.perf_counter() - start
+   587	                state.get()['agent_active'] = False
+   588	    try:
+   589	        inventory = {t.instance_id: t for t in load_tasks(config.tasks_path)}
+   590	        if len(set(TASK_IDS)) != len(TASK_IDS) or set(TASK_IDS) - inventory.keys():
+
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py | sed -n '1,310p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	"""Container preparation utilities for SWE-bench sandbox and evaluation environments."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import logging
+     6	import os
+     7	import shlex
+     8	import threading
+     9	from pathlib import Path
+    10	
+    11	from swegemma.config import EvalConfig
+    12	from swegemma.sandbox import BaseSandboxManager
+    13	
+    14	logger = logging.getLogger(__name__)
+    15	
+    16	
+    17	class ContainerSetupError(RuntimeError):
+    18	    """Raised when container setup fails (snapshot, baseline patch, or setup.py)."""
+    19	
+    20	
+    21	def resolve_sandbox_setup_script(config: EvalConfig | None = None) -> Path | None:
+    22	    """Locates the sandbox setup.py script from task configuration or standard paths."""
+    23	    candidates: list[Path] = []
+    24	    env_sandbox = os.environ.get('KAGGLE_SANDBOX_DIR', '')
+    25	    if env_sandbox:
+    26	        candidates.append(Path(env_sandbox) / 'setup.py')
+    27	        candidates.append(Path(env_sandbox) / 'sandbox' / 'setup.py')
+    28	    if config:
+    29	        if config.tasks_path:
+    30	            candidates.append(config.tasks_path.parent / 'sandbox' / 'setup.py')
+    31	            candidates.append(config.tasks_path.parent / 'setup.py')
+    32	        if config.snapshots_dir:
+    33	            candidates.append(config.snapshots_dir.parent / 'sandbox' / 'setup.py')
+    34	            candidates.append(config.snapshots_dir.parent / 'setup.py')
+    35	        if config.submission_dir:
+    36	            candidates.append(config.submission_dir / 'setup.py')
+    37	            candidates.append(config.submission_dir / 'sandbox' / 'setup.py')
+    38	
+    39	    candidates.extend([
+    40	        Path(
+    41	            '/kaggle/input/datasets/metric/gemma-4-developer-agent-metric-data/sandbox/setup.py'
+    42	        ),
+    43	        Path('/kaggle/input/gemma-4-developer-agent-metric-data/sandbox/setup.py'),
+    44	        Path('/kaggle/input/competition-data/sandbox/setup.py'),
+    45	        Path('/kaggle/input/competition-data/rerun/sandbox/setup.py'),
+    46	        Path('/kaggle/input/competition-data/secret/sandbox/setup.py'),
+    47	        Path('data/competition_data/secret/sandbox/setup.py'),
+    48	        Path('competition_data/rerun/sandbox/setup.py'),
+    49	        Path('/sandbox/setup.py'),
+    50	    ])
+    51	
+    52	    for cand in candidates:
+    53	        if cand.exists() and cand.is_file():
+    54	            return cand
+    55	    return None
+    56	
+    57	
+    58	INSTALL_DEPS_SCRIPT = resolve_sandbox_setup_script()
+    59	
+    60	
+    61	def resolve_wheels_dir(config: EvalConfig | None = None) -> Path | None:
+    62	    """Finds the local wheels directory containing task dependencies."""
+    63	    if config and config.wheels_dir and config.wheels_dir.exists():
+    64	        return config.wheels_dir
+    65	    candidates = [
+    66	        config.tasks_path.parent / 'wheels' if (config and config.tasks_path) else None,
+    67	        config.tasks_path.parent / 'sandbox' / 'wheels'
+    68	        if (config and config.tasks_path)
+    69	        else None,
+    70	        config.snapshots_dir.parent / 'wheels'
+    71	        if (config and config.snapshots_dir)
+    72	        else None,
+    73	        Path(
+    74	            '/kaggle/input/datasets/metric/gemma-4-developer-agent-metric-data/sandbox/wheels'
+    75	        ),
+    76	        Path('/kaggle/input/gemma-4-developer-agent-metric-data/sandbox/wheels'),
+    77	        Path('/kaggle/input/competition-data/wheels'),
+    78	        Path('data/competition_data/secret/sandbox/wheels'),
+    79	        Path('wheels'),
+    80	        Path('/wheels'),
+    81	        Path('/tmp/wheels'),
+    82	    ]
+    83	    for cand in candidates:
+    84	        if cand and cand.is_dir() and any(f.endswith('.whl') for f in os.listdir(cand)):
+    85	            return cand
+    86	    return None
+    87	
+    88	
+    89	def _is_wheel_compatible_py313(filename: str) -> bool:
+    90	    """Checks if a wheel filename is compatible with CPython 3.13 on Linux x86_64 under PEP 427."""
+    91	    base = os.path.basename(filename)
+    92	    if not base.endswith('.whl'):
+    93	        return False
+    94	    parts = base[:-4].split('-')
+    95	    if len(parts) < 5:
+    96	        return False
+    97	    py_tag = parts[-3]
+    98	    abi_tag = parts[-2]
+    99	    if (
+   100	        abi_tag in ('cp38', 'cp39', 'cp310', 'cp311', 'cp312')
+   101	        and py_tag in ('cp38', 'cp39', 'cp310', 'cp311', 'cp312')
+   102	    ):
+   103	        return False
+   104	    return abi_tag == 'none' or 'abi3' in abi_tag or 'cp313' in py_tag
+   105	
+   106	
+   107	def _deduplicate_wheels(wheel_files: list[str]) -> list[Path]:
+   108	    """Deduplicates compatible wheels to the highest version per normalized distribution name."""
+   109	    import re
+   110	
+   111	    from packaging.version import parse as parse_version
+   112	
+   113	    latest: dict[str, tuple[object, Path]] = {}
+   114	    for w_str in wheel_files:
+   115	        if not _is_wheel_compatible_py313(w_str):
+   116	            continue
+   117	        p = Path(w_str)
+   118	        parts = p.name[:-4].split('-')
+   119	        pkg_norm = re.sub(r'[-_.]+', '_', parts[0]).lower()
+   120	        try:
+   121	            ver: object = parse_version(parts[1])
+   122	        except Exception:
+   123	            ver = parts[1]
+   124	        prev = latest.get(pkg_norm)
+   125	        if prev is None:
+   126	            latest[pkg_norm] = (ver, p)
+   127	        else:
+   128	            try:
+   129	                if ver > prev[0]:  # type: ignore[operator]
+   130	                    latest[pkg_norm] = (ver, p)
+   131	            except TypeError:
+   132	                if str(ver) > str(prev[0]):
+   133	                    latest[pkg_norm] = (ver, p)
+   134	    return [item[1] for _, item in sorted(latest.items())]
+   135	
+   136	
+   137	_LARGE_WHEEL_THRESHOLD_BYTES: int = 20 * 1024 * 1024
+   138	_WHEEL_INDEX_CACHE: dict[
+   139	    str,
+   140	    tuple[list[Path], dict[str, Path], dict[str, set[str]], dict[str, set[str]]],
+   141	] = {}
+   142	
+   143	
+   144	def _inspect_wheels_dir(
+   145	    wheels_dir: Path,
+   146	) -> tuple[list[Path], dict[str, Path], dict[str, set[str]], dict[str, set[str]]]:
+   147	    """Indexes wheels in wheels_dir into base (<16MB) and large (>=16MB) sets with module and dependency graphs."""
+   148	    import re
+   149	    import zipfile
+   150	
+   151	    key = str(wheels_dir.resolve())
+   152	    if key in _WHEEL_INDEX_CACHE:
+   153	        return _WHEEL_INDEX_CACHE[key]
+   154	
+   155	    skip_base_pkgs = {
+   156	        'pytest',
+   157	        'pytest_timeout',
+   158	        'pytest_asyncio',
+   159	        'pytest_httpbin',
+   160	        'pytest_xdist',
+   161	        'pluggy',
+   162	        'pip',
+   163	        'setuptools',
+   164	        'wheel',
+   165	    }
+   166	
+   167	    all_wheels = [
+   168	        str(wheels_dir / f) for f in os.listdir(wheels_dir) if f.endswith('.whl')
+   169	    ]
+   170	    deduped = _deduplicate_wheels(all_wheels)
+   171	
+   172	    base_wheels: list[Path] = []
+   173	    large_wheels: dict[str, Path] = {}
+   174	    module_to_pkg: dict[str, set[str]] = {}
+   175	    pkg_requires: dict[str, set[str]] = {}
+   176	
+   177	    for w_path in deduped:
+   178	        pkg_norm = re.sub(r'[-_.]+', '_', w_path.name.split('-', 1)[0]).lower()
+   179	        if pkg_norm in skip_base_pkgs:
+   180	            continue
+   181	        if w_path.stat().st_size < _LARGE_WHEEL_THRESHOLD_BYTES:
+   182	            base_wheels.append(w_path)
+   183	        else:
+   184	            large_wheels[pkg_norm] = w_path
+   185	
+   186	        module_to_pkg.setdefault(pkg_norm, set()).add(pkg_norm)
+   187	        try:
+   188	            with zipfile.ZipFile(w_path, 'r') as zf:
+   189	                names = zf.namelist()
+   190	                for n in names:
+   191	                    top = n.split('/', 1)[0]
+   192	                    if top.endswith('.dist-info') or top.endswith('.data'):
+   193	                        if n.endswith('/top_level.txt'):
+   194	                            tl_txt = zf.read(n).decode('utf-8', errors='ignore')
+   195	                            for line in tl_txt.splitlines():
+   196	                                mod = line.strip().split('/')[0].lower()
+   197	                                if mod:
+   198	                                    module_to_pkg.setdefault(mod, set()).add(pkg_norm)
+   199	                        elif n.endswith('/METADATA'):
+   200	                            meta_txt = zf.read(n).decode('utf-8', errors='ignore')
+   201	                            for line in meta_txt.splitlines():
+   202	                                if line.startswith('Requires-Dist:'):
+   203	                                    raw_dep = line.split(':', 1)[1].strip()
+   204	                                    if ';' in raw_dep and 'extra ==' in raw_dep:
+   205	                                        continue
+   206	                                    m_dep = re.match(r'^([a-zA-Z0-9_\-\.]+)', raw_dep)
+   207	                                    if m_dep:
+   208	                                        dep_norm = re.sub(
+   209	                                            r'[-_.]+', '_', m_dep.group(1)
+   210	                                        ).lower()
+   211	                                        pkg_requires.setdefault(pkg_norm, set()).add(
+   212	                                            dep_norm
+   213	                                        )
+   214	                    else:
+   215	                        mod_name = (
+   216	                            top[:-3].lower()
+   217	                            if top.endswith('.py')
+   218	                            else top.split('.')[0].lower()
+   219	                        )
+   220	                        if mod_name and not mod_name.startswith('_'):
+   221	                            module_to_pkg.setdefault(mod_name, set()).add(pkg_norm)
+   222	        except Exception:
+   223	            pass
+   224	
+   225	    res = (base_wheels, large_wheels, module_to_pkg, pkg_requires)
+   226	    _WHEEL_INDEX_CACHE[key] = res
+   227	    return res
+   228	
+   229	
+   230	_WHEELS_TAR_LOCK = threading.Lock()
+   231	
+   232	
+   233	def _build_unpacked_wheels_tar(
+   234	    selected_wheels: list[Path], cache_name: str, marker_name: str
+   235	) -> Path:
+   236	    """Unpacks selected_wheels into a cached uncompressed tar archive with a marker file."""
+   237	    import shutil
+   238	    import subprocess
+   239	    import tempfile
+   240	    import uuid
+   241	    import zipfile
+   242	    from concurrent.futures import ThreadPoolExecutor
+   243	
+   244	    cache_dir = Path(tempfile.gettempdir()) / 'swegemma_sp_cache_v8'
+   245	    cache_dir.mkdir(parents=True, exist_ok=True)
+   246	    tar_path = cache_dir / f'{cache_name}.tar'
+   247	    if tar_path.exists() and tar_path.stat().st_size > 0:
+   248	        return tar_path
+   249	
+   250	    with _WHEELS_TAR_LOCK:
+   251	        if tar_path.exists() and tar_path.stat().st_size > 0:
+   252	            return tar_path
+   253	
+   254	        uid = uuid.uuid4().hex[:8]
+   255	        staging_dir = cache_dir / f'staging_{cache_name}_{os.getpid()}_{uid}'
+   256	        if staging_dir.exists():
+   257	            shutil.rmtree(staging_dir, ignore_errors=True)
+   258	        staging_dir.mkdir(parents=True, exist_ok=True)
+   259	
+   260	        def _extract_one(w_path: Path) -> None:
+   261	            try:
+   262	                with zipfile.ZipFile(w_path, 'r') as zf:
+   263	                    members = [
+   264	                        m
+   265	                        for m in zf.infolist()
+   266	                        if not m.filename.endswith(('.pyc', '/RECORD'))
+   267	                    ]
+   268	                    zf.extractall(staging_dir, members=members)
+   269	            except Exception as e:
+   270	                logger.debug('Skipping wheel %s during staging: %s', w_path.name, e)
+   271	
+   272	        try:
+   273	            with ThreadPoolExecutor(max_workers=8) as pool:
+   274	                list(pool.map(_extract_one, selected_wheels))
+   275	
+   276	            for data_dir in list(staging_dir.glob('*.data')):
+   277	                for sub_name in ('purelib', 'platlib'):
+   278	                    sub_dir = data_dir / sub_name
+   279	                    if sub_dir.is_dir():
+   280	                        for item in sub_dir.iterdir():
+   281	                            dest = staging_dir / item.name
+   282	                            if not dest.exists():
+   283	                                shutil.move(str(item), str(dest))
+   284	                shutil.rmtree(data_dir, ignore_errors=True)
+   285	
+   286	            (staging_dir / marker_name).write_text('ok\n', encoding='utf-8')
+   287	
+   288	            tmp_tar = cache_dir / f'{cache_name}_{os.getpid()}_{uid}.tar.tmp'
+   289	            subprocess.run(
+   290	                ['tar', '-cf', str(tmp_tar), '-C', str(staging_dir), '.'],
+   291	                check=True,
+   292	            )
+   293	            tmp_tar.replace(tar_path)
+   294	        finally:
+   295	            shutil.rmtree(staging_dir, ignore_errors=True)
+   296	
+   297	    return tar_path
+   298	
+   299	
+   300	def _extract_tar_into_site_packages(
+   301	    docker: BaseSandboxManager, container_id: str, tar_path: Path
+   302	) -> None:
+   303	    """Streams or copies a tar archive and extracts it into /usr/local/lib/python3.13/site-packages."""
+   304	    sp_dir = '/usr/local/lib/python3.13/site-packages'
+   305	    stream_fn = getattr(docker, '_stream_tar_via_exec_socket', None)
+   306	    if callable(stream_fn):
+   307	        with open(tar_path, 'rb') as f:
+   308	            if stream_fn(container_id, f, sp_dir):
+   309	                return
+   310	    staged = f'/var/tmp/{tar_path.name}'
+

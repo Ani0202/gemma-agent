@@ -1,0 +1,4 @@
+- Changed `bin/memguard` to refresh recipients after all scans and require positive job provenance. Removed RSS/cwd admission and unused options. Preserved prior safety fixes and added regressions.
+- Tests: **77 passed, 1 skipped** offline; **78 passed** with `MEMGUARD_LIVE=1`. Diff check passed.
+- Ordinary `bin/job` workload wrappers remain killable after the intended 3-second grace. Memguard’s processes and wrappers remain protected.
+- Open issues: none. Sandbox/environment: used cached Python/pytest offline because system Python lacks pytest. No changes to `bin/job` or `ops/`; no commit created.
