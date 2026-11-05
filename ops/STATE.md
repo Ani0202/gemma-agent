@@ -20,8 +20,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - requests/httpx dropped (wheel shadowing = scorer property, dec 014). Gold v2 files in results/ (gold_calibration_*, gold_failure_causes).
 ## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
-- Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
-- Heavy jobs one at a time (waiters/memguard/codex exempt); bin/job hardened b1eedd7. codex-build branches from main HEAD.
+- Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 ## Running jobs (23:39Z): review-submit-guard5-light (FULL, v5), codex-probes-fix7 -> review-probes-fix7-light (queued; dec 047), memguard-light.
 - KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
   dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
@@ -76,5 +75,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
    fail-closed (csv exact header, field count, ISO date; any doubt refuses; all pages, or refuse if rows == page size; re-read UTC day
    AFTER the query, refuse if changed). FULL adversarial review of the whole guard. BLOCKING only in the pre-check -> drop the pre-check,
    re-review that removal = last round. Clean -> bin/send aniket "apply ops/patches/kaggle-submit-kernel-v5.diff" -> commit -> dry checks -> submit.
+   DEC 048: page-size assumption accepted (NON-BLOCKING); guard backlog ops/backlog-guard.md (ordering, repeat path) only in a needed change.
 2. DEC 047: gate (b) formula kept (conservative; report 010 leads with h1_composite). fix7 review clean -> merge stack -> host eval/tests -> push from codex/kernel-gate-finfix (cap 4.0, <= 4 quota-h, log ops/budget/kaggle.md) -> timing_summary --gate-mode stock-path -> report 010.
 3. After report 010: plan 005 (dec 022 item 4) + plan 007 (dec 039) = first quality levers; ops/patches cleanup (dec 045 item 4).

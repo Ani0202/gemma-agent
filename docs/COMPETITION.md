@@ -124,3 +124,4 @@ See docs/RULES_FINDINGS.md. Still [verify] (official pages unreadable by tooling
 - **M6** Small-model bonus: E2B/E4B, must be a final (Prizes page, host 751104). E4B validator acceptance RESOLVED (E4B entries score); intermittent "incorrect format" reports OPEN (752128) [participant].
 - **M7** LoRA: mixed participant reports (755677); validate on exact base first.
 - **Reference:** official small-model standings notebook: https://www.kaggle.com/code/ryanholbrook/gemma-4-developer-agent-small-model-leaderboard
+- **[verify]** (dec 048 item 4): when our server-side submission count first exceeds 20, record whether `kaggle competitions submissions -v --page-size 100` returned more than 20 rows (the guard's pre-check assumes the server honours page size).
