@@ -206,3 +206,6 @@
 2026-11-05T23:39:00Z | dec 047: gate (b) conservative formula ACCEPTED (G1 leads with h1_composite); fix7 scope approved; delta re-review queued (G1 over 8 expected ids) | ops/decisions/047-20261105T233613-16457-from-builder.md ops/codex/review-probes-fix7.sh
 2026-11-05T23:39:44Z | dec 048: page-size assumption NON-BLOCKING; guard backlog (ordering, repeat path) recorded; [verify] page-size line added | ops/decisions/048-20261105T233817-11602-from-builder.md ops/backlog-guard.md
 2026-11-05T23:44:24Z | guard v5 full review: 4 BLOCKING (3 core) -> v6 NEW file (no text classification, json ledger, exact auth, strptime dates, file branch removed); harness 37/37; review-submit-guard6-light | ops/codex/review-20261105T233800.md ops/patches/kaggle-submit-kernel-v6.diff
+2026-11-05T23:47:38Z | fix7 delta review CLEAN; stack merged to main 2db5f51 (ATTRIBUTION conflict kept both); main eval/tests 712p/4s; decision_note added to results/kaggle_timing_e4b_v001.json | ops/codex/review-20261105T233951.md results/kaggle_timing_e4b_v001.json
+2026-11-05T23:47:38Z | PLAN 006 PUSHED: aniket0202/gemma-31b-timing v1 (31b-v001-t4 cap 4.0, budget 6000); waiter timing-31b-wait-light | ops/budget/kaggle.md
+2026-11-05T23:47:38Z | guard v6 review CLEAN -> bin/send aniket "apply ops/patches/kaggle-submit-kernel-v6.diff"; Director mailed | ops/codex/review-20261105T234411.md

@@ -4,3 +4,4 @@
   to measure LB variance. Before the first repeat is proposed, design a Director-authorized repeat path (e.g. an AUTHORIZE field repeat=N
   that relaxes the sha-prefix and local single-use rules to "no row today" for that N) and get it reviewed.
 - Known limitation (dec 048 item 1, NON-BLOCKING): the pre-check assumes the server honours --page-size 100 (the CLI prints no next-page token).
+- (c) Duplicate JSON keys in a ledger line silently use the last value (v6 review NON-BLOCKING 1): reject duplicates via object_pairs_hook in the next guard change.

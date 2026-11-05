@@ -673,3 +673,841 @@ Phase 0. Get every bundle proposed for submission, and all eval or stats code, t
    119	grep -qv '^competitions submit mock-competition-not-real \|^competitions submissions mock-competition-not-real \|^kernels output mockowner/mock-kernel/' "$T/calls.log" && { echo "FAIL unexpected mock calls"; fail=1; } || true
    120	echo "mock calls: $(wc -l < "$T/calls.log")"; [ $fail = 0 ] && echo "ALL PASS" || { echo "SOME FAILED"; exit 1; }
 
+exec
+/bin/bash -lc 'cat ops/patches/kaggle-submit-kernel-v6.diff' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+--- a/bin/kaggle-submit
++++ b/bin/kaggle-submit
+@@ -1,31 +1,154 @@
+ #!/usr/bin/env bash
+-# Guarded Kaggle submission. Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>"
+-# Refuses unless: a Director decision contains "SUBMIT: AUTHORIZE sha256=<this zip's sha256> track=<track>",
+-# that authorization is unused, and no submission was made yet today (UTC).
++# Guarded Kaggle submission (code competition: submissions are a notebook version's /kaggle/working/submission.zip).
++# Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>" <kernel_version>
++# Refuses unless ALL hold (fail closed on any doubt; dec 041-048, reviews ops/codex/review-20261105T2316*-2338*.md):
++#  - a Director decision line, exactly "SUBMIT: AUTHORIZE sha256=<sha of the zip> track=<track>" optionally followed by
++#    " bundle=<this zip path>", exists in ops/decisions/*.md;
++#  - the local ledger ops/submissions.jsonl (every line parsed as JSON; any unreadable/malformed state refuses) has no
++#    record with this sha256 and none for today (UTC);
++#  - no ops/submissions.pending exists (left by any attempt without a "Submission ref"; a human removes it only after
++#    reconciling with `kaggle competitions submissions`);
++#  - the OUTPUT submission.zip of kernel version <kernel_version> of $SUBMIT_KERNEL is byte-identical to the zip and has
++#    exactly one regular root member named agent.yaml; size < 3 GiB;
++#  - defence in depth: Kaggle's own submission list shows nothing dated today and nothing carrying sha:<12 hex>.
++# One exclusive lock is held from the first check to the ledger write. Success is recorded only on "Submission ref: N".
+ set -euo pipefail
+ cd "$(dirname "$0")/.."
+ source ./config.env
+-zip=$1; track=$2; msg=${3:-"$track $(basename "$zip")"}
+-[ -f "$zip" ] || { echo "no such zip: $zip"; exit 1; }
++[ $# -eq 4 ] || { echo "usage: bin/kaggle-submit <zip> <31b|e4b> <message> <kernel_version>"; exit 1; }
++zip=$1; track=$2; msg=$3; kver=$4
++[ -f "$zip" ] && [ ! -L "$zip" ] || { echo "no such regular file: $zip"; exit 1; }
+ [[ "$track" =~ ^(31b|e4b)$ ]] || { echo "track must be 31b or e4b"; exit 1; }
++[ "${SUBMIT_MODE:-}" = kernel ] || { echo "REFUSED: SUBMIT_MODE must be kernel (file upload is not accepted by this competition)"; exit 3; }
++[[ "${SUBMIT_KERNEL:-}" =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]] || { echo "REFUSED: SUBMIT_KERNEL must be owner/slug"; exit 3; }
++[[ "$kver" =~ ^[1-9][0-9]*$ ]] || { echo "REFUSED: kernel version must be a positive integer"; exit 3; }
++exec 9>>ops/.submit.lock
++flock -n 9 || { echo "REFUSED: another bin/kaggle-submit is running"; exit 3; }
++[ ! -e ops/submissions.pending ] || { echo "REFUSED: ops/submissions.pending exists (earlier attempt without a Submission ref); reconcile with 'kaggle competitions submissions' first"; exit 3; }
+ sha=$(sha256sum "$zip" | cut -d' ' -f1)
+-auth=$(grep -l "^SUBMIT: AUTHORIZE sha256=$sha track=$track" ops/decisions/*.md 2>/dev/null | tail -1 || true)
+-[ -n "$auth" ] || { echo "REFUSED: no Director authorization for sha256=$sha track=$track"; exit 3; }
++[[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "REFUSED: cannot hash $zip"; exit 3; }
++auth=$(python3 -I - "$sha" "$track" "$zip" <<'PY'
++import glob, re, sys
++sha, track, zp = sys.argv[1:]
++line = re.compile(r"SUBMIT: AUTHORIZE sha256=([0-9a-f]{64}) track=(31b|e4b)(?: bundle=(\S+))?", re.ASCII)
++hits = []
++for f in sorted(glob.glob("ops/decisions/*.md")):
++    with open(f, encoding="utf-8") as fh:  # unreadable decision files raise -> refuse
++        for raw in fh.read().splitlines():
++            m = line.fullmatch(raw)
++            if m and m.group(1) == sha and m.group(2) == track and m.group(3) in (None, zp):
++                hits.append(f)
++if not hits:
++    sys.exit(1)
++print(hits[-1])
++PY
++) || { echo "REFUSED: no exact Director authorization for sha256=$sha track=$track"; exit 3; }
+ touch ops/submissions.jsonl
+-grep -q "\"sha256\": \"$sha\"" ops/submissions.jsonl && { echo "REFUSED: this zip was already submitted"; exit 3; }
++ledger_ok() {  # <day>: exit 0 only if the ledger is fully parseable and has no record for this sha or for <day>
++  python3 -I - "$sha" "$1" <<'PY'
++import json, sys
++sha, day = sys.argv[1:]
++with open("ops/submissions.jsonl", encoding="utf-8") as fh:
++    lines = fh.read().splitlines()
++for n, raw in enumerate(lines, 1):
++    try:
++        r = json.loads(raw)
++    except ValueError:
++        print("REFUSED: ops/submissions.jsonl line %d is not JSON" % n); sys.exit(1)
++    if not isinstance(r, dict) or not isinstance(r.get("sha256"), str) or not isinstance(r.get("day"), str):
++        print("REFUSED: ops/submissions.jsonl line %d lacks sha256/day" % n); sys.exit(1)
++    if r["sha256"] == sha:
++        print("REFUSED: this zip was already submitted (ledger line %d)" % n); sys.exit(1)
++    if day in (r["day"], r.get("day_checked")):
++        print("REFUSED: already submitted on UTC %s (ledger line %d)" % (day, n)); sys.exit(1)
++PY
++}
++check_zip() {  # <path> <label>: exactly one regular root member named agent.yaml; size < 3 GiB
++  python3 -I - "$1" <<'PY' || { echo "REFUSED: $2: no single regular root member named exactly agent.yaml"; exit 3; }
++import stat, sys, zipfile
++ms = zipfile.ZipFile(sys.argv[1]).infolist()
++i = [m for m in ms if m.filename == "agent.yaml" or m.orig_filename == "agent.yaml"]
++mode = (i[0].external_attr >> 16) if len(i) == 1 else -1
++ok = (len(i) == 1 and i[0].orig_filename == "agent.yaml" and not i[0].is_dir()
++      and stat.S_IFMT(mode) in (0, stat.S_IFREG) and not any("\x00" in m.orig_filename for m in ms))
++sys.exit(0 if ok else 1)
++PY
++  local size; size=$(stat -c %s "$1"); [ "$size" -lt 3221225472 ] || { echo "REFUSED: $2: zip >= 3 GiB"; exit 3; }
++}
+ today=$(date -u +%F)
+-grep -q "\"day\": \"$today\"" ops/submissions.jsonl && { echo "REFUSED: already submitted today (UTC $today)"; exit 3; }
+-unzip -l "$zip" | awk '{print $4}' | grep -qx 'agent.yaml' || { echo "REFUSED: agent.yaml not at zip root"; exit 3; }
+-size=$(stat -c %s "$zip"); [ "$size" -lt 3221225472 ] || { echo "REFUSED: zip >= 3 GiB"; exit 3; }
+-echo "Submitting $zip ($track, sha256=$sha) authorized by $auth"
+-if [ "$SUBMIT_MODE" = "kernel" ]; then
+-  [ -n "$SUBMIT_KERNEL" ] || { echo "SUBMIT_KERNEL not set"; exit 1; }
+-  # Builder: verify exact flags with `kaggle competitions submit -h` in Phase 0 before first use.
+-  kaggle competitions submit "$COMP" -k "$SUBMIT_KERNEL" -f submission.zip -m "$msg"
++ledger_ok "$today" || exit 3
++check_zip "$zip" "local zip"
++# 'kaggle kernels output owner/slug/N' fetches the output of version N (CLI sets version_label=vN), so the hash is tied
++# to the version that is submitted.
++out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
++kaggle kernels output "$SUBMIT_KERNEL/$kver" -p "$out" -q >/dev/null || { echo "REFUSED: cannot download kernel v$kver output"; exit 3; }
++[ -f "$out/submission.zip" ] && [ ! -L "$out/submission.zip" ] || { echo "REFUSED: kernel v$kver has no regular submission.zip output"; exit 3; }
++osha=$(sha256sum "$out/submission.zip" | cut -d' ' -f1)
++[ "$osha" = "$sha" ] || { echo "REFUSED: kernel v$kver output sha256=$osha != authorized $sha"; exit 3; }
++check_zip "$out/submission.zip" "kernel output"
++echo "Kernel $SUBMIT_KERNEL v$kver output verified: sha256=$osha"
++# Re-check the UTC day right before submitting (the download can cross midnight).
++now=$(date -u +%F)
++ledger_ok "$now" || exit 3
++# Server-side pre-check (defence in depth; strict and fail-closed). The CLI prints no next-page token, so one page of 100
++# is requested and a full page refuses. Known, accepted limitation (dec 048): assumes the server honours --page-size.
++msg="sha:${sha:0:12} $msg"
++subs=$(kaggle competitions submissions "$COMP" -v --page-size 100 2>&1) || { echo "REFUSED: cannot list server-side submissions"; exit 3; }
++printf '%s' "$subs" | python3 -I -c 'import csv, datetime, io, re, sys
++today, pre = sys.argv[1], "sha:" + sys.argv[2][:12]
++HEADER = ["ref", "fileName", "date", "description", "status", "publicScore", "privateScore"]
++DATE = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]{1,6})?(\+00:00)?", re.ASCII)
++def refuse(why):
++    print("REFUSED: server-side submissions list: " + why); sys.exit(1)
++text = sys.stdin.read()
++if text.strip() == "No submissions found":
++    sys.exit(0)
++try:
++    rows = list(csv.reader(io.StringIO(text, newline=""), strict=True))
++except csv.Error as e:
++    refuse("csv error " + str(e))
++while rows and rows[-1] == []:
++    rows.pop()
++if not rows or rows[0] != HEADER:
++    refuse("unexpected header")
++body = rows[1:]
++if not body:
++    refuse("header without rows")
++if len(body) >= 100:
++    refuse("full page (100 rows): older submissions not visible")
++for r in body:
++    if len(r) != len(HEADER):
++        refuse("row with %d fields" % len(r))
++    ref, date, desc = r[0], r[2], r[3]
++    m = DATE.fullmatch(date)
++    if not re.fullmatch(r"[0-9]+", ref, re.ASCII) or not m:
++        refuse("malformed ref/date in a row")
++    try:
++        d = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
++    except ValueError:
++        refuse("impossible date in a row")
++    if d.date().isoformat() == today or pre in desc:
++        refuse("a submission dated today (UTC) or carrying this sha exists: ref " + ref)' "$now" "$sha" || exit 3
++[ "$(date -u +%F)" = "$now" ] || { echo "REFUSED: UTC day changed during the pre-check; re-run"; exit 3; }
++record() {  # <file> <status> <ref>; JSON-serialized
++  python3 -I -c 'import json, sys; a = sys.argv[1:]
++print(json.dumps(dict(day=a[0], day_checked=a[1], t=a[2], status=a[3], ref=a[4] or None, track=a[5], sha256=a[6], zip=a[7],
++                      auth=a[8], msg=a[9], kernel=a[10], kernel_version=int(a[11]))))' \
++    "$(date -u +%F)" "$now" "$(date -u +%FT%TZ)" "$2" "$3" "$track" "$sha" "$zip" "$auth" "$msg" "$SUBMIT_KERNEL" "$kver" >> "$1"
++}
++record ops/submissions.pending pending ""
++echo "Submitting $zip ($track, sha256=$sha, kernel $SUBMIT_KERNEL v$kver) authorized by $auth"
++set +e
++resp=$(kaggle competitions submit "$COMP" -k "$SUBMIT_KERNEL" -v "$kver" -f submission.zip -m "$msg" 2>&1); rc=$?
++set -e
++printf '%s\n' "$resp"
++ref=$(printf '%s\n' "$resp" | sed -n 's/^Submission ref: \([0-9][0-9]*\)$/\1/p' | tail -1)
++if [ -n "$ref" ]; then
++  record ops/submissions.jsonl submitted "$ref"   # day = acceptance day; day_checked = pre-submit day (both block)
++  rm -f ops/submissions.pending
++  bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle (ref $ref)." || true
++  echo "logged to ops/submissions.jsonl (ref $ref)"
+ else
+-  kaggle competitions submit "$COMP" -f "$zip" -m "$msg"
++  # No positive acceptance evidence: ALWAYS ambiguous (dec 046 fail-closed; review 20261105T233800 item 1).
++  echo "NO 'Submission ref' (rc=$rc): ops/submissions.pending kept; reconcile with 'kaggle competitions submissions' before any retry"; exit 5
+ fi
+-printf '{"day": "%s", "t": "%s", "track": "%s", "sha256": "%s", "zip": "%s", "auth": "%s", "msg": "%s"}\n' \
+-  "$today" "$(date -u +%FT%TZ)" "$track" "$sha" "$zip" "$auth" "$msg" >> ops/submissions.jsonl
+-bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle. Score in ~12-15h."
+-echo "logged to ops/submissions.jsonl"
+--- a/config.env
++++ b/config.env
+@@ -14,8 +14,8 @@
+ HUMAN_HOLD_SEC=120            # don't inject mail within this many seconds of Aniket typing
+ GPU_HARD_CAP_USD=150
+ DIGEST_HOUR_UTC=14            # 8am Chicago (CST)
+-SUBMIT_MODE=file              # file | kernel  (Builder verifies in Phase 0)
+-SUBMIT_KERNEL=
++SUBMIT_MODE=kernel            # file | kernel  (verified 2026-11-05: file upload -> 400; code competition, dec 041)
++SUBMIT_KERNEL=aniket0202/gemma-submit-e4b
+ FINAL_DEADLINE=2026-12-02T23:59:00Z
+ CLAUDE_CONFIG_DIR_GEMMA="$HOME/.claude-gemma"   # separate Claude login (university account); Etho's login untouched
+ CODEX_MODEL=              # empty = Codex default; per-call override: CODEX_MODEL=... bin/codex-*
+
+exec
+/bin/bash -lc "python3 -I - <<'PY'
+from pathlib import Path
+import re, subprocess
+p=Path('ops/patches/kaggle-submit-kernel-v6.diff').read_text().splitlines(keepends=True)
+out={}; i=0
+while i<len(p):
+    assert p[i].startswith('--- a/'),p[i]
+    name=p[i][6:].strip(); i+=2
+    old=Path(name).read_text().splitlines(keepends=True); new=[]; pos=0
+    while i<len(p) and not p[i].startswith('--- a/'):
+        m=re.fullmatch(r'@@ -(\\d+),(\\d+) \\+(\\d+),(\\d+) @@\\n',p[i]); assert m,p[i]
+        start,count,nstart,ncount=map(int,m.groups()); i+=1
+        new+=old[pos:start-1]; pos=start-1; consumed=added=0
+        while i<len(p) and not p[i].startswith(('@@','--- a/')):
+            s=p[i]; i+=1
+            if s[0] in ' -': assert old[pos]==s[1:],(name,pos,s,old[pos]); pos+=1; consumed+=1
+            if s[0] in ' +': new.append(s[1:]); added+=1
+        assert (consumed,added)==(count,ncount),(consumed,added,count,ncount)
+    new+=old[pos:]; out[name]=''.join(new)
+for name,src in out.items():
+    r=subprocess.run(['bash','-n'],input=src,text=True,capture_output=True)
+    print(f'{name}: {len(src.splitlines())} lines, bash -n rc={r.returncode} {r.stderr}')
+    for n,s in enumerate(src.splitlines(),1): print(f'{n:4} {s}')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+bin/kaggle-submit: 154 lines, bash -n rc=0 
+   1 #!/usr/bin/env bash
+   2 # Guarded Kaggle submission (code competition: submissions are a notebook version's /kaggle/working/submission.zip).
+   3 # Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>" <kernel_version>
+   4 # Refuses unless ALL hold (fail closed on any doubt; dec 041-048, reviews ops/codex/review-20261105T2316*-2338*.md):
+   5 #  - a Director decision line, exactly "SUBMIT: AUTHORIZE sha256=<sha of the zip> track=<track>" optionally followed by
+   6 #    " bundle=<this zip path>", exists in ops/decisions/*.md;
+   7 #  - the local ledger ops/submissions.jsonl (every line parsed as JSON; any unreadable/malformed state refuses) has no
+   8 #    record with this sha256 and none for today (UTC);
+   9 #  - no ops/submissions.pending exists (left by any attempt without a "Submission ref"; a human removes it only after
+  10 #    reconciling with `kaggle competitions submissions`);
+  11 #  - the OUTPUT submission.zip of kernel version <kernel_version> of $SUBMIT_KERNEL is byte-identical to the zip and has
+  12 #    exactly one regular root member named agent.yaml; size < 3 GiB;
+  13 #  - defence in depth: Kaggle's own submission list shows nothing dated today and nothing carrying sha:<12 hex>.
+  14 # One exclusive lock is held from the first check to the ledger write. Success is recorded only on "Submission ref: N".
+  15 set -euo pipefail
+  16 cd "$(dirname "$0")/.."
+  17 source ./config.env
+  18 [ $# -eq 4 ] || { echo "usage: bin/kaggle-submit <zip> <31b|e4b> <message> <kernel_version>"; exit 1; }
+  19 zip=$1; track=$2; msg=$3; kver=$4
+  20 [ -f "$zip" ] && [ ! -L "$zip" ] || { echo "no such regular file: $zip"; exit 1; }
+  21 [[ "$track" =~ ^(31b|e4b)$ ]] || { echo "track must be 31b or e4b"; exit 1; }
+  22 [ "${SUBMIT_MODE:-}" = kernel ] || { echo "REFUSED: SUBMIT_MODE must be kernel (file upload is not accepted by this competition)"; exit 3; }
+  23 [[ "${SUBMIT_KERNEL:-}" =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]] || { echo "REFUSED: SUBMIT_KERNEL must be owner/slug"; exit 3; }
+  24 [[ "$kver" =~ ^[1-9][0-9]*$ ]] || { echo "REFUSED: kernel version must be a positive integer"; exit 3; }
+  25 exec 9>>ops/.submit.lock
+  26 flock -n 9 || { echo "REFUSED: another bin/kaggle-submit is running"; exit 3; }
+  27 [ ! -e ops/submissions.pending ] || { echo "REFUSED: ops/submissions.pending exists (earlier attempt without a Submission ref); reconcile with 'kaggle competitions submissions' first"; exit 3; }
+  28 sha=$(sha256sum "$zip" | cut -d' ' -f1)
+  29 [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "REFUSED: cannot hash $zip"; exit 3; }
+  30 auth=$(python3 -I - "$sha" "$track" "$zip" <<'PY'
+  31 import glob, re, sys
+  32 sha, track, zp = sys.argv[1:]
+  33 line = re.compile(r"SUBMIT: AUTHORIZE sha256=([0-9a-f]{64}) track=(31b|e4b)(?: bundle=(\S+))?", re.ASCII)
+  34 hits = []
+  35 for f in sorted(glob.glob("ops/decisions/*.md")):
+  36     with open(f, encoding="utf-8") as fh:  # unreadable decision files raise -> refuse
+  37         for raw in fh.read().splitlines():
+  38             m = line.fullmatch(raw)
+  39             if m and m.group(1) == sha and m.group(2) == track and m.group(3) in (None, zp):
+  40                 hits.append(f)
+  41 if not hits:
+  42     sys.exit(1)
+  43 print(hits[-1])
+  44 PY
+  45 ) || { echo "REFUSED: no exact Director authorization for sha256=$sha track=$track"; exit 3; }
+  46 touch ops/submissions.jsonl
+  47 ledger_ok() {  # <day>: exit 0 only if the ledger is fully parseable and has no record for this sha or for <day>
+  48   python3 -I - "$sha" "$1" <<'PY'
+  49 import json, sys
+  50 sha, day = sys.argv[1:]
+  51 with open("ops/submissions.jsonl", encoding="utf-8") as fh:
+  52     lines = fh.read().splitlines()
+  53 for n, raw in enumerate(lines, 1):
+  54     try:
+  55         r = json.loads(raw)
+  56     except ValueError:
+  57         print("REFUSED: ops/submissions.jsonl line %d is not JSON" % n); sys.exit(1)
+  58     if not isinstance(r, dict) or not isinstance(r.get("sha256"), str) or not isinstance(r.get("day"), str):
+  59         print("REFUSED: ops/submissions.jsonl line %d lacks sha256/day" % n); sys.exit(1)
+  60     if r["sha256"] == sha:
+  61         print("REFUSED: this zip was already submitted (ledger line %d)" % n); sys.exit(1)
+  62     if day in (r["day"], r.get("day_checked")):
+  63         print("REFUSED: already submitted on UTC %s (ledger line %d)" % (day, n)); sys.exit(1)
+  64 PY
+  65 }
+  66 check_zip() {  # <path> <label>: exactly one regular root member named agent.yaml; size < 3 GiB
+  67   python3 -I - "$1" <<'PY' || { echo "REFUSED: $2: no single regular root member named exactly agent.yaml"; exit 3; }
+  68 import stat, sys, zipfile
+  69 ms = zipfile.ZipFile(sys.argv[1]).infolist()
+  70 i = [m for m in ms if m.filename == "agent.yaml" or m.orig_filename == "agent.yaml"]
+  71 mode = (i[0].external_attr >> 16) if len(i) == 1 else -1
+  72 ok = (len(i) == 1 and i[0].orig_filename == "agent.yaml" and not i[0].is_dir()
+  73       and stat.S_IFMT(mode) in (0, stat.S_IFREG) and not any("\x00" in m.orig_filename for m in ms))
+  74 sys.exit(0 if ok else 1)
+  75 PY
+  76   local size; size=$(stat -c %s "$1"); [ "$size" -lt 3221225472 ] || { echo "REFUSED: $2: zip >= 3 GiB"; exit 3; }
+  77 }
+  78 today=$(date -u +%F)
+  79 ledger_ok "$today" || exit 3
+  80 check_zip "$zip" "local zip"
+  81 # 'kaggle kernels output owner/slug/N' fetches the output of version N (CLI sets version_label=vN), so the hash is tied
+  82 # to the version that is submitted.
+  83 out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
+  84 kaggle kernels output "$SUBMIT_KERNEL/$kver" -p "$out" -q >/dev/null || { echo "REFUSED: cannot download kernel v$kver output"; exit 3; }
+  85 [ -f "$out/submission.zip" ] && [ ! -L "$out/submission.zip" ] || { echo "REFUSED: kernel v$kver has no regular submission.zip output"; exit 3; }
+  86 osha=$(sha256sum "$out/submission.zip" | cut -d' ' -f1)
+  87 [ "$osha" = "$sha" ] || { echo "REFUSED: kernel v$kver output sha256=$osha != authorized $sha"; exit 3; }
+  88 check_zip "$out/submission.zip" "kernel output"
+  89 echo "Kernel $SUBMIT_KERNEL v$kver output verified: sha256=$osha"
+  90 # Re-check the UTC day right before submitting (the download can cross midnight).
+  91 now=$(date -u +%F)
+  92 ledger_ok "$now" || exit 3
+  93 # Server-side pre-check (defence in depth; strict and fail-closed). The CLI prints no next-page token, so one page of 100
+  94 # is requested and a full page refuses. Known, accepted limitation (dec 048): assumes the server honours --page-size.
+  95 msg="sha:${sha:0:12} $msg"
+  96 subs=$(kaggle competitions submissions "$COMP" -v --page-size 100 2>&1) || { echo "REFUSED: cannot list server-side submissions"; exit 3; }
+  97 printf '%s' "$subs" | python3 -I -c 'import csv, datetime, io, re, sys
+  98 today, pre = sys.argv[1], "sha:" + sys.argv[2][:12]
+  99 HEADER = ["ref", "fileName", "date", "description", "status", "publicScore", "privateScore"]
+ 100 DATE = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]{1,6})?(\+00:00)?", re.ASCII)
+ 101 def refuse(why):
+ 102     print("REFUSED: server-side submissions list: " + why); sys.exit(1)
+ 103 text = sys.stdin.read()
+ 104 if text.strip() == "No submissions found":
+ 105     sys.exit(0)
+ 106 try:
+ 107     rows = list(csv.reader(io.StringIO(text, newline=""), strict=True))
+ 108 except csv.Error as e:
+ 109     refuse("csv error " + str(e))
+ 110 while rows and rows[-1] == []:
+ 111     rows.pop()
+ 112 if not rows or rows[0] != HEADER:
+ 113     refuse("unexpected header")
+ 114 body = rows[1:]
+ 115 if not body:
+ 116     refuse("header without rows")
+ 117 if len(body) >= 100:
+ 118     refuse("full page (100 rows): older submissions not visible")
+ 119 for r in body:
+ 120     if len(r) != len(HEADER):
+ 121         refuse("row with %d fields" % len(r))
+ 122     ref, date, desc = r[0], r[2], r[3]
+ 123     m = DATE.fullmatch(date)
+ 124     if not re.fullmatch(r"[0-9]+", ref, re.ASCII) or not m:
+ 125         refuse("malformed ref/date in a row")
+ 126     try:
+ 127         d = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+ 128     except ValueError:
+ 129         refuse("impossible date in a row")
+ 130     if d.date().isoformat() == today or pre in desc:
+ 131         refuse("a submission dated today (UTC) or carrying this sha exists: ref " + ref)' "$now" "$sha" || exit 3
+ 132 [ "$(date -u +%F)" = "$now" ] || { echo "REFUSED: UTC day changed during the pre-check; re-run"; exit 3; }
+ 133 record() {  # <file> <status> <ref>; JSON-serialized
+ 134   python3 -I -c 'import json, sys; a = sys.argv[1:]
+ 135 print(json.dumps(dict(day=a[0], day_checked=a[1], t=a[2], status=a[3], ref=a[4] or None, track=a[5], sha256=a[6], zip=a[7],
+ 136                       auth=a[8], msg=a[9], kernel=a[10], kernel_version=int(a[11]))))' \
+ 137     "$(date -u +%F)" "$now" "$(date -u +%FT%TZ)" "$2" "$3" "$track" "$sha" "$zip" "$auth" "$msg" "$SUBMIT_KERNEL" "$kver" >> "$1"
+ 138 }
+ 139 record ops/submissions.pending pending ""
+ 140 echo "Submitting $zip ($track, sha256=$sha, kernel $SUBMIT_KERNEL v$kver) authorized by $auth"
+ 141 set +e
+ 142 resp=$(kaggle competitions submit "$COMP" -k "$SUBMIT_KERNEL" -v "$kver" -f submission.zip -m "$msg" 2>&1); rc=$?
+ 143 set -e
+ 144 printf '%s\n' "$resp"
+ 145 ref=$(printf '%s\n' "$resp" | sed -n 's/^Submission ref: \([0-9][0-9]*\)$/\1/p' | tail -1)
+ 146 if [ -n "$ref" ]; then
+ 147   record ops/submissions.jsonl submitted "$ref"   # day = acceptance day; day_checked = pre-submit day (both block)
+ 148   rm -f ops/submissions.pending
+ 149   bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle (ref $ref)." || true
+ 150   echo "logged to ops/submissions.jsonl (ref $ref)"
+ 151 else
+ 152   # No positive acceptance evidence: ALWAYS ambiguous (dec 046 fail-closed; review 20261105T233800 item 1).
+ 153   echo "NO 'Submission ref' (rc=$rc): ops/submissions.pending kept; reconcile with 'kaggle competitions submissions' before any retry"; exit 5
+ 154 fi
+config.env: 24 lines, bash -n rc=0 
+   1 # Settings (safe to commit; no secrets)
+   2 COMP=gemma-4-developer-agent
+   3 BUILDER_MODEL=opus            # long working turns (alias resolves to Opus 5.5)
+   4 BUILDER_EFFORT=high           # claude --effort: low|medium|high|xhigh|max
+   5 DIRECTOR_MODEL=opus           # short decisions; switch to sonnet if usage limits bite
+   6 DIRECTOR_EFFORT=high
+   7 PAPER_MODEL=opus              # paper writer (bin/session paper)
+   8 PAPER_EFFORT=high
+   9 TMUX_SESSION=gemma            # windows: builder, director, router (Etho's tmux session is never touched)
+  10 RL_SLEEP_MIN=30               # back off a role this long after it reports a usage limit
+  11 MIN_GAP_MIN=5                 # nudge an idle Builder whose status is CONTINUE after this long
+  12 WAKE_MAX_MIN=180              # nudge an idle Builder at least this often while waiting on jobs
+  13 HUMAN_QUIET_MIN=30            # don't /clear a session within this many minutes of Aniket typing in it
+  14 HUMAN_HOLD_SEC=120            # don't inject mail within this many seconds of Aniket typing
+  15 GPU_HARD_CAP_USD=150
+  16 DIGEST_HOUR_UTC=14            # 8am Chicago (CST)
+  17 SUBMIT_MODE=kernel            # file | kernel  (verified 2026-11-05: file upload -> 400; code competition, dec 041)
+  18 SUBMIT_KERNEL=aniket0202/gemma-submit-e4b
+  19 FINAL_DEADLINE=2026-12-02T23:59:00Z
+  20 CLAUDE_CONFIG_DIR_GEMMA="$HOME/.claude-gemma"   # separate Claude login (university account); Etho's login untouched
+  21 CODEX_MODEL=              # empty = Codex default; per-call override: CODEX_MODEL=... bin/codex-*
+  22 CODEX_EFFORT_ASK=high
+  23 CODEX_EFFORT_REVIEW=high
+  24 CODEX_EFFORT_BUILD=medium
+
+codex
+The reconstructed wrapper has 154 lines, and both patched files pass `bash -n`. The four previous blocking paths appear fixed. I’m now probing the authorization, ledger, history parser, and result handling offline for regressions.
+exec
+/bin/bash -lc "python3 -I -B - <<'PY'
+from pathlib import Path
+import builtins, contextlib, io, json, subprocess, sys
+from unittest.mock import patch
+p=Path('ops/patches/kaggle-submit-kernel-v6.diff').read_text().splitlines()
+start=p.index('@@ -1,31 +1,154 @@')+1
+end=p.index('--- a/config.env')
+src='\\n'.join(s[1:] for s in p[start:end] if s.startswith((' ','+')))+'\\n'
+auth=src.split(\"<<'PY'\\n\",1)[1].split('\\nPY\\n',1)[0]
+ledger=src.split('ledger_ok() {',1)[1].split(\"<<'PY'\\n\",1)[1].split('\\nPY\\n',1)[0]
+server=src.split(\"python3 -I -c 'import csv, datetime, io, re, sys\\n\",1)[1].split(\"' \\\""'$now'"\\\" \\\""'$sha'"\\\" || exit 3\",1)[0]
+server='import csv, datetime, io, re, sys\\n'+server
+sha='a'*64; day='2026-11-05'; passed=[]; failed=[]
+def run(code,args,stdin='',files=None,globnames=None):
+    def fake_open(name,*a,**kw):
+        val=files[name]
+        if isinstance(val,BaseException): raise val
+        return io.StringIO(val)
+    out=io.StringIO(); rc=0
+    with patch.object(sys,'argv',['probe']+args),patch.object(sys,'stdin',io.StringIO(stdin)),contextlib.redirect_stdout(out),patch('glob.glob',return_value=globnames or []):
+        ns={'__builtins__':dict(vars(builtins),open=fake_open)}
+        try: exec(compile(code,'<reconstructed-v6>','exec'),ns)
+        except SystemExit as e: rc=e.code or 0
+        except Exception: rc=99
+    return rc,out.getvalue()
+def check(name,ok):
+    (passed if ok else failed).append(name)
+for suffix,allowed in [('track=e4b',True),('track=e4b bundle=dist/e4b-v002.zip',True),('track=e4b_REJECTED',False),('track=e4b-extra',False),('track=e4b trailing junk',False),('track=e4b bundle=dist/other.zip',False),('track=31b',False),('track=e4b ',False)]:
+    text='SUBMIT: AUTHORIZE sha256='+sha+' '+suffix+'\\n'
+    rc,_=run(auth,[sha,'e4b','dist/e4b-v002.zip'],files={'auth.md':text},globnames=['auth.md'])
+    check('auth '+suffix,(rc==0)==allowed)
+rc,_=run(auth,[sha,'e4b','dist/e4b-v002.zip'],files={'auth.md':PermissionError()},globnames=['auth.md']);check('unreadable auth refuses',rc"'!=0)
+cases=[('"'empty','',True),('compact same sha',json.dumps({'sha256':sha,'day':'2026-01-01'},separators=(',',':')),False),('today',json.dumps({'sha256':'b'*64,'day':day}),False),('checked today',json.dumps({'sha256':'b'*64,'day':'2026-11-06','day_checked':day}),False),('escaped sha',json.dumps({'sha256':sha,'day':'2026-01-01'}).replace('a','\\\\u0061'),False),('old unrelated',json.dumps({'sha256':'b'*64,'day':'2026-01-01'}),True),('non JSON','oops',False),('blank record','\\n',False),('missing sha','{\"day\":\"2026-01-01\"}',False),('non string day','{\"sha256\":\"x\",\"day\":20261105}',False),('array','[]',False),('null','null',False)]
+for name,s,allowed in cases:
+    rc,_=run(ledger,[sha,day],files={'ops/submissions.jsonl':s});check('ledger '+name,(rc==0)==allowed)
+for exc in (PermissionError(),FileNotFoundError(),UnicodeDecodeError('utf-8',b'\\xff',0,1,'invalid')):
+    rc,_=run(ledger,[sha,day],files={'ops/submissions.jsonl':exc});check('ledger '+type(exc).__name__,rc"'!=0)
+header='"'ref,fileName,date,description,status,publicScore,privateScore\\n'
+def csv(date,desc='other',ref='9'): return header+f'{ref},submission.zip,{date},{desc},COMPLETE,0.1,\\n'
+scases=[('empty sentinel','No submissions found\\n',True),('old',csv('2026-11-01 01:00:00'),True),('today',csv(day+' 01:00:00'),False),('same sha',csv('2026-11-01 01:00:00','sha:'+sha[:12]),False),('fraction UTC',csv('2026-11-01 01:00:00.123456+00:00'),True),('impossible month',csv('2026-99-99 99:99:99'),False),('February 30',csv('2026-02-30 01:00:00'),False),('unicode year',csv('２０２６-11-05 01:00:00'),False),('unicode ref',csv('2026-11-01 01:00:00',ref='９'),False),('non UTC',csv('2026-11-01 01:00:00+01:00'),False),('header only',header,False),('junk','<html>oops</html>',False),('short',header+'1\\n',False),('bad quote',header+'9,submission.zip,\"2026-11-01 01:00:00,x,COMPLETE,0.1,\\n',False),('full page',header+csv('2026-11-01 01:00:00').split('\\n',1)[1]*100,False)]
+for name,s,allowed in scases:
+    rc,_=run(server,[day,sha],stdin=s);check('server '+name,(rc==0)==allowed)
+# Execute the exact post-submit decision block with shell-function stubs; no filesystem mutations.
+post=src.split('set -e\\nprintf',1)[1]
+post='printf'+post
+stub='''set -euo pipefail
+record() { printf 'RECORD:%s:%s\\\\n' \""'$1" "$3"; }
+rm() { printf '"'REMOVE:%s\\\\n' \""'$*"; }
+bin/notify() { :; }
+track=e4b; zip=dist/z.zip; rc=1
+resp=$1
+'"'''
+for name,response,expected in [('accept','Submission ref: 123',0),('400','400 Client Error: Bad Request',5),('503 embedded 400','503 Server Error\\n400 Client Error',5),('no ref','ERROR: submission rejected',5),('suffix ref','Submission ref: 123bad',5)]:
+    r=subprocess.run(['bash','-c',stub+post,'probe',response],capture_output=True,text=True)
+    check('post '+name,r.returncode==expected and (('REMOVE:' in r.stdout)==(expected==0)))
+print(f'Offline extracted-code checks: {len(passed)} passed, {len(failed)} failed')
+for f in failed: print('FAIL '+f)
+# Inspect a boundary outside the declared minimum schema; reported separately.
+s='{'+f'\"sha256\":\"{sha}\",\"sha256\":\"other\",\"day\":\"{day}\",\"day\":\"2026-01-01\"'+'}'
+rc,_=run(ledger,[sha,day],files={'ops/submissions.jsonl':s})
+print('Duplicate-key ledger boundary: rc='+str(rc))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+Offline extracted-code checks: 44 passed, 0 failed
+Duplicate-key ledger boundary: rc=0
+
+exec
+/bin/bash -lc "nl -ba ops/patches/kaggle-submit-kernel-v6.diff && sed -n '1,80p' ops/STATE.md && sed -n '1,100p' docs/PLAN.md" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	--- a/bin/kaggle-submit
+     2	+++ b/bin/kaggle-submit
+     3	@@ -1,31 +1,154 @@
+     4	 #!/usr/bin/env bash
+     5	-# Guarded Kaggle submission. Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>"
+     6	-# Refuses unless: a Director decision contains "SUBMIT: AUTHORIZE sha256=<this zip's sha256> track=<track>",
+     7	-# that authorization is unused, and no submission was made yet today (UTC).
+     8	+# Guarded Kaggle submission (code competition: submissions are a notebook version's /kaggle/working/submission.zip).
+     9	+# Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>" <kernel_version>
+    10	+# Refuses unless ALL hold (fail closed on any doubt; dec 041-048, reviews ops/codex/review-20261105T2316*-2338*.md):
+    11	+#  - a Director decision line, exactly "SUBMIT: AUTHORIZE sha256=<sha of the zip> track=<track>" optionally followed by
+    12	+#    " bundle=<this zip path>", exists in ops/decisions/*.md;
+    13	+#  - the local ledger ops/submissions.jsonl (every line parsed as JSON; any unreadable/malformed state refuses) has no
+    14	+#    record with this sha256 and none for today (UTC);
+    15	+#  - no ops/submissions.pending exists (left by any attempt without a "Submission ref"; a human removes it only after
+    16	+#    reconciling with `kaggle competitions submissions`);
+    17	+#  - the OUTPUT submission.zip of kernel version <kernel_version> of $SUBMIT_KERNEL is byte-identical to the zip and has
+    18	+#    exactly one regular root member named agent.yaml; size < 3 GiB;
+    19	+#  - defence in depth: Kaggle's own submission list shows nothing dated today and nothing carrying sha:<12 hex>.
+    20	+# One exclusive lock is held from the first check to the ledger write. Success is recorded only on "Submission ref: N".
+    21	 set -euo pipefail
+    22	 cd "$(dirname "$0")/.."
+    23	 source ./config.env
+    24	-zip=$1; track=$2; msg=${3:-"$track $(basename "$zip")"}
+    25	-[ -f "$zip" ] || { echo "no such zip: $zip"; exit 1; }
+    26	+[ $# -eq 4 ] || { echo "usage: bin/kaggle-submit <zip> <31b|e4b> <message> <kernel_version>"; exit 1; }
+    27	+zip=$1; track=$2; msg=$3; kver=$4
+    28	+[ -f "$zip" ] && [ ! -L "$zip" ] || { echo "no such regular file: $zip"; exit 1; }
+    29	 [[ "$track" =~ ^(31b|e4b)$ ]] || { echo "track must be 31b or e4b"; exit 1; }
+    30	+[ "${SUBMIT_MODE:-}" = kernel ] || { echo "REFUSED: SUBMIT_MODE must be kernel (file upload is not accepted by this competition)"; exit 3; }
+    31	+[[ "${SUBMIT_KERNEL:-}" =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]] || { echo "REFUSED: SUBMIT_KERNEL must be owner/slug"; exit 3; }
+    32	+[[ "$kver" =~ ^[1-9][0-9]*$ ]] || { echo "REFUSED: kernel version must be a positive integer"; exit 3; }
+    33	+exec 9>>ops/.submit.lock
+    34	+flock -n 9 || { echo "REFUSED: another bin/kaggle-submit is running"; exit 3; }
+    35	+[ ! -e ops/submissions.pending ] || { echo "REFUSED: ops/submissions.pending exists (earlier attempt without a Submission ref); reconcile with 'kaggle competitions submissions' first"; exit 3; }
+    36	 sha=$(sha256sum "$zip" | cut -d' ' -f1)
+    37	-auth=$(grep -l "^SUBMIT: AUTHORIZE sha256=$sha track=$track" ops/decisions/*.md 2>/dev/null | tail -1 || true)
+    38	-[ -n "$auth" ] || { echo "REFUSED: no Director authorization for sha256=$sha track=$track"; exit 3; }
+    39	+[[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "REFUSED: cannot hash $zip"; exit 3; }
+    40	+auth=$(python3 -I - "$sha" "$track" "$zip" <<'PY'
+    41	+import glob, re, sys
+    42	+sha, track, zp = sys.argv[1:]
+    43	+line = re.compile(r"SUBMIT: AUTHORIZE sha256=([0-9a-f]{64}) track=(31b|e4b)(?: bundle=(\S+))?", re.ASCII)
+    44	+hits = []
+    45	+for f in sorted(glob.glob("ops/decisions/*.md")):
+    46	+    with open(f, encoding="utf-8") as fh:  # unreadable decision files raise -> refuse
+    47	+        for raw in fh.read().splitlines():
+    48	+            m = line.fullmatch(raw)
+    49	+            if m and m.group(1) == sha and m.group(2) == track and m.group(3) in (None, zp):
+    50	+                hits.append(f)
+    51	+if not hits:
+    52	+    sys.exit(1)
+    53	+print(hits[-1])
+    54	+PY
+    55	+) || { echo "REFUSED: no exact Director authorization for sha256=$sha track=$track"; exit 3; }
+    56	 touch ops/submissions.jsonl
+    57	-grep -q "\"sha256\": \"$sha\"" ops/submissions.jsonl && { echo "REFUSED: this zip was already submitted"; exit 3; }
+    58	+ledger_ok() {  # <day>: exit 0 only if the ledger is fully parseable and has no record for this sha or for <day>
+    59	+  python3 -I - "$sha" "$1" <<'PY'
+    60	+import json, sys
+    61	+sha, day = sys.argv[1:]
+    62	+with open("ops/submissions.jsonl", encoding="utf-8") as fh:
+    63	+    lines = fh.read().splitlines()
+    64	+for n, raw in enumerate(lines, 1):
+    65	+    try:
+    66	+        r = json.loads(raw)
+    67	+    except ValueError:
+    68	+        print("REFUSED: ops/submissions.jsonl line %d is not JSON" % n); sys.exit(1)
+    69	+    if not isinstance(r, dict) or not isinstance(r.get("sha256"), str) or not isinstance(r.get("day"), str):
+    70	+        print("REFUSED: ops/submissions.jsonl line %d lacks sha256/day" % n); sys.exit(1)
+    71	+    if r["sha256"] == sha:
+    72	+        print("REFUSED: this zip was already submitted (ledger line %d)" % n); sys.exit(1)
+    73	+    if day in (r["day"], r.get("day_checked")):
+    74	+        print("REFUSED: already submitted on UTC %s (ledger line %d)" % (day, n)); sys.exit(1)
+    75	+PY
+    76	+}
+    77	+check_zip() {  # <path> <label>: exactly one regular root member named agent.yaml; size < 3 GiB
+    78	+  python3 -I - "$1" <<'PY' || { echo "REFUSED: $2: no single regular root member named exactly agent.yaml"; exit 3; }
+    79	+import stat, sys, zipfile
+    80	+ms = zipfile.ZipFile(sys.argv[1]).infolist()
+    81	+i = [m for m in ms if m.filename == "agent.yaml" or m.orig_filename == "agent.yaml"]
+    82	+mode = (i[0].external_attr >> 16) if len(i) == 1 else -1
+    83	+ok = (len(i) == 1 and i[0].orig_filename == "agent.yaml" and not i[0].is_dir()
+    84	+      and stat.S_IFMT(mode) in (0, stat.S_IFREG) and not any("\x00" in m.orig_filename for m in ms))
+    85	+sys.exit(0 if ok else 1)
+    86	+PY
+    87	+  local size; size=$(stat -c %s "$1"); [ "$size" -lt 3221225472 ] || { echo "REFUSED: $2: zip >= 3 GiB"; exit 3; }
+    88	+}
+    89	 today=$(date -u +%F)
+    90	-grep -q "\"day\": \"$today\"" ops/submissions.jsonl && { echo "REFUSED: already submitted today (UTC $today)"; exit 3; }
+    91	-unzip -l "$zip" | awk '{print $4}' | grep -qx 'agent.yaml' || { echo "REFUSED: agent.yaml not at zip root"; exit 3; }
+    92	-size=$(stat -c %s "$zip"); [ "$size" -lt 3221225472 ] || { echo "REFUSED: zip >= 3 GiB"; exit 3; }
+    93	-echo "Submitting $zip ($track, sha256=$sha) authorized by $auth"
+    94	-if [ "$SUBMIT_MODE" = "kernel" ]; then
+    95	-  [ -n "$SUBMIT_KERNEL" ] || { echo "SUBMIT_KERNEL not set"; exit 1; }
+    96	-  # Builder: verify exact flags with `kaggle competitions submit -h` in Phase 0 before first use.
+    97	-  kaggle competitions submit "$COMP" -k "$SUBMIT_KERNEL" -f submission.zip -m "$msg"
+    98	+ledger_ok "$today" || exit 3
+    99	+check_zip "$zip" "local zip"
+   100	+# 'kaggle kernels output owner/slug/N' fetches the output of version N (CLI sets version_label=vN), so the hash is tied
+   101	+# to the version that is submitted.
+   102	+out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
+   103	+kaggle kernels output "$SUBMIT_KERNEL/$kver" -p "$out" -q >/dev/null || { echo "REFUSED: cannot download kernel v$kver output"; exit 3; }
+   104	+[ -f "$out/submission.zip" ] && [ ! -L "$out/submission.zip" ] || { echo "REFUSED: kernel v$kver has no regular submission.zip output"; exit 3; }
+   105	+osha=$(sha256sum "$out/submission.zip" | cut -d' ' -f1)
+   106	+[ "$osha" = "$sha" ] || { echo "REFUSED: kernel v$kver output sha256=$osha != authorized $sha"; exit 3; }
+   107	+check_zip "$out/submission.zip" "kernel output"
+   108	+echo "Kernel $SUBMIT_KERNEL v$kver output verified: sha256=$osha"
+   109	+# Re-check the UTC day right before submitting (the download can cross midnight).
+   110	+now=$(date -u +%F)
+   111	+ledger_ok "$now" || exit 3
+   112	+# Server-side pre-check (defence in depth; strict and fail-closed). The CLI prints no next-page token, so one page of 100
+   113	+# is requested and a full page refuses. Known, accepted limitation (dec 048): assumes the server honours --page-size.
+   114	+msg="sha:${sha:0:12} $msg"
+   115	+subs=$(kaggle competitions submissions "$COMP" -v --page-size 100 2>&1) || { echo "REFUSED: cannot list server-side submissions"; exit 3; }
+   116	+printf '%s' "$subs" | python3 -I -c 'import csv, datetime, io, re, sys
+   117	+today, pre = sys.argv[1], "sha:" + sys.argv[2][:12]
+   118	+HEADER = ["ref", "fileName", "date", "description", "status", "publicScore", "privateScore"]
+   119	+DATE = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]{1,6})?(\+00:00)?", re.ASCII)
+   120	+def refuse(why):
+   121	+    print("REFUSED: server-side submissions list: " + why); sys.exit(1)
+   122	+text = sys.stdin.read()
+   123	+if text.strip() == "No submissions found":
+   124	+    sys.exit(0)
+   125	+try:
+   126	+    rows = list(csv.reader(io.StringIO(text, newline=""), strict=True))
+   127	+except csv.Error as e:
+   128	+    refuse("csv error " + str(e))
+   129	+while rows and rows[-1] == []:
+   130	+    rows.pop()
+   131	+if not rows or rows[0] != HEADER:
+   132	+    refuse("unexpected header")
+   133	+body = rows[1:]
+   134	+if not body:
+   135	+    refuse("header without rows")
+   136	+if len(body) >= 100:
+   137	+    refuse("full page (100 rows): older submissions not visible")
+   138	+for r in body:
+   139	+    if len(r) != len(HEADER):
+   140	+        refuse("row with %d fields" % len(r))
+   141	+    ref, date, desc = r[0], r[2], r[3]
+   142	+    m = DATE.fullmatch(date)
+   143	+    if not re.fullmatch(r"[0-9]+", ref, re.ASCII) or not m:
+   144	+        refuse("malformed ref/date in a row")
+   145	+    try:
+   146	+        d = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+   147	+    except ValueError:
+   148	+        refuse("impossible date in a row")
+   149	+    if d.date().isoformat() == today or pre in desc:
+   150	+        refuse("a submission dated today (UTC) or carrying this sha exists: ref " + ref)' "$now" "$sha" || exit 3
+   151	+[ "$(date -u +%F)" = "$now" ] || { echo "REFUSED: UTC day changed during the pre-check; re-run"; exit 3; }
+   152	+record() {  # <file> <status> <ref>; JSON-serialized
+   153	+  python3 -I -c 'import json, sys; a = sys.argv[1:]
+   154	+print(json.dumps(dict(day=a[0], day_checked=a[1], t=a[2], status=a[3], ref=a[4] or None, track=a[5], sha256=a[6], zip=a[7],
+   155	+                      auth=a[8], msg=a[9], kernel=a[10], kernel_version=int(a[11]))))' \
+   156	+    "$(date -u +%F)" "$now" "$(date -u +%FT%TZ)" "$2" "$3" "$track" "$sha" "$zip" "$auth" "$msg" "$SUBMIT_KERNEL" "$kver" >> "$1"
+   157	+}
+   158	+record ops/submissions.pending pending ""
+   159	+echo "Submitting $zip ($track, sha256=$sha, kernel $SUBMIT_KERNEL v$kver) authorized by $auth"
+   160	+set +e
+   161	+resp=$(kaggle competitions submit "$COMP" -k "$SUBMIT_KERNEL" -v "$kver" -f submission.zip -m "$msg" 2>&1); rc=$?
+   162	+set -e
+   163	+printf '%s\n' "$resp"
+   164	+ref=$(printf '%s\n' "$resp" | sed -n 's/^Submission ref: \([0-9][0-9]*\)$/\1/p' | tail -1)
+   165	+if [ -n "$ref" ]; then
+   166	+  record ops/submissions.jsonl submitted "$ref"   # day = acceptance day; day_checked = pre-submit day (both block)
+   167	+  rm -f ops/submissions.pending
+   168	+  bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle (ref $ref)." || true
+   169	+  echo "logged to ops/submissions.jsonl (ref $ref)"
+   170	 else
+   171	-  kaggle competitions submit "$COMP" -f "$zip" -m "$msg"
+   172	+  # No positive acceptance evidence: ALWAYS ambiguous (dec 046 fail-closed; review 20261105T233800 item 1).
+   173	+  echo "NO 'Submission ref' (rc=$rc): ops/submissions.pending kept; reconcile with 'kaggle competitions submissions' before any retry"; exit 5
+   174	 fi
+   175	-printf '{"day": "%s", "t": "%s", "track": "%s", "sha256": "%s", "zip": "%s", "auth": "%s", "msg": "%s"}\n' \
+   176	-  "$today" "$(date -u +%FT%TZ)" "$track" "$sha" "$zip" "$auth" "$msg" >> ops/submissions.jsonl
+   177	-bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle. Score in ~12-15h."
+   178	-echo "logged to ops/submissions.jsonl"
+   179	--- a/config.env
+   180	+++ b/config.env
+   181	@@ -14,8 +14,8 @@
+   182	 HUMAN_HOLD_SEC=120            # don't inject mail within this many seconds of Aniket typing
+   183	 GPU_HARD_CAP_USD=150
+   184	 DIGEST_HOUR_UTC=14            # 8am Chicago (CST)
+   185	-SUBMIT_MODE=file              # file | kernel  (Builder verifies in Phase 0)
+   186	-SUBMIT_KERNEL=
+   187	+SUBMIT_MODE=kernel            # file | kernel  (verified 2026-11-05: file upload -> 400; code competition, dec 041)
+   188	+SUBMIT_KERNEL=aniket0202/gemma-submit-e4b
+   189	 FINAL_DEADLINE=2026-12-02T23:59:00Z
+   190	 CLAUDE_CONFIG_DIR_GEMMA="$HOME/.claude-gemma"   # separate Claude login (university account); Etho's login untouched
+   191	 CODEX_MODEL=              # empty = Codex default; per-call override: CODEX_MODEL=... bin/codex-*
+# STATE: snapshot 2026-11-05 23:18Z (cycle 100, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus (dec 010: local-first, two-strike).
+## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
+- v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
+- e4b-v001 (cap 1.4): dist/e4b-v001.zip f2ced9c9...62d277e9, review clean; superseded by v002.
+- e4b-v002 (dec 032 item 1: v001 + cap 1.0 + max_output_tokens 8192 at both occurrences): dist/e4b-v002.zip
+  sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad, bin/pack PASS, load check OK
+  (results/bundle_load_check_e4b_v002.json: 8192/8192, 60 s). Dec 032 item 3 conditions (i)-(iv) all hold (23:11Z).
+  Dec 040 AUTHORIZED (unused; Nov 5 slot lost, submit Nov 6). Route: kernel aniket0202/gemma-submit-e4b v1 (CPU, output sha = 60c0...4dad).
+  bin/ edit DENIED by classifier -> Aniket applies guard patch (v1-v4 NEVER apply). Guard tests ONLY eval/tests/guard_mock_test.sh <cand> <zip>.
+  After apply+commit: dry checks (unauthorized sha -> exit 3; wrong kernel version -> sha REFUSED) in commit msg; then
+  bin/kaggle-submit dist/e4b-v002.zip e4b '<msg>' 1 -> mail Director the Submission ref; ops/budget/kaggle.md; results/lb_e4b_v002.json.
+- CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 E4B/12B/E2B validator
+  acceptance (first e4b submit settles E4B); l.55 submit_patch/get_status vs call limits; l.63 private-LB multiple runs; l.72 wheels arch
+  (x86 assumed, unrecorded); 12h overrun ruling. VERIFIED: l.42 submit method = kernel output (dec 041); l.76 superseded by l.112.
+- No local pass-rate scores yet. eval-runner-fix MERGED to main 70c0d9f (codex review clean + N1 count-cap fix d13ceac; 421 pass, 3 skip).
+  Test cmd: /home/ubuntu/gemma-local/venv/bin/python3 with pyimg cp3.13 site-packages appended to sys.path, pytest eval/tests.
+## Eval data
+- Splits v2 FROZEN: clean 48 (rich 39, fastapi 9), dev 33, holdout 15; holdout uses = 0. Hashes: eval/splits/MANIFEST.json.
+- requests/httpx dropped (wheel shadowing = scorer property, dec 014). Gold v2 files in results/ (gold_calibration_*, gold_failure_causes).
+## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
+- Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
+- Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
+## Running jobs (23:44Z): review-submit-guard6-light (v6), codex-probes-fix7 -> review-probes-fix7-light (queued; dec 047), memguard-light.
+- KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
+  dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
+- fix5c BLOCKING 1 (gate a ignored failed finalization git rc/exception) FIXED on codex/kernel-gate-finfix e02666f (on 92a74c7;
+  109 tests pass; v5 unchanged a=7/8). Stack fix5->probes->gate->finfix merges together once all reviews are clean, then host eval/tests
+  on main. fix5c NON-BLOCKING 4: add the 5 vendored wheels to docs/ATTRIBUTION.md before merge. Item 6 docker-order
+  MERGED 8c55985; main eval/tests 469p/3s/1f (stale test_memguard oom_score_adj; fixed by the fix6 merge).
+- memguard-fix6 MERGED e8a2b04 + deployed. Tests: ops/tools/runtests.py (pyimg path). bin/job owner patch: HOLD (dec 026).
+- DEC 027 FIDELITY: kernel = Dockerfile.public only (offline); NO PIP_* prefixes; setup_calls logging mandatory.
+- Dec 022 item 4 = plan 005 (ops/codex/ask-20261105T181222.md; draft bundles/drafts/item4-system.md; empty submit loses all; needs GPU).
+## Quota / spend
+- GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
+- Kaggle GPU this week: 5.18/30 h per `kaggle quota` 21:05Z. Plan 006 cap 4.0 ~2.4 quota-h (-> ~7.6). Log: ops/budget/kaggle.md. Resets Sat 00:00Z.
+## Live caveats
+- Job naming (dec 024): waiters, codex-ask and codex-review jobs end in -light; builds, test suites and evals never do.
+- LORO with only 2 repos (rich, fastapi) is weak; report 002 must say so (dec 014 item 3).
+- DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
+  (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
+  results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
+- Director reminder due 2026-11-06T23:02Z: GCP quota re-request line to Aniket; keep until a decision marks it done.
+- Any Kaggle GPU kernel must pin the starter docker_image (py3.12, cp312 wheelhouse). Hosted-LLM-API data question OPEN; no new 3rd-party services.
+- One pending Kaggle submission at a time; no partial credit on timeout (docs/RULES_FINDINGS.md).
+## Timing facts (results/kaggle_timing_e4b_v000_setup.json)
+- Harness sandbox setup ~210 s/task, outside max_time_minutes (clock starts after setup); flat across repos. vLLM startup 5.39 min;
+  verification ~410 s (excluded from the 12 h). Agent clock p90 144 s at cap 5.
+
+## Open decisions / instructions in force
+- Dec 022: interim timing rule (cap + S) x125 + 30 <= 660 (S now per dec 034 hypotheses). Item 4 (truncation-safe diff, patch hygiene, tool-output trimming) pending = dec 032 item 8.
+- Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
+
+## Dec 034 (report 009 ruled: option C with gated step-up) — in force
+- 31b-v001-t4 (dec 036 item 2 name; dir bundles/31b/v001) = TIMING bundle (cap 4.0, max_output_tokens 8192 x2): dist/31b-v001.zip sha256=3c3a264652ab1d72ff6b9c5609c482c34a2ab7af37eb600689e5cfa0bf810f6a,
+  pack PASS, load check results/bundle_load_check_31b_v001.json (8192/8192, 240 s). NOT a submission candidate.
+- Kernel probes P1-P3: branch codex/kernel-probes 63127c8 (on fix5 87001e4). DEC 036: gate fix on branch codex/kernel-probes-gate
+  92a74c7 (worktree gemma-wt/codex-kernel-probes-gate): --gate-mode stock-path, b = max(phase1 - image_emu - setup.py) <= cap*60+37,
+  h1_composite reported (not gated); 118 tests pass; v5 rich_3067 = 89.52 s; whole v5 b max 92.3 <= 121 (PASS; overall FAIL on (a)).
+  Push the -gate branch at cap 4.0, budget 6000 only after BOTH review-kernel-probes-light and review-kernel-probes-gate-light are clean
+  (eval/plans/006.md "Dec 036 correction"). Summary cmd: timing_summary.py --gate-mode stock-path --gate-vllm-seconds 600.
+  Kaggle slug/push command: same as v5 (ops/budget/kaggle.md); log quota.
+  DEC 037: minus-image-only BLOCKING in the 63127c8 review = MOOT (say so in push note); gate prompt scoped OK; queue order holds.
+- Gates for that run: (a) 8/8 no harness error; (b) max(Phase-1 - emulation) <= 277 s; (d) vLLM <= 600 s; (e) >= 1 non-empty diff.
+- G1 = P2 no docker binary + no docker.sock AND P1 stock setup <= 30 s on all 8 AND gates pass -> request SUBMIT 31b-v002 (cap <= 3.5,
+  byte-identical to v001-t4 except cap + comment, no re-time; dec 036 item 2) in report 010, citing h1_composite.
+- FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
+- e4b-v002 submit: record submit time, completion time, any runtime field from the Kaggle API/CLI in ops/budget/kaggle.md (weak evidence; never act on it alone).
+- Forum question (dec 035, E4 YES): Aniket posts report 009 s6 from his own account; Builder posts NOTHING. When an answer appears, summarize it (no task data) in the next report. Nothing waits on it; G1 governs.
+- OPEN eval-design question (dec 034 item 6): under H1, test deps come from the scorer's own site-packages, not setup.py. Before local
+  pass-rate evals start, pre-register which environment the local sandbox models and why. Don't act on it before then.
+- Dec 032 item 5: decision_note is in timing_summary (probes branch); add the same note field to results/kaggle_timing_e4b_v001.json at merge.
+## Next 3
+1. Guard v6 = ops/patches/kaggle-submit-kernel-v6.diff (v5 full review: 3 core BLOCKING; v6 under review-submit-guard6-light). Pre-check strict
+   fail-closed (csv exact header, field count, ISO date; any doubt refuses; all pages, or refuse if rows == page size; re-read UTC day
+   AFTER the query, refuse if changed). FULL adversarial review of the whole guard. BLOCKING only in the pre-check -> drop the pre-check,
+   re-review that removal = last round. Clean -> bin/send aniket "apply ops/patches/kaggle-submit-kernel-v6.diff" -> commit -> dry checks -> submit.
+   DEC 048: page-size assumption accepted (NON-BLOCKING); guard backlog ops/backlog-guard.md (ordering, repeat path) only in a needed change.
+2. DEC 047: gate (b) formula kept (conservative; report 010 leads with h1_composite). fix7 review clean -> merge stack -> host eval/tests -> push from codex/kernel-gate-finfix (cap 4.0, <= 4 quota-h, log ops/budget/kaggle.md) -> timing_summary --gate-mode stock-path -> report 010.
+3. After report 010: plan 005 (dec 022 item 4) + plan 007 (dec 039) = first quality levers; ops/patches cleanup (dec 045 item 4).
+# Plan (the Director may revise it; log revisions in the journal)
+
+Today is Nov 4. The final deadline is Dec 2, 23:59 UTC. Each phase ends in a gate report to the
+Director.
+
+## P0: Foundation and baselines (Nov 4–7)
+Follow `docs/KICKOFF.md`.
+
+**Gate 0:**
+- The harness is verified and the facts are corrected.
+- Gold calibration has produced the clean task list.
+- The splits are frozen.
+- `pack` and the eval runners work.
+- 31B and E4B baseline bundles exist.
+- The first baseline submission is authorized.
+
+## P1: Scaffold iteration, both tracks (Nov 7–18)
+- Use the E4B track as a cheap testbed: a 1×L4 runs about 4× cheaper than 4×L4. Port its wins to
+  31B and confirm them there.
+- Work on the failure taxonomy, harness-trap fixes, the prompt workflow, skills, the localizer
+  sub-agent and sampling.
+- Submit daily when there's an eligible candidate.
+
+**Gate 1:** each track's best bundle beats its baseline on paired dev, and the timing bound holds.
+
+## P2: Post-training (Nov 12–25)
+- Collect trajectories on dev tasks (never holdout).
+- Use rejection-sampling SFT, plus scripted trajectories built from the reference patches.
+- LoRA: no A100 on GCP (decision 003). Cost out E4B LoRA on Kaggle L4x4 or GCP l4x1 spot, and whether 31B LoRA is feasible at all, in a report before Phase 2.
+- Run 1–2 rounds of expert iteration.
+- Lever (unscheduled): open-weight teacher distillation (licence must permit training other models). Needs GPUs we lack or a paid API (Aniket approval); cost out only when LoRA work starts (decision 003 item 3).
+- Ship rule (decision 004-002-001): leave-one-repo-out is mandatory for every ship decision; repo-specific prompt content is rejected; weight the four public repos equally.
+- Ship only if it wins paired on dev **and** holdout, in the exact vLLM base.
+
+**Gate 2:** for each track, decide adapter vs no adapter.
+
+## P3: Hardening (Nov 24–29)
+- Freeze candidates.
+- Run leave-one-repo-out checks, variance runs, and a timing rehearsal on 4×L4.
+- Get the last scored submissions in by about Nov 29.
+
+## P4: Finals (Nov 30–Dec 2)
+- Run the Director's selection analysis.
+- Escalate to Aniket on Dec 1.
+- Lock the selection by Dec 2, 18:00 UTC.
+
+## Budget plan ($150 hard cap; the Director releases it in increments)
+| Use | Approx. |
+|---|---|
+| CPU x86 VM for gold calibration and Phase-2 checks | $5 |
+| E4B on 1×L4 (spot) | $30 |
+| 31B on 4×L4 (spot) | $65 |
+| LoRA training (no A100 on GCP for now; see decision 003) | TBD |
+| Reserve | $20 |
+
+Kaggle L4x4 gives about 15 h/week, reserved for exact-environment smoke tests and timing.
+
+exec
+/bin/bash -lc "cat ops/backlog-guard.md && rg -n 'version_label|Submission ref:|def kernels_output|def competition_submit|def competitions_submissions|page_size' /home/ubuntu/gemma-local/venv/lib/python*/site-packages/kaggle/api/kaggle_api_extended.py" in /home/ubuntu/work/gemma
+ exited 2 in 0ms:
+# bin/kaggle-submit backlog (dec 048 item 3). Do these ONLY inside the next guard change that's needed anyway, never as a standalone round before Nov 6.
+- (a) Ordering: in the server-side pre-check, refuse unless the date column is non-increasing (newest-first), so the today-check stays valid under any page cap.
+- (b) Repeat submissions: "sha:<prefix> in description" refuses any re-submission of a sha, but slot policy allows repeating the best bundle
+  to measure LB variance. Before the first repeat is proposed, design a Director-authorized repeat path (e.g. an AUTHORIZE field repeat=N
+  that relaxes the sha-prefix and local single-use rules to "no row today" for that N) and get it reviewed.
+- Known limitation (dec 048 item 1, NON-BLOCKING): the pre-check assumes the server honours --page-size 100 (the CLI prints no next-page token).
+rg: /home/ubuntu/gemma-local/venv/lib/python*/site-packages/kaggle/api/kaggle_api_extended.py: IO error for operation on /home/ubuntu/gemma-local/venv/lib/python*/site-packages/kaggle/api/kaggle_api_extended.py: No such file or directory (os error 2)
+
+codex
+All 44 offline checks of the extracted code passed, including the four prior blockers. I found one optional hardening issue: `json.loads` silently accepts duplicate ledger keys, keeping the last value. The guard’s writer does not produce duplicates, and rejecting them goes beyond the specified parser contract, so I’m treating this as non-blocking.
+codex
+**BLOCKING: None found.** V6 fixes all four previous blockers. Reviewing the whole reconstructed wrapper found no blocking regression.
+
+Target line numbers below refer to the reconstructed v6 files; links point to the corresponding diff.
+
+- **Previous #1 fixed — ambiguous results retain pending.** `bin/kaggle-submit:145` requires an exact numeric reference line. Without one, pending remains and the guard exits 5, regardless of error text. [Diff:164](/home/ubuntu/work/gemma/ops/patches/kaggle-submit-kernel-v6.diff:164)
+- **Previous #2 fixed — ledger errors refuse.** `bin/kaggle-submit:51` parses JSON records, validates string `sha256`/`day`, and compares parsed SHA, day and `day_checked`. Compact JSON works; unreadable, malformed and invalid-schema records refuse. [Diff:62](/home/ubuntu/work/gemma/ops/patches/kaggle-submit-kernel-v6.diff:62)
+- **Previous #3 fixed — authorization suffixes refuse.** `bin/kaggle-submit:33` uses `fullmatch`; a supplied bundle must exactly equal the zip argument. The supplied dec 040 directive format passes. [Diff:43](/home/ubuntu/work/gemma/ops/patches/kaggle-submit-kernel-v6.diff:43)
+- **Previous #4 fixed — invalid dates refuse.** `bin/kaggle-submit:100` restricts digits to ASCII, and line 127 validates calendar/time values with `strptime`. Impossible dates and Unicode digits refuse. [Diff:119](/home/ubuntu/work/gemma/ops/patches/kaggle-submit-kernel-v6.diff:119)
+
+The file-upload branch is removed. Four arguments and kernel mode are mandatory; patched configuration selects kernel mode. The lock, pinned-version hash comparison, pending-before-submit ordering and ledger-before-pending-removal ordering remain intact. [Arguments/mode](/home/ubuntu/work/gemma/ops/patches/kaggle-submit-kernel-v6.diff:26), [configuration](/home/ubuntu/work/gemma/ops/patches/kaggle-submit-kernel-v6.diff:187), [submission/logging](/home/ubuntu/work/gemma/ops/patches/kaggle-submit-kernel-v6.diff:158).
+
+**NON-BLOCKING**
+
+1. **Duplicate ledger keys silently use the last value.** At reconstructed `bin/kaggle-submit:55`, `json.loads` accepts repeated `sha256` or `day` keys. I reproduced a record whose initial matching values were overwritten by later unrelated values and therefore passed. Rejecting duplicate keys would strengthen corruption detection. This exceeds the specified parser contract, and the guard’s writer never generates duplicates. [Diff:66](/home/ubuntu/work/gemma/ops/patches/kaggle-submit-kernel-v6.diff:66)
+
+2. **Pagination assumption remains accepted.** The server must honour `--page-size 100`; full pages refuse. This is the explicitly accepted dec 048 limitation. [Diff:113](/home/ubuntu/work/gemma/ops/patches/kaggle-submit-kernel-v6.diff:113)
+
+**Questions:** None.
+
+Validation: reconstructed all 154 wrapper lines and 24 configuration lines; both pass `bash -n`. **44 offline extracted-code checks passed.** The filesystem-writing harness was not rerun under the read-only sandbox. No files changed; no real Kaggle CLI invoked.
+tokens used
+41,150
