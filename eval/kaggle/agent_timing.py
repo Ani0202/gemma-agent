@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -77,31 +78,146 @@ def install():
             lg.propagate = False
             lg.handlers.clear()
 
-def patch_subprocess_deps(data_dir):
-    """Minimal gold_calibration.patch_subprocess_deps, including imported bindings."""
+PIP_PREFIX = 'PIP_NO_INDEX=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_RETRIES=0 PIP_TIMEOUT=5'
+SCORER_TOOLS = ('pip', 'pdm-backend', 'setuptools', 'wheel', 'poetry-core',
+                'hatchling', 'flit-core', 'editables', 'pytest', 'pytest-timeout', 'typer')
+BASE_SKIP = {'pytest', 'pytest-timeout', 'pytest-asyncio', 'pytest-httpbin',
+             'pytest-xdist', 'pluggy', 'pip', 'setuptools', 'wheel'}
+
+
+def setup_command(repo, fast_path=True):
+    return (PIP_PREFIX + ' python3 /tmp/setup.py ' +
+            ('--fast-path ' if fast_path else '') + shlex.quote(repo))
+
+
+def compatible_wheels(wheels, tags):
+    """Highest version per distribution, with sandbox PEP 425 tags (never host tags)."""
+    from packaging.utils import parse_wheel_filename
+    rank = {tag: i for i, tag in enumerate(tags)}
+    selected = {}
+    for path in sorted(Path(wheels).glob('*.whl')):
+        name, version, build, wheel_tags = parse_wheel_filename(path.name)
+        matches = [rank[str(tag)] for tag in wheel_tags if str(tag) in rank]
+        if not matches:
+            continue
+        score = (version, -min(matches), build)
+        if name not in selected or score > selected[name][0]:
+            selected[name] = (score, path)
+    return {name: item[1] for name, item in selected.items()}
+
+
+def setup_step(current, name, action):
+    """Bound output in the journal; never serialize commands, task objects or exceptions."""
+    start = time.perf_counter()
+    row = dict(step=name, start_offset_s=round(start-current['started'], 6),
+               duration_s=0.0, rc=None, stdout='', stderr='')
+    current['setup_calls'].append(row)
+    try:
+        result = action()
+        row['rc'] = getattr(result, 'exit_code', 0)
+        for field in ('stdout', 'stderr'):
+            value = getattr(result, field, '') or ''
+            row[field] = value.encode('utf-8', errors='replace')[-2048:].decode('utf-8', errors='ignore')
+        return result
+    except Exception as exc:
+        row.update(rc=-1, stderr=type(exc).__name__)
+        current['setup_failed'] = True
+        raise
+    finally:
+        row['duration_s'] = round(time.perf_counter()-start, 6)
+        if row['rc'] != 0:
+            current['setup_failed'] = True
+
+
+def patch_subprocess_deps(data_dir, state=None):
+    """Install scorer tools in each venv, using that interpreter's ABI, entirely offline."""
     import swegemma.harness.container_setup as cs
-    orig = cs.install_test_dependencies
+    from packaging.utils import parse_wheel_filename
+    orig = getattr(cs.install_test_dependencies, '_timing_original', cs.install_test_dependencies)
     wheels = data_dir / 'wheels'
     if not wheels.is_dir():
         wheels = WHEELHOUSE
     setup = data_dir / 'sandbox' / 'setup.py'
     if not setup.exists():
         setup = next(iter(data_dir.rglob('setup.py')), setup)
+
     def install(docker, container_id, repo='', *, fast_path=True, config=None):
         if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
             return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+        current = state.get() if state is not None else dict(
+            started=time.perf_counter(), setup_calls=[], setup_failed=False)
         sp = next(iter(sorted(docker.sandboxes[container_id]['venv'].glob('lib/python3*/site-packages'))))
-        base, large, _, _ = cs._inspect_wheels_dir(wheels)
-        if large:
-            raise RuntimeError('large wheels present; workspace-import scan not emulated')
-        with tarfile.open(cs._build_unpacked_wheels_tar(list(base), 'sp_base_local', '.swegemma_base_injected')) as tf:
-            tf.extractall(sp, filter='data')
-        docker.copy_to(container_id, setup, '/tmp/setup.py')
-        docker.exec(container_id, f"python3 /tmp/setup.py {'--fast-path' if fast_path else ''} {repo}".strip(), timeout=280)
-    # All consumers must see the replacement, even if imported before this call.
+        # A universal pip wheel supplies vendored packaging even when ensurepip failed.
+        pip_wheels = [p for p in wheels.glob('pip-*.whl')
+                      if p.name.endswith('-py3-none-any.whl')]
+        if not pip_wheels:
+            print('Missing required universal pip wheel in', wheels, flush=True)
+            def missing_pip():
+                raise RuntimeError('Required compatible pip wheel missing')
+            setup_step(current, 'pip_bootstrap', missing_pip)
+        pip_wheel = max(pip_wheels, key=lambda p: parse_wheel_filename(p.name)[1])
+        probe = ("import sys,json;sys.path.insert(0,'/tmp/bootstrap-pip.whl');"
+                 "from pip._vendor.packaging.tags import sys_tags;"
+                 "print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()]}))")
+        def probe_interpreter():
+            docker.copy_to(container_id, pip_wheel, '/tmp/bootstrap-pip.whl')
+            return docker.exec(container_id, 'python3 -c ' + shlex.quote(probe), timeout=30)
+        result = setup_step(current, 'interpreter_probe', probe_interpreter)
+        if result.exit_code != 0:
+            raise RuntimeError('Sandbox interpreter probe failed')
+        identity = json.loads(result.stdout)
+        selected = compatible_wheels(wheels, identity['tags'])
+        timeout_wheel = selected.get('pytest-timeout')
+        if timeout_wheel and str(parse_wheel_filename(timeout_wheel.name)[1]) != '2.1.0':
+            selected.pop('pytest-timeout')
+            for path in wheels.glob('pytest_timeout-2.1.0-*.whl'):
+                if {str(t) for t in parse_wheel_filename(path.name)[3]} & set(identity['tags']):
+                    selected['pytest-timeout'] = path
+        print('sandbox python', identity['version'], 'chosen wheels',
+              [p.name for p in selected.values()], flush=True)
+        # The cache key includes the selected files, so cp312 and cp313 never share a tar.
+        def extract_base():
+            missing = [name for name in SCORER_TOOLS if name not in selected]
+            if missing:
+                print('Missing compatible scorer wheels:', ', '.join(missing), flush=True)
+                raise RuntimeError('Required compatible tools missing: ' + ', '.join(missing))
+            base = [p for name, p in selected.items() if name not in BASE_SKIP]
+            if any(p.stat().st_size >= cs._LARGE_WHEEL_THRESHOLD_BYTES for p in base):
+                raise RuntimeError('large wheels present; workspace-import scan not emulated')
+            key = hashlib.sha256(json.dumps([(str(p.resolve()), p.stat().st_size,
+                    p.stat().st_mtime_ns) for p in base]).encode()).hexdigest()[:24]
+            with tarfile.open(cs._build_unpacked_wheels_tar(base, 'timing_' + key,
+                                                          '.swegemma_base_injected')) as tf:
+                tf.extractall(sp, filter='data')
+        setup_step(current, 'base_tar_extraction', extract_base)
+        bootstrap = ("import zipfile,sysconfig;zipfile.ZipFile('/tmp/bootstrap-pip.whl')"
+                     ".extractall(sysconfig.get_path('purelib'))")
+        result = setup_step(current, 'pip_bootstrap', lambda: docker.exec(container_id,
+            'python3 -c ' + shlex.quote(bootstrap) + ' && ' + PIP_PREFIX +
+            ' python3 -m pip --version', timeout=30))
+        if result.exit_code != 0:
+            raise RuntimeError('Sandbox pip bootstrap failed')
+        def install_tools():
+            # Copy to a sandbox-local wheelhouse; include copy time in this step.
+            for path in selected.values():
+                docker.copy_to(container_id, path, '/wheels/' + path.name)
+            tools = ['/wheels/' + selected[n].name for n in SCORER_TOOLS]
+            return docker.exec(container_id,
+                PIP_PREFIX + ' python3 -m pip install --ignore-installed --no-index --find-links=/wheels ' +
+                ' '.join(shlex.quote(n) for n in tools), timeout=60)
+        result = setup_step(current, 'tool_install', install_tools)
+        if result.exit_code != 0:
+            raise RuntimeError('Offline scorer tool installation failed')
+        def run_setup():
+            docker.copy_to(container_id, setup, '/tmp/setup.py')
+            return docker.exec(container_id, setup_command(repo, fast_path), timeout=280)
+        setup_step(current, 'setup.py', run_setup)
+        return current
+    install._timing_original = orig
     for name, module in list(sys.modules.items()):
         if name.startswith('swegemma.') and hasattr(module, 'install_test_dependencies'):
             module.install_test_dependencies = install
+    return install
 
 def classify_patch(patch, repo, protected=None, test_targets=()):
     """Parse file headers outside hunks, including quoted paths and renames."""
@@ -253,15 +369,17 @@ async def evaluate(config, journal, started, caps, totals):
         inventory = {t.instance_id: t for t in load_tasks(config.tasks_path)}
         if len(set(TASK_IDS)) != len(TASK_IDS) or set(TASK_IDS) - inventory.keys():
             raise ValueError('Duplicate or missing task IDs')
-        patch_subprocess_deps(DATA)
+        patch_subprocess_deps(DATA, state)
         for iid in TASK_IDS:
             if should_stop(time.monotonic()-started, caps['max_time_minutes'], caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
                 append(journal, {'_stopped': 'insufficient remaining budget for next task'})
                 break
             task = dataclasses.replace(inventory[iid], patch='')
-            times = dict(verification=0.0)
+            times = dict(verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
             state.set(times)
             evaluator, result, error = TimingEvaluator(config), None, None
+            original_start = evaluator.docker.start
+            evaluator.docker.start = lambda: setup_step(times, 'venv', original_start)
             start = time.perf_counter()
             try:
                 result = await evaluator.evaluate_task(task)
@@ -285,7 +403,8 @@ async def evaluate(config, journal, started, caps, totals):
             raw_error = (result.error or '') if result else error or ''
             try:
               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
-                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=None,
+                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
                 llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
                 tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
                 completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
@@ -294,7 +413,7 @@ async def evaluate(config, journal, started, caps, totals):
             except Exception as exc:
                 append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
                                      wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
-                                     error='Row build exception (' + type(exc).__name__ + ')'))
+                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'], error='Row build exception (' + type(exc).__name__ + ')'))
             raw = WORK / 'runs' / iid
             raw.mkdir(parents=True, exist_ok=True)
             (raw / 'agent.patch').write_text(patch)
@@ -354,7 +473,7 @@ def main():
                       bundle_sha256=None, agent_yaml_sha256=None, gpu_names=[], gpu_count=0,
                       mcp_import_ok=None, vllm_startup_seconds=None,
                       fields=dict(instance_id='Task ID', repo='Repository', wall_seconds='Agent (including setup), verification, total wall seconds',
-                          sandbox_setup_seconds='Null: not separable', resolved='Harness verdict', exit_code='Verification exit code or null',
+                          sandbox_setup_seconds='Sum of measured setup steps', setup_calls='Bounded setup command timings/output', setup_failed='Any setup failure', resolved='Harness verdict', exit_code='Verification exit code or null',
                           error='Sanitized failure category or null', llm_turns='LLM calls or null', tool_calls='Total and per_tool requests',
                           tool_seconds='Per-tool n,total,max call->response seconds, FIFO per name', test_run='Test requests n, matched total_seconds, share_of_agent_seconds',
                           prompt_tokens='Trace usage or null', completion_tokens='Trace usage or null', completion_tokens_per_second='Completion usage / agent seconds or null',

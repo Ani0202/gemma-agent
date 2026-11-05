@@ -153,3 +153,91 @@ def test_kernel_exception_still_writes_header_and_done(tmp_path, monkeypatch):
     assert rows[-1]['_done']['startup_seconds'] is None
     assert rows[-2] == {'_stopped': 'Kernel exception (RuntimeError)'}
     assert 'TASK_TEXT_SECRET' not in text
+
+
+def test_setup_command_offline_prefix():
+    import shlex
+    words = shlex.split(timing.setup_command('example/repo; echo unsafe'))
+    assert words[:4] == ['PIP_NO_INDEX=1', 'PIP_DISABLE_PIP_VERSION_CHECK=1',
+                         'PIP_RETRIES=0', 'PIP_TIMEOUT=5']
+    assert words[4:] == ['python3', '/tmp/setup.py', '--fast-path', 'example/repo; echo unsafe']
+
+
+def test_wheels_follow_sandbox_abi(tmp_path):
+    for name in ['native-1-cp312-cp312-manylinux_2_17_x86_64.whl',
+                 'native-2-cp313-cp313-manylinux_2_17_x86_64.whl',
+                 'native-3-cp312-cp312-win_amd64.whl', 'pure-1-py3-none-any.whl']:
+        (tmp_path / name).touch()
+    selected = timing.compatible_wheels(tmp_path, ['cp312-cp312-manylinux_2_17_x86_64', 'py3-none-any'])
+    assert selected['native'].name.startswith('native-1-')
+    assert selected['pure'].name == 'pure-1-py3-none-any.whl'
+
+
+@pytest.mark.parametrize('setup_rc', [0, 7])
+def test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch, setup_rc):
+    import contextvars
+    import sys
+    import tarfile
+    from types import ModuleType, SimpleNamespace
+    cs = ModuleType('swegemma.harness.container_setup')
+    cs.install_test_dependencies = lambda *a, **k: None
+    cs._LARGE_WHEEL_THRESHOLD_BYTES = 20 * 1024 * 1024
+    archive = tmp_path / 'base.tar'
+    with tarfile.open(archive, 'w'):
+        pass
+    selections = []
+    def build(wheels, key, marker):
+        selections.extend(wheels)
+        assert key.startswith('timing_')
+        return archive
+    cs._build_unpacked_wheels_tar = build
+    for name in ['swegemma', 'swegemma.harness']:
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    monkeypatch.setitem(sys.modules, 'swegemma.harness.container_setup', cs)
+    wheels = tmp_path / 'wheels'
+    wheels.mkdir()
+    for tool in timing.SCORER_TOOLS:
+        version = '2.1.0' if tool == 'pytest-timeout' else '1.0'
+        (wheels / f'{tool.replace("-", "_")}-{version}-py3-none-any.whl').touch()
+    (tmp_path / 'sandbox').mkdir()
+    (tmp_path / 'sandbox/setup.py').touch()
+    sp = tmp_path / 'venv/lib/python3.12/site-packages'
+    sp.mkdir(parents=True)
+    commands = []
+    class SubprocessManager:
+        sandboxes = {'id': {'venv': tmp_path / 'venv'}}
+        def copy_to(self, *args):
+            pass
+        def exec(self, sid, command, **kw):
+            commands.append(command)
+            if 'sys_tags' in command:
+                return SimpleNamespace(exit_code=0, stdout=json.dumps(dict(version='3.12', tags=['py3-none-any'])), stderr='')
+            return SimpleNamespace(exit_code=setup_rc if '/tmp/setup.py' in command else 0,
+                                   stdout='x' * 5000, stderr='é' * 5000)
+    current = dict(started=timing.time.perf_counter(), setup_calls=[], setup_failed=False)
+    state = contextvars.ContextVar('test_setup')
+    state.set(current)
+    install = timing.patch_subprocess_deps(tmp_path, state)
+    install(SubprocessManager(), 'id', 'example/repo')
+    assert current['setup_failed'] == bool(setup_rc)
+    assert current['setup_calls'][-1]['rc'] == setup_rc
+    assert [r['step'] for r in current['setup_calls']] == [
+        'interpreter_probe', 'base_tar_extraction', 'pip_bootstrap', 'tool_install', 'setup.py']
+    assert all(len(r['stdout'].encode()) <= 2048 and len(r['stderr'].encode()) <= 2048
+               and r['duration_s'] >= 0 and r['start_offset_s'] >= 0 for r in current['setup_calls'])
+    assert any('bootstrap-pip.whl' in c and 'extractall' in c for c in commands)
+    assert commands[-1].startswith(timing.PIP_PREFIX)
+    assert any('--no-index --find-links=/wheels' in c for c in commands)
+    assert 'pip' not in [p.name.split('-')[0] for p in selections]
+    (wheels / 'hatchling-1.0-py3-none-any.whl').unlink()
+    with pytest.raises(RuntimeError, match='hatchling'):
+        install(SubprocessManager(), 'id')
+    assert current['setup_calls'][-1]['rc'] == -1
+
+
+def test_gold_single_file_staging_still_compiles(tmp_path):
+    generated = tmp_path / 'gold.py'
+    load('stage_kernel').stage_kernel(generated)
+    compile(generated.read_text(), str(generated), 'exec')
+    assert '_shared_env = types.ModuleType' in generated.read_text()
+    assert '# BEGIN SHARED ENV IMPORT' not in generated.read_text()
