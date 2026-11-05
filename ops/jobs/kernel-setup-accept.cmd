@@ -1,0 +1,1 @@
+bash -c cd\ /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix\ \&\&\ /home/ubuntu/gemma-local/venv/bin/python\ eval/repro/plan003_kernel_setup.py 
