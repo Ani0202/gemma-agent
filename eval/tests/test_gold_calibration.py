@@ -117,7 +117,8 @@ class WorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             args = argparse.Namespace(data_dir=Path(directory), worker='a',
                                       sandbox='subprocess', result=Path(directory) / 'result.json')
-            with patch.object(gold, 'load_inventory', return_value=[raw]), \
+            with patch.object(gold, 'patch_subprocess_deps'), \
+                    patch.object(gold, 'load_inventory', return_value=[raw]), \
                     patch.dict('sys.modules', {'swegemma.models': models}), \
                     patch.object(gold, 'patch_subprocess_deps'), \
                     patch.object(gold, 'verify_gold', side_effect=verifier):
@@ -129,7 +130,8 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(patch_text, 'GOLD_PATCH_SECRET')
             self.assertEqual(sandbox, 'subprocess')
             # Exit 0 can still fail the harness's required-test/JUnit checks.
-            return dict(resolved=False, test_exit_code=0, error='TEST_PATCH_SECRET')
+            return dict(resolved=False, test_exit_code=0, error='TEST_PATCH_SECRET',
+                        error_message='TASK_TEXT_SECRET', test_output='ERROR TASK_TEXT_SECRET')
         row = self.run_worker(verify)
         self.assertFalse(row['resolved'])
         self.assertEqual(row['exit_code'], 0)
