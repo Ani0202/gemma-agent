@@ -165,3 +165,5 @@
 2026-11-05T20:03Z | 1c13123: vendor pathspec/shellingham/trove-classifiers (missing in the no-stub repro), closure preflight | eval/kaggle/vendor/SHA256SUMS
 2026-11-05T20:08Z | Claude review of 9ec991f..1c13123: BLOCKING (preflight would reject Kaggle's runtime pip) + annotated-doc unvendored | ops/reviews/claude-review-vendor-fix.md
 2026-11-05T20:11Z | 87001e4: preflight mirrors setup (runtime pip, exact closure), annotated-doc vendored; 111 tests; no-stub repro all deps from embedded wheels; re-review running | results/plan003_kernel_setup_nostub_vendored.json
+2026-11-05T20:16Z | Claude re-review of 87001e4: NO BLOCKING (Kaggle-like cp312 simulation resolves fully) | ops/reviews/claude-rereview-vendor-fix.md
+2026-11-05T20:18Z | Report 007 NEEDS_DECISION: re-push e4b-v001 re-time as kernel v5 from 87001e4; Codex fix5 cmd now targets main...87001e4 (no Claude findings) | ops/reports/007-v4-failed-repush.md

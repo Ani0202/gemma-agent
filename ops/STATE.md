@@ -22,9 +22,9 @@ Builder on Opus (dec 010: local-first, two-strike).
   FIX chain on codex/kernel-setup-fix5: 9d386bc (embed pytest-timeout 2.1.0) -> 1c13123 (pathspec/shellingham/trove-classifiers)
   -> 87001e4 (Claude review vendor-fix BLOCKING: preflight rejected Kaggle runtime pip; exact closure walk; annotated-doc). Vendored
   official PyPI wheels pinned eval/kaggle/vendor/SHA256SUMS (ATTRIBUTION logged). 111 tests; no-stub repro OK
-  (results/plan003_kernel_setup_nostub_vendored.json). RUNNING: Claude re-review of 87001e4 -> ops/reviews/claude-rereview-vendor-fix.md.
-  NO BLOCKING -> send report 007 (drafted, ops/reports/007-v4-failed-repush.md) NEEDS_DECISION re-push v5 from 87001e4.
-  Codex fix5c 23:08Z: update cmd HEAD to the pushed SHA (independent prompt, dec 030 item 2) before then.
+  (results/plan003_kernel_setup_nostub_vendored.json). Claude re-review of 87001e4 NO BLOCKING (ops/reviews/claude-rereview-vendor-fix.md).
+  Report 007 SENT (NEEDS_DECISION): re-push v5 from 87001e4; on approval push + waiter, log ops/budget/kaggle.md.
+  Codex fix5c 23:08Z cmd already targets main...87001e4 (independent prompt, dec 030 item 2).
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
 - DEC 028 (report 005-prelim, option A APPROVED): 2a STOP met; artifact branch closed, 2b moot, no v000 re-time. CPU 2a dropped.
   Item 1-3: kernel-setup-fix5 BUILT aa116cb (branch codex/kernel-setup-fix5 on round-4 c4c9528; Codex 80 offline pass). Builder dry run

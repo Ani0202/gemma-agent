@@ -34,7 +34,8 @@ Unchanged from dec 028 item 4 (gate (a)-(e)) and dec 029/030. The same bundle (d
   - The strict closure test, with no runtime fallback, is complete against the local wheelhouse copy, also under cp312 tags.
   - The staged kernel's `check_tool_sources` passes under the Kaggle pip condition (no pip wheel, no ensurepip).
   - The no-stub repro reproduces the v4 failure before the fix and runs the full Docker-order sequence after it, with all 4 non-wheelhouse deps taken from the embedded wheels.
-  - Final Claude re-review of 87001e4: ops/reviews/claude-rereview-vendor-fix.md (verbatim).
+  - Final Claude re-review of 87001e4: **NO BLOCKING** (ops/reviews/claude-rereview-vendor-fix.md, verbatim). Its simulation with cp312 tags and 3.12 markers found the setup closure and the preflight both resolve fully (16 edges, all from wheels). Its 5 NB items are theoretical, test-quality or the /wheels nit; none affect this run.
+  - Codex fix5 review (23:08Z, medium, alone) now targets main...87001e4. Its prompt mentions no Claude findings (dec 030 item 2).
 
 ## 4. Results (setup only; no timing yet)
 | run | env | tasks | outcome | file |
@@ -51,4 +52,4 @@ Note for report 005: the image-emulation steps (tool_install ~1.5 s, tool_deps ~
 - **C. Drop the image-emulation steps and assume the scorer image's tools.** Faster and closer to the scorer's per-task cost, but it departs from dec 027 fidelity (the tools would then come from the Kaggle runtime, untested). Not recommended.
 
 ## 6. Recommendation
-**A.** The measurement is reversible and cheap, and the Codex review still gates any reliance on it (dec 029 item 3). The Codex fix5 prompt will be updated to HEAD = the pushed SHA, still without Claude findings (dec 030 item 2).
+**A. SUBMIT none; Kaggle re-push: kernel v5 from 87001e4, dist/e4b-v001.zip sha256=f2ced9c97ee1447cb3a78c0ebf65f4ecaff90c84b18313645d5d043c62d277e9, 8 ids, budget 3900 s, -t 5700 s (≤3.17 quota-h; week would be ≤6.9/30).** The measurement is reversible and cheap, and the Codex review still gates any reliance on it (dec 029 item 3). The Codex fix5 prompt will be updated to HEAD = the pushed SHA, still without Claude findings (dec 030 item 2).
