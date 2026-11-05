@@ -1,0 +1,56 @@
+--- a/bin/kaggle-submit
++++ b/bin/kaggle-submit
+@@ -1,5 +1,7 @@
+ #!/usr/bin/env bash
+-# Guarded Kaggle submission. Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>"
++# Guarded Kaggle submission. Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>" [kernel_version]
++# Kernel mode (SUBMIT_MODE=kernel, dec 041): the 4th arg is required; the OUTPUT submission.zip of that exact kernel
++# version is downloaded and must be byte-identical (sha256) to the authorized zip, and pass the same root/size checks.
+ # Refuses unless: a Director decision contains "SUBMIT: AUTHORIZE sha256=<this zip's sha256> track=<track>",
+ # that authorization is unused, and no submission was made yet today (UTC).
+ set -euo pipefail
+@@ -19,13 +21,26 @@
+ size=$(stat -c %s "$zip"); [ "$size" -lt 3221225472 ] || { echo "REFUSED: zip >= 3 GiB"; exit 3; }
+ echo "Submitting $zip ($track, sha256=$sha) authorized by $auth"
+ if [ "$SUBMIT_MODE" = "kernel" ]; then
+-  [ -n "$SUBMIT_KERNEL" ] || { echo "SUBMIT_KERNEL not set"; exit 1; }
+-  # Builder: verify exact flags with `kaggle competitions submit -h` in Phase 0 before first use.
+-  kaggle competitions submit "$COMP" -k "$SUBMIT_KERNEL" -f submission.zip -m "$msg"
++  [[ "$SUBMIT_KERNEL" =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]] || { echo "SUBMIT_KERNEL must be owner/slug"; exit 1; }
++  kver=${4:-}
++  [[ "$kver" =~ ^[0-9]+$ ]] || { echo "REFUSED: kernel mode needs the kernel version (integer) as 4th arg"; exit 3; }
++  # 'kaggle kernels output owner/slug/N' fetches the output of version N (CLI sets version_label=vN,
++  # kaggle_api_extended.py parse_kernel_string/_kernel_version_label), so the hash is tied to the version submitted.
++  out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
++  kaggle kernels output "$SUBMIT_KERNEL/$kver" -p "$out" -q >/dev/null
++  [ -f "$out/submission.zip" ] && [ ! -L "$out/submission.zip" ] || { echo "REFUSED: version $kver has no regular submission.zip output"; exit 3; }
++  osha=$(sha256sum "$out/submission.zip" | cut -d' ' -f1)
++  [ "$osha" = "$sha" ] || { echo "REFUSED: kernel v$kver output sha256=$osha != authorized $sha"; exit 3; }
++  unzip -l "$out/submission.zip" | awk '{print $4}' | grep -qx 'agent.yaml' || { echo "REFUSED: kernel output: agent.yaml not at zip root"; exit 3; }
++  osize=$(stat -c %s "$out/submission.zip"); [ "$osize" -lt 3221225472 ] || { echo "REFUSED: kernel output zip >= 3 GiB"; exit 3; }
++  echo "Kernel $SUBMIT_KERNEL v$kver output verified: sha256=$osha"
++  kaggle competitions submit "$COMP" -k "$SUBMIT_KERNEL" -v "$kver" -f submission.zip -m "$msg"
++  kinfo=", \"kernel\": \"$SUBMIT_KERNEL\", \"kernel_version\": $kver"
+ else
+   kaggle competitions submit "$COMP" -f "$zip" -m "$msg"
++  kinfo=""
+ fi
+-printf '{"day": "%s", "t": "%s", "track": "%s", "sha256": "%s", "zip": "%s", "auth": "%s", "msg": "%s"}\n' \
+-  "$today" "$(date -u +%FT%TZ)" "$track" "$sha" "$zip" "$auth" "$msg" >> ops/submissions.jsonl
++printf '{"day": "%s", "t": "%s", "track": "%s", "sha256": "%s", "zip": "%s", "auth": "%s", "msg": "%s"%s}\n' \
++  "$today" "$(date -u +%FT%TZ)" "$track" "$sha" "$zip" "$auth" "$msg" "$kinfo" >> ops/submissions.jsonl
+ bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle. Score in ~12-15h."
+ echo "logged to ops/submissions.jsonl"
+--- a/config.env
++++ b/config.env
+@@ -14,8 +14,8 @@
+ HUMAN_HOLD_SEC=120            # don't inject mail within this many seconds of Aniket typing
+ GPU_HARD_CAP_USD=150
+ DIGEST_HOUR_UTC=14            # 8am Chicago (CST)
+-SUBMIT_MODE=file              # file | kernel  (Builder verifies in Phase 0)
+-SUBMIT_KERNEL=
++SUBMIT_MODE=kernel            # file | kernel  (verified 2026-11-05: file upload -> 400; code competition, dec 041)
++SUBMIT_KERNEL=aniket0202/gemma-submit-e4b
+ FINAL_DEADLINE=2026-12-02T23:59:00Z
+ CLAUDE_CONFIG_DIR_GEMMA="$HOME/.claude-gemma"   # separate Claude login (university account); Etho's login untouched
+ CODEX_MODEL=              # empty = Codex default; per-call override: CODEX_MODEL=... bin/codex-*

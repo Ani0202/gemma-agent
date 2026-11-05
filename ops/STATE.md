@@ -1,14 +1,18 @@
-# STATE: snapshot 2026-11-05 23:14Z (cycle 99, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 23:18Z (cycle 100, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
-- e4b-v001 (dec 022 item 3, cap 5 -> 1.4 only): dist/e4b-v001.zip sha256=f2ced9c97ee1447cb3a78c0ebf65f4ecaff90c84b18313645d5d043c62d277e9 (re-pack, comment fix only), codex-review clean (no BLOCKING); re-time HELD until item 2 concludes.
+- e4b-v001 (cap 1.4): dist/e4b-v001.zip f2ced9c9...62d277e9, review clean; superseded by v002.
 - e4b-v002 (dec 032 item 1: v001 + cap 1.0 + max_output_tokens 8192 at both occurrences): dist/e4b-v002.zip
   sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad, bin/pack PASS, load check OK
   (results/bundle_load_check_e4b_v002.json: 8192/8192, 60 s). Dec 032 item 3 conditions (i)-(iv) all hold (23:11Z).
-  SUBMIT MAIL SENT 23:11Z (ops/mail/director/20261105T231112-18464-from-builder.md): v002 review ops/codex/review-20261105T230900.md
-  BLOCKING none; fix5c review ops/codex/review-20261105T230800.md 1 BLOCKING = gate-only (exempt). Cap derivation 7 s F -> 631 min.
-  Awaiting Director authorization; after submit: log times in ops/budget/kaggle.md + LB score results file (dec 038 item 3).
+  Dec 040 AUTHORIZED (unused). File upload -> 400 at 23:13Z (code competition). Dec 041: submit via kernel aniket0202/gemma-submit-e4b
+  v1 (CPU, private, output sha verified = 60c0...4dad). Guard patch ops/patches/kaggle-submit-kernel.diff: bin/ edit DENIED by permission
+  classifier -> needs apply by owner/permission + review-submit-guard-light no BLOCKING. Cutoff 23:55Z, else Nov 6 slot (same auth).
+  Then: bin/kaggle-submit dist/e4b-v002.zip e4b '<msg>' 1; log ops/budget/kaggle.md; results/lb_e4b_v002.json (dec 038 item 3).
+- CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 E4B/12B/E2B validator
+  acceptance (first e4b submit settles E4B); l.55 submit_patch/get_status vs call limits; l.63 private-LB multiple runs; l.72 wheels arch
+  (x86 assumed, unrecorded); 12h overrun ruling. VERIFIED: l.42 submit method = kernel output (dec 041); l.76 superseded by l.112.
 - No local pass-rate scores yet. eval-runner-fix MERGED to main 70c0d9f (codex review clean + N1 count-cap fix d13ceac; 421 pass, 3 skip).
   Test cmd: /home/ubuntu/gemma-local/venv/bin/python3 with pyimg cp3.13 site-packages appended to sys.path, pytest eval/tests.
 ## Eval data
@@ -18,8 +22,8 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
-## Running jobs (23:14Z): review-kernel-probes-light (now starting; OLD minus-image prompt, dec 037 moot), review-kernel-probes-gate-light
-  + review-memguard-fix6e-light (wait for probes), review-kernel-gate-finfix-light (waits for all 3), memguard 7933 (0 kills).
+## Running jobs (23:18Z): review-submit-guard-light; review-kernel-probes-light (OLD prompt, dec 037 moot) -> then probes-gate-light +
+  memguard-fix6e-light -> then kernel-gate-finfix-light (dec 041 item 3: finfix + legacy-decision + attribution in one change); memguard 7933.
 - KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
   dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
 - fix5c BLOCKING 1 (gate a ignored failed finalization git rc/exception) FIXED on codex/kernel-gate-finfix e02666f (on 92a74c7;
@@ -28,13 +32,9 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   MERGED 8c55985; main eval/tests 469p/3s/1f (stale test_memguard oom_score_adj; fixed by the fix6 merge).
 - memguard-fix6 eedf84b+0f5de3d livetest GREEN. Review clean -> merge + full eval/tests + deploy (stop 7933, start memguard-light). BLOCKING -> short report.
 - NOTE: codex-build branches from main HEAD; follow-ups: manual worktree on prev commit + sed prev build-*.sh + bin/job start.
-## bin/job, memguard, owner patch (cycles 62-66)
-- Linger=yes since ~18:05Z (dec 025): scope path (MemoryMax=5G) is normal; Codex works under it. Owner patch v2 (ops/patches/bin-job-fallback.diff): HOLD for Aniket (dec 026), 3 BLOCKING in ops/codex/review-20261105T180811.md; plan v3 = pidfd helper. NOT started.
-- sandbox-limits round 3 9d610b5 (wait4 ru_maxrss peak; Codex 459 pass/4 skip). Host test job sandbox-limits3-hosttest; if green -> codex-review -> merge eval/ only.
-## Dec 027 still in force (superseded parts closed by dec 028)
-- FIDELITY: kernel reproduces Dockerfile.public only (pip + line-9 tools, offline); NO PIP_* prefixes; setup_calls logging mandatory.
-- Item 6 / dec 022 item 4 scoped (ops/codex/ask-20261105T181222.md): harness fallback diff covers caps when submit_patch not called;
-  empty submit loses everything; draft prompt bundles/drafts/item4-system.md; plan 005 (paired A/B at v002 cap, needs GPU: ask in report 005).
+- bin/job owner patch v2 (ops/patches/bin-job-fallback.diff): HOLD for Aniket (dec 026), 3 BLOCKING in ops/codex/review-20261105T180811.md; plan v3 = pidfd helper. NOT started.
+- DEC 027 FIDELITY: kernel reproduces Dockerfile.public only (pip + line-9 tools, offline); NO PIP_* prefixes; setup_calls logging mandatory.
+- Dec 022 item 4 = plan 005 (ops/codex/ask-20261105T181222.md; draft bundles/drafts/item4-system.md; empty submit loses all; needs GPU).
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
 - Kaggle GPU this week: 5.18/30 h per `kaggle quota` 21:05Z. Plan 006 cap 4.0 ~2.4 quota-h (-> ~7.6). Log: ops/budget/kaggle.md. Resets Sat 00:00Z.
