@@ -50,7 +50,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 ## OOM incident (dec 020/021)
 - Root cause from runs/gold-null2: null-phase rows 22 rich_4006 (327 s), 38 rich_3480 (2683 s), 39 rich_3772 (2867 s) hit exit 124. The harness executor already uses start_new_session+killpg (adk_eval_core subprocess_sandbox.py:57), so the orphan theory is weaker; the leading suspect is unbounded memory in a null-patch rich test with no per-sandbox memory cap (none locally; the scorer has 4 GiB). Unproven: no RSS was logged. The codex-sandbox-limits fix covers both.
 - bin/job hardening: APPLIED by Aniket (b1eedd7). The review-memguard rerun still covers it.
-- No exit-137 events since the reboot.
 
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
