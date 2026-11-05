@@ -376,7 +376,9 @@ module.main()
         assert "KILL" in text and "survivors=[]" in text, text
         job.wait(timeout=10)
         assert marked_live(mg, marker, job_id) == set(), "fresh inventory found marked survivors"
-        assert rcfile.read_text().strip() == "137"
+        # The bash wrapper carries the job marker too, so memguard kills it before it can write rc.
+        assert job.returncode == -signal.SIGKILL, job.returncode
+        assert not rcfile.exists()
         assert mg.proc_info(dummy.pid)["state"] not in {"Z", "X"}
         assert mg.marker_value(dummy.pid, "GEMMA_JOB_CAP") is None
         assert Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip() == baseline
