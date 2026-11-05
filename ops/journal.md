@@ -68,3 +68,5 @@
 2026-11-05T15:12Z | pushed Kaggle L4x4 aniket0202/gemma-e4b-timing v1 (E4B v000, 8 dev ids Random(1)); job e4b-timing-wait | eval/plans/001-timing-ids.txt
 2026-11-05T15:10Z | Kaggle timing v1 FAILED at 2 s: cp312 wheelhouse on default py3.13 GPU image; ~0 quota | runs/e4b-timing-v1-failed/gemma-e4b-timing.log
 2026-11-05T15:12Z | fix 8b200ca: pin starter docker_image (py3.12) + 'Other' model handle; pushed timing v2; job e4b-timing-wait2 | eval/kaggle/timing_push.sh, ops/budget/kaggle.md
+2026-11-05T15:15:50Z | dec 017 (owner-approved context-clear fixes): CLAUDE.md top role line added; STATE.md trimmed to snapshot, history archived | ops/history/STATE-archive.md
+2026-11-05T15:15:50Z | router change drafted (clear logging, no clear for continue-nudge-only with 2h forced clear, explicit role files in orient); bash -n + scratch tests OK; codex-review job review-router | bin/.router.new, ops/codex/router-dec017.diff

@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Router: delivers mail into the interactive Builder/Director sessions when they're idle, primes and
+# names (Remote Control) fresh sessions, wakes the Builder on job completion, relays phone replies,
+# backs off on usage limits, sends the daily digest, reconciles GPU spend, and pushes to git.
+# Runs in tmux window gemma:router (started by bin/start). Only types into its own tmux session.
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 1
+source ./config.env
+S=$TMUX_SESSION
+CLEAR_MAX_GAP_MIN=${CLEAR_MAX_GAP_MIN:-120}   # force a /clear if the role hasn't been cleared for this long (dec 017)
+NUDGE_CONTINUE="Continue your plan (status was CONTINUE)."   # router's periodic continue-nudge body (no /clear for it alone)
+mkdir -p ops/rc ops/mail/builder/read ops/mail/director/read ops/mail/paper/read ops/logs ops/jobs
+touch ops/journal.md ops/digest_pending
+[ -f ops/status ] || echo "CONTINUE" > ops/status
+log(){ echo "$(date -u +%FT%TZ) $*" | tee -a ops/logs/router.log; }
+now(){ date -u +%s; }
+age(){ [ -f "$1" ] && echo $(( $(now) - $(stat -c %Y "$1") )) || echo 999999; }  # seconds since mtime
+
+inject(){ # role text
+  tmux send-keys -t "$S:$1" -l "$2" && sleep 0.5 && tmux send-keys -t "$S:$1" Enter
+  rm -f "ops/rc/$1.idle"; date -u +%s > "ops/rc/$1.lastinject"
+}
+idle(){ [ -f "ops/rc/$1.idle" ]; }
+human_recent(){ [ "$(age "ops/rc/$1.human")" -lt "$2" ]; }
+limited(){ local u; u=$(cat "ops/rc/$1.backoff_until" 2>/dev/null || echo 0); [ "$(now)" -lt "$u" ]; }
+check_limit(){ # if the session just went idle showing a usage-limit message, back off
+  local role=$1
+  if idle "$role" && [ "$(age "ops/rc/$role.lastinject")" -lt 600 ] && \
+     tmux capture-pane -p -t "$S:$role" 2>/dev/null | tail -8 | grep -qiE 'usage limit|limit reached|resets? at|rate.?limit'; then
+    if ! limited "$role"; then
+      echo $(( $(now) + RL_SLEEP_MIN*60 )) > "ops/rc/$role.backoff_until"; log "$role hit a usage limit; backing off ${RL_SLEEP_MIN}m"
+    fi
+  fi
+}
+orient(){ # role -> grounding prefix for every injected message (context may have been cleared)
+  if [ "$1" = builder ]; then echo "You are the BUILDER. Your constitution is CLAUDE.md (state: ops/STATE.md)."
+  elif [ "$1" = paper ]; then echo "You are the PAPER WRITER. Your brief is ops/decisions/005-E2.md plus any later decision addressed to the PAPER WRITER; CLAUDE.md is the Builder's and does not apply to you except Hard rules and the Etho rules. State: paper/STATE.md; you write only under paper/."
+  else echo "You are the DIRECTOR. Your constitution is DIRECTOR.md; CLAUDE.md is the Builder's and does not apply to you except Hard rules and the Etho rules. Record decisions only via bin/decide."; fi
+}
+nudge_only(){ # mail files... -> true iff every file is the router's periodic continue-nudge
+  local f
+  [ $# -gt 0 ] || return 1
+  for f in "$@"; do
+    case "$f" in *-from-router.md) ;; *) return 1 ;; esac
+    [ "$(tail -n +4 "$f" 2>/dev/null)" = "$NUDGE_CONTINUE" ] || return 1
+  done
+}
+maybe_clear(){ # role [nudge_only 0|1]: clear context before new work unless Aniket was active recently
+  local role=$1 nudge=${2:-0}
+  human_recent "$role" $((HUMAN_QUIET_MIN*60)) && return 0
+  if [ "$nudge" = 1 ] && [ "$(age "ops/rc/$role.lastclear")" -lt $((CLEAR_MAX_GAP_MIN*60)) ]; then
+    log "no clear $role (continue-nudge only)"; return 0
+  fi
+  tmux send-keys -t "$S:$role" -l "/clear" && sleep 0.5 && tmux send-keys -t "$S:$role" Enter; sleep 4
+  touch "ops/rc/$role.lastclear"; log "clear $role"
+}
+prime(){ # fresh session: name it for Remote Control, then orient (two steps, verified)
+  local role=$1 st
+  st=$(cat "ops/rc/$role.started" 2>/dev/null || echo 0)
+  [ -f "ops/rc/$role.primed" ] && return
+  [ $(( $(now) - st )) -lt 20 ] && return          # give claude time to boot
+  if [ ! -f "ops/rc/$role.rc" ]; then              # step 1: Remote Control (sent once per session)
+    log "priming $role: remote control"
+    tmux send-keys -t "$S:$role" -l "/remote-control gemma-$role" && sleep 0.5 && tmux send-keys -t "$S:$role" Enter
+    touch "ops/rc/$role.rc"; return
+  fi
+  [ "$(age "ops/rc/$role.rc")" -lt 20 ] && return  # text typed while /remote-control connects is lost
+  log "priming $role: orientation"
+  if [ "$role" = builder ]; then
+    inject builder "[[ROUTER]] $(orient builder) Session (re)started. Read CLAUDE.md fully, then ops/STATE.md (if missing, follow docs/KICKOFF.md), check ops/mail/builder/ for unread mail, and continue your plan. End your turn as CLAUDE.md says."
+  elif [ "$role" = paper ]; then
+    inject paper "[[ROUTER]] $(orient paper) Session (re)started. Read ops/decisions/005-E2.md fully (your PAPER WRITER brief) and any later decision addressed to the PAPER WRITER, then paper/STATE.md, check ops/mail/paper/ for unread mail, and continue from where paper/STATE.md says."
+  else
+    inject director "[[ROUTER]] $(orient director) Session (re)started. Read DIRECTOR.md fully and ops/STATE.md, then check ops/mail/director/ for unread mail and handle it. If nothing is pending, reply 'ready' and wait."
+  fi
+  sleep 8
+  if tmux capture-pane -p -J -S -300 -t "$S:$role" 2>/dev/null | grep -q '\[\[ROUTER\]\]'; then
+    touch "ops/rc/$role.primed"; log "$role primed"
+  else
+    touch "ops/rc/$role.rc"; log "$role orientation not visible; will retry"   # retry in ~20s
+  fi
+}
+deliver(){ # role: inject unread mail as one message
+  local role=$1 files=() moved=() f dst list nudge=0
+  for f in ops/mail/$role/*.md; do [ -e "$f" ] && files+=("$f"); done
+  [ ${#files[@]} -eq 0 ] && return 1
+  idle "$role" || return 0; limited "$role" && return 0; human_recent "$role" "$HUMAN_HOLD_SEC" && return 0
+  list=""
+  for f in "${files[@]}"; do dst="ops/mail/$role/read/$(basename "$f")"; mv "$f" "$dst"; moved+=("$dst"); list="$list $dst"; done
+  nudge_only "${moved[@]}" && nudge=1
+  maybe_clear "$role" "$nudge"
+  log "deliver to $role:$list"
+  inject "$role" "[[MAIL]] $(orient "$role") New message(s):$list . Read them and act on them per your constitution."
+  return 0
+}
+wake_builder(){ # job events and status-based nudges (only when no mail is pending)
+  idle builder || return; limited builder && return; human_recent builder "$HUMAN_HOLD_SEC" && return
+  local st kind changed idle_s
+  st=$(head -1 ops/status 2>/dev/null); kind=${st%% *}
+  changed=$(find ops/jobs -name '*.status' -newer ops/rc/builder.idle 2>/dev/null | xargs -r -n1 basename | sed 's/.status$//' | paste -sd, -)
+  idle_s=$(age ops/rc/builder.idle)
+  if [ -n "$changed" ]; then SEND_FROM=router bin/send builder "Job status changed: $changed (see bin/job status)." >/dev/null
+  elif [ "$kind" = CONTINUE ] && [ "$idle_s" -ge $((MIN_GAP_MIN*60)) ]; then SEND_FROM=router bin/send builder "$NUDGE_CONTINUE" >/dev/null
+  elif [ "$kind" = WAITING_JOBS ] && [ "$idle_s" -ge $((WAKE_MAX_MIN*60)) ]; then SEND_FROM=router bin/send builder "Periodic check while waiting on: ${st#* }." >/dev/null
+  elif [ "$kind" = NEEDS_DECISION ] && [ "$idle_s" -ge 1800 ] && ! ls ops/decisions 2>/dev/null | grep -q "$(basename "${st#* }" .md)"; then
+       [ -z "$(ls ops/mail/director/*.md 2>/dev/null)" ] && SEND_FROM=router bin/send director "Reminder: Builder is waiting on a decision for ${st#* }." >/dev/null && touch ops/rc/builder.idle
+  fi
+}
+send_digest(){
+  local today; today=$(date -u +%F)
+  [ "$(cat ops/.digest_day 2>/dev/null)" = "$today" ] && return
+  [ "$(date -u +%H)" -lt "$DIGEST_HOUR_UTC" ] && return
+  bin/notify default "Gemma daily digest $today" "$(tail -8 ops/digest_pending)
+GPU \$$(bin/gpu spent 2>/dev/null || echo ?) / allowance \$$(cat ops/budget/allowance_usd). Builder: $(head -1 ops/status | cut -c1-80)"
+  : > ops/digest_pending; echo "$today" > ops/.digest_day
+}
+gitsync(){
+  [ "$(age ops/rc/.lastgit)" -lt 1800 ] && return
+  touch ops/rc/.lastgit
+  git add -A >/dev/null 2>&1; git commit -qm "router sync $(date -u +%FT%TZ)" >/dev/null 2>&1 || true
+  git remote | grep -q . && { git push -q >/dev/null 2>&1 || log "git push failed (non-fatal)"; }
+}
+
+log "router started (pid $$)"
+while :; do
+  [ -f ops/STOP ] && { log "STOP present; router exiting"; exit 0; }
+  bin/notify-poll >/dev/null 2>&1 || true
+  if [ ! -f ops/PAUSE ]; then
+    for r in director builder; do
+      tmux has-session -t "$S" 2>/dev/null || break
+      prime "$r"; check_limit "$r"
+      [ -f "ops/rc/$r.primed" ] && deliver "$r"
+    done
+    if tmux list-windows -t "$S" -F '#W' 2>/dev/null | grep -x paper >/dev/null; then   # paper role, only if its window exists
+      if [ -f ops/rc/paper.started ] && [ ops/rc/paper.started -nt ops/rc/paper.primed ]; then
+        [ -f ops/rc/paper.primed ] && rm -f ops/rc/paper.primed ops/rc/paper.rc   # restarted without bin/session's reset
+        prime paper                                          # started by bin/session: name + orient it
+      elif [ ! -f ops/rc/paper.primed ]; then touch ops/rc/paper.primed   # started by hand, already named
+      fi
+      check_limit paper
+      [ -f ops/rc/paper.primed ] && deliver paper
+    fi
+    [ -f ops/rc/builder.primed ] && [ -z "$(ls ops/mail/builder/*.md 2>/dev/null)" ] && wake_builder
+  fi
+  [ "$(age ops/rc/.lastgpu)" -ge 300 ] && { touch ops/rc/.lastgpu; bin/gpu reconcile >/dev/null 2>&1 || true; }
+  send_digest; gitsync
+  sleep 15
+done
