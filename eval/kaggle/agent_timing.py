@@ -147,7 +147,7 @@ def trace_counts(trace):
     counts = Counter(e.tool_name for e in entries if e.event_type == 'tool_call')
     tokens = {}
     for key in ('prompt_tokens', 'completion_tokens'):
-        values = [e.usage[key] for e in entries if e.usage and key in e.usage]
+        values = [e.usage[key] for e in entries if e.usage and isinstance(e.usage.get(key), (int, float))]
         tokens[key] = sum(values) if values else None
     return dict(counts), tokens, tool_seconds(entries)
 
@@ -275,16 +275,25 @@ async def evaluate(config, journal, started, caps, totals):
             total = time.perf_counter() - start
             totals.append(total)
             patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch) or ''
-            counts, tokens, seconds = trace_counts(evaluator.trace)
+            try:
+                counts, tokens, seconds = trace_counts(evaluator.trace)
+            except Exception as exc:  # never lose the run over trace parsing
+                counts, tokens, seconds = {}, dict(prompt_tokens=None, completion_tokens=None), {}
+                error = (error or '') + ' trace parse (' + type(exc).__name__ + ')'
             code = result.test_exit_code if result else None
             raw_error = (result.error or '') if result else error or ''
-            append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+            try:
+              append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
                 wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=None,
                 llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
                 tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
                 completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
                 **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
                 timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+            except Exception as exc:
+                append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+                                     wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+                                     error='Row build exception (' + type(exc).__name__ + ')'))
             raw = WORK / 'runs' / iid
             raw.mkdir(parents=True, exist_ok=True)
             (raw / 'agent.patch').write_text(patch)
