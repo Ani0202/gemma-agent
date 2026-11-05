@@ -21,7 +21,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 ## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
-- bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
+- Heavy jobs one at a time (waiters/memguard/codex exempt); bin/job hardened b1eedd7. codex-build branches from main HEAD.
 ## Running jobs (23:18Z): review-submit-guard-light; review-kernel-probes-light (OLD prompt, dec 037 moot) -> then probes-gate-light +
   memguard-fix6e-light -> then kernel-gate-finfix-light (dec 041 item 3: finfix + legacy-decision + attribution in one change); memguard 7933.
 - KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
@@ -30,9 +30,8 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   109 tests pass; v5 unchanged a=7/8). Stack fix5->probes->gate->finfix merges together once all reviews are clean, then host eval/tests
   on main. fix5c NON-BLOCKING 4: add the 5 vendored wheels to docs/ATTRIBUTION.md before merge. Item 6 docker-order
   MERGED 8c55985; main eval/tests 469p/3s/1f (stale test_memguard oom_score_adj; fixed by the fix6 merge).
-- memguard-fix6 eedf84b+0f5de3d livetest GREEN. Review clean -> merge + full eval/tests + deploy (stop 7933, start memguard-light). BLOCKING -> short report.
-- codex-build branches from main HEAD (follow-ups: manual worktree). bin/job owner patch v2: HOLD (dec 026), pidfd v3 NOT started.
-- DEC 027 FIDELITY: kernel reproduces Dockerfile.public only (pip + line-9 tools, offline); NO PIP_* prefixes; setup_calls logging mandatory.
+- memguard-fix6 eedf84b+0f5de3d GREEN: review clean -> merge, eval/tests, deploy (stop 7933, start memguard-light). bin/job owner patch: HOLD (dec 026).
+- DEC 027 FIDELITY: kernel = Dockerfile.public only (offline); NO PIP_* prefixes; setup_calls logging mandatory.
 - Dec 022 item 4 = plan 005 (ops/codex/ask-20261105T181222.md; draft bundles/drafts/item4-system.md; empty submit loses all; needs GPU).
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
