@@ -169,3 +169,4 @@
 2026-11-05T20:14Z | Report 007 NEEDS_DECISION: re-push e4b-v001 re-time as kernel v5 from 87001e4; Codex fix5 cmd now targets main...87001e4 (no Claude findings) | ops/reports/007-v4-failed-repush.md
 2026-11-05T20:16Z | Dec 031 (approve w/ changes): kernel v5 pushed from clean worktree at 87001e4 (wheels verified); waiter e4b-v001-timing-v5-wait-light; two-strike in force | ops/budget/kaggle.md
 2026-11-05T20:17Z | Pre-registration addendum (dec 031 item 3: (b)/(c) on total Phase-1 incl. emulation), results notes for no-stub repro files (item 5), Codex prompt timing question (item 6) | eval/plans/004.md
+2026-11-05T21:10Z | kernel v5 done; gate FAIL (a) 7/8 ctx overflow rich_3930, (b) max 305.6>296; two-strike STOP; report 008 NEEDS_DECISION (v002 cap 1.0 + max_output_tokens 8192) | ops/reports/008-v5-gate-fail-cap-proposal.md, results/kaggle_timing_e4b_v001.json

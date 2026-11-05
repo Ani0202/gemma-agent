@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 20:18Z (cycle 89, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 21:10Z (cycle 90, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
@@ -15,17 +15,11 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 ## Running jobs (19:31Z)
-- DEC 031: kernel v5 PUSHED 20:16:43Z from CLEAN worktree /home/ubuntu/work/gemma-wt/push-v5 at EXACTLY 87001e4 (vendored wheels
-  verified vs SHA256SUMS; staged GIT_SHA 87001e4; same bundle f2ced9c9 / 8 ids / budget 3900 s / -t 5700 s). Waiter
-  e4b-v001-timing-v5-wait-light -> runs/e4b-v001-timing-v5. TWO-STRIKE: any harness errors in v5 -> STOP + short report, NO v6.
-  Then: eval/kaggle/timing_summary.py (from 87001e4) runs/e4b-v001-timing-v5/timing.jsonl --output results/kaggle_timing_e4b_v001.json;
-  check provenance (git_sha 87001e4, agent_yaml_sha256 == zip's agent.yaml, n_expected 8, verification_skipped).
-  PRE-REG (eval/plans/004.md addendum): (b)/(c) bind on TOTAL Phase-1 incl. image emulation; phase1_minus_image reported, not gated;
-  fail on total -> report 005 proposes lower cap from total (dec 030 item 5).
-  v4 (9ec991f) failed in setup (pytest-timeout 2.1.0 offline); raw runs/e4b-v001-timing-v4-failed/; 0.25 quota-h.
-  Codex fix5c 23:08Z (medium, alone): main...87001e4, independent prompt + dec 031 item 6 timing question; then memguard-fix6c.
-  Reliance/SUBMIT only after Codex clean + merge + host eval/tests + gate (a)-(e). Report 005 w/ SUBMIT before ~23:45Z, else Nov 6.
-  Reviews (verbatim): ops/reviews/claude-{review,rereview}-fix5.md, claude-{review,rereview}-vendor-fix.md.
+- KERNEL v5 DONE ~21:00Z (87001e4, 4xL4, provenance OK): GATE FAIL (a) 7/8 (rich_3930 vLLM 400 ctx overflow: prompt >16384
+  with max_output_tokens 16384) and (b) max TOTAL 305.6 s > 296 ((c) 266.7 PASS, (d) 352 s, (e) 7). results/kaggle_timing_e4b_v001.json
+  (top-level "decision":"PASS" is legacy projection, NOT the gate; needs note field before citing). Setup.py ~202 s on 7/8 => S~216 s,
+  cap-4.0 path closed. TWO-STRIKE: STOPPED, no v6. Report 008 NEEDS_DECISION: v002 = cap 1.0 + max_output_tokens 8192, option A
+  submit w/o re-time (worst 282.9 s/task, 619 min). DON'T build v002 until a decision. Numbers provisional until Codex fix5c clean.
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
 - DEC 028 (report 005-prelim, option A APPROVED): 2a STOP met; artifact branch closed, 2b moot, no v000 re-time. CPU 2a dropped.
   Item 1-3: kernel-setup-fix5 BUILT aa116cb (branch codex/kernel-setup-fix5 on round-4 c4c9528; Codex 80 offline pass). Builder dry run
@@ -54,7 +48,7 @@ Builder on Opus (dec 010: local-first, two-strike).
   empty submit loses everything; draft prompt bundles/drafts/item4-system.md; plan 005 (paired A/B at v002 cap, needs GPU: ask in report 005).
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
-- Kaggle GPU this week: 0.07 h used (v1+v2 failed fast, per `kaggle quota`); 3.48 quota-h used after v3 (~1.74 L4x4 h). Log: ops/budget/kaggle.md. Resets Sat 00:00Z.
+- Kaggle GPU this week: 5.18/30 h per `kaggle quota` 21:05Z (v5 +1.45). Earlier: 0.07 h used (v1+v2 failed fast, per `kaggle quota`); 3.48 quota-h used after v3 (~1.74 L4x4 h). Log: ops/budget/kaggle.md. Resets Sat 00:00Z.
 
 ## Live caveats
 - Job naming (dec 024): waiters, codex-ask and codex-review jobs end in -light; builds, test suites and evals never do.
@@ -75,6 +69,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
 ## Next 3
-1. Kernel v4 done -> download (waiter) -> timing_summary -> results/kaggle_timing_e4b_v001.json; check gate (a)-(e) + provenance.
-2. 23:08Z Codex fix5 review (medium) -> clean: merge branch, host eval/tests, report 005 NEEDS_DECISION + SUBMIT + bin/send if < ~23:45Z.
+1. Await decision on report 008 (v002 build). If approved: build bundles/e4b/v002, pack, codex-review, SUBMIT follow-up.
+2. 23:08Z Codex fix5c review (medium) -> clean: merge branch, host eval/tests; numbers from v5 become reliable.
 3. Then memguard-fix6 Codex review -> merge + deploy memguard-light; then 31b plan 006.
