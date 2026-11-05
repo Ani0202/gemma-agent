@@ -19,6 +19,7 @@ Env: x86_64 VM. GCP project gemma-agent-839566, spend $0. Kaggle quota used 0h. 
 GCP quota (dec 003): only l4x1 spot + cpu8 usable; multi-GPU -> Kaggle.
 Rules (dec 004-002-001): docs/RULES_FINDINGS.md rewritten from official sources; no repo overlap with hidden set; LORO mandatory for ship decisions; no partial credit on timeout.
 Open: (1) E2 resolved (dec 005): paper session owns paper/, do not edit; keep results/ files self-describing (schema + header line). (2) Director reminder due 2026-11-06T23:02Z: GCP quota re-request line to Aniket; keep until decision marks done. (3) Hosted-LLM-API data question OPEN; no new third-party services.
+Dec 012 FYI: paper §4.1 cites only the committed gold-local v2 results file -> commit it promptly when gold-local finishes.
 Paper evidence (dec 007, due Nov 9 23:59Z, no extra compute): commit schema-headed results/ files for (a) gold calibration per-task outcomes+exclusion causes, (b) timing per task from Kaggle E4B smoke (31B if run), (c) failure taxonomy via trace-analyst once. Not yet produced; flag here if any won't exist by Nov 9.
 
 Running jobs: gold-local, codex-eval-runner, gold-diag4-wait (cross-check only).
