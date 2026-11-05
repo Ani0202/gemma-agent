@@ -137,12 +137,21 @@ def test_harness_protected_rule_and_extra_targets():
 
 
 def test_trace_usage_is_only_recorded_values():
-    entry = lambda **kw: types.SimpleNamespace(event_type='tool_call', tool_name='read_file', **kw)
-    counts, tokens = runner.trace_counts(types.SimpleNamespace(entries=[
+    entry = lambda **kw: types.SimpleNamespace(event_type='tool_call', tool_name='read_file', timestamp=0.0, **kw)
+    counts, tokens, _ = runner.trace_counts(types.SimpleNamespace(entries=[
         entry(usage={'prompt_tokens': 3}), entry(usage={'prompt_tokens': 0})]))
     assert counts == {'read_file': 2}
     assert tokens == dict(prompt_tokens=3, completion_tokens=None)
     assert runner.trace_counts(None)[1] == dict(prompt_tokens=None, completion_tokens=None)
+
+
+def test_tool_seconds_pairs_calls_fifo_per_tool():
+    e = lambda t, name, ts: types.SimpleNamespace(event_type=t, tool_name=name, timestamp=ts, usage=None)
+    out = runner.tool_seconds([e('tool_call', 'run_tests', 10.0), e('tool_call', 'read_file', 10.5),
+                               e('tool_response', 'read_file', 11.0), e('tool_response', 'run_tests', 14.0),
+                               e('tool_call', 'run_tests', 20.0), e('tool_response', 'run_tests', 21.0),
+                               e('tool_response', 'orphan', 30.0)])
+    assert out == {'run_tests': dict(n=2, total=5.0, max=4.0), 'read_file': dict(n=1, total=0.5, max=0.5)}
 
 
 def test_env_guard(monkeypatch):

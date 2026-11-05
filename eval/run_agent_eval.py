@@ -29,6 +29,7 @@ FIELDS = dict(instance_id='Task ID', repo='Repository', resolved='Harness verdic
               wall_seconds='agent (includes Container A setup), verification, total seconds',
               llm_turns='Harness LLM call count',
               tool_calls='total and per_tool requested (trace); harness total if no trace',
+              tool_seconds='Per tool: n, total, max wall seconds call->response (trace timestamps)',
               prompt_tokens='Recorded trace prompt usage, or null',
               completion_tokens='Recorded trace completion usage, or null',
               patch_bytes='UTF-8 size before harness stripping',
@@ -194,7 +195,22 @@ def trace_counts(trace):
     for key in ('prompt_tokens', 'completion_tokens'):
         values = [e.usage[key] for e in entries if e.usage and key in e.usage]
         tokens[key] = sum(values) if values else None
-    return dict(counts), tokens
+    return dict(counts), tokens, tool_seconds(entries)
+
+
+def tool_seconds(entries):
+    """Per tool name: wall seconds from each tool_call to its tool_response (FIFO per name)."""
+    pending, out = {}, {}
+    for e in entries:
+        if e.event_type == 'tool_call':
+            pending.setdefault(e.tool_name, []).append(e.timestamp)
+        elif e.event_type == 'tool_response' and pending.get(e.tool_name):
+            stat = out.setdefault(e.tool_name, dict(n=0, total=0.0, max=0.0))
+            dt = max(0.0, e.timestamp - pending[e.tool_name].pop(0))
+            stat['n'] += 1
+            stat['total'] = round(stat['total'] + dt, 3)
+            stat['max'] = round(max(stat['max'], dt), 3)
+    return out
 
 
 def observe_patch_strip(original, state):
@@ -343,14 +359,14 @@ async def run(args):
         trace = evaluator.trace
         trace_path = task_dir / 'trace.json'
         trace_path.write_text(json.dumps(trace.to_dict(format='legacy') if trace else {}, default=str))
-        per_tool, tokens = trace_counts(trace)
+        per_tool, tokens, per_tool_seconds = trace_counts(trace)
         raw_error = result.error or '' if result else error or ''
         row = dict(instance_id=iid, repo=task.repo, resolved=resolved, exit_code=code, error=error,
                    wall_seconds=dict(agent=evaluator.agent_seconds,
                                      verification=times['verification'],
                                      total=total), llm_turns=context.llm_calls_used,
                    tool_calls=dict(total=sum(per_tool.values()) if trace else context.tool_calls_used,
-                                   per_tool=per_tool), **tokens,
+                                   per_tool=per_tool), tool_seconds=per_tool_seconds, **tokens,
                    **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
                    timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' +
                                            getattr(evaluator, 'agent_error', ''), re.I)) or code == 124,
