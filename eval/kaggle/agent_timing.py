@@ -26,6 +26,7 @@ import time
 BUNDLE_B64 = ""  # embedded by timing_push.sh
 TASK_IDS = []
 SETUP_ONLY = False
+SKIP_VERIFICATION = True
 SETUP_FIX = 1
 GIT_SHA = ""
 KERNEL_BUDGET_SECONDS = 3 * 3600
@@ -621,6 +622,111 @@ def test_run_stats(trace, agent_seconds):
 def should_stop(elapsed, cap_minutes, verification_timeout, observed_max, budget):
     return elapsed + 1.5 * max(cap_minutes * 60 + verification_timeout, observed_max) > budget
 
+
+class AsyncioTimingProxy:
+    """Observe only agent_runner's timeout context, without changing asyncio itself."""
+    def __init__(self, original, state):
+        self._original, self._state = original, state
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
+
+    def timeout(self, *args, **kwargs):
+        cm = self._original.timeout(*args, **kwargs)
+        state = self._state
+        delay = args[0] if args else kwargs.get('delay')
+
+        class ObservedTimeout:
+            async def __aenter__(self):
+                self.current = state.get(None)
+                if self.current is not None:
+                    self.current.update(agent_timeout_seconds=delay, timeout_enter=time.perf_counter())
+                return await cm.__aenter__()
+
+            async def __aexit__(self, *exc_info):
+                exit_exc = exc_info[1]
+                try:
+                    return await cm.__aexit__(*exc_info)
+                except BaseException as exc:
+                    exit_exc = exc
+                    raise
+                finally:
+                    if self.current is not None:
+                        self.current.update(timeout_exit=time.perf_counter(),
+                            agent_timeout_fired=bool(getattr(cm, 'expired', lambda: False)())
+                                or isinstance(exit_exc, TimeoutError))
+
+        return ObservedTimeout()
+
+
+def observe_sandbox(original, state, name):
+    """Forward identical arguments/results/exceptions and time sandbox boundaries."""
+    async def observed(*args, **kwargs):
+        current = state.get(None)
+        start = time.perf_counter()
+        row = None
+        if current is not None:
+            if name == 'sandbox_start':
+                current['sandbox_start_begin'] = start
+            elif name == 'sandbox_exec' and current.get('timeout_exit') is not None:
+                cmd = args[2] if len(args) > 2 else kwargs.get('command', kwargs.get('cmd', ''))
+                row = dict(cmd=str(cmd)[:40], duration_s=None, rc=None)
+                current.setdefault('finalization_exec', []).append(row)
+        try:
+            result = await original(*args, **kwargs)
+            if row is not None:
+                row['rc'] = getattr(result, 'exit_code', None)
+            return result
+        except BaseException as exc:
+            if row is not None:
+                row['exception'] = type(exc).__name__
+            raise
+        finally:
+            end = time.perf_counter()
+            if current is not None:
+                if name in ('sandbox_start', 'sandbox_stop'):
+                    current[name + '_end'] = end
+                    current[name + '_duration'] = end - start
+                if row is not None:
+                    row['duration_s'] = end - start
+    return observed
+
+
+async def skip_verification(docker, config, task, snapshot_path, *, agent_patch='',
+                            agent_error=None, trace=None, start_time=0.0, **kwargs):
+    """Return the harness result type without starting Container B or running tests."""
+    from swegemma.models import TaskResult
+    result = TaskResult(instance_id=task.instance_id, repo=task.repo, resolved=False,
+        agent_patch=agent_patch, test_output='', test_exit_code=0,
+        duration_seconds=time.perf_counter() - start_time, error=agent_error, trace=trace)
+    # swegemma 0.2.11 annotates this field int, with assignment validation disabled.
+    result.test_exit_code = None
+    return result
+
+
+def phase1_fields(current, run_seconds, total, context, patch):
+    def difference(end, start):
+        return current[end] - current[start] if current.get(end) is not None and current.get(start) is not None else None
+    phase1 = difference('sandbox_stop_end', 'sandbox_start_begin')
+    source = 'sandbox_wrappers' if phase1 is not None else 'run_agent_sandbox'
+    phase1 = run_seconds if phase1 is None else phase1
+    submitted = bool(context.patch_submitted) if context is not None else None
+    return dict(agent_timeout_seconds=current.get('agent_timeout_seconds'),
+        agent_clock_seconds=difference('timeout_exit', 'timeout_enter'),
+        agent_timeout_fired=current.get('agent_timeout_fired'),
+        finalization_seconds=difference('sandbox_stop_end', 'timeout_exit'),
+        finalization_exec=current.get('finalization_exec', []),
+        teardown_seconds=current.get('sandbox_stop_duration'),
+        phase1_wall_seconds=phase1, phase1_source=source,
+        pre_agent_seconds=difference('timeout_enter', 'sandbox_start_begin'),
+        post_phase1_seconds=total - phase1, patch_submitted=submitted,
+        fallback_patch_used=(not submitted and bool(patch.strip())) if submitted is not None else None,
+        verification_skipped=SKIP_VERIFICATION)
+
+
+def harness_error(result, agent_error):
+    return 'Harness task failure' if (result is not None and result.error) or agent_error else None
+
 def distribution(values):
     values = sorted(values)
     def percentile(q):
@@ -647,13 +753,19 @@ async def evaluate(config, journal, started, caps, totals):
     from swegemma.harness.verification import _is_protected_test_or_config_path
     import swegemma.evaluate as ev
     import swegemma.harness.verification as vf
+    import swegemma.harness.agent_runner as ar
     state = ContextVar('timing')
+    original_asyncio = ar.asyncio
+    original_sandbox = {name: getattr(ar, name) for name in ('sandbox_start', 'sandbox_stop', 'sandbox_exec')}
+    ar.asyncio = AsyncioTimingProxy(original_asyncio, state)
+    for name, original in original_sandbox.items():
+        setattr(ar, name, observe_sandbox(original, state, name))
     original_verify, original_strip = ev.verify_task, vf.strip_protected_files_from_patch
     vf.strip_protected_files_from_patch = observe_patch_strip(original_strip, state)
     async def verify(*args, **kwargs):
         start = time.perf_counter()
         try:
-            return await original_verify(*args, **kwargs)
+            return await (skip_verification if SKIP_VERIFICATION else original_verify)(*args, **kwargs)
         finally:
             state.get()['verification'] = time.perf_counter() - start
     ev.verify_task = verify
@@ -681,7 +793,7 @@ async def evaluate(config, journal, started, caps, totals):
             raise ValueError('Duplicate or missing task IDs')
         patch_subprocess_deps(DATA, state)
         for iid in TASK_IDS:
-            if should_stop(time.monotonic()-started, caps['max_time_minutes'], caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
+            if should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
                 append(journal, {'_stopped': 'insufficient remaining budget for next task'})
                 break
             task = dataclasses.replace(inventory[iid], patch='')
@@ -693,7 +805,7 @@ async def evaluate(config, journal, started, caps, totals):
             start = time.perf_counter()
             try:
                 result = await evaluator.evaluate_task(task)
-                error = 'Harness task failure' if result.error else None
+                error = harness_error(result, evaluator.agent_error)
             except Exception as exc:
                 error = 'Evaluation exception (' + type(exc).__name__ + ')'
             finally:
@@ -711,8 +823,12 @@ async def evaluate(config, journal, started, caps, totals):
                 error = (error or '') + ' trace parse (' + type(exc).__name__ + ')'
             code = result.test_exit_code if result else None
             raw_error = (result.error or '') if result else error or ''
+            phase = phase1_fields(times, evaluator.agent_seconds, total,
+                                  getattr(evaluator, 'context', None),
+                                  result.agent_patch if result else evaluator.patch)
             try:
               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+                **phase,
                 wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
                 setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
                 editable_failed=times.get('editable_failed', False),
@@ -727,6 +843,7 @@ async def evaluate(config, journal, started, caps, totals):
                 timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
             except Exception as exc:
                 append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+                                     **phase,
                                      wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
                                      setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
                 editable_failed=times.get('editable_failed', False),
@@ -741,6 +858,9 @@ async def evaluate(config, journal, started, caps, totals):
             (raw / 'result.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result else {'error': error}, default=str))
     finally:
         ev.verify_task, vf.strip_protected_files_from_patch = original_verify, original_strip
+        ar.asyncio = original_asyncio
+        for name, original in original_sandbox.items():
+            setattr(ar, name, original)
 
 def start_server(holder):
     import torch
@@ -863,6 +983,20 @@ def main():
                       bundle_sha256=None, agent_yaml_sha256=None, gpu_names=[], gpu_count=0,
                       mcp_import_ok=None, vllm_startup_seconds=None,
                       fields=dict(instance_id='Task ID', repo='Repository', wall_seconds='Agent (including setup), verification, total wall seconds',
+                          vllm_startup_seconds='Header: perf_counter seconds spent starting vLLM; null on startup failure',
+                          verification_skipped='Container B and verification tests skipped',
+                          agent_timeout_seconds='Delay passed to agent_runner asyncio.timeout, or null',
+                          agent_clock_seconds='Timeout context exit minus enter (perf_counter), or null',
+                          agent_timeout_fired='Real timeout expired or exit TimeoutError; null if not entered',
+                          finalization_seconds='Sandbox stop end minus timeout exit, or null',
+                          finalization_exec='Post-timeout sandbox_exec calls: cmd (first 40 chars), duration_s, rc or exception type',
+                          teardown_seconds='sandbox_stop duration including failed stop, or null',
+                          phase1_wall_seconds='sandbox_start begin to sandbox_stop end, otherwise _run_agent_sandbox duration',
+                          phase1_source='sandbox_wrappers or run_agent_sandbox fallback',
+                          pre_agent_seconds='Timeout enter minus sandbox_start begin, or null',
+                          post_phase1_seconds='Total wall seconds minus phase1_wall_seconds',
+                          patch_submitted='Context patch_submitted; null if no context',
+                          fallback_patch_used='No submitted patch and non-empty returned harness patch; null if no context',
                           sandbox_setup_seconds='Sum of measured setup steps', setup_calls='Bounded setup command timings/output', setup_failed='Any setup failure', resolved='Harness verdict', exit_code='Verification exit code or null',
                           error='Sanitized failure category or null', llm_turns='LLM calls or null', tool_calls='Total and per_tool requests',
                           tool_seconds='Per-tool n,total,max call->response seconds, FIFO per name', test_run='Test requests n, matched total_seconds, share_of_agent_seconds',
@@ -898,8 +1032,9 @@ def main():
             caps = dict(timeout_seconds=int(section.get('timeout_seconds', 300)), verification_timeout_seconds=int(section.get('verification_timeout_seconds', 300)),
                         max_tool_calls=int(section.get('max_tool_calls', 100)), max_time_minutes=float(section.get('max_time_minutes', 60.0)), max_turns=int(turns) if turns is not None else None)
             header['caps'] = caps
-            append(journal, header)
             server, adapters, model, startup = start_server(servers)
+            header['vllm_startup_seconds'] = startup
+            append(journal, header)
             append(journal, {'_vllm': dict(startup_seconds=startup)})
             models = server.create_model_registry(aliases=[model], model_prefix='openai/', api_key=os.environ.get('LOCAL_API_KEY', 'EMPTY'))
             limits, constraints = build_submission_limits()

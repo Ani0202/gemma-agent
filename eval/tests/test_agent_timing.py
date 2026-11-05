@@ -388,3 +388,364 @@ def test_dependency_closure_expands_already_installed_base_wheel(tmp_path):
     assert entries[0]['source'] == str(base)
     assert entries[0]['version_installed'] == '1.0'
     assert missing == ['missing-child']
+
+
+@pytest.mark.parametrize('with_verification', [False, True])
+def test_dry_run_verification_constant(tmp_path, with_verification):
+    ids = tmp_path / 'ids'
+    ids.write_text('task-1\n')
+    flags = ['--with-verification', '--dry-run'] if with_verification else ['--dry-run']
+    proc = subprocess.run(['bash', str(ROOT / 'eval/kaggle/timing_push.sh'), *flags,
+        'x/y', str(ROOT / 'bundles/e4b/v001'), str(ids)], check=True, capture_output=True, text=True)
+    stage = Path(proc.stdout.split('Dry run: no push. Staged: ')[1].strip())
+    try:
+        source = (stage / 'agent_timing.py').read_text()
+        compile(source, 'generated.py', 'exec')
+        node = next(n for n in ast.parse(source).body if isinstance(n, ast.Assign)
+                    and isinstance(n.targets[0], ast.Name) and n.targets[0].id == 'SKIP_VERIFICATION')
+        assert ast.literal_eval(node.value) is (not with_verification)
+    finally:
+        import shutil
+        shutil.rmtree(stage)
+
+
+@pytest.mark.parametrize('fired', [False, True])
+@pytest.mark.parametrize('error', [None, TimeoutError('timeout'), ValueError('other')])
+def test_timeout_proxy_preserves_context_and_exceptions(monkeypatch, fired, error):
+    import asyncio
+    from contextvars import ContextVar
+    state = ContextVar('timeout')
+    state.set({})
+    now = iter([10, 15])
+    monkeypatch.setattr(timing.time, 'perf_counter', lambda: next(now))
+    marker, calls = object(), []
+    class CM:
+        async def __aenter__(self):
+            return marker
+        async def __aexit__(self, *exc):
+            calls.append(exc)
+            return False
+        def expired(self):
+            return fired
+    def timeout(*args, **kwargs):
+        assert args == (84,) and kwargs == {}
+        return CM()
+    original = Entry(timeout=timeout, sleep=asyncio.sleep)
+    proxy = timing.AsyncioTimingProxy(original, state)
+    assert proxy.sleep is asyncio.sleep
+    async def run():
+        async with proxy.timeout(84) as value:
+            assert value is marker
+            if error:
+                raise error
+    if error:
+        with pytest.raises(type(error)) as caught:
+            asyncio.run(run())
+        assert caught.value is error
+    else:
+        asyncio.run(run())
+    assert calls[0][1] is error
+    assert state.get() == dict(agent_timeout_seconds=84, timeout_enter=10,
+        timeout_exit=15, agent_timeout_fired=fired or isinstance(error, TimeoutError))
+
+
+def test_real_timeout_proxy_expiration():
+    import asyncio
+    from contextvars import ContextVar
+    state = ContextVar('real_timeout')
+    state.set({})
+    async def run():
+        async with timing.AsyncioTimingProxy(asyncio, state).timeout(0):
+            await asyncio.sleep(0)
+    with pytest.raises(TimeoutError):
+        asyncio.run(run())
+    assert state.get()['agent_timeout_fired'] is True
+
+
+@pytest.mark.parametrize('name', ['sandbox_start', 'sandbox_stop', 'sandbox_exec'])
+@pytest.mark.parametrize('error', [None, RuntimeError('same'), TimeoutError('same')])
+def test_sandbox_wrapper_forwarding(monkeypatch, name, error):
+    import asyncio
+    from contextvars import ContextVar
+    current = dict(timeout_exit=1)
+    state = ContextVar('sandbox')
+    state.set(current)
+    times = iter([3, 7])
+    monkeypatch.setattr(timing.time, 'perf_counter', lambda: next(times))
+    marker = Entry(exit_code=9)
+    args, kwargs = (object(), 'sandbox', 'a' * 60), dict(timeout=31)
+    async def original(*a, **kw):
+        assert a == args and kw == kwargs
+        if error:
+            raise error
+        return marker
+    wrapped = timing.observe_sandbox(original, state, name)
+    if error:
+        with pytest.raises(type(error)) as caught:
+            asyncio.run(wrapped(*args, **kwargs))
+        assert caught.value is error
+    else:
+        assert asyncio.run(wrapped(*args, **kwargs)) is marker
+    if name == 'sandbox_exec':
+        expected = dict(cmd='a' * 40, duration_s=4, rc=None if error else 9)
+        if error:
+            expected['exception'] = type(error).__name__
+        assert current['finalization_exec'] == [expected]
+    else:
+        assert current[name + '_duration'] == 4
+        assert current[name + '_end'] == 7
+        if name == 'sandbox_start':
+            assert current['sandbox_start_begin'] == 3
+
+
+def test_finalization_only_after_timeout_and_phase_fields():
+    import asyncio
+    from contextvars import ContextVar
+    current = {}
+    state = ContextVar('finalization')
+    state.set(current)
+    async def original(*a, **kw):
+        return Entry(exit_code=0)
+    wrapped = timing.observe_sandbox(original, state, 'sandbox_exec')
+    asyncio.run(wrapped(None, 'id', 'before'))
+    assert 'finalization_exec' not in current
+    current.update(sandbox_start_begin=1, timeout_enter=4, timeout_exit=10,
+                   sandbox_stop_end=15, sandbox_stop_duration=2)
+    asyncio.run(wrapped(None, 'id', 'after'))
+    assert [c['cmd'] for c in current['finalization_exec']] == ['after']
+    fields = timing.phase1_fields(current, 14, 20, Entry(patch_submitted=False), 'diff')
+    assert fields['phase1_wall_seconds'] == 14
+    assert fields['phase1_source'] == 'sandbox_wrappers'
+    assert fields['pre_agent_seconds'] == 3
+    assert fields['agent_clock_seconds'] == 6
+    assert fields['finalization_seconds'] == 5
+    assert fields['teardown_seconds'] == 2
+    assert fields['post_phase1_seconds'] == 6
+    assert fields['fallback_patch_used'] is True
+    fields = timing.phase1_fields({}, 2, 3, None, '')
+    assert fields['phase1_wall_seconds'] == 2 and fields['phase1_source'] == 'run_agent_sandbox'
+    assert fields['agent_clock_seconds'] is fields['agent_timeout_fired'] is None
+    assert fields['patch_submitted'] is fields['fallback_patch_used'] is None
+
+
+@pytest.mark.parametrize('failure', [None, 'runner', 'setup', 'cleanup'])
+@pytest.mark.parametrize('skip', [True, False])
+def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, skip):
+    import asyncio
+    from contextvars import ContextVar
+    import dataclasses
+    import sys
+    from types import ModuleType
+    modules = {}
+    for name in ('swegemma', 'swegemma.evaluate', 'swegemma.models', 'swegemma.harness',
+                 'swegemma.harness.verification', 'swegemma.harness.agent_runner'):
+        modules[name] = ModuleType(name)
+        monkeypatch.setitem(sys.modules, name, modules[name])
+    ev, vf, ar, models = [modules['swegemma.' + n] for n in (
+        'evaluate', 'harness.verification', 'harness.agent_runner', 'models')]
+    class TaskResult(Entry):
+        tool_calls = 0
+        def model_dump(self, **kwargs):
+            return vars(self)
+    models.TaskResult = TaskResult
+    task = dataclasses.make_dataclass('Task', [('instance_id', str), ('repo', str),
+        ('patch', str), ('test_patch', str), ('FAIL_TO_PASS', tuple), ('PASS_TO_PASS', tuple),
+        ('test_files', tuple)])('task', 'org/repo', '', '', (), (), ())
+    result = asyncio.run(timing.skip_verification(None, None, task, None, agent_patch='diff'))
+    assert isinstance(result, TaskResult)
+    assert result.resolved is False and result.test_exit_code is None
+    assert result.agent_patch == 'diff' and result.error is None and result.trace is None
+    assert timing.harness_error(result, '') is None
+    assert timing.harness_error(result, 'Sandbox execution error: failed') == 'Harness task failure'
+    models.load_tasks = lambda path: [task]
+    verification_calls = []
+    async def original_verify(*a, **kw):
+        assert not skip, 'real verification must not run when skipped'
+        verification_calls.append((a, kw))
+        result = await timing.skip_verification(*a, **kw)
+        result.resolved, result.test_exit_code = True, 0
+        return result
+    ev.verify_task = original_verify
+    vf.strip_protected_files_from_patch = lambda patch, **kw: patch
+    vf._is_protected_test_or_config_path = lambda path: False
+    ar.asyncio = asyncio
+    async def sandbox(*a, **kw):
+        if failure == 'setup':
+            raise RuntimeError('container setup failed')
+        return 'sid'
+    ar.sandbox_start = ar.sandbox_stop = ar.sandbox_exec = sandbox
+    originals = dict(vars(ar))
+    class Evaluator:
+        def __init__(self, config):
+            def cleanup():
+                if failure == 'cleanup':
+                    raise RuntimeError('cleanup failed')
+            self.docker = Entry(start=lambda: None, cleanup_all=cleanup)
+        async def _run_agent_sandbox(self, task, *args, **kw):
+            assert not task.patch and not task.test_patch
+            if failure == 'runner':
+                raise RuntimeError('runner failed')
+            sid = await ar.sandbox_start(self.docker)
+            async with ar.asyncio.timeout(10):
+                pass
+            await ar.sandbox_stop(self.docker, sid)
+            return 'diff --git a/repo/a.py b/repo/a.py\n', '', None
+        async def evaluate_task(self, task):
+            context = Entry(task=task, patch_submitted=False, llm_calls_used=0)
+            patch, error, trace = await self._run_agent_sandbox(task, context=context)
+            return await ev.verify_task(self.docker, None, task, None,
+                                        agent_patch=patch, agent_error=error, trace=trace)
+    ev.Evaluator = Evaluator
+    monkeypatch.setattr(timing, 'TASK_IDS', ['task'])
+    monkeypatch.setattr(timing, 'WORK', tmp_path)
+    monkeypatch.setattr(timing, 'SKIP_VERIFICATION', skip)
+    monkeypatch.setattr(timing, 'patch_subprocess_deps', lambda *a: None)
+    seen = []
+    monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or False)
+    with (tmp_path / 'journal').open('w+') as stream:
+        asyncio.run(timing.evaluate(Entry(tasks_path=None), stream, timing.time.monotonic(),
+                    dict(max_time_minutes=1.4, verification_timeout_seconds=300), []))
+        stream.seek(0)
+        row = json.loads(stream.read())
+    assert row['verification_skipped'] is skip
+    assert (row['error'] is not None) is bool(failure)
+    verified = not skip and failure not in ('runner', 'setup')
+    assert row['resolved'] is verified
+    assert row['exit_code'] == (0 if verified else None)
+    assert len(verification_calls) == int(verified)
+    assert row['fallback_patch_used'] is (failure not in ('runner', 'setup'))
+    assert row['phase1_source'] == ('run_agent_sandbox' if failure in ('runner', 'setup') else 'sandbox_wrappers')
+    assert seen[0][2] == (0 if skip else 300)
+    assert ev.verify_task is original_verify
+    assert all(getattr(ar, key) is originals[key] for key in ('asyncio', 'sandbox_start', 'sandbox_stop', 'sandbox_exec'))
+
+
+@pytest.mark.parametrize('key,value,check', [
+    ('phase1_wall_seconds', 296.00001, 'b_max_phase1'),
+    ('phase1_wall_seconds', 270.00001, 'c_mean_phase1'),
+    ('setup_failed', True, 'a_all_tasks_complete_no_harness_error'),
+    ('error', 'Harness task failure', 'a_all_tasks_complete_no_harness_error'),
+    ('empty_patch', True, 'e_nonempty_source_diff'),
+    ('phase1_wall_seconds', None, 'b_max_phase1'),
+])
+def test_summary_phase1_gate_edges(tmp_path, key, value, check):
+    path = tmp_path / 'journal'
+    journal(path, startup=600)
+    records = [json.loads(s) for s in path.read_text().splitlines()]
+    for row, phase1 in zip(records[2:4], [296, 244]):
+        row.update(repo='org/repo', phase1_wall_seconds=phase1, sandbox_setup_seconds=10,
+                   finalization_seconds=3, patch_files=['repo/a.py'], empty_patch=False,
+                   test_files_edited=[], stray_files=[], error=None, agent_timeout_fired=True,
+                   fallback_patch_used=True, setup_calls=[dict(step='setup.py', duration_s=10,
+                       rc=0, retrying_lines=2, subprocesses=[dict(
+                           argv=['python', '-m', 'pip', 'install', '-e', '.'], retrying_lines=2)])])
+    def save():
+        path.write_text('\n'.join(json.dumps(r) for r in records))
+    save()
+    result = summary.summarize(path)
+    assert result['gate']['status'] == 'PASS'
+    assert result['gate']['b_max_phase1']['value'] == 296
+    assert result['gate']['c_mean_phase1']['value'] == 270
+    assert result['n_complete_no_error'] == 2
+    assert result['fallback_count'] == 6 and result['tasks_with_retrying_lines'] == 2
+    assert result['timeout_fired_count'] == result['fallback_patch_count'] == 2
+    assert result['tasks'][0]['nonempty_source_diff'] is True
+    for row in records[2:4]:
+        row[key] = value
+    save()
+    assert summary.summarize(path)['gate'][check]['status'] == 'FAIL'
+    assert summary.summarize(path)['gate']['status'] == 'FAIL'
+
+
+def test_summary_cli_thresholds(tmp_path):
+    path, output = tmp_path / 'journal', tmp_path / 'summary'
+    journal(path, startup=600.01)
+    subprocess.run(['python3', str(ROOT / 'eval/kaggle/timing_summary.py'), str(path),
+        '--output', str(output), '--gate-vllm-seconds', '600.01', '--gate-max-phase1', '300',
+        '--gate-mean-phase1', '280', '--gate-min-nonempty', '0'], check=True, capture_output=True)
+    assert json.loads(output.read_text())['gate']['d_vllm_seconds']['status'] == 'PASS'
+    assert summary.summarize(path)['gate']['d_vllm_seconds']['status'] == 'FAIL'
+
+
+def test_installed_agent_runner_observation_attributes():
+    path = Path('/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py')
+    if not path.exists():
+        pytest.skip('local swegemma source not installed')
+    tree = ast.parse(path.read_text())
+    names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update(a.asname or a.name.split('.')[0] for a in node.names)
+    assert {'asyncio', 'sandbox_start', 'sandbox_stop', 'sandbox_exec'} <= names
+
+
+@pytest.mark.parametrize('error', [TimeoutError('exit timeout'), ValueError('exit other')])
+def test_proxy_exit_exception_without_expired_is_unchanged(error):
+    import asyncio
+    from contextvars import ContextVar
+    state = ContextVar('exit_error')
+    state.set({})
+    class CM:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *exc):
+            raise error
+    proxy = timing.AsyncioTimingProxy(Entry(timeout=lambda **kw: CM()), state)
+    async def run():
+        async with proxy.timeout(delay=4):
+            pass
+    with pytest.raises(type(error)) as caught:
+        asyncio.run(run())
+    assert caught.value is error
+    assert state.get()['agent_timeout_fired'] is isinstance(error, TimeoutError)
+    assert state.get()['agent_timeout_seconds'] == 4
+
+
+def test_summary_incomplete_row_is_retained_and_fails_gate(tmp_path):
+    path = tmp_path / 'journal'
+    path.write_text('\n'.join(json.dumps(row) for row in [
+        dict(_schema='kaggle_timing_v1', task_ids=['broken'], vllm_startup_seconds=500),
+        dict(instance_id='broken', wall_seconds=dict(total=5), error='Row build exception')]))
+    result = summary.summarize(path)
+    assert result['n'] == 1 and result['n_complete_no_error'] == 0
+    assert result['tasks'][0]['instance_id'] == 'broken'
+    assert result['gate']['status'] == 'FAIL'
+
+
+def test_kernel_header_contains_vllm_startup(tmp_path, monkeypatch):
+    import io
+    import sys
+    import tarfile
+    from types import ModuleType
+    bundle_stream = io.BytesIO()
+    with tarfile.open(fileobj=bundle_stream, mode='w:gz') as archive:
+        payload = b'model: gemma-4-e4b-it-qat-w4a16-ct\n'
+        info = tarfile.TarInfo('agent.yaml')
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    monkeypatch.setattr(timing, 'BUNDLE_B64', base64.b64encode(bundle_stream.getvalue()).decode())
+    monkeypatch.setattr(timing, 'WORK', tmp_path)
+    monkeypatch.setattr(timing, 'BUNDLE', tmp_path / 'bundle')
+    monkeypatch.setattr(timing, 'install', lambda: None)
+    for name in ('mcp', 'torch', 'yaml', 'litellm', 'google', 'google.adk',
+                 'google.adk.agents', 'google.adk.agents.context_cache_config',
+                 'google.adk.apps', 'google.adk.apps._configs', 'swegemma', 'swegemma.config'):
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    torch = sys.modules['torch']
+    torch.cuda = Entry(device_count=lambda: 4, get_device_name=lambda i: 'L4')
+    sys.modules['google.adk.agents.context_cache_config'].ContextCacheConfig = lambda **kw: kw
+    sys.modules['google.adk.apps._configs'].EventsCompactionConfig = lambda **kw: kw
+    sys.modules['swegemma.config'].EvalConfig = lambda **kw: kw
+    sys.modules['swegemma.config'].build_submission_limits = lambda: (None, None)
+    server = Entry(create_model_registry=lambda **kw: {}, stop=lambda: None)
+    monkeypatch.setattr(timing, 'start_server', lambda holder: (server, None, 'model', 345.6))
+    async def evaluate(*args):
+        pass
+    monkeypatch.setattr(timing, 'evaluate', evaluate)
+    timing.main()
+    rows = [json.loads(line) for line in (tmp_path / 'timing.jsonl').read_text().splitlines()]
+    assert rows[0]['vllm_startup_seconds'] == 345.6
+    assert rows[1]['_vllm']['startup_seconds'] == 345.6
+    assert rows[-1]['_done']['startup_seconds'] == 345.6
+    expected_fields = timing.phase1_fields({}, 0, 0, None, '').keys()
+    assert set(expected_fields) <= rows[0]['fields'].keys()
