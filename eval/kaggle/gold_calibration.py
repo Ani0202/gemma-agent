@@ -175,62 +175,17 @@ def choose_sandbox():
     return 'subprocess'
 
 
-def patch_subprocess_deps(data_dir):
-    """Emulate the docker-only dependency setup for the subprocess sandbox (swegemma skips it).
-
-    Contract (swegemma 0.2.11 container_setup): for docker, _ensure_container_site_packages
-    unpacks every deduplicated (highest-version, py313-compatible) wheel from wheels_dir that is
-    < 20 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
-    site-packages, no resolver; large wheels are added only if imported by the workspace; then
-    sandbox/setup.py runs with --fast-path. We replicate exactly that inside the sandbox venv.
-    The sandbox venv uses system_site_packages=True, so the HOST python must mirror the image
-    (Dockerfile.public: pytest, pytest-timeout==2.1.0, typer, build backends; nothing else).
-    """
-    import tarfile
-    import swegemma.harness.container_setup as cs
-    import swegemma.harness.verification as vf
-    import swegemma.harness.sample_verification  # load all known by-name bindings
-    import swegemma.evaluate
-    import swegemma.cli
-    import swegemma.harness.agent_runner
-    orig = cs.install_test_dependencies
-    wheels_src = Path(data_dir) / 'wheels'
-    if not wheels_src.is_dir():
-        wheels_src = WHEELHOUSE
-    setup_py = Path(data_dir) / 'sandbox' / 'setup.py'
-    if not setup_py.exists():
-        setup_py = next(iter(Path(data_dir).rglob('setup.py')), setup_py)  # competition sandbox/setup.py
-
-    def install(docker, container_id, repo='', *, fast_path=True, config=None):
-        if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
-            return orig(docker, container_id, repo, fast_path=fast_path, config=config)
-        venv_dir = docker.sandboxes[container_id]['venv']
-        sp_dir = next(iter(sorted(venv_dir.glob('lib/python3*/site-packages'))))
-        base_wheels, large_wheels, _m2p, _req = cs._inspect_wheels_dir(wheels_src)
-        selected = list(base_wheels)
-        if large_wheels:  # public wheels have none; fail loudly rather than silently diverge
-            raise RuntimeError('large wheels present; workspace-import scan not emulated')
-        tar_path = cs._build_unpacked_wheels_tar(selected, 'sp_base_local', '.swegemma_base_injected')
-        with tarfile.open(tar_path) as tf:
-            tf.extractall(sp_dir, filter='data')
-        docker.copy_to(container_id, setup_py, '/tmp/setup.py')
-        flag = '--fast-path' if fast_path else ''
-        docker.exec(container_id, f'python3 /tmp/setup.py {flag} {repo}'.strip(), timeout=280)
-        probe_log = os.environ.get('GOLD_PROBE_LOG')  # diagnostic: which copy of the repo package is imported
-        if probe_log:
-            pkg = {'Textualize/rich': 'rich', 'encode/httpx': 'httpx', 'fastapi/fastapi': 'fastapi',
-                   'psf/requests': 'requests'}.get(repo, repo.split('/')[-1])
-            out = docker.exec(container_id, f'cd /workspace && PYTHONSAFEPATH=1 PYTHONNOUSERSITE=1 python3 -s -c '
-                              f'"import {pkg};print({pkg}.__file__)"', timeout=60)
-            with open(probe_log, 'a') as fh:
-                fh.write(json.dumps({'container': str(container_id), 'repo': repo, 'probe': str(out)[:500]}) + '\n')
-    for name, module in list(sys.modules.items()):
-        if (name == 'swegemma' or name.startswith('swegemma.')) and getattr(module, 'install_test_dependencies', None) is orig:
-            module.install_test_dependencies = install
-    return install
+# push.sh embeds this module here when staging the single-file Kaggle kernel.
+# BEGIN SHARED ENV IMPORT
+try:
+    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
+# END SHARED ENV IMPORT
 
 
-async def verify_gold(task, patch, data_dir, sandbox):
+async def verify_gold(task, patch, data_dir, sandbox, out_dir=None):
     """The only swegemma API adapter; see docs/GOLD_CALIBRATION.md assumptions.
 
     verify_task owns fresh sandbox staging, baseline setup, and test_patch.
@@ -241,7 +196,9 @@ async def verify_gold(task, patch, data_dir, sandbox):
     from swegemma.evaluate import Evaluator
     from swegemma.harness.verification import verify_task
 
-    with tempfile.TemporaryDirectory(prefix='gold-verify-', dir='/tmp') as scratch:
+    out_dir = Path(out_dir or WORKING_DIR).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='gold-verify-', dir=out_dir) as scratch:
         config = EvalConfig(tasks_path=data_dir / 'tasks.jsonl',
                             snapshots_dir=data_dir / 'snapshots', wheels_dir=data_dir / 'wheels',
                             results_dir=Path(scratch), submission_dir=data_dir / 'sample_submission',
@@ -271,8 +228,12 @@ async def verify_gold(task, patch, data_dir, sandbox):
             import swegemma.sandbox as _sb
             _d2 = ','.join(n for n in dir(_sb) if 'Manager' in n or 'Sandbox' in n)
             raise RuntimeError('bind failed; SRC=' + _d1 + '; SB=' + _d2 + '; sig=' + str(sig)[:300] + '; required=' + ','.join(req) + '; ctx=' + ','.join(sorted(context))[:300]) from None
-        result = verify_task(**kwargs)
-        return await result if inspect.isawaitable(result) else result
+        token = gold_artifact_dir.set(Path(scratch))
+        try:
+            result = verify_task(**kwargs)
+            return await result if inspect.isawaitable(result) else result
+        finally:
+            gold_artifact_dir.reset(token)
 
 
 def worker(args):
@@ -284,7 +245,10 @@ def worker(args):
                exit_code=None, duration_seconds=0.0, error=None, sandbox=args.sandbox)
     try:
         if args.sandbox == 'subprocess':
-            patch_subprocess_deps(args.data_dir)
+            environment = setup_scorer_env(
+                args.data_dir, out_dir=args.result.parent,
+                allow_unsandboxed=getattr(args, 'allow_unsandboxed', False))
+            row['sandbox'] = environment['sandbox']
         from swegemma.models import load_tasks
         task = next(t for t in load_tasks(args.data_dir / 'tasks.jsonl')
                     if t.instance_id == args.worker)
@@ -295,7 +259,7 @@ def worker(args):
         if not isinstance(patch, str) or not patch.strip():
             row['error'] = 'Missing or empty gold patch'
         else:
-            result = asyncio.run(verify_gold(task, patch, args.data_dir, args.sandbox))
+            result = asyncio.run(verify_gold(task, patch, args.data_dir, args.sandbox, out_dir=args.result.parent))
             # Assumed result is a mapping or TaskResult-like object, never a bare bool.
             get = result.get if isinstance(result, dict) else lambda k, d=None: getattr(result, k, d)
             resolved = get('resolved')
@@ -322,12 +286,14 @@ def worker(args):
     args.result.write_text(json.dumps(row) + '\n', encoding='utf-8')
 
 
-def run_one(task, data_dir, sandbox):
+def run_one(task, data_dir, sandbox, allow_unsandboxed=False):
     start = time.monotonic()
     with tempfile.TemporaryDirectory(prefix='gold-worker-', dir='/tmp') as scratch:
         output = Path(scratch) / 'result.json'
         command = [sys.executable, str(Path(__file__).resolve()), '--worker', task['instance_id'],
                    '--data-dir', str(data_dir), '--sandbox', sandbox, '--result', str(output)]
+        if allow_unsandboxed:
+            command.append('--allow-unsandboxed')
         try:
             proc = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   timeout=3600)
@@ -354,6 +320,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', type=Path, default=DATA_DIR)
     parser.add_argument('--working-dir', type=Path, default=WORKING_DIR)
+    parser.add_argument('--allow-unsandboxed', action='store_true',
+                        default=os.environ.get('GOLD_ALLOW_UNSANDBOXED') == '1')
     parser.add_argument('--worker', help=argparse.SUPPRESS)
     parser.add_argument('--result', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--sandbox', choices=('docker', 'subprocess'), help=argparse.SUPPRESS)
@@ -380,7 +348,7 @@ def main():
         print(f'Gold calibration: total={len(tasks)}, resumed={len(results)}, '
               f'sandbox={sandbox}, concurrency={CONCURRENCY}', flush=True)
         with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool, journal.open('a', encoding='utf-8') as stream:
-            futures = [pool.submit(run_one, task, args.data_dir, sandbox) for task in pending]
+            futures = [pool.submit(run_one, task, args.data_dir, sandbox, args.allow_unsandboxed) for task in pending]
             for future in as_completed(futures):
                 row = future.result()
                 stream.write(json.dumps(row, allow_nan=False) + '\n')

@@ -8,7 +8,7 @@ fi
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 stage_dir=$(mktemp -d /tmp/gold-kernel-push.XXXXXX)
 trap 'rm -rf -- "$stage_dir"' EXIT
-cp -- "$script_dir/gold_calibration.py" "$stage_dir/gold_calibration.py"
+python3 "$script_dir/stage_kernel.py" "$stage_dir/gold_calibration.py"
 python3 - "$script_dir/gold_calibration_metadata.json" "$stage_dir/kernel-metadata.json" "$1" <<'PY'
 import json
 import sys

@@ -106,6 +106,20 @@ class SummaryTests(unittest.TestCase):
                 gold.main()
             self.assertEqual(json.loads((root / 'gold_summary.json').read_text())['passing_ids'], ['a'])
 
+    def test_gold_ids_file_selects_inventory_before_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'tasks.jsonl').write_text(''.join(json.dumps(dict(instance_id=i, repo='org/repo')) + '\n'
+                                                     for i in ('a', 'b')))
+            (root / 'gold_results.jsonl').write_text(json.dumps(result()) + '\n')
+            (root / 'ids.txt').write_text('a\n')
+            with patch('sys.argv', [str(SCRIPT), '--data-dir', str(root), '--working-dir', str(root)]), \
+                    patch.dict('os.environ', GOLD_IDS_FILE=str(root / 'ids.txt')), \
+                    patch.object(gold, 'install_harness', side_effect=AssertionError('fully resumed')), \
+                    patch('builtins.print'):
+                gold.main()
+            self.assertEqual(json.loads((root / 'gold_summary.json').read_text())['total'], 1)
+
 
 class WorkerTests(unittest.TestCase):
     def run_worker(self, verifier):
@@ -119,13 +133,13 @@ class WorkerTests(unittest.TestCase):
                                       sandbox='subprocess', result=Path(directory) / 'result.json')
             with patch.object(gold, 'load_inventory', return_value=[raw]), \
                     patch.dict('sys.modules', {'swegemma.models': models}), \
-                    patch.object(gold, 'patch_subprocess_deps'), \
+                    patch.object(gold, 'setup_scorer_env', return_value={'sandbox': 'bwrap'}), \
                     patch.object(gold, 'verify_gold', side_effect=verifier):
                 gold.worker(args)
             return json.loads(args.result.read_text())
 
     def test_gold_patch_only_and_harness_verdict_preserved(self):
-        async def verify(task, patch_text, data_dir, sandbox):
+        async def verify(task, patch_text, data_dir, sandbox, **kwargs):
             self.assertEqual(patch_text, 'GOLD_PATCH_SECRET')
             self.assertEqual(sandbox, 'subprocess')
             # Exit 0 can still fail the harness's required-test/JUnit checks.
@@ -137,13 +151,24 @@ class WorkerTests(unittest.TestCase):
         self.assertGreaterEqual(row['duration_seconds'], 0)
 
     def test_exception_text_never_copied_into_result(self):
-        async def verify(*args):
+        async def verify(*args, **kwargs):
             raise RuntimeError('GOLD_PATCH_SECRET TASK_TEXT_SECRET')
         row = self.run_worker(verify)
         self.assertFalse(row['resolved'])
         self.assertIsNone(row['exit_code'])
         self.assertEqual(row['error'], 'Verification/setup exception (RuntimeError)')
         self.assertNotIn('SECRET', json.dumps(row))
+
+    def test_null_patch_control_still_reaches_verifier(self):
+        async def verify(task, patch_text, data_dir, sandbox, **kwargs):
+            self.assertIn('NULL_CONTROL.txt', patch_text)
+            self.assertNotIn('GOLD_PATCH_SECRET', patch_text)
+            self.assertIn('out_dir', kwargs)
+            return dict(resolved=False, test_exit_code=1)
+        with patch.dict('os.environ', GOLD_NULL_PATCH='1'):
+            row = self.run_worker(verify)
+        self.assertFalse(row['resolved'])
+        self.assertEqual(row['sandbox'], 'bwrap')
 
     def test_docker_unavailable_falls_back_without_network_pull(self):
         with patch.object(gold.subprocess, 'run', side_effect=FileNotFoundError):

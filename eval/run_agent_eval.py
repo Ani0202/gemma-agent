@@ -1,5 +1,7 @@
 """Offline local swegemma 0.2.11 evaluation; raw artifacts stay under runs/."""
 import argparse
+import ast
+import importlib.metadata
 import asyncio
 from collections import Counter
 from contextvars import ContextVar
@@ -21,7 +23,10 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from eval.kaggle.gold_calibration import patch_subprocess_deps, verify_gold
+from eval.kaggle.gold_calibration import verify_gold
+from eval.sandbox_env import (isolate_host_packages, patch_subprocess_deps,
+                              setup_scorer_env, command_metrics)
+from eval.tool_timing import ToolTiming, current_timing, install_harness_timing
 
 FIELDS = dict(instance_id='Task ID', repo='Repository', resolved='Harness verdict (bool)',
               exit_code='Verification exit code, or null if not run',
@@ -29,7 +34,13 @@ FIELDS = dict(instance_id='Task ID', repo='Repository', resolved='Harness verdic
               wall_seconds='agent (includes Container A setup), verification, total seconds',
               llm_turns='Harness LLM call count',
               tool_calls='total and per_tool requested (trace); harness total if no trace',
-              tool_seconds='Per tool: n, total, max wall seconds call->response (trace timestamps)',
+              tool_seconds='Per tool: n, total, max monotonic execution seconds',
+              tool_calls_timed='Calls measured at ADK execution callbacks',
+              tool_seconds_unmatched='Calls missing a timing boundary',
+              cmd_timeouts='Command timeouts, including recovered timeouts',
+              sandbox='bwrap or explicitly allowed none',
+              leak_suspect='Sensitive tokens appeared in tool arguments',
+              leak_hits='Matched sensitive tokens only', diag_error='Diagnostic exception category',
               prompt_tokens='Recorded trace prompt usage, or null',
               completion_tokens='Recorded trace completion usage, or null',
               patch_bytes='UTF-8 size before harness stripping',
@@ -57,22 +68,6 @@ def assert_dependency_bindings(patched):
            if getattr(sys.modules.get(n), 'install_test_dependencies', None) is not patched]
     if bad:
         raise RuntimeError('Unpatched dependency bindings: ' + ', '.join(bad))
-
-
-def isolate_host_packages():
-    """Keep pyimg system packages; remove swegemma's extra harness-venv .pth leak."""
-    from swegemma.sandbox import SubprocessManager
-    original = SubprocessManager.start
-    if getattr(original, '_image_only', False):
-        return
-
-    def start(self):
-        sid = original(self)
-        for pth in self.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'):
-            pth.unlink()
-        return sid
-    start._image_only = True
-    SubprocessManager.start = start
 
 
 def sha_file(path):
@@ -106,10 +101,12 @@ class Journal:
         try:
             if lines and not force:
                 old = json.loads(lines[0])
-                identity = ('_schema', 'bundle', 'bundle_sha256', 'caps', 'split',
-                            'concurrency', 'endpoint', 'models_yaml', 'data_dir')
-                if any(old.get(k) != header.get(k) for k in identity):
-                    raise ValueError('Results header mismatch; use a new run name or --force-new')
+                identity = (old.keys() | header.keys()) - {'created_utc'}
+                diff = {k: {'old': old.get(k), 'new': header.get(k)}
+                        for k in sorted(identity) if old.get(k) != header.get(k)}
+                if diff:
+                    raise ValueError('Results header mismatch; use --force-new-out or a new run name: '
+                                     + json.dumps(diff, default=str, sort_keys=True))
                 valid_bytes = len(lines[0])
                 for i, line in enumerate(lines[1:], 1):
                     try:
@@ -152,7 +149,7 @@ def classify_patch(patch, repo, protected=None, test_targets=()):
 
     def path_value(raw):
         raw = raw.split('\t', 1)[0]
-        value = json.loads(raw) if raw.startswith('"') else raw
+        value = decode_git_path(raw) if raw.startswith('"') else raw
         return value[2:] if value.startswith(('a/', 'b/')) else value
 
     for line in patch.splitlines() + ['diff --git ']:
@@ -195,22 +192,7 @@ def trace_counts(trace):
     for key in ('prompt_tokens', 'completion_tokens'):
         values = [e.usage[key] for e in entries if e.usage and key in e.usage]
         tokens[key] = sum(values) if values else None
-    return dict(counts), tokens, tool_seconds(entries)
-
-
-def tool_seconds(entries):
-    """Per tool name: wall seconds from each tool_call to its tool_response (FIFO per name)."""
-    pending, out = {}, {}
-    for e in entries:
-        if e.event_type == 'tool_call':
-            pending.setdefault(e.tool_name, []).append(e.timestamp)
-        elif e.event_type == 'tool_response' and pending.get(e.tool_name):
-            stat = out.setdefault(e.tool_name, dict(n=0, total=0.0, max=0.0))
-            dt = max(0.0, e.timestamp - pending[e.tool_name].pop(0))
-            stat['n'] += 1
-            stat['total'] = round(stat['total'] + dt, 3)
-            stat['max'] = round(max(stat['max'], dt), 3)
-    return out
+    return dict(counts), tokens, {}
 
 
 def observe_patch_strip(original, state):
@@ -231,6 +213,110 @@ def read_ids(path):
             if line.strip() and not line.lstrip().startswith('#')}
 
 
+def decode_git_path(raw):
+    # Git C-quotes UTF-8 bytes using octal escapes, which JSON doesn't accept.
+    # literal_eval on bytes understands both octal and ordinary C escapes.
+    escaped = ''.join(c if ord(c) < 128 else ''.join(f'\\{b:03o}' for b in c.encode())
+                      for c in raw)
+    return ast.literal_eval('b' + escaped).decode('utf-8', errors='surrogateescape')
+
+
+def validate_inventory_ids(path):
+    seen = set()
+    with path.open() as stream:
+        for number, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            iid = json.loads(line)['instance_id']
+            if iid in seen:
+                raise ValueError(f'Duplicate inventory IDs at line {number}')
+            seen.add(iid)
+
+
+def runner_revision():
+    return dict(git_sha=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
+                                               text=True).strip(),
+                git_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)))
+
+
+def wheels_listing_sha(path):
+    listing = []
+    if path:
+        for p in sorted(Path(path).rglob('*')):
+            listing.append((p.relative_to(path).as_posix(), p.stat().st_size,
+                            str(p.resolve()) if p.is_symlink() else None))
+    return hashlib.sha256(json.dumps(listing, sort_keys=True).encode()).hexdigest()
+
+
+def config_snapshot(value):
+    if dataclasses.is_dataclass(value):
+        return {f.name: config_snapshot(getattr(value, f.name)) for f in dataclasses.fields(value)
+                if f.name != 'models'}
+    if hasattr(value, 'model_dump'):
+        return value.model_dump(mode='json')
+    if isinstance(value, dict):
+        return {k: config_snapshot(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        values = [config_snapshot(v) for v in value]
+        return sorted(values) if isinstance(value, (set, frozenset)) else values
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def build_config(defaults, args, models, raw_dir, caps):
+    from swegemma import config as sc
+    from swegemma.budget import EvaluationBudget, HarnessLimits
+    names = {f.name for f in dataclasses.fields(sc.EvalConfig)}
+    for key in defaults.keys() - names:
+        logging.warning('Unknown EvalConfig key: %s', key)
+    options = {k: v for k, v in defaults.items() if k in names}
+    types = dict(budget=EvaluationBudget, harness=HarnessLimits,
+                 limits=sc.SubmissionLimits, generation_constraints=sc.GenerationConstraints,
+                 context_cache_config=sc.ContextCacheConfig,
+                 events_compaction_config=sc.EventsCompactionConfig,
+                 adapter_manifest=sc.AdapterManifest)
+    for key, cls in types.items():
+        if isinstance(options.get(key), dict):
+            options[key] = cls(**options[key])
+    paths = dict(tasks_path=args.data_dir / 'tasks.jsonl', snapshots_dir=args.data_dir / 'snapshots',
+                 wheels_dir=args.data_dir / 'wheels', results_dir=raw_dir, submission_dir=args.bundle)
+    # Explicit CLI runtime settings own these fields. Other bundle fields pass through.
+    options.update(paths, models=models, sandbox='subprocess', concurrency=args.concurrency,
+                   display_mode='quiet', **caps)
+    for key, fallback in [('graph_dir', 'graphs'), ('embeddings_dir', 'embeddings')]:
+        path = Path(options.get(key, fallback))
+        options[key] = str((path if path.is_absolute() else args.data_dir / path).resolve())
+    return sc.EvalConfig(**options)
+
+
+def task_diagnostics(trace, patch, repo, protected, test_files, data_dir):
+    out = dict(per_tool={}, prompt_tokens=None, completion_tokens=None,
+               patch_bytes=len(patch.encode()), patch_files=[], test_files_edited=[],
+               stray_files=[], empty_patch=not patch.strip(), leak_suspect=False, leak_hits=[],
+               diag_error=None)
+    errors = []
+    try:
+        out['per_tool'], tokens, _ = trace_counts(trace)
+        out.update(tokens)
+    except Exception as exc:
+        errors.append(type(exc).__name__)
+    try:
+        out.update(classify_patch(patch, repo, protected, test_files))
+    except Exception as exc:
+        errors.append(type(exc).__name__)
+    try:
+        tokens = (str(ROOT), str(data_dir), 'tasks.jsonl', 'test_patch', 'FAIL_TO_PASS')
+        arguments = [json.dumps(e.tool_args, ensure_ascii=False) for e in trace.entries
+                     if e.event_type == 'tool_call'] if trace else []
+        out['leak_hits'] = [t for t in dict.fromkeys(tokens) if any(t in a for a in arguments)]
+        out['leak_suspect'] = bool(out['leak_hits'])
+    except Exception as exc:
+        errors.append(type(exc).__name__)
+    out['diag_error'] = ','.join(errors) or None
+    return out
+
+
 async def run(args):
     from swegemma.cli import _build_cli_model_registry
     from swegemma.config import EvalConfig
@@ -240,19 +326,15 @@ async def run(args):
     from swegemma.harness.verification import _is_protected_test_or_config_path
     import yaml
 
-    isolate_host_packages()
-    patched = patch_subprocess_deps(args.data_dir)
-    assert_dependency_bindings(patched)
     split_ids = read_ids(args.split)
     if not split_ids <= read_ids(ROOT / 'eval/splits/dev.txt'):
         raise ValueError('Only frozen dev IDs are authorized; split contains non-dev IDs')
     selected = split_ids & set(args.ids.split(',')) if args.ids else split_ids
     if not selected:
         raise ValueError('No selected tasks')
+    validate_inventory_ids(args.data_dir / 'tasks.jsonl')
     inventory = load_tasks(args.data_dir / 'tasks.jsonl')
     tasks = {t.instance_id: t for t in inventory}
-    if len(tasks) != len(inventory):
-        raise ValueError('Duplicate inventory IDs')
     if not split_ids <= tasks.keys():
         raise ValueError('Split IDs missing from inventory')
     if any(not re.fullmatch(r'[A-Za-z0-9_.-]+', i) for i in split_ids):
@@ -271,24 +353,39 @@ async def run(args):
     for name in models.list_available():
         model = models.get(name)
         model._additional_args['api_base'] = args.endpoint
-    header = dict(_schema='agent_eval_v1', fields=FIELDS, bundle=str(args.bundle),
-                  bundle_sha256=bundle_sha(args.bundle), git_sha=subprocess.check_output(
-                      ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+    raw_dir = args.out / args.run_name
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    config = build_config(defaults, args, models, raw_dir, caps)
+    environment = setup_scorer_env(args.data_dir, out_dir=args.out, repo_root=ROOT,
+                                   allow_unsandboxed=args.allow_unsandboxed)
+    patched = environment['patched']
+    assert_dependency_bindings(patched)
+    header = dict(_schema='agent_eval_v2', fields=FIELDS, bundle=str(args.bundle),
+                  bundle_sha256=bundle_sha(args.bundle), **runner_revision(),
+                  tasks_sha256=sha_file(args.data_dir / 'tasks.jsonl'),
                   split=dict(path=str(args.split), sha256=sha_file(args.split)), caps=caps,
+                  versions={name: importlib.metadata.version(name) for name in
+                            ('swegemma', 'adk_submission', 'google-adk', 'litellm')},
+                  python_version=sys.version, wheels_listing_sha256=wheels_listing_sha(environment['wheels_dir']),
+                  sandbox=environment['sandbox'], bwrap_argv_template=environment['bwrap_argv_template'],
+                  effective_config=config_snapshot(config),
                   concurrency=args.concurrency, endpoint=args.endpoint,
                   models_yaml=sha_file(args.models_yaml) if args.models_yaml else None,
                   data_dir=str(args.data_dir), created_utc=datetime.now(timezone.utc).isoformat())
-    journal = Journal(ROOT / 'results' / f'{args.run_name}.jsonl', header, args.force_new)
+    journal_path = (args.out / f'{args.run_name}.jsonl' if args.out_explicit else
+                    ROOT / 'results' / f'{args.run_name}.jsonl')
+    if args.force_new_out and journal_path.exists():
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')
+        journal_path.rename(journal_path.with_name(journal_path.stem + '-' + stamp + '.jsonl'))
+        raw_dir.rename(raw_dir.with_name(raw_dir.name + '-' + stamp))
+        raw_dir.mkdir()
+    journal = Journal(journal_path, header, args.force_new)
     if not journal.finished <= split_ids:
         journal.close()
         raise ValueError('Resume records contain IDs outside the split')
-    raw_dir = ROOT / 'runs' / args.run_name
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    logging.getLogger().addHandler(logging.FileHandler(raw_dir / 'harness.log'))
-    config = EvalConfig(tasks_path=args.data_dir / 'tasks.jsonl', snapshots_dir=args.data_dir / 'snapshots',
-                        wheels_dir=args.data_dir / 'wheels', results_dir=raw_dir,
-                        submission_dir=args.bundle, models=models, sandbox='subprocess',
-                        concurrency=args.concurrency, display_mode='quiet', **caps)
+    file_handler = logging.FileHandler(raw_dir / 'harness.log')
+    logging.getLogger().addHandler(file_handler)
+    restore_timing = install_harness_timing()
     import swegemma.evaluate as evaluate_module
     original_verify = evaluate_module.verify_task
     phase_times = ContextVar('phase_times')
@@ -331,12 +428,16 @@ async def run(args):
     async def one(iid):
         times = dict(verification=0.0)
         phase_times.set(times)
+        command_metrics.set(times)
+        timing = ToolTiming()
+        current_timing.set(timing)
         evaluator = LocalEvaluator(config)
         task = dataclasses.replace(tasks[iid], patch='')
         context = SwegemmaContext(docker_manager=evaluator.docker, container_id='',
                                  problem_statement=task.problem_statement, repo=task.repo,
                                  task=dataclasses.replace(task, test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=()),
-                                 budget=config.budget, harness=config.harness)
+                                 budget=config.budget, harness=config.harness,
+                                 graph_dir=config.graph_dir, embeddings_dir=config.embeddings_dir)
         start = time.perf_counter()
         result, error, code, resolved = None, None, None, False
         try:
@@ -352,25 +453,35 @@ async def run(args):
         total = time.perf_counter() - start
         patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch)
         task_dir = raw_dir / iid
-        task_dir.mkdir(exist_ok=True)
-        (task_dir / 'agent.patch').write_text(patch)
-        (task_dir / 'output.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result
-                                                       else dict(error=error), default=str))
         trace = evaluator.trace
         trace_path = task_dir / 'trace.json'
-        trace_path.write_text(json.dumps(trace.to_dict(format='legacy') if trace else {}, default=str))
-        per_tool, tokens, per_tool_seconds = trace_counts(trace)
+        artifact_error = None
+        try:
+            task_dir.mkdir(exist_ok=True)
+            (task_dir / 'agent.patch').write_text(patch)
+            (task_dir / 'output.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result
+                                                           else dict(error=error), default=str))
+            trace_path.write_text(json.dumps(trace.to_dict(format='legacy') if trace else {}, default=str))
+        except Exception as exc:
+            logging.exception('Artifact diagnostics failed: %s', iid)
+            artifact_error = type(exc).__name__
+        diagnostics = task_diagnostics(trace, patch, task.repo,
+                                       _is_protected_test_or_config_path, task.test_files,
+                                       args.data_dir)
+        if artifact_error:
+            diagnostics['diag_error'] = ','.join(filter(None, [diagnostics['diag_error'], artifact_error]))
+        per_tool = diagnostics.pop('per_tool')
         raw_error = result.error or '' if result else error or ''
         row = dict(instance_id=iid, repo=task.repo, resolved=resolved, exit_code=code, error=error,
                    wall_seconds=dict(agent=evaluator.agent_seconds,
                                      verification=times['verification'],
                                      total=total), llm_turns=context.llm_calls_used,
                    tool_calls=dict(total=sum(per_tool.values()) if trace else context.tool_calls_used,
-                                   per_tool=per_tool), tool_seconds=per_tool_seconds, **tokens,
-                   **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+                                   per_tool=per_tool), **timing.metrics(), **diagnostics,
+                   sandbox=environment['sandbox'], cmd_timeouts=times.get('cmd_timeouts', 0),
                    timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' +
                                            getattr(evaluator, 'agent_error', ''), re.I)) or code == 124,
-                   trace_path=str(trace_path.relative_to(ROOT)))
+                   trace_path=os.path.relpath(trace_path, ROOT))
         journal.append(row)
         print(f'{iid}: resolved={resolved}', flush=True)
 
@@ -383,7 +494,7 @@ async def run(args):
             for iid in check:
                 if not tasks[iid].patch.strip():
                     raise ValueError('Self-check gold patch missing')
-                result = await verify_gold(tasks[iid], tasks[iid].patch, args.data_dir, 'subprocess')
+                result = await verify_gold(tasks[iid], tasks[iid].patch, args.data_dir, 'subprocess', out_dir=raw_dir)
                 (raw_dir / f'selfcheck-{iid}.json').write_text(json.dumps(result.model_dump(exclude={'trace'}), default=str))
                 if result.resolved is not True:
                     raise RuntimeError('Gold self-check unresolved; see runs artifacts')
@@ -397,7 +508,10 @@ async def run(args):
     finally:
         evaluate_module.verify_task = original_verify
         verification_module.strip_protected_files_from_patch = original_strip
+        restore_timing()
         journal.close()
+        logging.getLogger().removeHandler(file_handler)
+        file_handler.close()
 
 
 def main(argv=None):
@@ -405,6 +519,7 @@ def main(argv=None):
     for name in ('bundle', 'data-dir', 'split'):
         parser.add_argument('--' + name, type=Path, required=name != 'data-dir', default=Path('data/raw'))
     parser.add_argument('--run-name', required=True)
+    parser.add_argument('--out', type=Path, help='Artifact and journal directory (default: runs/)')
     parser.add_argument('--concurrency', type=int, required=True)
     for name in ('ids', 'selfcheck-ids'):
         parser.add_argument('--' + name)
@@ -414,9 +529,11 @@ def main(argv=None):
     parser.add_argument('--endpoint', default=os.environ.get('LOCAL_INFERENCE_URL') or
                         os.environ.get('OPENAI_BASE_URL') or 'http://localhost:8000/v1')
     parser.add_argument('--models-yaml', type=Path)
-    for name in ('skip-selfcheck', 'force-new', 'allow-foreign-python'):
+    for name in ('skip-selfcheck', 'force-new', 'force-new-out', 'allow-foreign-python', 'allow-unsandboxed'):
         parser.add_argument('--' + name, action='store_true')
     args = parser.parse_args(argv)
+    args.out_explicit = args.out is not None
+    args.out = (args.out or ROOT / 'runs').resolve()
     guard_python(args.allow_foreign_python)
     if urlparse(args.endpoint).hostname not in {'localhost', '127.0.0.1', '::1'}:
         parser.error('Only localhost inference endpoints are permitted')
