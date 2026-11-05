@@ -93,3 +93,7 @@
 2026-11-05T17:48Z | dec 021 item 2: proposed bin/job patch (setsid pgid kill, oom_score_adj, MemAvailable gate); scratch smoke OK | ops/patches/bin-job-hardening.diff
 2026-11-05T17:49Z | dec 020 item 6: gold-null2 exit-124 rows 22/38/39 (rich, up to 2867 s); harness already killpg's; suspect: no per-sandbox mem cap. codex-build sandbox-limits launched | runs/gold-null2/gold_results.jsonl, ops/codex/build-sandbox-limits.spec
 2026-11-05T17:50Z | dec 022 item 2 (210 s setup root-cause): codex-ask ask-setup-210s + scout launched | ops/decisions/022-003-e4b-v000-timing-gate-fail.md
+2026-11-05T17:52Z | Codex runs after 17:37Z all failed: the bin/job ulimit -v 5G fallback crashes the Codex tool host (SIGTRAP); A/B: -v crashes, -d and no cap OK. Director told (fix for Aniket) | ops/jobs/ask-setup-210s.log, ops/mail/director/20261105T175337-12082-from-builder.md
+2026-11-05T17:52Z | relaunched review-memguard, codex-sandbox-limits, ask-setup-210s under the systemd scope cap | ops/jobs/
+2026-11-05T17:53Z | dec 022 item 3: e4b-v001 (cap 1.4) packed sha256=4d07af92...; codex-review queued; re-time held | bundles/e4b/v001/MANIFEST.md
+2026-11-05T17:53Z | dec 022 item 2c: scout report in | ops/scout/2026-11-05-timing-caps.md

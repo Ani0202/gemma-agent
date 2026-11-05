@@ -1,10 +1,11 @@
-# STATE: snapshot 2026-11-05 17:51Z (cycle 61, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 17:55Z (cycle 62, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - 31b: dist/31b-v000.zip sha256=4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161 (repo a12f0b7; static+codex static OK)
 - e4b: dist/e4b-v000.zip sha256=cc647bfb28bc6d2db0e3ec816df084f23a91230786d8fea177e2d63d2a6940e2 (same)
+- e4b-v001 (dec 022 item 3, cap 5 -> 1.4 only): dist/e4b-v001.zip sha256=4d07af9211879fe0e45d2148457d4a4a7c273539063bb6f7ca6bfda15cb4d7d7, pack PASS; codex-review running; re-time HELD until item 2 concludes.
 - No local pass-rate scores yet. eval-runner-fix MERGED to main 70c0d9f (codex review clean + N1 count-cap fix d13ceac; 421 pass, 3 skip).
   Test cmd: /home/ubuntu/gemma-local/venv/bin/python3 with pyimg cp3.13 site-packages appended to sys.path, pytest eval/tests.
 
@@ -14,19 +15,20 @@ Builder on Opus (dec 010: local-first, two-strike).
 
 ## Re-grounding check (EVERY cycle, dec 021 item 1e)
 - `bin/job status memguard` must say running; if not: `bin/job start memguard -- bin/memguard`. Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
-- Until bin-job-hardening.diff is applied by Aniket: at most ONE heavy job at a time on this VM (waiters/memguard/codex-ask/review exempt).
+- bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
-## Running jobs (17:51Z)
-- memguard (pid 7933, started 17:48Z): running, 0 kills; verified it sets oom_score_adj=1000 on bin/job targets. Test eval/tests/test_memguard.py 2/2 pass (job memguard-test).
-- review-memguard: codex-review of bin/memguard + ops/patches/bin-job-hardening.diff.
-- codex-sandbox-limits: codex-build of dec 020 item 6 (per-task group, 4 GiB tree-RSS kill, orphan tracking, peak RSS per task, GOLD_CONCURRENCY), branch codex/sandbox-limits.
-- ask-setup-210s: codex-ask on dec 022 items 2a/2b/2d (the 210 s setup: intrinsic or a kernel artifact).
-- scout (subagent): dec 022 item 2c public caps/setup -> ops/scout/2026-11-05-timing-caps.md.
-- Killed (dec 020 item 4): gold-rerun-b5, e4b-timing-wait3 (both already dead after the reboot).
+## Running jobs (17:55Z)
+- memguard (pid 7933): running, 0 kills.
+- RELAUNCHED 17:52Z (the first attempts all failed because Codex's tool host crashes under the ulimit -v 5G fallback): review-memguard, codex-sandbox-limits (branch codex/sandbox-limits), ask-setup-210s. All three now run under the systemd scope (the user bus exists since 17:51Z).
+- review-e4b-v001: codex-review of v001.
+- scout DONE: ops/scout/2026-11-05-timing-caps.md. No public setup figure; the rules text puts setup inside the 12 h; unclear whether it counts against the per-task cap; public caps 4.5/8 min.
+
+## Codex x bin/job (cycle 62)
+- bin/job hardening applied by Aniket (b1eedd7). Its ulimit -v 5G fallback (no user bus) crashes Codex (SIGTRAP). ulimit -d 5G works (A/B probe 17:52Z). Asked the Director to relay a one-line fix to Aniket. If a Codex job fails with 'code-mode host closed its stdout', check the [bin/job] cap line in the log.
 
 ## OOM incident (dec 020/021)
 - Root cause from runs/gold-null2: null-phase rows 22 rich_4006 (327 s), 38 rich_3480 (2683 s), 39 rich_3772 (2867 s) hit exit 124. The harness executor already uses start_new_session+killpg (adk_eval_core subprocess_sandbox.py:57), so the orphan theory is weaker; the leading suspect is unbounded memory in a null-patch rich test with no per-sandbox memory cap (none locally; the scorer has 4 GiB). Unproven: no RSS was logged. The codex-sandbox-limits fix covers both.
-- bin/job patch for Aniket: ops/patches/bin-job-hardening.diff (setsid pgid kill + survivor report, scope stop, oom_score_adj 1000, MemAvailable<5G refusal unless *-light). Smoke-tested on a scratch copy: group kill, no survivors. Awaiting codex-review, then to the Director.
+- bin/job hardening: APPLIED by Aniket (b1eedd7). The review-memguard rerun still covers it.
 - No exit-137 events since the reboot.
 
 ## Quota / spend
@@ -57,5 +59,5 @@ Builder on Opus (dec 010: local-first, two-strike).
 
 ## Next 3
 1. Review/merge codex/sandbox-limits (own review + codex-review); act on review-memguard findings; send the patch path to the Director.
-2. Dec 022 item 2: write results/kaggle_timing_e4b_v000_setup_breakdown.json + RULES_FINDINGS from ask-setup-210s/scout, then codex-ask the adversarial take (2d). Meanwhile build+pack e4b-v001 (cap 1.4).
+2. Dec 022 item 2: write results/kaggle_timing_e4b_v000_setup_breakdown.json + RULES_FINDINGS from ask-setup-210s/scout, then codex-ask the adversarial take (2d). (v001 packed; act on review-e4b-v001.)
 3. EV-1 implementation, then the cpu8 gold+null run; then item 4 levers and report 004.
