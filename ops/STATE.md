@@ -14,7 +14,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Linger check (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`; if not, tell the Director. After the NEXT reboot, once: `systemctl --user list-units --type=service --state=running`, names only; report non-ours units to the Director, never inspect or touch them (may be Etho).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
-
 ## Running jobs (19:31Z)
 - KERNEL v4 (9ec991f) FAILED, no measurement: all 8 tasks 'Harness task failure' in 2-4 s at pytest_timeout_source
   ("No offline pytest-timeout 2.1.0 source"; wheelhouse lacks 2.1.0; local acceptance used imgrt-stub). vLLM 319 s, 4x L4 OK.
