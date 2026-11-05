@@ -341,6 +341,10 @@ def start_server(holder):
     startup = time.perf_counter() - start
     return server_instance, adapters, declared_model, startup
 
+class WrongAccelerator(RuntimeError):
+    pass
+
+
 def main():
     started, totals, servers, startup = time.monotonic(), [], [], None
     WORK.mkdir(exist_ok=True, parents=True)
@@ -375,6 +379,9 @@ def main():
             from swegemma.config import EvalConfig, build_submission_limits
             litellm.drop_params = True
             header.update(gpu_count=torch.cuda.device_count(), gpu_names=[torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])
+            # Fail fast (saves quota) if Kaggle fell back to another accelerator (v2 silently got T4 x2).
+            if header['gpu_count'] < 4 or not all('L4' in n for n in header['gpu_names']):
+                raise WrongAccelerator('expected 4x L4')
             cfg_file = next((BUNDLE / n for n in ('eval_config.yaml', 'eval_config.yml') if (BUNDLE / n).is_file()), None)
             raw = (yaml.safe_load(cfg_file.read_text()) or {}) if cfg_file else {}
             section = raw.get('evaluation', raw)

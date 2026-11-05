@@ -80,5 +80,12 @@ PY
 if $dry_run; then
   echo "Dry run: no push. Staged: $stage_dir"
 else
-  kaggle kernels push -p "$stage_dir" --accelerator NvidiaL4X4 -t "$((budget + 1800))"
+  # 'NvidiaL4' is the starter notebook's machine_shape; unknown names (e.g. NvidiaL4X4) silently fall back to T4 x2.
+  kaggle kernels push -p "$stage_dir" --accelerator NvidiaL4 -t "$((budget + 1800))"
+  shape_dir=$(mktemp -d /tmp/timing-kernel-shape.XXXXXX)
+  kaggle kernels pull "$1" -p "$shape_dir" -m >/dev/null
+  shape=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["machine_shape"])' "$shape_dir/kernel-metadata.json")
+  rm -rf -- "$shape_dir"
+  echo "Server machine_shape: $shape"
+  if [[ $shape != NvidiaL4 ]]; then echo "WARNING: accelerator is $shape, not NvidiaL4; kernel will abort at the GPU check" >&2; fi
 fi
