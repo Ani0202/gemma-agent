@@ -1,5 +1,4 @@
 """Offline Phase 2 gold calibration; no agent or model inference is performed."""
-from __future__ import annotations
 
 import argparse
 import shutil

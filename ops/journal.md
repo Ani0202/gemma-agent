@@ -27,3 +27,4 @@
 2026-11-05T00:05Z | cycle 21: gold-wait still running, no action | ops/jobs/gold-wait.log
 2026-11-05T00:08Z | gold v3 all-TypeError (adapter result shape); diagnostics added, smoke kernel pushed | eval/kaggle/gold_calibration.py
 2026-11-05T00:12Z | smoke TypeError not from shape check; added 'where' traceback loc, repushed smoke | eval/kaggle/gold_calibration.py
+2026-11-05T00:15Z | smoke2 SyntaxError (__future__ import), removed, repushed v4; waiting gold-smoke-wait3 | eval/kaggle/gold_calibration.py
