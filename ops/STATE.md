@@ -43,7 +43,7 @@ History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Build
 ## Live caveats
 - Job naming (dec 024): waiters, codex-ask and codex-review jobs end in -light; builds, test suites and evals never do.
 - LORO with only 2 repos (rich, fastapi) is weak; report 002 must say so (dec 014 item 3).
-- Paper evidence due Nov 9 23:59Z (dec 007): schema-headed results/ files for gold calibration (done), Kaggle E4B timing (pending), failure taxonomy via trace-analyst once (pending). paper/ is the paper session's; don't edit.
+- Paper evidence due Nov 9 23:59Z (dec 007): gold calib (done), E4B timing + trace-analyst taxonomy (pending). Never edit paper/.
 - Director reminder due 2026-11-06T23:02Z: GCP quota re-request line to Aniket; keep until a decision marks it done.
 - Any Kaggle GPU kernel must pin the starter docker_image (py3.12, cp312 wheelhouse). Hosted-LLM-API data question OPEN; no new 3rd-party services.
 - One pending Kaggle submission at a time; no partial credit on timeout (docs/RULES_FINDINGS.md).
@@ -74,7 +74,6 @@ History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Build
 - OPEN eval-design question (dec 034 item 6): under H1, test deps come from the scorer's own site-packages, not setup.py. Before local
   pass-rate evals start, pre-register which environment the local sandbox models and why. Don't act on it before then.
 - Dec 032 item 5: decision_note is in timing_summary (probes branch); add the same note field to results/kaggle_timing_e4b_v001.json at merge.
-- fix6 review requeued as review-memguard-fix6e-light (waits for the probes review; fix6d killed while still sleeping).
 ## Next 3
 1. 23:08Z fix5c + v002 reviews -> evaluate v002 SUBMIT conditions (ii)/(iii) -> SUBMIT mail to Director (slot cutoff ~23:45Z).
 2. fix5c clean: merge fix5 branch; probes + probes-gate reviews clean -> push codex/kernel-probes-gate (cap 4.0) -> timing_summary --gate-mode stock-path -> report 010.
