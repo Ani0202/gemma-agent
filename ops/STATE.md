@@ -1,4 +1,5 @@
-# STATE (2026-11-05, cycle 25 / Phase 0)
+# STATE (2026-11-05, cycle 26 / Phase 0)
+Cycle 26: smoke4 where = inspect.bind in verify_gold (script.py:202): kwargs don't bind verify_task signature (missing required arg). Adapter now records sig/required/ctx names in row['shape'] on bind failure; smoke v6 pushed, job gold-smoke-wait5 -> runs/gold-smoke5. Next: read shape, fix kwargs, rerun full gold.
 Cycle 25: smoke3 kernel ran FULL set (GOLD_LIMIT ignored in main path), was CANCELLED at 42/129 (~1150s), no output files; log shows all rows resolved=False exit_code=None (adapter error, location lost). Fixed: smoke copy /tmp/gsmoke now hardcodes GOLD_LIMIT=1 and prints err/where/shape in 'Finished' lines; pushed v5; job gold-smoke-wait4 -> runs/gold-smoke4. Next: read log for where=, fix adapter in eval/kaggle/gold_calibration.py, rerun full gold.
 Best bundles: none validated. v000 packed + static PASS + codex static OK (repo SHA a12f0b7):
  31b dist/31b-v000.zip sha256=4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161

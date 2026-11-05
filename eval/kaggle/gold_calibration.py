@@ -198,7 +198,12 @@ async def verify_gold(task, patch, data_dir, sandbox):
             raise RuntimeError('Unsupported verify_task signature')
         kwargs = {name: context[name] for name, p in parameters.items()
                   if name in context and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD)}
-        inspect.signature(verify_task).bind(**kwargs)
+        try:
+            inspect.signature(verify_task).bind(**kwargs)
+        except TypeError as exc:
+            sig = inspect.signature(verify_task)
+            req = [n for n, p in sig.parameters.items() if p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
+            raise RuntimeError('bind failed; sig=' + str(sig)[:300] + '; required=' + ','.join(req) + '; ctx=' + ','.join(sorted(context))[:300]) from None
         result = verify_task(**kwargs)
         return await result if inspect.isawaitable(result) else result
 
@@ -235,6 +240,8 @@ def worker(args):
                                 f'Phase 2 unresolved (exit_code={exit_code}; includes JUnit validation)')
     except Exception as exc:
         row['error'] = f'Verification/setup exception ({type(exc).__name__})'
+        if str(exc).startswith('bind failed'):
+            row['shape'] = str(exc)[:900]  # API signature text only, no task data
         import traceback
         # Location only (file:line:function), never messages or values.
         row['where'] = ' <- '.join(f'{Path(f.filename).name}:{f.lineno}:{f.name}'
@@ -301,7 +308,7 @@ def main():
                 os.fsync(stream.fileno())
                 results[row['instance_id']] = row
                 print(f"Finished {len(results)}/{len(tasks)}: {row['instance_id']} "
-                      f"resolved={row['resolved']} exit_code={row['exit_code']}", flush=True)
+                      f"resolved={row['resolved']} exit_code={row['exit_code']} err={row.get('error')} where={row.get('where')} shape={row.get('shape')}", flush=True)
     summary = summarize(tasks, results)
     encoded = json.dumps(summary, indent=2, sort_keys=True) + '\n'
     output = args.working_dir / 'gold_summary.json'
