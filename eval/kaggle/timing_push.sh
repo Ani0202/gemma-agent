@@ -68,11 +68,14 @@ compile(generated, 'agent_timing.py', 'exec')
 metadata = dict(id=kernel_id, title=kernel_id.split('/')[1], code_file='agent_timing.py', language='python',
                 kernel_type='script', is_private=True, enable_gpu=True, enable_internet=False,
                 dataset_sources=['metric/gemma-4-developer-agent-wheelhouse'],
-                competition_sources=['gemma-4-developer-agent'], model_sources=[f'google/gemma-4/other/{model}/2'], kernel_sources=[])
+                competition_sources=['gemma-4-developer-agent'], model_sources=[f'google/gemma-4/Other/{model}/2'], kernel_sources=[],
+                # Pin the starter notebook's image (Python 3.12; wheelhouse binaries are cp312).
+                # Source: kaggle kernels pull ryanholbrook/getting-started-gemma-4-developer-agent -m (2026-11-05).
+                docker_image='gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461')
 (stage / 'kernel-metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
 print(json.dumps(metadata, indent=2))
 print(f'Generated script: {len(generated.encode())} bytes; stage: {stage}')
-print('Metadata assumption (offline): model_sources uses google/gemma-4/other/<model>/2')
+print('Metadata assumption (offline): model_sources uses google/gemma-4/Other/<model>/2 (starter casing); docker_image pinned to starter')
 PY
 if $dry_run; then
   echo "Dry run: no push. Staged: $stage_dir"

@@ -55,7 +55,8 @@ def test_generated_script_and_bundle(tmp_path):
         assert yaml_digest == hashlib.sha256((bundle / 'agent.yaml').read_bytes()).hexdigest()
         assert (tmp_path / 'extracted/prompt.md').read_text() == 'example prompt'
         metadata = json.loads((stage / 'kernel-metadata.json').read_text())
-        assert metadata['model_sources'] == ['google/gemma-4/other/gemma-4-e4b-it-qat-w4a16-ct/2']
+        assert metadata['model_sources'] == ['google/gemma-4/Other/gemma-4-e4b-it-qat-w4a16-ct/2']
+        assert metadata['docker_image'].startswith('gcr.io/kaggle-private-byod/python@sha256:')
         assert metadata['kernel_type'] == 'script'
         assert metadata['enable_gpu'] is True and metadata['enable_internet'] is False
     finally:
