@@ -17,7 +17,7 @@ History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Build
 - Splits v2 FROZEN: clean 48 (rich 39, fastapi 9), dev 33, holdout 15; holdout uses = 0. Hashes: eval/splits/MANIFEST.json.
 - requests/httpx dropped (wheel shadowing = scorer property, dec 014). Gold v2 files in results/ (gold_calibration_*, gold_failure_causes).
 ## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
-- Linger check (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`; if not, tell the Director. After the NEXT reboot, once: `systemctl --user list-units --type=service --state=running`, names only; report non-ours units to the Director, never inspect or touch them (may be Etho).
+- Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 ## Running jobs (21:36Z): review-kernel-setup-fix5c-light + review-e4b-v002-light (start 23:08/23:09Z), review-kernel-probes-light
@@ -64,8 +64,7 @@ History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Build
   Push the -gate branch at cap 4.0, budget 6000 only after BOTH review-kernel-probes-light and review-kernel-probes-gate-light are clean
   (eval/plans/006.md "Dec 036 correction"). Summary cmd: timing_summary.py --gate-mode stock-path --gate-vllm-seconds 600.
   Kaggle slug/push command: same as v5 (ops/budget/kaggle.md); log quota.
-  DEC 037: old review (63127c8) = P1-P3 + t4 bundle review; its minus-image-only BLOCKING findings are MOOT (say so in push note).
-  Gate review prompt already scoped to 63127c8..92a74c7 + item-3 check (verified). Queue order fix5c/v002 -> probes -> gate/fix6e holds dec 033 item 1.
+  DEC 037: minus-image-only BLOCKING in the 63127c8 review = MOOT (say so in push note); gate prompt scoped OK; queue order holds.
 - Gates for that run: (a) 8/8 no harness error; (b) max(Phase-1 - emulation) <= 277 s; (d) vLLM <= 600 s; (e) >= 1 non-empty diff.
 - G1 = P2 no docker binary + no docker.sock AND P1 stock setup <= 30 s on all 8 AND gates pass -> request SUBMIT 31b-v002 (cap <= 3.5,
   byte-identical to v001-t4 except cap + comment, no re-time; dec 036 item 2) in report 010, citing h1_composite.
