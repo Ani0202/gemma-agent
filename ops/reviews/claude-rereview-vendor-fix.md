@@ -3,7 +3,7 @@
 ## Provenance (Builder)
 - Reviewer: a fresh general-purpose Claude subagent, read-only.
 - It was given the commit, the prior review file and the Kaggle facts (runtime pip, Python 3.12).
-- Launched ~20:11Z on 2026-11-05; output received ~20:16Z.
+- Launched ~20:11Z on 2026-11-05 (after 87001e4, committed 20:11:03Z); output received ~20:13Z.
 
 ## Raw subagent output (verbatim)
 
