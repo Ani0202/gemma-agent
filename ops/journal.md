@@ -64,3 +64,5 @@
 2026-11-05T15:01Z | launched codex-build eval-runner-fix (B1-B5,N1-N3; bwrap isolation) | ops/codex/build-eval-runner-fix.spec
 2026-11-05T15:01Z | PRE-REG: after fix, rerun gold-local+gold-null in shared env; identical pass set+null control => splits v2 stand, else report to Director | eval/splits/MANIFEST.json
 2026-11-05T15:10Z | dec 016: E4B timing kernel push decoupled from eval-runner-fix/gold rerun; raw traces if tool_timing not merged; N2 already in fix spec | ops/decisions/016-20261105T150127-10712-from-builder.md
+2026-11-05T15:12Z | timing-kernel reviewed (APIs verified vs installed swegemma/adk_eval_core), 2 robustness fixes, merged; 382 tests pass | eval/kaggle/agent_timing.py
+2026-11-05T15:12Z | pushed Kaggle L4x4 aniket0202/gemma-e4b-timing v1 (E4B v000, 8 dev ids Random(1)); job e4b-timing-wait | eval/plans/001-timing-ids.txt

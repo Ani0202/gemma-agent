@@ -1,4 +1,11 @@
-# STATE (2026-11-05, cycle 48 / Phase 0) — Builder on Opus (dec 010 local-first, two-strike)
+# STATE (2026-11-05, cycle 49 / Phase 0) — Builder on Opus (dec 010 local-first, two-strike)
+Cycle 49: timing-kernel REVIEWED (APIs verified vs swegemma 0.2.11/adk_eval_core source: context.llm_calls_used, SessionTrace.to_dict(format='legacy'),
+  TaskResult pydantic, context kwarg). Raw traces (timestamps) + agent.patch + result.json saved per task to /kaggle/working/runs/<iid>/ (dec 016 OK).
+  Builder fixes: None-usage guard; row-build/trace-parse exceptions can't kill the run. Merged to main (conflict: kept main gold_calibration, no diag). 382 tests pass.
+  PUSHED aniket0202/gemma-e4b-timing v1: bundles/e4b/v000, 8 dev ids eval/plans/001-timing-ids.txt (Random(1): 6 rich + 2 fastapi), budget 10800s, -t 12600.
+  Job e4b-timing-wait -> runs/e4b-timing. On finish: python3 eval/kaggle/timing_summary.py runs/e4b-timing/timing.jsonl results/kaggle_timing_e4b_v000.json;
+  compute test-run share post-hoc from raw traces (B3: FIFO-per-name is wrong for batched calls); check header mcp_import_ok; fill ops/budget/kaggle.md actual hours.
+  Model handle assumption google/gemma-4/other/<model>/2 (starter path); if kernel fails on model mount, fix metadata and re-push.
 Cycle 48 (dec 016 approve-with-changes): Kaggle E4B timing (plan 001) DECOUPLED from eval-runner-fix + gold rerun.
   On codex-timing-kernel finish: review -> PUSH IMMEDIATELY (don't wait for eval-runner-fix). If eval/tool_timing.py (B3) not merged
   by push time, ship with RAW per-event traces (timestamps) saved to /kaggle/working/runs/ and compute test-run share post-hoc.
@@ -52,7 +59,7 @@ Best bundles: none validated. v000 packed + static PASS + codex static OK (repo 
  31b dist/31b-v000.zip sha256=4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161
  e4b dist/e4b-v000.zip sha256=cc647bfb28bc6d2db0e3ec816df084f23a91230786d8fea177e2d63d2a6940e2
 Remaining codex BLOCKING: runtime budget/timing unverified (needs concurrency-1 timing on L4x4/Kaggle).
-Env: x86_64 VM. GCP project gemma-agent-839566, spend $0. Kaggle quota used 0h. Owner GPU policy (dec 001): Kaggle first.
+Env: x86_64 VM. GCP project gemma-agent-839566, spend $0. Kaggle quota: gemma-e4b-timing v1 running (est ≤3.2 quota-h). Owner GPU policy (dec 001): Kaggle first.
 GCP quota (dec 003): only l4x1 spot + cpu8 usable; multi-GPU -> Kaggle.
 Rules (dec 004-002-001, 013): docs/RULES_FINDINGS.md; no repo overlap with hidden set; LORO mandatory for ship decisions; no partial credit on timeout (participant evidence 752017); one pending submission at a time.
 Open: (1) E2 resolved (dec 005): paper session owns paper/, do not edit; keep results/ files self-describing (schema + header line). (2) Director reminder due 2026-11-06T23:02Z: GCP quota re-request line to Aniket; keep until decision marks done. (3) Hosted-LLM-API data question OPEN; no new third-party services.
@@ -60,7 +67,7 @@ Dec 012 FYI: paper §4.1 cites only the committed gold-local v2 results file -> 
 Paper evidence (dec 007, due Nov 9 23:59Z, no extra compute): commit schema-headed results/ files for (a) gold calibration per-task outcomes+exclusion causes, (b) timing per task from Kaggle E4B smoke (31B if run), (c) failure taxonomy via trace-analyst once. Not yet produced; flag here if any won't exist by Nov 9.
 
 
-Running jobs: codex-eval-runner-fix (critical path), codex-timing-kernel (build), gold-diag4-wait (cross-check, redundant).
-Next 3 (dec 016: 1 and 2 in PARALLEL): (1) review timing-kernel -> push Kaggle L4x4 E4B timing run at once (plan 001; raw traces; check `import mcp`);
+Running jobs: codex-eval-runner-fix (critical path), e4b-timing-wait (Kaggle), gold-diag4-wait (cross-check, redundant).
+Next 3 (dec 016: 1 and 2 in PARALLEL): (1) on e4b-timing-wait: timing_summary + post-hoc test-run share -> results/, plan-001 rule;
   (2) review+merge eval-runner-fix (real-bwrap tests, N2 check), rerun gold-local+gold-null shared env, compare vs v2 (change => short report);
   (3) report 002 with first-submission candidate + LORO caveat.
