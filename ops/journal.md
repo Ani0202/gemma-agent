@@ -186,3 +186,4 @@
 2026-11-05T21:30Z | Plan 006 dec-034 section appended (cap 4.0, gates a/b'/d/e, budget 6000, G1 legs) | eval/plans/006.md
 2026-11-05T21:31Z | dec 035 (E4 approved: Aniket posts forum question himself; owner approved dec 032-034; order = dec 034 item 7); no Builder action; jobs fix5c/v002/probes/fix6e reviews running, memguard 0 kills, linger yes | ops/decisions/035-E4.md
 2026-11-05T21:34Z | dec 036: gate fix stock-path on codex/kernel-probes-gate 92a74c7 (118 pass; v5 rich_3067 89.52 s), MANIFEST renamed 31b-v001-t4, plan 006 correction, review-kernel-probes-gate-light queued; stop of stale probes review denied by classifier | ops/decisions/036-20261105T212937-908-from-builder.md eval/plans/006.md
+2026-11-05T21:36:10Z | dec 037 read: review split confirmed, gate prompt already scoped to gate diff, queue priority fix5c/v002 first unchanged; no action needed | ops/decisions/037-20261105T213500-22819-from-builder.md

@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 21:36Z (cycle 96, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 21:38Z (cycle 97, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - 31b: dist/31b-v000.zip sha256=4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161 (repo a12f0b7; static+codex static OK)
@@ -64,6 +64,8 @@ History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Build
   Push the -gate branch at cap 4.0, budget 6000 only after BOTH review-kernel-probes-light and review-kernel-probes-gate-light are clean
   (eval/plans/006.md "Dec 036 correction"). Summary cmd: timing_summary.py --gate-mode stock-path --gate-vllm-seconds 600.
   Kaggle slug/push command: same as v5 (ops/budget/kaggle.md); log quota.
+  DEC 037: old review (63127c8) = P1-P3 + t4 bundle review; its minus-image-only BLOCKING findings are MOOT (say so in push note).
+  Gate review prompt already scoped to 63127c8..92a74c7 + item-3 check (verified). Queue order fix5c/v002 -> probes -> gate/fix6e holds dec 033 item 1.
 - Gates for that run: (a) 8/8 no harness error; (b) max(Phase-1 - emulation) <= 277 s; (d) vLLM <= 600 s; (e) >= 1 non-empty diff.
 - G1 = P2 no docker binary + no docker.sock AND P1 stock setup <= 30 s on all 8 AND gates pass -> request SUBMIT 31b-v002 (cap <= 3.5,
   byte-identical to v001-t4 except cap + comment, no re-time; dec 036 item 2) in report 010, citing h1_composite.
