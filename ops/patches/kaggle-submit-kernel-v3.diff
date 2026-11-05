@@ -1,0 +1,112 @@
+--- a/bin/kaggle-submit
++++ b/bin/kaggle-submit
+@@ -1,31 +1,83 @@
+ #!/usr/bin/env bash
+-# Guarded Kaggle submission. Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>"
++# Guarded Kaggle submission. Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>" [kernel_version]
+ # Refuses unless: a Director decision contains "SUBMIT: AUTHORIZE sha256=<this zip's sha256> track=<track>",
+ # that authorization is unused, and no submission was made yet today (UTC).
++# Kernel mode (SUBMIT_MODE=kernel, dec 041/042): the 4th arg is required; the OUTPUT submission.zip of that exact kernel
++# version is downloaded and must be byte-identical (sha256) to the authorized zip, and pass the same root/size checks.
++# Safety (review ops/codex/review-20261105T231632.md): one exclusive lock from ledger checks through recording; success is
++# recorded only on a positive "Submission ref: N"; an ambiguous outcome leaves ops/submissions.pending, which blocks
++# every later call until a human reconciles it against `kaggle competitions submissions`. Only a server 4xx
++# (requests 'NNN Client Error', not 408) counts as a definite rejection (review ops/codex/review-20261105T231919.md).
+ set -euo pipefail
+ cd "$(dirname "$0")/.."
+ source ./config.env
+ zip=$1; track=$2; msg=${3:-"$track $(basename "$zip")"}
+ [ -f "$zip" ] || { echo "no such zip: $zip"; exit 1; }
+ [[ "$track" =~ ^(31b|e4b)$ ]] || { echo "track must be 31b or e4b"; exit 1; }
++exec 9>>ops/.submit.lock
++flock -n 9 || { echo "REFUSED: another bin/kaggle-submit is running"; exit 3; }
++[ ! -e ops/submissions.pending ] || { echo "REFUSED: ops/submissions.pending exists (ambiguous earlier attempt); reconcile with 'kaggle competitions submissions' first"; exit 3; }
+ sha=$(sha256sum "$zip" | cut -d' ' -f1)
+ auth=$(grep -l "^SUBMIT: AUTHORIZE sha256=$sha track=$track" ops/decisions/*.md 2>/dev/null | tail -1 || true)
+ [ -n "$auth" ] || { echo "REFUSED: no Director authorization for sha256=$sha track=$track"; exit 3; }
+ touch ops/submissions.jsonl
+ grep -q "\"sha256\": \"$sha\"" ops/submissions.jsonl && { echo "REFUSED: this zip was already submitted"; exit 3; }
++day_used() { grep -q "\"day\": \"$1\"\|\"day_checked\": \"$1\"" ops/submissions.jsonl; }
+ today=$(date -u +%F)
+-grep -q "\"day\": \"$today\"" ops/submissions.jsonl && { echo "REFUSED: already submitted today (UTC $today)"; exit 3; }
+-unzip -l "$zip" | awk '{print $4}' | grep -qx 'agent.yaml' || { echo "REFUSED: agent.yaml not at zip root"; exit 3; }
+-size=$(stat -c %s "$zip"); [ "$size" -lt 3221225472 ] || { echo "REFUSED: zip >= 3 GiB"; exit 3; }
+-echo "Submitting $zip ($track, sha256=$sha) authorized by $auth"
++day_used "$today" && { echo "REFUSED: already submitted today (UTC $today)"; exit 3; }
++check_zip() {  # <path> <label>
++  python3 -I -c 'import stat,sys,zipfile
++z=zipfile.ZipFile(sys.argv[1]); i=[m for m in z.infolist() if m.filename == "agent.yaml"]
++ok=len(i) == 1 and not i[0].is_dir() and not stat.S_ISLNK(i[0].external_attr >> 16)
++sys.exit(0 if ok else 1)' "$1" || { echo "REFUSED: $2: no single regular root member named exactly agent.yaml"; exit 3; }
++  local size; size=$(stat -c %s "$1"); [ "$size" -lt 3221225472 ] || { echo "REFUSED: $2: zip >= 3 GiB"; exit 3; }
++}
++check_zip "$zip" "local zip"
++kernel=""; kver=""
+ if [ "$SUBMIT_MODE" = "kernel" ]; then
+-  [ -n "$SUBMIT_KERNEL" ] || { echo "SUBMIT_KERNEL not set"; exit 1; }
+-  # Builder: verify exact flags with `kaggle competitions submit -h` in Phase 0 before first use.
+-  kaggle competitions submit "$COMP" -k "$SUBMIT_KERNEL" -f submission.zip -m "$msg"
++  [[ "$SUBMIT_KERNEL" =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]] || { echo "SUBMIT_KERNEL must be owner/slug"; exit 1; }
++  kernel=$SUBMIT_KERNEL; kver=${4:-}
++  [[ "$kver" =~ ^[1-9][0-9]*$ ]] || { echo "REFUSED: kernel mode needs the kernel version (positive integer) as 4th arg"; exit 3; }
++  # 'kaggle kernels output owner/slug/N' fetches the output of version N (CLI sets version_label=vN,
++  # kaggle_api_extended.py parse_kernel_string/_kernel_version_label), so the hash is tied to the version submitted.
++  out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
++  kaggle kernels output "$kernel/$kver" -p "$out" -q >/dev/null
++  [ -f "$out/submission.zip" ] && [ ! -L "$out/submission.zip" ] || { echo "REFUSED: version $kver has no regular submission.zip output"; exit 3; }
++  osha=$(sha256sum "$out/submission.zip" | cut -d' ' -f1)
++  [ "$osha" = "$sha" ] || { echo "REFUSED: kernel v$kver output sha256=$osha != authorized $sha"; exit 3; }
++  check_zip "$out/submission.zip" "kernel output"
++  echo "Kernel $kernel v$kver output verified: sha256=$osha"
++fi
++# Re-check the UTC day right before submitting (the download can cross midnight).
++now=$(date -u +%F)
++day_used "$now" && { echo "REFUSED: already submitted today (UTC $now)"; exit 3; }
++record() {  # <file> <status> <ref>; JSON-serialized
++  python3 -c 'import json,sys; a=sys.argv[1:]; d=dict(day=a[0], day_checked=a[1], t=a[2], status=a[3], ref=a[4] or None, track=a[5], sha256=a[6], zip=a[7], auth=a[8], msg=a[9]);
++if a[10]: d.update(kernel=a[10], kernel_version=int(a[11]))
++print(json.dumps(d))' "$(date -u +%F)" "$now" "$(date -u +%FT%TZ)" "$2" "$3" "$track" "$sha" "$zip" "$auth" "$msg" "$kernel" "$kver" >> "$1"
++}
++record ops/submissions.pending pending ""
++echo "Submitting $zip ($track, sha256=$sha) authorized by $auth"
++set +e
++if [ -n "$kernel" ]; then
++  resp=$(kaggle competitions submit "$COMP" -k "$kernel" -v "$kver" -f submission.zip -m "$msg" 2>&1); rc=$?
++else
++  resp=$(kaggle competitions submit "$COMP" -f "$zip" -m "$msg" 2>&1); rc=$?
++fi
++set -e
++printf '%s\n' "$resp"
++ref=$(printf '%s\n' "$resp" | sed -n 's/^Submission ref: \([0-9][0-9]*\)$/\1/p' | tail -1)
++if [ -n "$ref" ]; then
++  record ops/submissions.jsonl submitted "$ref"   # day = acceptance day; day_checked = pre-submit day (both block)
++  rm -f ops/submissions.pending
++  bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle (ref $ref)." || true
++  echo "logged to ops/submissions.jsonl (ref $ref)"
++elif [ $rc -ne 0 ] && printf '%s\n' "$resp" | grep -qE '(^|[^0-9])4(0[0-7]|09|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9]) Client Error' \
++     && ! printf '%s' "$resp" | grep -q 'Submission ref'; then
++  # Clear pending ONLY on positive rejection evidence: a requests HTTPError 4xx (not 408 timeout) from the server.
++  # Everything else (killed CLI, empty output, decode errors, 5xx, network) stays AMBIGUOUS.
++  rm -f ops/submissions.pending
++  echo "Submit REJECTED (rc=$rc); authorization not consumed"; exit 4
+ else
+-  kaggle competitions submit "$COMP" -f "$zip" -m "$msg"
++  echo "AMBIGUOUS submit outcome (rc=$rc, no 'Submission ref'); ops/submissions.pending kept; reconcile manually"; exit 5
+ fi
+-printf '{"day": "%s", "t": "%s", "track": "%s", "sha256": "%s", "zip": "%s", "auth": "%s", "msg": "%s"}\n' \
+-  "$today" "$(date -u +%FT%TZ)" "$track" "$sha" "$zip" "$auth" "$msg" >> ops/submissions.jsonl
+-bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle. Score in ~12-15h."
+-echo "logged to ops/submissions.jsonl"
+--- a/config.env
++++ b/config.env
+@@ -14,8 +14,8 @@
+ HUMAN_HOLD_SEC=120            # don't inject mail within this many seconds of Aniket typing
+ GPU_HARD_CAP_USD=150
+ DIGEST_HOUR_UTC=14            # 8am Chicago (CST)
+-SUBMIT_MODE=file              # file | kernel  (Builder verifies in Phase 0)
+-SUBMIT_KERNEL=
++SUBMIT_MODE=kernel            # file | kernel  (verified 2026-11-05: file upload -> 400; code competition, dec 041)
++SUBMIT_KERNEL=aniket0202/gemma-submit-e4b
+ FINAL_DEADLINE=2026-12-02T23:59:00Z
+ CLAUDE_CONFIG_DIR_GEMMA="$HOME/.claude-gemma"   # separate Claude login (university account); Etho's login untouched
+ CODEX_MODEL=              # empty = Codex default; per-call override: CODEX_MODEL=... bin/codex-*
