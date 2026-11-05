@@ -39,7 +39,11 @@ def setup_evidence(call):
 
 
 def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
-              gate_vllm_seconds=600, gate_min_nonempty=1):
+              gate_vllm_seconds=600, gate_min_nonempty=1, gate_mode='total'):
+    """gate_mode 'total' = dec 028 item 4 (a)-(e) on TOTAL Phase-1. gate_mode 'minus-image' = dec 034 item 2:
+    (b) max(Phase-1 minus image emulation) <= cap x 60 + 37 s (cap from the header), (c) not gated."""
+    if gate_mode not in ('total', 'minus-image'):
+        raise ValueError('gate_mode must be total or minus-image')
     records = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
     if not records or records[0].get('_schema') != 'kaggle_timing_v1':
         raise ValueError('Expected kaggle_timing_v1 header')
@@ -108,11 +112,37 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
     gate = dict(n_expected=n_expected,
         a_all_tasks_complete_no_harness_error=check(n_expected > 0 and complete == n_expected and not missing
                                                     and not stopped and done is not None, complete, n_expected),
-        b_max_phase1=check(all_phase1 and phase1['max'] <= gate_max_phase1, phase1['max'], gate_max_phase1),
-        c_mean_phase1=check(all_phase1 and phase1['mean'] <= gate_mean_phase1, phase1['mean'], gate_mean_phase1),
+        d_vllm_seconds=None, e_nonempty_source_diff=None)
+    if gate_mode == 'total':
+        gate.update(b_max_phase1=check(all_phase1 and phase1['max'] <= gate_max_phase1, phase1['max'], gate_max_phase1),
+                    c_mean_phase1=check(all_phase1 and phase1['mean'] <= gate_mean_phase1, phase1['mean'], gate_mean_phase1))
+    else:
+        minus = [t['phase1_minus_image_seconds'] for t in tasks]
+        bound = cap * 60 + 37 if cap is not None else None
+        ok = all_phase1 and bound is not None and all(v is not None for v in minus)
+        worst = max(minus) if ok and minus else None
+        gate.update(b_max_phase1_minus_image=check(ok and worst <= bound, worst, bound),
+                    c_mean_phase1='NOT_GATED (dec 034 item 2)')
+    gate.update(
         d_vllm_seconds=check(startup is not None and startup <= gate_vllm_seconds, startup, gate_vllm_seconds),
         e_nonempty_source_diff=check(nonempty >= gate_min_nonempty, nonempty, gate_min_nonempty))
+    gate['mode'] = gate_mode
     gate['status'] = 'PASS' if all(v['status'] == 'PASS' for v in gate.values() if isinstance(v, dict)) else 'FAIL'
+    stock = [dict(instance_id=r['instance_id'], **(r.get('stock_setup') or {})) for r in rows if 'stock_setup' in r]
+    stock_totals = [x['total_s'] for x in stock if x.get('total_s') is not None and not x.get('error')]
+    def llm_stats(r):
+        calls = r.get('llm_calls') or []
+        comp = [c['completion_tokens'] for c in calls if isinstance(c.get('completion_tokens'), (int, float))]
+        gaps = [c['gap_s'] for c in calls if isinstance(c.get('gap_s'), (int, float)) and c['gap_s'] > 0]
+        agent = r.get('wall_seconds', {}).get('agent')
+        return dict(instance_id=r['instance_id'], n_calls=len(calls), completion_tokens=sum(comp) if comp else None,
+                    calls_per_minute=len(calls) / agent * 60 if agent else None, mean_gap_s=sum(gaps) / len(gaps) if gaps else None,
+                    gap_tokens_per_second=sum(comp) / sum(gaps) if comp and gaps else None)
+    probes = dict(platform_probe=header.get('platform_probe'),
+                  stock_setup=dict(tasks=stock, n_ok=len(stock_totals), max_s=max(stock_totals) if stock_totals else None,
+                                   all_le_30s=bool(stock) and len(stock_totals) == len(stock) and max(stock_totals) <= 30),
+                  llm=[llm_stats(r) for r in rows if 'llm_calls' in r],
+                  mean_agent_seconds=distribution(numbers([r['wall_seconds']['agent'] for r in rows if r['wall_seconds'].get('agent') is not None]))['mean'])
     return dict(_schema='kaggle_timing_summary_v1',
                 fields=dict(n='Number of task rows (gate expected n)',
                     n_complete_no_error='Rows with a sandbox-wrapper phase1 measurement and no harness error (setup_failed is diagnostic only)',
@@ -134,7 +164,9 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                     timeout_fired_count='Tasks whose observed agent timeout fired',
                     fallback_patch_count='Tasks using a non-empty fallback patch',
                     vllm_startup_seconds='Measured vLLM startup seconds',
-                    gate='a-e checks: PASS/FAIL, observed value, CLI threshold; overall status requires all checks',
+                    gate='a-e checks: PASS/FAIL, observed value, CLI threshold; overall status requires all checks; mode total (dec 028) or minus-image (dec 034 item 2)',
+                    probes='Plan 006 addendum P1-P3: platform_probe (header), stock_setup per task (+max_s, all_le_30s = G1 P1 leg), llm per-task call stats, mean_agent_seconds',
+                    decision_note='decision is the legacy total-wall/cap projection, NOT the gate (dec 032 item 5)',
                     total_seconds='Total task wall seconds distribution',
                     test_run_share='Agent test time share distribution', test_runs_per_task='Test request count distribution',
                     empty_patch_count='Blank patches', test_files_edited_count='Tasks editing protected/test files',
@@ -144,7 +176,8 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                     cap_worst_case_minutes='Configured cap times 125 plus 30 minutes', cap_minutes='Configured agent cap',
                     artifact_errors='Raw artifact write failures (diagnostic; rows unaffected)',
                     missing_task_ids='Header task IDs absent from task rows', done_present='Journal contains _done', stopped='Journal stop reasons'),
-                tasks=tasks, gate=gate, n_complete_no_error=complete,
+                tasks=tasks, gate=gate, probes=probes, n_complete_no_error=complete,
+                decision_note='decision is the legacy total-wall/cap projection, NOT the gate (dec 032 item 5)',
                 provenance={k: header.get(k) for k in ('git_sha', 'bundle_sha256', 'agent_yaml_sha256', 'gpu_names',
                     'gpu_count', 'caps', 'created_utc', 'concurrency', 'mcp_import_ok')},
                 agent_outcome_counts=dict(Counter(str(t['agent_outcome']) for t in tasks)),
@@ -182,11 +215,12 @@ def main():
     parser.add_argument('--gate-mean-phase1', type=float, default=270)
     parser.add_argument('--gate-vllm-seconds', type=float, default=600)
     parser.add_argument('--gate-min-nonempty', type=int, default=1)
+    parser.add_argument('--gate-mode', choices=('total', 'minus-image'), default='total')
     args = parser.parse_args()
     summary = summarize(args.timing_jsonl, gate_max_phase1=args.gate_max_phase1,
                         gate_mean_phase1=args.gate_mean_phase1,
                         gate_vllm_seconds=args.gate_vllm_seconds,
-                        gate_min_nonempty=args.gate_min_nonempty)
+                        gate_min_nonempty=args.gate_min_nonempty, gate_mode=args.gate_mode)
     args.output.write_text(json.dumps(summary, indent=2, allow_nan=False) + '\n')
     print(json.dumps(summary, indent=2, allow_nan=False))
 

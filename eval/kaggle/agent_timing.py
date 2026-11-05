@@ -18,9 +18,11 @@ from pathlib import Path
 import re
 import shutil
 import shlex
+import socket
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 
 BUNDLE_B64 = ""  # embedded by timing_push.sh
@@ -33,6 +35,7 @@ SKIP_VERIFICATION = True
 SETUP_FIX = 1
 GIT_SHA = ""
 KERNEL_BUDGET_SECONDS = 3 * 3600
+STOCK_PROBE = True  # P1 (plan 006 addendum): time the stock subprocess setup per task
 DATA = Path('/kaggle/input/competitions/gemma-4-developer-agent')
 WORK = Path('/kaggle/working')
 BUNDLE = WORK / 'bundle'
@@ -843,6 +846,91 @@ def harness_error(result, agent_error):
     return 'Harness task failure' if any(agent_outcome(m) is None for m in messages) else None
 
 
+def platform_probe(host='pypi.org', port=443, timeout=10.0):
+    """P2 (plan 006 addendum): docker presence, DNS, and one TCP connect. Sends no payload."""
+    out = dict(docker_which=shutil.which('docker'), docker_sock=os.path.exists('/var/run/docker.sock'),
+               host=host, port=port, dns=None, dns_seconds=None, tcp=None, tcp_seconds=None, tcp_errno=None)
+    box = {}
+    def resolve():
+        try:
+            box['addrs'] = sorted({ai[4][0] for ai in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)})
+        except Exception as exc:
+            box['error'] = type(exc).__name__
+    start = time.perf_counter()
+    worker = threading.Thread(target=resolve, daemon=True)
+    worker.start(); worker.join(timeout)
+    out['dns_seconds'] = round(time.perf_counter() - start, 3)
+    if worker.is_alive():
+        out['dns'], out['tcp'] = 'timeout', 'skipped'
+        return out
+    if 'error' in box or not box.get('addrs'):
+        out['dns'], out['tcp'] = 'failed:' + box.get('error', 'empty'), 'skipped'
+        return out
+    out['dns'] = 'resolved'
+    out['dns_addr_count'] = len(box['addrs'])
+    start = time.perf_counter()
+    try:
+        sock = socket.create_connection((box['addrs'][0], port), timeout=timeout)
+        sock.close()
+        out['tcp'] = 'connected'
+    except socket.timeout:
+        out['tcp'] = 'timeout'  # blackhole: SYN dropped
+    except ConnectionRefusedError:
+        out['tcp'] = 'refused'
+    except OSError as exc:
+        out['tcp'], out['tcp_errno'] = 'unreachable', exc.errno
+    out['tcp_seconds'] = round(time.perf_counter() - start, 3)
+    return out
+
+def stock_setup_probe(config, iid, repo):
+    """P1 (plan 006 addendum): time swegemma's STOCK subprocess setup sequence on this task's snapshot.
+    Mirrors eval/tools/stock_subprocess_setup_timing.py (agent_runner.py ~l.553-584); the stock
+    install_test_dependencies is used even though patch_subprocess_deps rebinds it. Never raises."""
+    steps, error, mgr, sid = {}, None, None, None
+    t0 = time.perf_counter()
+    try:
+        import swegemma.harness.container_setup as cs
+        from swegemma.sandbox.subprocess import SubprocessManager
+        install_deps = getattr(cs.install_test_dependencies, '_timing_original', cs.install_test_dependencies)
+        mgr = SubprocessManager(timeout_seconds=120)
+        s = time.perf_counter(); sid = mgr.start(); steps['start_venv'] = round(time.perf_counter() - s, 3)
+        for name, fn, args, kwargs in (
+                ('setup_container_wheels', cs.setup_container_wheels, (mgr, sid, config), {}),
+                ('extract_snapshot', cs.extract_snapshot, (mgr, sid, Path(config.snapshots_dir) / f'{iid}.tgz'), {}),
+                ('setup_git_exclude', cs.setup_git_exclude, (mgr, sid), {}),
+                ('install_editable_package', cs.install_editable_package, (mgr, sid), {}),
+                ('install_test_dependencies', install_deps, (mgr, sid, repo), dict(config=config)),
+                ('setup_workspace_test_config', cs.setup_workspace_test_config, (mgr, sid), dict(repo=repo)),
+                ('setup_baseline_commit', cs.setup_baseline_commit, (mgr, sid, 'baseline'), {})):
+            s = time.perf_counter()
+            try:
+                fn(*args, **kwargs)
+            finally:
+                steps[name] = round(time.perf_counter() - s, 3)
+    except Exception as exc:
+        error = type(exc).__name__
+    finally:
+        try:
+            if mgr is not None:
+                mgr.cleanup_all()
+        except Exception as exc:
+            error = error or 'cleanup ' + type(exc).__name__
+    return dict(total_s=round(time.perf_counter() - t0, 3), steps_s=steps, error=error)
+
+def llm_calls(trace, limit=200):
+    """P3 (plan 006 addendum): one row per trace entry carrying usage (ADK attaches usage once per
+    model event), with the gap since the previous entry of any type (approx. model latency)."""
+    rows, prev = [], None
+    entries = trace.entries if trace else []
+    first = entries[0].timestamp if entries else None
+    for e in entries:
+        if e.usage:
+            rows.append(dict(t=round(e.timestamp - first, 3), gap_s=round(e.timestamp - prev, 3) if prev is not None else None,
+                             event_type=e.event_type,
+                             completion_tokens=e.usage.get('completion_tokens'), prompt_tokens=e.usage.get('prompt_tokens')))
+        prev = e.timestamp
+    return rows[:limit]
+
 def image_emulation_seconds(setup_calls):
     """Seconds spent emulating Dockerfile.public image layers the scorer image already has."""
     return sum(c.get('duration_s') or 0 for c in setup_calls if c.get('step') in IMAGE_EMULATION_STEPS)
@@ -917,6 +1005,7 @@ async def evaluate(config, journal, started, caps, totals):
                 append(journal, {'_stopped': 'insufficient remaining budget for next task'})
                 break
             task = dataclasses.replace(inventory[iid], patch='')
+            stock = stock_setup_probe(config, iid, task.repo) if STOCK_PROBE else None
             times = dict(instance_id=task.instance_id, verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
             state.set(times)
             evaluator, result, error = TimingEvaluator(config), None, None
@@ -961,6 +1050,7 @@ async def evaluate(config, journal, started, caps, totals):
                 llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
                 tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
                 completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
+                stock_setup=stock, llm_calls=llm_calls(evaluator.trace),
                 **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
                 timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
             except Exception as exc:
@@ -972,6 +1062,7 @@ async def evaluate(config, journal, started, caps, totals):
                 setup_output_artifact=times.get('setup_output_artifact'),
                 missing_tool_deps=times.get('missing_tool_deps', []),
                 setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                stock_setup=stock,
                 editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
             # Raw artifacts are diagnostics written after the row; never lose the remaining tasks over them.
             try:
@@ -1132,7 +1223,7 @@ def main():
         header = dict(_schema='kaggle_timing_v1', git_sha=GIT_SHA, task_ids=TASK_IDS, concurrency=1,
                       created_utc=datetime.now(timezone.utc).isoformat(), caps=None,
                       bundle_sha256=None, agent_yaml_sha256=None, gpu_names=[], gpu_count=0,
-                      mcp_import_ok=None, vllm_startup_seconds=None,
+                      mcp_import_ok=None, vllm_startup_seconds=None, platform_probe=None,
                       fields=dict(instance_id='Task ID', repo='Repository', wall_seconds='Agent (including setup), verification, total wall seconds',
                           vllm_startup_seconds='Header: perf_counter seconds spent starting vLLM; null on startup failure',
                           verification_skipped='Container B and verification tests skipped',
@@ -1155,11 +1246,16 @@ def main():
                           tool_seconds='Per-tool n,total,max call->response seconds, FIFO per name', test_run='Test requests n, matched total_seconds, share_of_agent_seconds',
                           prompt_tokens='Trace usage or null', completion_tokens='Trace usage or null', completion_tokens_per_second='Completion usage / agent seconds or null',
                           patch_bytes='UTF-8 diff bytes before stripping', patch_files='Diff paths', test_files_edited='Protected/test target paths',
-                          stray_files='New files outside package Python source', empty_patch='Blank diff', timed_out='Timeout error or exit 124'))
+                          stray_files='New files outside package Python source', empty_patch='Blank diff', timed_out='Timeout error or exit 124',
+                          platform_probe='Header (P2): docker binary/socket, DNS + one 10 s TCP connect to pypi.org:443, no payload',
+                          stock_setup='P1: stock subprocess setup sequence on the same snapshot, run before the task (outside its Phase-1): total_s, steps_s, error',
+                          llm_calls='P3: per usage-bearing trace entry: t since first entry, gap_s since previous entry, tokens'))
         # Write the header even if installation or extraction fails; enrich before startup.
         try:
             header['bundle_sha256'], header['agent_yaml_sha256'] = extract_bundle(BUNDLE_B64, BUNDLE)
             print('bundle_sha256=', header['bundle_sha256'], 'agent_yaml_sha256=', header['agent_yaml_sha256'], flush=True)
+            header['platform_probe'] = platform_probe()  # P2: <= ~20 s, no payload
+            print('platform_probe=', header['platform_probe'], flush=True)
             gpu_preflight()  # cheap fail-fast before the multi-minute install (torch check below stays authoritative)
             install()
             check_hook_targets()  # fail before vLLM startup if the wheelhouse swegemma lacks the hook targets
