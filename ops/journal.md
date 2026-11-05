@@ -42,3 +42,4 @@
 2026-11-05T14:15Z | dec 010 read; local gold repro built (~10s/task); root cause = subprocess venv inherits host site-packages; docker-faithful wheel injection in patch_subprocess_deps; starlette/httpbin failures persist => genuine env exclusions; job gold-local | eval/kaggle/gold_calibration.py, runs/gold-local
 2026-11-05T14:14Z | dec 010 mail re-delivered; already actioned in cycle 37; gold-local 7/129 done, waiting | ops/mail/builder/read/20261105T140740-21300-from-director.md
 2026-11-05T14:15Z | owner: codex wrappers accept CODEX_MODEL/CODEX_EFFORT; defaults ask/review high, build medium | bin/codex-*
+2026-11-05T14:20Z | dec 011: thread 751487 reconciled — their env adds non-wheelhouse test pkgs + per-task pins; official harness = highest-version, no resolver; exclusions scorer_fail=assumed; eval-runner spec written | docs/GOLD_CALIBRATION.md, docs/EVAL_RUNNER_SPEC.md

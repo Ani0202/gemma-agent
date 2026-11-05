@@ -94,3 +94,19 @@ python3 -m py_compile eval/kaggle/gold_calibration.py
 python3 -m unittest discover -s eval/tests -p test_gold_calibration.py -v
 bash -n eval/kaggle/push.sh
 ```
+
+## Reconciliation with public thread 751487 (dec 011, 2026-11-05)
+Thread 751487 (Zbigniew Kirchner, Apache-2.0 notebooks) reports gold 127/129 in a "scorer-like" env. Its method
+section says: "a clean venv, pytest, the competition wheels, **and the missing test packages**" (author's own
+wheels dataset) and "a few old public tasks need period-correct versions (e.g. Pygments for 7 rich tasks)".
+The author also states they do not know whether submissions use Docker or subprocess.
+So the 127 env **adds packages absent from the official wheelhouse and pins older per-task versions**.
+The official harness (swegemma 0.2.11, source-read): `_deduplicate_wheels` (packaging.version max) and
+`sandbox/setup.py deduplicate_wheels` (semver max) both select the HIGHEST version per package; no resolver,
+no per-task requirements pinning (fast-path only writes workspace_paths.pth + pytest config). Official
+wheelhouse facts: 56 starlette versions, max 1.6.0 (removes Router on_startup); no pytest-httpbin/httpbin,
+inline_snapshot or dirty_equals wheels; Pygments max 2.21.0.
+Conclusion: explanation (b) (different wheel set) — not an emulation bug in our env. Exclusions for these
+causes are tagged `scorer_fail=assumed` (code-verified against published harness, not run-verified in the
+real scorer; the hidden scorer image could differ). Known residual emulation difference: docker path runs
+`pip install --no-deps -e /workspace`; subprocess path relies on workspace_paths.pth (gold passers unaffected).
