@@ -209,3 +209,4 @@
 2026-11-05T23:47:38Z | fix7 delta review CLEAN; stack merged to main 2db5f51 (ATTRIBUTION conflict kept both); main eval/tests 712p/4s; decision_note added to results/kaggle_timing_e4b_v001.json | ops/codex/review-20261105T233951.md results/kaggle_timing_e4b_v001.json
 2026-11-05T23:47:38Z | PLAN 006 PUSHED: aniket0202/gemma-31b-timing v1 (31b-v001-t4 cap 4.0, budget 6000); waiter timing-31b-wait-light | ops/budget/kaggle.md
 2026-11-05T23:47:38Z | guard v6 review CLEAN -> bin/send aniket "apply ops/patches/kaggle-submit-kernel-v6.diff"; Director mailed | ops/codex/review-20261105T234411.md
+2026-11-05T23:49:51Z | dec 049/050: guard convergence scope, pending reconcile rule, Nov 6 18:00Z status line; plan 006 budget accepted; upload-mode callers none | ops/decisions/049-20261105T234424-2660-from-builder.md ops/decisions/050-20261105T234725-6433-from-builder.md

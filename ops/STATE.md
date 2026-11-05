@@ -71,7 +71,11 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 1. Guard v6 REVIEW CLEAN (ops/codex/review-20261105T234411.md); Aniket told to apply ONLY ops/patches/kaggle-submit-kernel-v6.diff (23:47Z).
    When `git diff --stat bin/kaggle-submit config.env` shows it: commit (dec 041-048 + review), dry checks (unauthorized sha -> 3; wrong
    kernel version -> REFUSED) in the commit msg, then bin/kaggle-submit dist/e4b-v002.zip e4b '<msg>' 1 -> mail Director the ref.
-   Guard backlog ops/backlog-guard.md (ordering, repeat path, duplicate keys) only in a needed change. DEC 048: page-size accepted.
+   Commit msg must also list upload-mode callers: NONE (grep 23:50Z: only bin/session disallow rules, eval/tests harness) (dec 049 item 4).
+   DEC 049: failed submit w/o ref -> run `kaggle competitions submissions`, report row count/status for our sha + UTC time; remove pending
+   ONLY on a decision "clear pending marker for sha=<...>". BLOCKING scope from now = no-auth submit / wrong sha / 2nd same day / retry after
+   ambiguous; rest -> ops/backlog-guard.md. If not applied by Nov 6 18:00Z: status line to Director, nothing else (item 5).
+   DEC 050: on waiter: `kaggle quota` -> ops/budget/kaggle.md; no other heavy jobs until v002 submit + plan 006 done (plan 005/007 prep OK).
 2. Plan 006 PUSHED (stack merged 2db5f51, tests 712p). On completion: timing_summary --gate-mode stock-path --gate-vllm-seconds 600 ->
    schema-headed results file -> report 010 (G1 legs; lead with h1_composite; dec 047). Gate (b) formula kept (dec 047).
 3. After report 010: plan 005 (dec 022 item 4) + plan 007 (dec 039) = first quality levers; ops/patches cleanup (dec 045 item 4).
