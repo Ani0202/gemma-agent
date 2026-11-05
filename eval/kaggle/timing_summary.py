@@ -109,6 +109,12 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                 and setup_py is not None else None),
             stock_setup_seconds=stock_s,
             h1_composite_seconds=sum(parts) if all(type(v) in (int, float) for v in parts) else None,
+            # fix5c review BLOCKING 1: a post-timeout finalization command (fallback git diff) that raised or
+            # returned rc != 0 is a harness error even when result.error/agent_error look normal. Fail closed:
+            # rc None without a recorded exception (unknown result) counts as failed too.
+            finalization_failed=[{key: call.get(key) for key in ('cmd', 'rc', 'exception')}
+                                 for call in row.get('finalization_exec') or []
+                                 if call.get('exception') or call.get('rc') != 0],
             total=row['wall_seconds']['total'],
             nonempty_source_diff=not row.get('empty_patch', True) and bool(source_files)))
     def measured(key):
@@ -120,7 +126,7 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
     # from the run_agent_sandbox fallback means the sandbox wrappers never fired: not complete.
     def wrapped(r):
         return r['phase1_wall_seconds'] is not None and r.get('phase1_source') != 'run_agent_sandbox'
-    complete = sum(r['error'] is None and wrapped(r) for r in tasks)
+    complete = sum(r['error'] is None and not r['finalization_failed'] and wrapped(r) for r in tasks)
     n_expected = len(header['task_ids'])
     missing = [iid for iid in header['task_ids'] if iid not in ids]
     nonempty = sum(t['nonempty_source_diff'] for t in tasks)
@@ -168,7 +174,7 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                   mean_agent_seconds=distribution(numbers([r['wall_seconds']['agent'] for r in rows if r['wall_seconds'].get('agent') is not None]))['mean'])
     return dict(_schema='kaggle_timing_summary_v1',
                 fields=dict(n='Number of task rows (gate expected n)',
-                    n_complete_no_error='Rows with a sandbox-wrapper phase1 measurement and no harness error (setup_failed is diagnostic only)',
+                    n_complete_no_error='Rows with a sandbox-wrapper phase1 measurement, no harness error and no failed finalization command (setup_failed is diagnostic only)',
                     provenance='Kernel header: git_sha, bundle_sha256, agent_yaml_sha256, gpu_names, gpu_count, caps, created_utc, concurrency, mcp_import_ok',
                     agent_outcome_counts='Rows per agent_outcome (timeout/turns/tool_calls/no_submit/null)',
                     setup_failed_count='Rows with a non-fatal setup rc!=0 (diagnostic, not gated)',
@@ -180,7 +186,7 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                     h1_composite_seconds='Distribution of agent_clock + finalization + P1 stock_setup total_s (not gated)',
                     fallback_invocations='Index-enabled editable fallback invocations across setup calls',
                     retrying_lines_total='pip Retrying lines across setup calls, nested output counted once',
-                    tasks='Per-task instance_id, repo, setup_calls [{step,duration_s,rc,retrying_lines}], sandbox_setup_seconds, agent_clock_seconds, agent_timeout_fired, finalization_seconds, teardown_seconds, phase1_wall_seconds, setup_py_emulation_seconds, stockpath_phase1_seconds, stock_setup_seconds, h1_composite_seconds, total, error, nonempty_source_diff, fallback_patch_used; unavailable measurements are null',
+                    tasks='Per-task instance_id, repo, setup_calls [{step,duration_s,rc,retrying_lines}], sandbox_setup_seconds, agent_clock_seconds, agent_timeout_fired, finalization_seconds, teardown_seconds, phase1_wall_seconds, setup_py_emulation_seconds, stockpath_phase1_seconds, stock_setup_seconds, h1_composite_seconds, total, error, finalization_failed [{cmd,rc,exception}] (post-timeout commands with rc!=0, exception or unknown rc; any entry fails gate a), nonempty_source_diff, fallback_patch_used; unavailable measurements are null',
                     nonempty_source_diff='Nonblank classified patch with a path outside protected/test and stray files',
                     phase1_seconds='Phase-1 wall seconds: mean/p50/p90/max of available measurements',
                     setup_seconds='Setup S seconds: mean/p50/p90/max of available measurements',

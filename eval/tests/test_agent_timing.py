@@ -1020,3 +1020,25 @@ def test_runtime_copyable_matches_copy_runtime_package(tmp_path):
     found = timing.runtime_copyable('pytest')
     result = timing.copy_runtime_package('pytest', tmp_path / 'dest')
     assert (found is None) == (result == 'missing')
+
+
+@pytest.mark.parametrize('calls,ok', [
+    ([dict(cmd='git diff', duration_s=.1, rc=0)] * 2, True),
+    ([], True),                                                   # no timeout: no finalization commands
+    ([dict(cmd='git diff', duration_s=60, rc=124)], False),       # fix5c review BLOCKING 1 reproduction
+    ([dict(cmd='git diff', duration_s=.1, rc=0), dict(cmd='git add', duration_s=None, rc=None, exception='TimeoutError')], False),
+    ([dict(cmd='git diff', duration_s=.1, rc=None)], False),      # unknown result fails closed
+])
+def test_gate_a_rejects_failed_finalization_exec(tmp_path, calls, ok):
+    path = tmp_path / 'j'
+    _gate_journal(path)
+    records = [json.loads(x) for x in path.read_text().splitlines()]
+    for r in records:
+        if 'instance_id' in r and '_schema' not in r:
+            r['finalization_exec'] = calls
+    path.write_text('\n'.join(json.dumps(r) for r in records))
+    result = summary.summarize(path)
+    want = 'PASS' if ok else 'FAIL'
+    assert result['gate']['a_all_tasks_complete_no_harness_error']['status'] == want
+    assert result['gate']['status'] == want
+    assert all(bool(t['finalization_failed']) is (not ok) for t in result['tasks'])
