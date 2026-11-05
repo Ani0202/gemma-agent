@@ -34,3 +34,4 @@
 2026-11-05T00:50Z | smoke6: only snapshot_path missing from kwargs; snapshot-line diagnostics, smoke v9, job gold-smoke-wait7 | runs/gold-smoke6
 2026-11-05T00:53Z | smoke7: still missing snapshot_path; adapter uses resolve_task_snapshot_paths, smoke v10, job gold-smoke-wait8 | runs/gold-smoke7
 2026-11-05T00:58Z | smoke8 adapter works (1 pass/3 unresolved); pushed full gold kernel v4, job gold-full-wait | runs/gold-smoke8, ops/jobs/gold-full-wait
+2026-11-05T02:08:40Z | gold-full done: 52/129 clean, splits frozen (dev36/hold16) | eval/splits/MANIFEST.json, results/gold_calibration_per_task.jsonl
