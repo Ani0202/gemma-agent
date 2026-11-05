@@ -48,3 +48,6 @@
 2026-11-05T14:25Z | dec 012 (paper, FYI only, no Builder action): paper §4.1 waits on committed gold-local v2 results file; gold-local + codex-eval-runner still running | ops/decisions/012-20261105T142515-1727-from-paper.md
 2026-11-05T14:30:45Z | gold-local done 52/77 (same set as gold-full); launched gold-null null-patch control + import probe before freezing splits v2 (wheelhouse contains repo pkgs' own wheels) | eval/kaggle/gold_calibration.py, runs/gold-null
 2026-11-05T14:32:46Z | Dec 013 rules sweep applied: RULES_FINDINGS.md/COMPETITION.md M1–M7, pending cap + E4B acceptance resolved, plan 001 addendum (test-run time share) | ops/decisions/013-owner-rules-sweep-2026-11-05.md
+2026-11-05T14:52Z | codex eval-runner built; added tool_seconds; mcp missing in harness venv broke litellm tool calls -> installed; stub E2E PASS; review job launched | codex/eval-runner bcdbfbd, ops/codex/build-eval-runner.md
+2026-11-05T14:52Z | accidental `bin/codex-review --help` ran a real review (~10k tok); output deleted | bin/codex-review
+2026-11-05T14:52Z | gold-null: null-patch PASS 4/52 (requests 3/3, fastapi_14873); requests+httpx import from site-packages wheel -> emulation triggers fired, splits v2 blocked; codex-ask job | results/gold_null_control.jsonl, results/gold_import_probe.jsonl
