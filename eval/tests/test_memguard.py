@@ -44,6 +44,7 @@ def mock_world(monkeypatch, mg, initial, markers, records=()):
     monkeypatch.setattr(mg, "running_jobs", lambda: list(records))
     monkeypatch.setattr(mg, "proc_stat", lambda p: world.get(p))
     monkeypatch.setattr(mg, "proc_info", lambda p: world.get(p))
+    monkeypatch.setattr(mg, "runs_memguard", lambda p: False)
     clock = [0.0]
     monkeypatch.setattr(mg.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(mg.time, "sleep", lambda t: clock.__setitem__(0, clock[0] + t))
@@ -94,6 +95,8 @@ def test_pidfd_is_opened_before_identity_check(monkeypatch, mg, args):
     calls = []
     monkeypatch.setattr(mg.os, "pidfd_open", lambda p: calls.append("open") or 42)
     monkeypatch.setattr(mg, "proc_info", lambda p: calls.append("check") or proc(p, ppid=0))
+    monkeypatch.setattr(mg, "snapshot", lambda: {})
+    monkeypatch.setattr(mg, "running_jobs", lambda: [])
     monkeypatch.setattr(mg, "marker_value", lambda *a: b"cap")
     monkeypatch.setattr(mg.signal, "pidfd_send_signal", lambda *a: calls.append("signal"))
     monkeypatch.setattr(mg.os, "close", lambda fd: calls.append("close"))
@@ -392,8 +395,132 @@ def test_legacy_known_members_do_not_follow_reused_pid(monkeypatch, mg, args):
     assert set(mg.inventory(job, args, set())) == {10}
 
 
+@pytest.mark.parametrize("survives", [False, True])
+def test_legacy_history_survives_new_first_member_and_temporary_node(monkeypatch, mg, args, survives):
+    records = [dict(name="job", pid=10, pgid=10)]
+    world = mock_world(monkeypatch, mg, {
+        10: proc(10), 11: proc(11, ppid=10, comm="node"),
+        12: proc(12, ppid=10), 13: proc(13, ppid=10)},
+        {p: b"cap" for p in (10, 11, 12, 13)}, records)
+    _, jobs = mg.find_jobs(world, args, set())  # poll 1
+    key = next(iter(jobs))
+    assert set(jobs[key]["known_members"]) == {10, 12, 13}
+    del world[10]
+    world[11] = proc(11, comm="python")
+    world[13] = proc(13, comm="node")
+    _, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)  # poll 2: 11 first
+    assert jobs[key]["pids"] == [11, 12]
+    assert jobs[key]["known_members"][13] == 123
+    assert set(mg.inventory(jobs[key], args, set())) == {11, 12}
+    world[13] = proc(13, ppid=1, pgid=13)  # unchanged starttime, setsid
+    _, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)  # poll 3
+    assert set(jobs[key]["members"]) == {11, 12, 13}
+    sent = []
+
+    def kill(d, log, args):
+        assert world[d["pid"]]["comm"] != "node"
+        sent.append(d["pid"])
+        if survives and d["pid"] == 13:
+            return False
+        del world[d["pid"]]
+        return True
+
+    monkeypatch.setattr(mg, "send_kill", kill)
+    killed, survivors = mg.kill_tree(jobs[key], args, set(), lambda _: None)
+    assert killed == ([11, 12] if survives else [11, 12, 13])
+    assert survivors == ([13] if survives else [])
+    assert 13 in sent
+    assert not (13 in world and survivors == [])
+
+
+def test_legacy_history_survives_poll_with_no_eligible_members(monkeypatch, mg, args):
+    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"})
+    _, jobs = mg.find_jobs(world, args, set())
+    key = next(iter(jobs))
+    world[10] = proc(10, comm="node")
+    targets, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)
+    assert targets == {}
+    assert jobs[key]["known_members"] == {10: 123}
+    assert jobs[key]["rss"] == 0
+    world[10] = proc(10, pgid=99)
+    targets, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)
+    assert set(targets) == set(jobs[key]["members"]) == {10}
+
+
+@pytest.mark.parametrize("legacy_pgid", [None, 10])
+def test_old_legacy_and_new_job_id_watchdogs_are_never_victims(monkeypatch, mg, args, legacy_pgid):
+    import io
+    records = [dict(name="memguard", pid=10, pgid=legacy_pgid),
+               dict(name="memguard-light", pid=20, pgid=20, job_id=b"memguard-light/boot/123")]
+    world = mock_world(monkeypatch, mg, {
+        10: proc(10, comm="bash"), 11: proc(11, ppid=10),
+        20: proc(20, pgid=20, comm="bash"), 21: proc(21, ppid=20, pgid=20)},
+        {p: b"cap" for p in (10, 11, 20, 21)}, records)
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                        (b"memguard-light/boot/123" if p in {20, 21} else None)
+                        if marker == "GEMMA_JOB_ID" else b"cap")
+    targets, jobs = mg.find_jobs(world, args, {20, 21})
+    assert targets == jobs == {}  # neither OOM candidates nor victim jobs
+    assert mg.raise_oom_adj(targets, False, args) == 0
+    class File(io.StringIO):
+        def close(self):
+            pass
+    writes, sent = File(), []
+    monkeypatch.setattr("builtins.open", lambda *a, **kw: writes)
+    monkeypatch.delattr(mg.os, "pidfd_open", raising=False)
+    monkeypatch.setattr(mg.os, "kill", lambda *a: sent.append(a))
+    # Stale candidates must also be excluded at the final action-time check.
+    assert mg.raise_oom_adj(world, False, args) == 0
+    for d in world.values():
+        assert not mg.send_kill(d, lambda _: None, args)
+    assert sent == []
+    assert writes.getvalue() == ""
+
+
+@pytest.mark.parametrize("argv", [b"/repo/bin/memguard\0--once\0",
+                                  b"/usr/bin/python3\0/repo/bin/memguard\0"])
+def test_cmdline_watchdog_and_wrapper_are_protected_without_job_metadata(monkeypatch, mg, args, argv):
+    runs_memguard = mg.runs_memguard
+    world = mock_world(monkeypatch, mg, {10: proc(10, comm="bash"), 11: proc(11, ppid=10)},
+                       {10: b"cap", 11: b"cap"})
+    # Exercise the real parser with a guard which has no identifying env or status.
+    monkeypatch.setattr(mg, "runs_memguard", runs_memguard)
+    monkeypatch.setattr(mg, "read", lambda path, mode="r": argv if path == "/proc/11/cmdline" else b"")
+    assert mg.find_jobs(world, args, set()) == ({}, {})
+    assert not mg.action_eligible(world[10], args)
+    assert not mg.action_eligible(world[11], args)
+
+
+@pytest.mark.parametrize("job_id,protected", [(b"memguard", True), (b"memguard-other/boot/1", True),
+                                               (b"xmemguard/boot/1", False), (b"Memguard/boot/1", False)])
+def test_watchdog_job_id_uses_literal_prefix(monkeypatch, mg, args, job_id, protected):
+    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"})
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                        job_id if marker == "GEMMA_JOB_ID" else b"cap")
+    targets, jobs = mg.find_jobs(world, args, set())
+    assert bool(targets) == bool(jobs) == (not protected)
+
+
+def test_watchdog_job_id_also_protects_legacy_wrapper(monkeypatch, mg, args):
+    world = mock_world(monkeypatch, mg, {10: proc(10, comm="bash"), 11: proc(11, ppid=10)},
+                       {10: b"cap", 11: b"cap"})
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                        (b"memguard-light/boot/123" if p == 11 else None)
+                        if marker == "GEMMA_JOB_ID" else b"cap")
+    assert mg.find_jobs(world, args, set()) == ({}, {})
+    assert not mg.action_eligible(world[10], args)
+
+
+@pytest.mark.parametrize("argv", [b"/bin/python3\0--arg\0/repo/bin/memguard\0",
+                                  b"/bin/memguard-helper\0", b"/bin/xmemguard\0"])
+def test_cmdline_watchdog_match_requires_exact_basename_in_first_two_args(monkeypatch, mg, argv):
+    monkeypatch.setattr(mg, "read", lambda *a: argv)
+    assert not mg.runs_memguard(10)
+
+
 @pytest.mark.parametrize("action", ["signal", "oom"])
-@pytest.mark.parametrize("change", ["node", "uid", "shell", "marker", "cwd", "rss"])
+@pytest.mark.parametrize("change", ["node", "uid", "shell", "marker", "cwd", "rss",
+                                    "guard-id", "guard-cmd", "guard-child"])
 def test_action_revalidates_allowlist_after_handle_open(monkeypatch, mg, args, action, change):
     import io
     marked = {} if change in {"cwd", "rss"} else {10: b"cap"}
@@ -420,6 +547,14 @@ def test_action_revalidates_allowlist_after_handle_open(monkeypatch, mg, args, a
             monkeypatch.setattr(mg, "cwd_of", lambda p: "/elsewhere")
         elif change == "rss":
             world[10] = proc(10, rss=1024)
+        elif change == "guard-id":
+            monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                                b"memguard-light/boot/123" if marker == "GEMMA_JOB_ID" else b"cap")
+        elif change == "guard-cmd":
+            monkeypatch.setattr(mg, "runs_memguard", lambda p: p == 10)
+        elif change == "guard-child":
+            world[11] = proc(11, ppid=10)
+            monkeypatch.setattr(mg, "runs_memguard", lambda p: p == 11)
 
     sent, closed = [], []
     def pidfd_open(p):
