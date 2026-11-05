@@ -275,18 +275,27 @@ def setup_script_identity(data_dir):
                 sha256=hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None)
 
 
+def base_cache_key(wheels, harness_version):
+    """Identify the selected base wheels, independent of enumeration order/path."""
+    import hashlib
+    identity = (str(harness_version), sorted((p.name, p.stat().st_size) for p in wheels))
+    return 'sp_base_local_' + hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:24]
+
+
 def patch_subprocess_deps(data_dir):
     """Emulate the docker-only dependency setup for the subprocess sandbox (swegemma skips it).
 
-    Contract (swegemma 0.2.11 container_setup): for docker, _ensure_container_site_packages
-    unpacks every deduplicated (highest-version, py313-compatible) wheel from wheels_dir that is
-    < 20 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
+    Contract (swegemma 0.2.11 container_setup): Docker workspace setup first attempts
+    the workspace editable install; _ensure_container_site_packages then unpacks every deduplicated
+    (highest-version, py313-compatible) wheel from wheels_dir that is
+    < 16 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
     site-packages, no resolver; large wheels are added only if imported by the workspace; then
     sandbox/setup.py runs with --fast-path. We replicate exactly that inside the sandbox venv.
     The sandbox venv uses system_site_packages=True, so the HOST python must mirror the image
     (Dockerfile.public: pytest, pytest-timeout==2.1.0, typer, build backends; nothing else).
     """
     import tarfile
+    from importlib.metadata import version
     import swegemma.harness.container_setup as cs
     import swegemma.harness.verification as vf
     import swegemma.harness.sample_verification  # load all known by-name bindings
@@ -305,13 +314,26 @@ def patch_subprocess_deps(data_dir):
             return orig(docker, container_id, repo, fast_path=fast_path, config=config)
         venv_dir = docker.sandboxes[container_id]['venv']
         sp_dir = next(iter(sorted(venv_dir.glob('lib/python3*/site-packages'))))
+        # The stock editable hook returns early for subprocess managers. Mirror
+        # its Docker command, ignored failure, and default manager timeout here.
+        docker.exec(container_id,
+                    'pip install --no-index --find-links=/wheels --no-build-isolation --no-deps -e /workspace 2>/dev/null || true')
+        # The harness index caches by directory path alone. Refresh it so a changed
+        # wheelhouse is still selected/deduplicated by the actual harness code.
+        cs._WHEEL_INDEX_CACHE.pop(str(wheels_src.resolve()), None)
         base_wheels, large_wheels, _m2p, _req = cs._inspect_wheels_dir(wheels_src)
         selected = list(base_wheels)
         if large_wheels:  # public wheels have none; fail loudly rather than silently diverge
             raise RuntimeError('large wheels present; workspace-import scan not emulated')
-        tar_path = cs._build_unpacked_wheels_tar(selected, 'sp_base_local', '.swegemma_base_injected')
-        with tarfile.open(tar_path) as tf:
-            tf.extractall(sp_dir, filter='data')
+        cache_key = base_cache_key(selected, version('swegemma'))
+        marker = sp_dir / '.swegemma_base_injected'
+        if not marker.is_file() or marker.read_text() != cache_key:
+            tar_path = cs._build_unpacked_wheels_tar(selected, cache_key, marker.name)
+            with tarfile.open(tar_path) as tf:
+                tf.extractall(sp_dir, filter='data')
+            # The harness archive contains an 'ok' marker; bind the container's
+            # marker to this wheel identity only after extraction succeeds.
+            marker.write_text(cache_key)
         docker.copy_to(container_id, setup_py, '/tmp/setup.py')
         flag = '--fast-path' if fast_path else ''
         docker.exec(container_id, f'python3 /tmp/setup.py {flag} {repo}'.strip(), timeout=280)
