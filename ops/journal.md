@@ -55,3 +55,7 @@
 2026-11-05T14:54:28Z | null_pass excluded: fastapi_14873, requests_7309/7315/7427 | results/gold_failure_causes.jsonl sha256=c0958fc5
 2026-11-05T14:54:28Z | SPLITS v2 FROZEN: clean 48 (rich 39, fastapi 9), dev 33, holdout 15; list sha256 clean=637228f6 dev=b8d07c85 holdout=e6e14acd (file sha256 clean.txt=339d0a0c dev.txt=bff0841a holdout.txt=56a99421); holdout uses=0 | eval/splits/MANIFEST.json
 2026-11-05T14:54:28Z | gold per-task v2 committed (paper §4.1 source) | results/gold_calibration_per_task.jsonl
+2026-11-05T14:58Z | dec 015 read (approve; critical path unchanged; shadowing lever pre-reg; supplementary-dev scoping deferred until first sub queued) | ops/decisions/015-20261105T145428-1107-from-builder.md
+2026-11-05T14:58Z | ask-shadowing (codex) done: independently agrees wheel shadowing = official harness property; no change to dec 014 | ops/codex/ask-20261105T145051.md
+2026-11-05T14:58Z | codex-build timing-kernel launched (Kaggle L4x4 E4B timing kernel per plan 001, starter-faithful, dry-run push only) | ops/codex/build-timing-kernel.spec
+2026-11-05T14:58Z | plan 002 pre-registered (candidate: import-origin check lever) | eval/plans/002.md

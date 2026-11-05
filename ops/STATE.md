@@ -1,4 +1,10 @@
-# STATE (2026-11-05, cycle 45 / Phase 0) — Builder on Opus (dec 010 local-first, two-strike)
+# STATE (2026-11-05, cycle 46 / Phase 0) — Builder on Opus (dec 010 local-first, two-strike)
+Cycle 46 (dec 015 approve): critical path = review-eval-runner -> merge -> Kaggle E4B timing (plan 001) -> report 002 w/ first-sub candidate.
+  Launched codex-build timing-kernel (spec ops/codex/build-timing-kernel.spec): eval/kaggle/agent_timing.py (starter-faithful vLLM+EvalConfig,
+  embedded bundle b64, seq tasks, timing.jsonl w/ tool_seconds + test-run share, time-box), timing_push.sh (--accelerator NvidiaL4X4, -t, --dry-run),
+  timing_summary.py (plan-001 rule). Review on finish; then pick ~6 dev ids (4 rich, 2 fastapi), push, log quota in ops/budget/kaggle.md.
+  ask-shadowing done: codex agrees shadowing = harness property. Plan 002 pre-registered (import-origin check; candidate, not scheduled).
+  DEFERRED (dec 015 item 3): one-page scoping note for supplementary public dev set (eval/plans/) ONLY after first sub queued; no downloads.
 Cycle 45 (dec 014): shadowing RESOLVED = scorer property (container_setup.py:266 strips RECORD -> setup.py editable install fails
   uninstall-no-record-file, reproduced in scratch venv -> src-layout requests/httpx import wheel copy). Rule 2b: requests/httpx
   dropped (unmeasurable locally). null_pass excluded: fastapi_14873, requests_7309/7315/7427.
@@ -39,6 +45,6 @@ Dec 012 FYI: paper §4.1 cites only the committed gold-local v2 results file -> 
 Paper evidence (dec 007, due Nov 9 23:59Z, no extra compute): commit schema-headed results/ files for (a) gold calibration per-task outcomes+exclusion causes, (b) timing per task from Kaggle E4B smoke (31B if run), (c) failure taxonomy via trace-analyst once. Not yet produced; flag here if any won't exist by Nov 9.
 
 
-Running jobs: review-eval-runner (codex-review, critical path), ask-shadowing (cross-check), gold-diag4-wait (cross-check).
+Running jobs: review-eval-runner (codex-review, critical path), codex-timing-kernel (build), gold-diag4-wait (cross-check).
 Next 3: (1) review-eval-runner -> fix BLOCKING, merge codex/eval-runner to main; (2) Kaggle L4x4 E4B timing run (plan 001;
   check `import mcp` in kernel; log test-run share mean/p90 via tool_seconds); (3) report 002 with first-submission candidate + LORO caveat.

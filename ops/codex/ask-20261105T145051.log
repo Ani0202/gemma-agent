@@ -5576,3 +5576,74 @@ exec
 
 codex
 For `fastapi_14873`, the gold patch changes `fastapi/routing.py`; the test patch changes only `tests/test_router_events.py`. They do not overwrite each other. The stronger explanation is dependency version sensitivity: older Starlette resets the handler lists during construction, while the selected Starlette 1.6.0 wheel no longer does. That explains how the workspace source can pass this test without the gold change.
+codex
+**Blocking conclusion: forcing workspace imports would not faithfully reproduce the supplied Docker path.** The strongest argument against that change is that the official code injects the repository’s own wheel, its editable-install attempts do not reliably remove that wheel, and pytest’s final path handling does not put `/workspace/src` ahead of site-packages. The observed Requests/HTTPX imports are therefore consistent with an official harness defect.
+
+I read `AGENTS.md` and `CLAUDE.md`. This was read-only source investigation; I did not execute Docker verification or change files.
+
+1. **Does Docker exclude or subsequently remove the repository’s wheel?**
+
+   **No repository-specific exclusion exists.** `_inspect_wheels_dir` selects the highest compatible version per distribution and excludes only its fixed list of infrastructure packages. Requests, HTTPX, FastAPI, Rich and Starlette are eligible. `_ensure_container_site_packages` injects the base set into `/usr/local/lib/python3.13/site-packages`; `repo` additionally influences large-wheel selection, rather than excluding the task package. See [container_setup.py:107](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:107), [155](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:155), [332](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:332).
+
+   `setup_container_wheels` handles wheel availability; `extract_archive_to_container` extracts the repository snapshot. Neither implements package exclusion or source precedence. See [container_setup.py:393](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:393), [416](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:416), [docker.py:439](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/docker.py:439).
+
+   **Docker does attempt editable installation.** Phase 2 first calls `install_editable_package`, before dependency injection. Subsequently, competition `setup.py` runs another `pip install … --no-deps -e <workspace>` **before** branching into its fast path. Installation failures are tolerated. See [verification.py:405](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:405), [container_setup.py:506](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:506), [setup.py:193](/home/ubuntu/work/gemma/data/raw/sandbox/setup.py:193), [350](/home/ubuntu/work/gemma/data/raw/sandbox/setup.py:350).
+
+   The crucial trap: wheel extraction **omits `RECORD`**, and pip raises an error when uninstalling a distribution without its uninstall manifest. Thus an attempted editable install does not establish that the unpacked package disappeared. Even a surviving editable `.pth` normally appends source paths after site-packages. See [container_setup.py:260](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:260), [req_uninstall.py:75](/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pip/_internal/req/req_uninstall.py:75), [site.py:206](/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site.py:206).
+
+   The fast path additionally writes `workspace_paths.pth`, containing the workspace and its immediate non-hidden subdirectories—including `src`. It contains ordinary path lines, not a prepend instruction. See [setup.py:307](/home/ubuntu/work/gemma/data/raw/sandbox/setup.py:307).
+
+2. **What does official Phase-2 pytest actually see?**
+
+   The exact command template is:
+
+   ```bash
+   cd /workspace && PYTHONSAFEPATH=1 PYTHONNOUSERSITE=1 python3 -s -m pytest <targets> \
+     --junitxml=/tmp/_swegemma_junit_<random>.xml \
+     -p no:anyio -o timeout=0 -o python_classes="Test* *Test" -q
+   ```
+
+   Targets come from `task.test_files` or the test patch; ordinary positional targets exclude `conftest.py`. See [verification.py:429](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:429), [618](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:618).
+
+   **Final import mode is `prepend`.** Competition setup initially adds `--import-mode=importlib`, but after applying patches the verifier calls `setup_workspace_test_config(overwrite=True)`. That replaces `pytest.ini` with settings containing no import-mode override. Pytest defaults to `prepend`. See [setup.py:226](/home/ubuntu/work/gemma/data/raw/sandbox/setup.py:226), [verification.py:601](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:601), [container_setup.py:890](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:890), [_pytest/main.py:220](/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/main.py:220).
+
+   Relevant precedence after conftest loading is:
+
+   ```text
+   /workspace
+   interpreter/library paths
+   /usr/local/lib/python3.13/site-packages
+   appended editable/workspace .pth paths, including /workspace/src
+   ```
+
+   This is the relevant precedence, not a universal complete `sys.path` dump: installed `.pth` files and test-specific imports can add entries.
+
+   `/workspace` becomes the pytest root through its generated configuration, but **rootdir alone does not prepend source paths**. Loading the generated root `conftest.py` in `prepend` mode brings `/workspace` forward. The inspected snapshots have `tests/__init__.py` and no workspace-root `__init__.py`; packaged test imports likewise resolve their package root to `/workspace`, not `/workspace/src`. See [_pytest/config/__init__.py:787](/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py:787), [_pytest/pathlib.py:621](/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:621), [873](/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pathlib.py:873).
+
+   **Expected outcome for the inspected snapshots: Requests and HTTPX import the wheel; FastAPI and Rich import workspace source**, absent an additional test/plugin path mutation. Requests uses `src` discovery ([requests snapshot](/home/ubuntu/work/gemma/data/raw/snapshots/requests_7427.tgz), member `pyproject.toml:80`); HTTPX also lives under `src` ([HTTPX snapshot](/home/ubuntu/work/gemma/data/raw/snapshots/httpx_3672.tgz), member `src/httpx/__init__.py:1`). Prepending `/workspace` cannot defeat a site-packages package for either layout.
+
+3. **Where does the emulation diverge, and what is the minimal faithful fix?**
+
+   There are real divergences, but none establishes that faithful Docker emulation should force source imports:
+
+   - **Repeated wheel extraction:** the emulation extracts on every dependency-install call. Docker injects once per container using `.swegemma_base_injected`. Minimal correction: honor that marker. Compare [gold_calibration.py:208](/home/ubuntu/work/gemma/eval/kaggle/gold_calibration.py:208) with [container_setup.py:337](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:337).
+   - **Missing initial editable-install attempt:** the stock helper returns immediately for subprocess managers. Minimal correction: reproduce Docker’s initial attempt **before** injection, while retaining competition setup’s later attempts. See [container_setup.py:512](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:512), [verification.py:405](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:405).
+   - **Extra early workspace path:** subprocess execution sets `PYTHONPATH=<workspace>`; the supplied Docker configuration does not. Minimal correction: neutralize that subprocess-specific setting for faithful commands. See [subprocess.py:485](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py:485), [docker.py:90](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/docker.py:90).
+
+   **Removing the task wheel or prepending `/workspace/src` would change the evaluated environment.** It may create a useful source-correct evaluation, but should be explicitly labeled as a different protocol.
+
+4. **Was the probe representative?**
+
+   It runs **from `/workspace`, using `python3 -s -c`**, with the same safe-path/user-site flags as verification. It runs after each emulated dependency setup, so normally twice per verification. See [gold_calibration.py:218](/home/ubuntu/work/gemma/eval/kaggle/gold_calibration.py:218), [verification.py:408](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:408), [601](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:601).
+
+   **It is not a pytest import probe.** It omits pytest configuration, plugin loading, conftests and package collection. Furthermore, subprocess `PYTHONPATH` already places the workspace early. Consequently, its FastAPI/Rich results do not prove Docker startup precedence. Its Requests/HTTPX results remain consistent with final pytest precedence because pytest brings forward the workspace root, not `src`.
+
+5. **Why can `fastapi_14873` null-pass?**
+
+   It is **not test-only**, and the test patch does **not** overwrite the changed source: gold touches `fastapi/routing.py`; the test patch touches `tests/test_router_events.py`. See [tasks.jsonl:27](/home/ubuntu/work/gemma/data/raw/tasks.jsonl:27). The recorded null pass is [gold_results.jsonl:14](/home/ubuntu/work/gemma/runs/gold-null/gold_results.jsonl:14).
+
+   The strongest explanation is **Starlette-version sensitivity**. Gold moves handler initialization until after superclass construction. The older Starlette constructor resets those handler lists; Starlette 1.6.0 no longer does. Thus the selected newer dependency removes the failure mechanism even with unchanged workspace source. Compare [FastAPI snapshot](/home/ubuntu/work/gemma/data/raw/snapshots/fastapi_14873.tgz), member `fastapi/routing.py:955`, with [Starlette 0.49.0 wheel](/home/ubuntu/work/gemma/data/raw/wheels/starlette-0.49.0-py3-none-any.whl), member `starlette/routing.py:594`, and [Starlette 1.6.0 wheel](/home/ubuntu/work/gemma/data/raw/wheels/starlette-1.6.0-py3-none-any.whl), member `starlette/routing.py:585`. Highest-version selection is implemented at [container_setup.py:107](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:107).
+
+**My second opinion:** correct the concrete emulation differences, but do not interpret wheel imports or null passes as proof that those differences caused them. The supplied official source itself supports both wheel shadowing and dependency-induced null passes. A successful gold run therefore establishes environment compatibility, not necessarily that the gold source change was exercised.
+tokens used
+99,947
