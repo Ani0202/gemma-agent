@@ -155,19 +155,73 @@ def job_name(root, procs, records):
     return None
 
 
+def current_boot_id():
+    return (read("/proc/sys/kernel/random/boot_id") or "").strip()
+
+
+def same_boot(record, boot_id):
+    # Missing boot identity is legacy; an unreadable current boot fails closed.
+    return "boot_id" not in record or bool(boot_id and record["boot_id"] == boot_id)
+
+
+def watchdog_id(job_id):
+    return job_id is not None and job_id.split(b"/", 1)[0].startswith(b"memguard")
+
+
+def watchdog_argv(cmdline):
+    installed = os.fsencode(os.path.realpath(os.path.join(REPO, "bin/memguard")))
+    for arg in cmdline.split(b"\0"):
+        if not arg:
+            continue
+        path = os.path.realpath(arg) if b"/" in arg else arg
+        if path == installed or (os.path.basename(path) == b"memguard" and
+                                 os.path.basename(os.path.dirname(path)) == b"bin"):
+            return True
+    return False
+
+
 def runs_memguard(pid):
-    argv = (read(f"/proc/{pid}/cmdline", "rb") or b"").split(b"\0")
-    return any(os.path.basename(arg) == b"memguard" for arg in argv[:2])
+    return watchdog_argv(read(f"/proc/{pid}/cmdline", "rb") or b"")
+
+
+def wrapper_script():
+    source = read(os.path.join(REPO, "bin/job")) or ""
+    prefix = "GEMMA_JOB_CAP=$cap setsid nohup bash -c '\n"
+    suffix = "    ' _ \"$name\""
+    return source.split(prefix, 1)[1].split(suffix, 1)[0] if prefix in source and suffix in source else None
+
+
+def is_job_wrapper(cmdline, name, script):
+    argv = cmdline.split(b"\0")
+    return (script is not None and len(argv) >= 6 and
+            os.path.basename(argv[0]) == b"bash" and argv[1] == b"-c" and
+            argv[2] == ("\n" + script).encode() and argv[3] == b"_" and
+            argv[4] == name.encode())
+
+
+def watchdog_record(pid, cmdline, job_id, records):
+    """Use this recipient's fresh command and marker, including wrapper metadata."""
+    if watchdog_id(job_id) or watchdog_argv(cmdline):
+        return True
+    for record in records:
+        if record["pid"] != pid:
+            continue
+        command = read(os.path.join(REPO, "ops/jobs", record["name"] + ".cmd")) or ""
+        if "bin/memguard" in command and is_job_wrapper(cmdline, record["name"], wrapper_script()):
+            return True
+    return False
 
 
 def protected_watchdogs(procs, records):
     # Deployment stops the old guard before starting the new one, with no heavy
     # jobs running. We do not rely on the old implementation excluding this guard.
-    guards = {p for p in procs if runs_memguard(p)}
+    guards = {p for p in procs if runs_memguard(p) or watchdog_record(
+        p, read(f"/proc/{p}/cmdline", "rb") or b"",
+        marker_value(p, "GEMMA_JOB_ID"), records)}
     for p in procs:
         job_id = marker_value(p, "GEMMA_JOB_ID")
         name = job_name(p, procs, records)
-        if ((job_id is not None and job_id.startswith(b"memguard")) or
+        if (watchdog_id(job_id) or
                 (name is not None and name.startswith("memguard")) or
                 any(r["name"].startswith("memguard") and r["pid"] in ancestors(p, procs)
                     for r in records)):
@@ -181,12 +235,12 @@ def verified_records(procs, records):
         return []
     # Compare the full bash -c wrapper body with our installed bin/job. Fail closed
     # if its layout changes; substring matches could admit unrelated shell scripts.
-    source = read(os.path.join(REPO, "bin/job")) or ""
-    prefix = "GEMMA_JOB_CAP=$cap setsid nohup bash -c '\n"
-    suffix = "    ' _ \"$name\""
-    script = source.split(prefix, 1)[1].split(suffix, 1)[0] if prefix in source and suffix in source else None
+    script = wrapper_script()
+    boot_id = current_boot_id()
     verified = []
     for record in records:
+        if not same_boot(record, boot_id):
+            continue
         d = procs.get(record["pid"])
         if not d or d["state"] in {"Z", "X"} or d["uid"] != UID:
             continue
@@ -194,19 +248,23 @@ def verified_records(procs, records):
             if str(d["starttime"]) != str(record["starttime"]):
                 continue
         else:
-            argv = (read(f"/proc/{record['pid']}/cmdline", "rb") or b"").split(b"\0")
-            if not (script is not None and len(argv) >= 6 and
-                    os.path.basename(argv[0]) == b"bash" and argv[1] == b"-c" and
-                    argv[2] == ("\n" + script).encode() and argv[3] == b"_" and
-                    argv[4] == record["name"].encode()):
+            cmdline = read(f"/proc/{record['pid']}/cmdline", "rb") or b""
+            if not is_job_wrapper(cmdline, record["name"], script):
                 continue
         verified.append(record)
     return verified
 
 
 def provenance(pid, procs, records, known_jobs=None):
-    if marker_value(pid, "GEMMA_JOB_ID") is not None:
+    job_id = (procs[pid]["job_id"] if "job_id" in procs[pid]
+              else marker_value(pid, "GEMMA_JOB_ID"))
+    if watchdog_id(job_id):
+        return False
+    if job_id is not None:
         return True
+    boot_id = current_boot_id()
+    records = [r for r in records if same_boot(r, boot_id)]
+    known_jobs = {k: j for k, j in (known_jobs or {}).items() if same_boot(j, boot_id)}
     identity = procs[pid]["starttime"]
     if any(j["known_members"].get(pid) == identity for j in (known_jobs or {}).values()):
         return True
@@ -223,6 +281,9 @@ def eligible(pid, procs, args, protected=(), records=(), known_jobs=None):
 def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
     """Require positive provenance and classify every recipient independently."""
     records = running_jobs() if records is None else records
+    boot_id = current_boot_id()
+    records = [r for r in records if same_boot(r, boot_id)]
+    known_jobs = {k: j for k, j in (known_jobs or {}).items() if same_boot(j, boot_id)}
     verified = verified_records(procs, records)
     known = {(p, start): j for j in (known_jobs or {}).values()
              for p, start in j["known_members"].items()}
@@ -260,7 +321,7 @@ def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
             root = previous["root"]
         j = jobs.setdefault(key, {"key": key, "root": root, "name": record["name"] if record else job_name(root, procs, records),
                                   "pids": [], "members": {}, "rss": 0, "records": records,
-                                  "known_members": dict(previous["known_members"]) if previous else {}})
+                                  "boot_id": boot_id, "known_members": dict(previous["known_members"]) if previous else {}})
         if previous:
             j["name"] = previous["name"]
             for member, start in previous["known_members"].items():
@@ -295,12 +356,22 @@ def action_eligible(d, args, known_jobs=None):
     records = running_jobs()
     verified = verified_records(procs, records)
     protected = protected_watchdogs(procs, records)
+    # Read the command and environment after the protection scan, then bind them
+    # to the recipient identity again. Missing proc metadata refuses both actions.
+    cmdline = read(f"/proc/{d['pid']}/cmdline", "rb")
+    environ = read(f"/proc/{d['pid']}/environ", "rb")
     current = proc_info(d["pid"])
-    if not current or current["starttime"] != d["starttime"]:
+    if (not current or current["starttime"] != d["starttime"] or
+            cmdline is None or environ is None):
         return False
+    job_id = next((entry[len(b"GEMMA_JOB_ID="):] for entry in environ.split(b"\0")
+                   if entry.startswith(b"GEMMA_JOB_ID=")), None)
+    if watchdog_record(d["pid"], cmdline, job_id, records):
+        return False
+    # Re-parented wrappers whose parent cannot be inspected fail closed.
     if current["comm"] in SHELL_COMMS and current["ppid"] and current["ppid"] not in procs:
         return False
-    procs[d["pid"]] = current
+    procs[d["pid"]] = {**current, "job_id": job_id}
     # Re-evaluate fresh recipient metadata against the scanned protections/ancestry.
     return eligible(d["pid"], procs, args, protected, verified, known_jobs)
 

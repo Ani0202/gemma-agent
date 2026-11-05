@@ -37,6 +37,7 @@ def proc(pid, ppid=1, pgid=10, starttime=123, comm="python", rss=1024, uid=None)
 
 def mock_world(monkeypatch, mg, initial, markers, records=()):
     world = dict(initial)
+    monkeypatch.setattr(mg, "current_boot_id", lambda: "boot-id")
     monkeypatch.setattr(mg, "snapshot", lambda: dict(world))
     # Legacy records exercise ancestry admission; record-free fixtures use job IDs.
     monkeypatch.setattr(mg, "marker_value", lambda p, marker:
@@ -49,6 +50,12 @@ def mock_world(monkeypatch, mg, initial, markers, records=()):
         for record in records:
             if str(path) == f"/proc/{record['pid']}/cmdline":
                 return b"\0".join([b"bash", b"-c", script.encode(), b"_", record["name"].encode(), b"command", b""])
+        if str(path).startswith("/proc/") and str(path).endswith("/cmdline"):
+            return b"python3\0worker.py\0"
+        if str(path).startswith("/proc/") and str(path).endswith("/environ"):
+            pid = int(str(path).split("/")[2])
+            job_id = mg.marker_value(pid, "GEMMA_JOB_ID")
+            return b"" if job_id is None else b"GEMMA_JOB_ID=" + job_id + b"\0"
         return original_read(path, mode)
     monkeypatch.setattr(mg, "read", read)
     monkeypatch.setattr(mg, "running_jobs", lambda: list(records))
@@ -110,6 +117,8 @@ def test_pidfd_is_opened_before_identity_check(monkeypatch, mg, args):
     monkeypatch.setattr(mg, "marker_value", lambda *a: b"cap")
     monkeypatch.setattr(mg.signal, "pidfd_send_signal", lambda *a: calls.append("signal"))
     monkeypatch.setattr(mg.os, "close", lambda fd: calls.append("close"))
+    monkeypatch.setattr(mg, "read", lambda path, mode="r":
+                        b"GEMMA_JOB_ID=cap\0" if path.endswith("/environ") else b"")
     assert mg.send_kill(proc(10), lambda _: None, args)
     assert calls == ["open", "check", "check", "signal", "close"]
 
@@ -552,9 +561,8 @@ def test_watchdog_job_id_also_protects_legacy_wrapper(monkeypatch, mg, args):
     assert not mg.action_eligible(world[10], args)
 
 
-@pytest.mark.parametrize("argv", [b"/bin/python3\0--arg\0/repo/bin/memguard\0",
-                                  b"/bin/memguard-helper\0", b"/bin/xmemguard\0"])
-def test_cmdline_watchdog_match_requires_exact_basename_in_first_two_args(monkeypatch, mg, argv):
+@pytest.mark.parametrize("argv", [b"/bin/memguard-helper\0", b"/bin/xmemguard\0"])
+def test_cmdline_watchdog_match_requires_exact_basename(monkeypatch, mg, argv):
     monkeypatch.setattr(mg, "read", lambda *a: argv)
     assert not mg.runs_memguard(10)
 
@@ -619,6 +627,7 @@ def test_six_field_status_retains_identity_and_names_escaped_job(monkeypatch, mg
     directory.mkdir(parents=True)
     (directory / "new.status").write_text("running 10 now 10 boot-id 123\n")
     monkeypatch.setattr(mg, "REPO", str(tmp_path))
+    monkeypatch.setattr(mg, "current_boot_id", lambda: "boot-id")
     records = mg.running_jobs()
     assert records == [dict(name="new", pid=10, pgid=10, boot_id="boot-id",
                             starttime="123", job_id=b"new/boot-id/123")]
@@ -733,3 +742,105 @@ def test_status_and_cap_alone_are_not_provenance(monkeypatch, mg, args, bad_wrap
         world[10] = proc(10, rss=4 * 1024**3)
     assert mg.find_jobs(world, args, set()) == ({}, {})
     assert not mg.action_eligible(world[10], args)
+
+
+def assert_actions_refused(monkeypatch, mg, args, candidate, known_jobs=None):
+    """Exercise both pinned action paths without touching real processes."""
+    import io
+    class File(io.StringIO):
+        def close(self):
+            pass
+    output, sent = File(), []
+    real_open = open
+    def open_oom(path, *a, **kw):
+        return output if str(path).endswith("oom_score_adj") else real_open(path, *a, **kw)
+    monkeypatch.setattr("builtins.open", open_oom)
+    monkeypatch.setattr(mg.os, "pidfd_open", lambda p: 42)
+    monkeypatch.setattr(mg.os, "close", lambda fd: None)
+    monkeypatch.setattr(mg.signal, "pidfd_send_signal", lambda *a: sent.append(a))
+    monkeypatch.setattr(mg.os, "kill", lambda *a: sent.append(a))
+    assert mg.send_kill(candidate, lambda _: None, args, known_jobs) is False
+    assert mg.raise_oom_adj({candidate["pid"]: candidate}, False, args, known_jobs) == 0
+    assert sent == []
+    assert output.getvalue() == ""
+
+
+@pytest.mark.parametrize("change", ["job-id", "cmdline", "unreadable-cmdline", "unreadable-environ"])
+def test_action_rechecks_watchdog_after_protection_scan(monkeypatch, mg, args, change):
+    marked = {10: b"work/boot/123"}
+    world = mock_world(monkeypatch, mg, {10: proc(10)}, marked)
+    candidate = world[10]
+    original_read = mg.read
+    def protect(procs, records):
+        # The process execs after its protection scan; its starttime is unchanged.
+        if change == "job-id":
+            marked[10] = b"memguard-light/boot/123"
+        else:
+            def read(path, mode="r"):
+                if path == "/proc/10/cmdline" and change != "unreadable-environ":
+                    return b"python3\0-u\0/repo/bin/memguard\0" if change == "cmdline" else None
+                if path == "/proc/10/environ" and change == "unreadable-environ":
+                    return None
+                return original_read(path, mode)
+            monkeypatch.setattr(mg, "read", read)
+        return set()
+    monkeypatch.setattr(mg, "protected_watchdogs", protect)
+    assert_actions_refused(monkeypatch, mg, args, candidate)
+
+
+@pytest.mark.parametrize("history", [False, True])
+def test_previous_boot_record_cannot_admit_unmarked_child(monkeypatch, mg, args, history):
+    record = dict(name="work", pid=10, pgid=10, boot_id="previous-boot",
+                  starttime="123", job_id=b"work/previous-boot/123")
+    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)}, {}, [record])
+    # Even a matching numeric identity must not establish ancestry after reboot.
+    original_read = mg.read
+    monkeypatch.setattr(mg, "read", lambda path, mode="r":
+                        b"python3\0unrelated.py\0" if path == "/proc/10/cmdline" else original_read(path, mode))
+    known = {("job", 10, 123): dict(key=("job", 10, 123), root=10, name="work",
+             boot_id="previous-boot", known_members={10: 123, 11: 123})} if history else None
+    assert mg.verified_records(world, [record]) == []
+    assert mg.find_jobs(world, args, set(), known_jobs=known) == ({}, {})
+    assert_actions_refused(monkeypatch, mg, args, world[11], known)
+
+
+@pytest.mark.parametrize("argv", [
+    b"/usr/bin/python3\0-u\0/repo/bin/memguard\0",
+    b"python3\0-X\0dev\0-W\0ignore\0bin/memguard\0",
+    b"env\0FOO=1\0python3\0bin/memguard\0",
+])
+def test_watchdog_any_argv_position_is_protected(monkeypatch, mg, args, argv):
+    parser = mg.runs_memguard
+    record = dict(name="watchdog-light", pid=20, pgid=20)
+    world = mock_world(monkeypatch, mg, {20: proc(20, comm="bash"), 10: proc(10, ppid=20)}, {}, [record])
+    original_read = mg.read
+    monkeypatch.setattr(mg, "read", lambda path, mode="r":
+                        argv if path == "/proc/10/cmdline" else original_read(path, mode))
+    monkeypatch.setattr(mg, "runs_memguard", parser)
+    assert parser(10)
+    assert {10, 20} <= mg.protected_watchdogs(world, [record])
+    assert mg.find_jobs(world, args, set()) == ({}, {})
+    assert_actions_refused(monkeypatch, mg, args, world[10])
+    assert_actions_refused(monkeypatch, mg, args, world[20])
+
+
+def test_wrapper_watchdog_command_record_is_protected(monkeypatch, mg, args):
+    record = dict(name="watchdog-light", pid=10, pgid=10)
+    world = mock_world(monkeypatch, mg, {10: proc(10, comm="bash")}, {}, [record])
+    original_read = mg.read
+    monkeypatch.setattr(mg, "read", lambda path, mode="r":
+                        "python3 -u /repo/bin/memguard" if str(path).endswith("watchdog-light.cmd")
+                        else original_read(path, mode))
+    assert 10 in mg.protected_watchdogs(world, [record])
+    assert mg.find_jobs(world, args, set()) == ({}, {})
+    assert_actions_refused(monkeypatch, mg, args, world[10])
+
+
+def test_watchdog_argv_resolves_symlinks(monkeypatch, mg, tmp_path):
+    directory = tmp_path / "bin"
+    directory.mkdir()
+    guard = directory / "memguard"
+    guard.touch()
+    alias = tmp_path / "guard-alias"
+    alias.symlink_to(guard)
+    assert mg.watchdog_argv(b"python3\0-u\0" + os.fsencode(alias) + b"\0")
