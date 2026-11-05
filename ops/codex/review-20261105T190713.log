@@ -284,3 +284,247 @@ You'll build `pack` (validate and zip), the eval runners, `kaggle-eval` and the 
 Phase 0. Get every bundle proposed for submission, and all eval or stats code, through
 `codex-review` before you rely on it.
 
+exec
+/bin/bash -lc 'cat ops/decisions/027-004-setup-210s-root-cause.md ops/STATE.md eval/plans/004.md ops/reports/004-setup-210s-root-cause.md' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+DECISION: approve-with-changes
+SUBMIT: none
+GPU_ALLOWANCE: none
+ESCALATE: none
+DIGEST: Per-task setup delay traced to our test harness (likely not the scorer); verifying on a free CPU session before one GPU re-timing.
+---
+I spot-checked results/plan003_pip_fallback_repro.json: a hung fallback takes 103.4 / 103.3 s (5 retries). Two calls predict 206.8 s, and Kaggle measured 207.4-210.8 s; four calls predict 413.4 s, and verification took 410-412 s. The match is convincing, and the plan-003 pre-registration came before the results. Option B is approved, with these fidelity changes:
+
+1. FIDELITY RULE for the timing kernel (it binds the kernel-setup-fix build): our kernel may only be changed to reproduce what the scorer image provides (Dockerfile.public: pip plus the listed tool set, installed offline into the sandbox venv). It must NOT add anything the scorer lacks. Remove spec item 2 (the PIP_NO_INDEX/PIP_RETRIES=0/PIP_TIMEOUT prefix) from the timing kernel. It would hide a real fallback hang that the scorer WOULD pay whenever a hidden repo's build backend isn't in that tool set. If the build already includes it, take it out and re-run its acceptance without it. The setup_calls logging (spec item 3) stays and is the important part: any fallback has to be visible.
+2. CPU-only Kaggle verification session (no GPU quota; internet OFF; starter docker_image pinned; no model):
+   a. FIRST run the UNFIXED install() on 2 tasks (1 rich, 1 fastapi), capturing the full setup.py output in setup_calls. This proves WHY the offline install fails (no pip in the venv, missing backend, or cp313-vs-py3.12 wheel/ABI mismatch). If the cause is wheel/ABI selection inside the competition's own harness or wheelhouse, the scorer may share it: then STOP, the artifact conclusion is void, and report it.
+   b. Then run the FIXED kernel on the same 8 + 8 fresh dev ids. Gate: setup <= 30 s per task, editable install rc 0 on all 16, zero pip "Retrying" lines.
+   Write the results to results/kaggle_setup_cpu_check.json. Log the session in ops/budget/kaggle.md (CPU, 0 GPU quota).
+3. Only if 2b passes: the ONE GPU re-time of v000 at cap 5 (dec 022 item 3, artifact branch), 8 fresh dev ids, verification skipped. Log it. This measures agent time; v000 at cap 5 is NOT a ship candidate.
+4. SHIP-CAP RULE (it adds to dec 022 item 1; both conditions must hold):
+   (i) (cap + max measured setup on 4xL4) x 125 + 30 <= 660, and
+   (ii) a fallback stress case: (cap + 0.25 x 3.5 + 0.75 x max measured setup) x 125 + 30 <= 660, i.e. 25% of hidden tasks pay the ~210 s fallback because their build backend isn't in the image.
+   With ~10 s setup that gives a cap of ~4.0 min. Build e4b-v002 at that cap (and the 31B equivalent once a 31B timing exists) after item 3. Hidden repos may use backends the public four don't, so (ii) is the honest margin. Don't relax it without evidence.
+5. If 2b fails (setup still >= 60 s): fall back to e4b-v001 (cap 1.4, sha256 f2ced9c9...e9) and re-time that instead, as dec 022 says. Still only one GPU timing run for this question.
+6. In parallel, CPU only: continue dec 022 item 4 (diff survives truncation, patch hygiene, trimming tool output). Those levers matter at cap 4 as well.
+7. Next report (005): the 2a cause, the CPU gate, the GPU re-time, and the proposed first-submission bundle with its cap derivation under item 4. I'll run a codex-ask adversarial check before authorizing that submission.
+
+Reasoning: the evidence says our kernel is at fault, but a timing harness is only useful if it's faithful. Making our kernel faster than the scorer is the one way this can turn into a zero-score timeout. A free CPU session proves both the cause and the fix before we spend the single GPU run. The 25% stress margin costs ~0.8 min of cap and protects against hidden repos whose build backend isn't preinstalled.
+# STATE: snapshot 2026-11-05 19:08Z (cycle 78, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
+Builder on Opus (dec 010: local-first, two-strike).
+
+## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
+- 31b: dist/31b-v000.zip sha256=4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161 (repo a12f0b7; static+codex static OK)
+- e4b: dist/e4b-v000.zip sha256=cc647bfb28bc6d2db0e3ec816df084f23a91230786d8fea177e2d63d2a6940e2 (same)
+- e4b-v001 (dec 022 item 3, cap 5 -> 1.4 only): dist/e4b-v001.zip sha256=f2ced9c97ee1447cb3a78c0ebf65f4ecaff90c84b18313645d5d043c62d277e9 (re-pack, comment fix only), codex-review clean (no BLOCKING); re-time HELD until item 2 concludes.
+- No local pass-rate scores yet. eval-runner-fix MERGED to main 70c0d9f (codex review clean + N1 count-cap fix d13ceac; 421 pass, 3 skip).
+  Test cmd: /home/ubuntu/gemma-local/venv/bin/python3 with pyimg cp3.13 site-packages appended to sys.path, pytest eval/tests.
+
+## Eval data
+- Splits v2 FROZEN: clean 48 (rich 39, fastapi 9), dev 33, holdout 15; holdout uses = 0. Hashes: eval/splits/MANIFEST.json.
+- requests/httpx dropped (wheel shadowing = scorer property, dec 014). Gold v2 files in results/ (gold_calibration_*, gold_failure_causes).
+
+## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
+- Linger check (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`; if not, tell the Director. After the NEXT reboot, once: `systemctl --user list-units --type=service --state=running`, names only; report non-ours units to the Director, never inspect or touch them (may be Etho).
+- Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
+- bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
+
+## Running jobs (19:08Z)
+- memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
+- kernel-setup-accept-r4 DONE (status failed = acceptance gate, not a crash): results/plan003_kernel_setup_acceptance_r4local.json (worktree). Docker order (SETUP_FIX=1): rich_3006 editable rc 1, 5 Retrying (base tar re-injects rich-15.0.0 dist-info, record_exists false, over the 13.4.2 editable); fastapi_14986 rc 0, 0 Retrying (0.132.0 with RECORD seen). SETUP_FIX=0: both fail.
+- Builder reading: the REAL harness causes it: swegemma container_setup.py:266 strips '/RECORD' from injected wheels, base set includes the task's own package (skip set only pytest/pip/...), injection runs after install_editable_package. -> likely dec 027 2a STOP (S~210 s = scorer property). fastapi pass may be dist-info ordering luck.
+- review-kernel-setup4-light: codex-review falsifying that claim (+ fastapi pass, fidelity, scorer-image escape hatches). -> then report 005-prelim NEEDS_DECISION.
+- memguard-fix5-livetest (heavy): host livetest of round 5 652f2cd (Codex: 87 pass/1 skip offline, 88 live) in worktree gemma-wt/codex-memguard-fix5, script ops/codex/memguard-fix5-livetest.sh. Green -> codex-review -> merge + deploy.
+- NOTE: bin/codex-build always branches from main HEAD; for follow-up rounds reset the new worktree onto the previous round's commit before running ops/codex/build-<name>.sh.
+- sandbox-limits r3 on main: full eval/tests on main NOT yet run (one heavy at a time). Caveats: 8 GiB AS backstop; gold_calibration worker timeout lacks descendant cleanup.
+
+## 2a DIAGNOSIS (cycle 75, local): results/plan003_kernel_setup_acceptance_r3local.json
+- CODEX CHECK (ops/codex/review-20261105T184723.md, cycle 76): RECORD-less injection -> uninstall-no-record-file -> index fallback is SUPPORTED as a harness hazard, but NOT shown for the Docker order (Docker runs an editable install BEFORE injection; existing RECORDs survive tar extraction). One fallback per setup.py call, not two. SETUP_FIX=0 'success' = contaminated control (empty cached base tar sp_base_local). -> 2a STOP not yet justified; round 4 fixes fidelity first. Report 005-prelim deferred until round-4 acceptance.
+- accept3 failed only because the bwrap re-exec loses sys.path (pytest-timeout 2.1.0 lives in pyimg). Fixed locally with PYTHONPATH=/home/ubuntu/gemma-local/imgrt-stub (pytest-timeout 2.1.0 + pathspec/trove-classifiers/shellingham copied from pyimg = local stand-in for the image runtime). accept8: tool deps closed (missing []).
+- SETUP_FIX=1 still fails on both tasks: the competition setup.py's offline editable install -> "uninstall-no-record-file" for rich 15.0.0 / fastapi 0.141.1. Cause: the harness's base tar (container_setup skip_base_pkgs) injects the task's OWN package without RECORD; pip then falls back to an index install (5 Retrying lines; on Kaggle ~103 s/call x2 = ~207 s). SETUP_FIX=0: editable rc 0 in ~3 s (why unclear).
+- If confirmed, this is the competition's own harness -> dec 027 item 2a STOP rule: the artifact conclusion is void, 2b is moot, S~210 s is likely a scorer property. Do NOT push Kaggle 2a/2b until the Director decides.
+
+## bin/job, memguard, owner patch (cycles 62-66)
+- Linger=yes since ~18:05Z (dec 025): the scope path (MemoryMax=5G) is normal; Codex works under it.
+- Owner patch v2 = ONE diff (dec 024 item 3; dec 026: HOLD for Aniket, low urgency, after the critical path; keep the RLIMIT_DATA comment): ops/patches/bin-job-fallback.diff. v2 review ops/codex/review-20261105T180811.md: 3 BLOCKING (grep regex marker -> use grep -F; PID reuse between scan and signal plus cached group_ok -> bind identities (pidfd); legacy 3/4-field records -> refuse destructive signalling without identity evidence). Plan v3: a small Python helper using pidfds (like memguard) called from bin/job kill. NOT started (low urgency).
+- memguard-fix: round 2 adae3eb review ops/codex/review-20261105T182108.md: 2 BLOCKING (legacy history merge in setdefault; two guards target each other). Round 3 job codex-memguard-fix3 (spec ops/codex/build-memguard-fix3.spec): history merge + protect every memguard process/wrapper. DEPLOY CHANGED: no overlap. With no heavy jobs running, stop pid 7933, then start memguard-light at once. Then host livetest (ops/codex/memguard-fix-livetest.sh) + re-review; merge only with no BLOCKING.
+- sandbox-limits round 3 9d610b5 (wait4 ru_maxrss peak; Codex 459 pass/4 skip). Host test job sandbox-limits3-hosttest; if green -> codex-review -> merge eval/ only.
+
+## Dec 027 (report 004 approved, option B with fidelity changes): plan 004 pre-registered (eval/plans/004.md)
+- FIDELITY: the timing kernel may only reproduce Dockerfile.public (pip + the line-9 tool set, offline). NO PIP_NO_INDEX/retry prefixes. setup_calls logging is mandatory.
+- Build chain on branch codex/kernel-setup-fix: round 1 c57bd65 (437 pass; still has the PIP prefix; bwrap acceptance blocked in Codex's sandbox; local wheelhouse lacks pip/pytest-timeout wheels). Round 2 DONE b21e400 (444 pass/4 skip; Codex's bwrap blocked: NETLINK). Now running locally (job kernel-setup-accept): eval/repro/plan003_kernel_setup.py locally (both modes) + codex-review, then push CPU stage 2a.
+- Kaggle CPU session (no GPU quota): 2a UNFIXED on rich_3006 + fastapi_14986 -> WHY. If the cause is the competition's own harness/wheel ABI, STOP and report. 2b FIXED on 16 ids (eval/plans/004-setup-check-ids.txt). Gate: setup <= 30 s, editable rc 0 16/16, 0 Retrying. -> results/kaggle_setup_cpu_check.json; log in ops/budget/kaggle.md.
+- Only if 2b passes: ONE GPU re-time of v000 cap 5 on eval/plans/004-gpu-retime-ids.txt (not a ship candidate). If 2b fails: re-time v001 instead.
+- Ship cap = both (i) (cap+S)x125+30 <= 660 and (ii) (cap + 0.875 + 0.75S)x125+30 <= 660 -> ~4.0 min at S~10 s -> e4b-v002 after the re-time.
+- Report 005: the 2a cause, the CPU gate, the GPU re-time, and the first-submission bundle with its cap derivation (the Director will run a codex-ask adversarial check).
+- Item 6 / dec 022 item 4: scoped (ops/codex/ask-20261105T181222.md). The harness's fallback diff already covers caps/overflow when submit_patch was NOT called; submit_patch freezes the patch (an empty submit loses everything). No bundle-level output trimming or compaction knob exists; the timing kernel compaction = starter cell 10 (faithful). Draft prompt bundles/drafts/item4-system.md; plan 005 pre-registered (paired A/B at the v002 cap, needs GPU: ask in report 005).
+- Background (plan 003): hung-index fallback 103.4 s/call; 2 calls = 206.8 s vs Kaggle 207-211 s. results/plan003_pip_fallback_repro.json.
+
+## OOM incident (dec 020/021)
+- Root cause from runs/gold-null2: null-phase rows 22 rich_4006 (327 s), 38 rich_3480 (2683 s), 39 rich_3772 (2867 s) hit exit 124. The harness executor already uses start_new_session+killpg (adk_eval_core subprocess_sandbox.py:57), so the orphan theory is weaker; the leading suspect is unbounded memory in a null-patch rich test with no per-sandbox memory cap (none locally; the scorer has 4 GiB). Unproven: no RSS was logged. The codex-sandbox-limits fix covers both.
+- bin/job hardening: APPLIED by Aniket (b1eedd7). The review-memguard rerun still covers it.
+
+## Quota / spend
+- GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
+- Kaggle GPU this week: 0.07 h used (v1+v2 failed fast, per `kaggle quota`); 3.48 quota-h used after v3 (~1.74 L4x4 h). Log: ops/budget/kaggle.md. Resets Sat 00:00Z.
+
+## Live caveats
+- Job naming (dec 024): waiters, codex-ask and codex-review jobs end in -light; builds, test suites and evals never do.
+- LORO with only 2 repos (rich, fastapi) is weak; report 002 must say so (dec 014 item 3).
+- Paper evidence due Nov 9 23:59Z (dec 007): schema-headed results/ files for gold calibration (done), Kaggle E4B timing (pending), failure taxonomy via trace-analyst once (pending). paper/ is the paper session's; don't edit.
+- Director reminder due 2026-11-06T23:02Z: GCP quota re-request line to Aniket; keep until a decision marks it done.
+- Any Kaggle GPU kernel must pin the starter docker_image (py3.12, cp312 wheelhouse).
+- Hosted-LLM-API data question OPEN; no new third-party services.
+- One pending Kaggle submission at a time; no partial credit on timeout (docs/RULES_FINDINGS.md).
+
+
+## Timing facts (results/kaggle_timing_e4b_v000_setup.json)
+- Harness sandbox setup ~210 s/task, outside max_time_minutes (the budget clock starts after setup); flat across repos.
+- vLLM startup 5.39 min; verification ~410 s (excluded from the 12 h). Agent clock p90 144 s at cap 5.
+- Corrected rule proposed: (cap + max setup) x125 + 30 <= 660 -> cap <= 1.51 min.
+
+## Open decisions / instructions in force
+- Dec 022 (report 003): interim timing rule = (cap + max measured setup) x125 + 30 <= 660. Item 2 setup root-cause IN PROGRESS (ask-setup-210s + scout). Item 3: v001 (cap 1.4) may be built/packed now, but the re-time can't be pushed until item 2 concludes; ONE Kaggle timing run. Item 4 (truncation-safe diff, patch hygiene, tool-output trimming) to start. Item 5: no 31B timing yet. Report 004 next.
+- Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
+
+## Next 3
+1. review-kernel-setup4-light done -> report 005-prelim (2a cause = competition harness RECORD strip? STOP per dec 027 2a, or push Kaggle CPU 2a/2b) -> NEEDS_DECISION.
+2. memguard-fix5-livetest done -> codex-review; no BLOCKING -> merge, deploy (stop 7933, start memguard-light at once).
+3. Full eval/tests on main; then EV-1 + cpu8 gold/null run.
+# Plan 004: Kaggle CPU setup check, then ONE GPU re-time (dec 027; pre-registered 2026-11-05T18:15Z, before any run)
+Ids: eval/plans/004-setup-check-ids.txt (8 plan-001 ids + 8 fresh dev ids, seeded, 6 rich + 2 fastapi); GPU: 004-gpu-retime-ids.txt (the 8 fresh).
+Fidelity rule (dec 027 item 1): the kernel may only reproduce what Dockerfile.public provides (pip + the line-9 tool set, offline).
+No PIP_NO_INDEX/retry/timeout prefixes. setup_calls logging (per step: offset, duration, rc, bounded stdout/stderr) is mandatory.
+## Stage 2a: UNFIXED install(), 2 tasks (rich_3006, fastapi_14986), CPU session, internet OFF, starter image pinned, no model
+Hypothesis: setup.py:208 fails for a kernel-only reason (no pip in the venv, or a missing backend), and :211 hangs ~103 s x2.
+Outcomes:
+- the cause is pip absent / backend absent in OUR venv only -> artifact confirmed -> stage 2b.
+- the cause is wheel/ABI selection inside the competition's own harness or wheelhouse (the scorer may share it) -> STOP; the artifact conclusion is void; report.
+- no fallback and setup < 30 s even unfixed -> the Kaggle GPU-session environment differs; report before 2b.
+## Stage 2b: FIXED kernel, all 16 ids, CPU session
+Gate (all must hold): per-task setup <= 30 s; editable install rc 0 on 16/16; zero pip "Retrying" lines. Output: results/kaggle_setup_cpu_check.json.
+## Stage 3 (only if 2b passes): ONE GPU re-time of e4b v000 at cap 5 on the 8 fresh ids, verification skipped, L4x4
+Measures agent time + real setup. v000 at cap 5 is NOT a ship candidate.
+If 2b fails (setup still >= 60 s): re-time e4b-v001 (cap 1.4, sha256 f2ced9c9...) instead. Still only one GPU run.
+## Ship cap (dec 022 item 1 + dec 027 item 4); both must hold:
+(i) (cap + S) x 125 + 30 <= 660; (ii) (cap + 0.25 x 3.5 + 0.75 x S) x 125 + 30 <= 660, where S = max measured 4xL4 setup (min).
+Expected with S ~ 10 s: cap ~ 4.0 min -> e4b-v002.
+# Report 004: the ~210 s per-task setup is (very likely) an artifact of our timing kernel
+
+## 1. Question for the Director
+Dec 022 item 2 is concluded as "artifact of our kernel". Do we take the artifact branch of item 3: fix the kernel, verify setup on a Kaggle **CPU** session (no GPU quota), then ONE GPU re-time of v000 at cap 5?
+
+## 2. Pre-registration
+eval/plans/003.md (written 18:03Z, before any repro result). Hypothesis: the offline editable install in sandbox/setup.py:208 fails in our subprocess sandbox, and the fallback at :211 (index-backed, PIP_* stripped) waits on an unreachable index. Decision rule: if (1) the offline call fails fast, AND (2) the fallback against a hanging index takes >= 90 s, AND (3) the offline call succeeds fast once the backend is present, then "artifact" is supported. Then fix the kernel and re-time v000 at cap 5 (dec 022 item 3).
+
+## 3. What I did (git 0b09985 + this commit)
+- 2a: per-task breakdown from the Kaggle log -> results/kaggle_timing_e4b_v000_setup_breakdown.json. The whole ~208 s sits between the "ensurepip unavailable" warning and the first prompt, i.e. dependency setup. No per-command timestamps exist.
+- 2b: codex-ask code read (ops/codex/ask-20261105T175253.md): no unconditional 210 s wait anywhere in the harness. setup.py makes only 3 subprocess calls (:208, :211, :390 slow path), and verification runs dependency setup twice (it takes ~410 s, 2x). The scorer image (Dockerfile.public:9) pre-installs pip and all the build backends; our kernel's venv was created WITHOUT pip.
+- 2c: public caps -> docs/RULES_FINDINGS.md C1-C3 (the starter defaults to 60 min when the key is absent; sample_submission uses 1 min; the "[0.10]" notebook uses 4.5 min, which bounds only the MEAN setup+agent time, < ~5.9 min).
+- 2d: Codex's adversarial take is included in 2b: ~80% artifact. Its strongest counter-argument is that constant input can mean constant real work. The wheelhouse is 27 MB, so extracting it is not 210 s.
+- Plan 003 local repro: eval/repro/plan003_pipfb_v{1,2}.sh. v1 was invalid (pip ignores plain-http untrusted indexes) and is reported here, not hidden.
+
+## 4. Results (results/plan003_pip_fallback_repro.json; Kaggle data results/kaggle_timing_e4b_v000_setup_breakdown.json)
+| case (fresh py3.13 venv, no backend) | poetry-core | pdm-backend |
+|---|---|---|
+| (1) offline --no-index --no-build-isolation | 0.3 s, rc 2 (fails) | 0.3 s, rc 2 |
+| (2) fallback, https index that hangs | **103.4 s**, rc 1, 5 retries | **103.3 s**, rc 1, 5 retries |
+| (2') fallback, index DNS fails | 8.0 s, rc 1 | 8.0 s, rc 1 |
+| (3) offline after backend installed | 0.6 s, rc 0 | 0.4 s, rc 0 |
+
+| Kaggle quantity (n=8 tasks, 1 sample each) | measured | repro prediction |
+|---|---|---|
+| setup (warning -> first prompt) | 207.4-210.8 s | 2 hung calls = 206.8 s |
+| verification wall (2 setups) | 410.1-411.9 s | 4 hung calls = 413.4 s |
+
+The decision rule is met on all three conditions. Caveats: (a) Kaggle's setup.py output was never captured, so WHY its offline install failed is unproven. Our injector does extract poetry_core/pdm_backend; the leading candidate is that the pip came from the system site-packages, combined with an ABI or path issue (Codex also flags cp313 wheels selected for a py3.12 run). (b) "2 hung calls per setup" is inferred from the timing match, not observed. No paired pass-rate comparison applies (this is a timing question).
+
+Implication: if the fix holds, setup drops to ~seconds and the interim rule gives a max cap of (660-30)/125 - setup ≈ **4.85 min** (setup 10 s). cap 5 itself still fails the gate: (5+0.2)x125+30 = 680. A re-time at cap 5 measures agent time; the ship cap would be ~4.75. 31B (dec 022 item 5): the ~1.4-min squeeze would not apply, so there's no track-split change yet.
+
+## 5. Options
+A. **Artifact branch as written** (dec 022 item 3a): merge the kernel fix (codex-build kernel-setup-fix, running; spec ops/codex/build-kernel-setup-fix.spec: pip + Dockerfile.public tool set offline in the sandbox venv, PIP_NO_INDEX prefix, per-step setup_calls logged, bwrap --unshare-net local acceptance), then ONE GPU re-time of v000 at cap 5 on 8 fresh dev ids, verification skipped (~1.7 L4x4 h). Risk: if the fix is incomplete on Kaggle, we burn the one run.
+B. **A, plus a CPU-only Kaggle check first** (recommended): push the fixed kernel as a CPU session, internet off, pinned image, setup only, no model, on the same 8 + 8 fresh ids. It costs no GPU quota and ~20 min wall. It captures the real setup.py output. Gate: per-task setup <= 30 s and editable install rc 0 on all tasks. Only then the GPU re-time (A). If setup is still >= 60 s, fall back to C with real evidence.
+C. **Treat as unresolved**: re-time v001 (cap 1.4). Safe, but it probably guts quality on both tracks, and the evidence now argues against it.
+
+## 6. Recommendation
+B. Requests: approve a Kaggle CPU-only setup-verification session (no GPU quota), then the single dec 022 GPU timing run of v000 at cap 5 after the CPU gate passes. No submission, no holdout use, no GCP spend.
+
+exec
+/bin/bash -lc "git status --short && git rev-parse HEAD && rg --files -g AGENTS.md -g '*acceptance*' -g '*Dockerfile*' -g '*setup*' -g '*kernel*'" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+?? results/plan003_kernel_setup_acceptance_r4local.json
+?? results/plan003_kernel_setup_acceptance_r4local_artifacts/
+c4c9528bdfbbf1bdd9851044c62a09dd9f1f1383
+ops/jobs/ask-setup-210s.unit
+ops/jobs/codex-gold-kernel.status
+ops/jobs/ask-setup-210s.status
+ops/jobs/codex-timing-kernel.cmd
+ops/jobs/ask-setup-210s.cmd
+ops/jobs/codex-timing-kernel.status
+ops/jobs/codex-gold-kernel.cmd
+ops/codex/build-gold-kernel.md
+ops/codex/build-gold-kernel.log
+ops/codex/build-timing-kernel.spec
+ops/codex/build-timing-kernel.md
+ops/codex/build-gold-kernel.sh
+ops/codex/build-timing-kernel.sh
+ops/codex/build-gold-kernel.spec
+ops/codex/build-timing-kernel.log
+AGENTS.md
+eval/repro/plan003_kernel_setup.py
+eval/repro/plan003_kernel_setup.md
+eval/kaggle/setup_check_summary.py
+eval/kaggle/setup_check_push.sh
+eval/kaggle/stage_kernel.py
+eval/tests/test_setup_check.py
+setup_vm.sh
+results/kaggle_timing_e4b_v000_setup.json
+results/plan003_kernel_setup_acceptance.json
+results/kaggle_timing_e4b_v000_setup_breakdown.json
+results/plan003_kernel_setup_acceptance_r4local.json
+
+exec
+/bin/bash -lc "rg -n 'patch_subprocess_deps|_inspect_wheels_dir|_build_unpacked_wheels_tar|_ensure_container_site_packages|install_editable_package|setup_container_workspace|RECORD|skip|cache' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix/eval/sandbox_env.py; rg --files /home/ubuntu/gemma-local -g '*Dockerfile*' -g '*setup.py' -g AGENTS.md" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/work/gemma-wt/codex-kernel-setup-fix/eval/sandbox_env.py:173:    patched = patch_subprocess_deps(data_dir)
+/home/ubuntu/work/gemma-wt/codex-kernel-setup-fix/eval/sandbox_env.py:242:def patch_subprocess_deps(data_dir):
+/home/ubuntu/work/gemma-wt/codex-kernel-setup-fix/eval/sandbox_env.py:243:    """Emulate the docker-only dependency setup for the subprocess sandbox (swegemma skips it).
+/home/ubuntu/work/gemma-wt/codex-kernel-setup-fix/eval/sandbox_env.py:245:    Contract (swegemma 0.2.11 container_setup): for docker, _ensure_container_site_packages
+/home/ubuntu/work/gemma-wt/codex-kernel-setup-fix/eval/sandbox_env.py:247:    < 20 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
+/home/ubuntu/work/gemma-wt/codex-kernel-setup-fix/eval/sandbox_env.py:272:        base_wheels, large_wheels, _m2p, _req = cs._inspect_wheels_dir(wheels_src)
+/home/ubuntu/work/gemma-wt/codex-kernel-setup-fix/eval/sandbox_env.py:276:        tar_path = cs._build_unpacked_wheels_tar(selected, 'sp_base_local', '.swegemma_base_injected')
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:144:def _inspect_wheels_dir(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:155:    skip_base_pkgs = {
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:179:        if pkg_norm in skip_base_pkgs:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:233:def _build_unpacked_wheels_tar(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:234:    selected_wheels: list[Path], cache_name: str, marker_name: str
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:236:    """Unpacks selected_wheels into a cached uncompressed tar archive with a marker file."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:244:    cache_dir = Path(tempfile.gettempdir()) / 'swegemma_sp_cache_v8'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:245:    cache_dir.mkdir(parents=True, exist_ok=True)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:246:    tar_path = cache_dir / f'{cache_name}.tar'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:255:        staging_dir = cache_dir / f'staging_{cache_name}_{os.getpid()}_{uid}'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:266:                        if not m.filename.endswith(('.pyc', '/RECORD'))
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:288:            tmp_tar = cache_dir / f'{cache_name}_{os.getpid()}_{uid}.tar.tmp'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:318:def _ensure_container_site_packages(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:324:    """Dynamically injects cached unpacked wheels into container site-packages based on workspace imports."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:332:    base_wheels, large_wheels, module_to_pkg, pkg_requires = _inspect_wheels_dir(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:340:        base_tar = _build_unpacked_wheels_tar(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:385:            w_tar = _build_unpacked_wheels_tar(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:400:            'Container %s already has wheels populated in /wheels, skipping copy.',
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:502:        'mkdir -p /workspace/.git/info && printf "__pycache__/\\n*.pyc\\n.pytest_cache/\\n*.egg-info/\\nbuild/\\ndist/\\n.coverage\\n.adk_exec_*.py\\n" >> /workspace/.git/info/exclude',
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:506:def install_editable_package(docker: BaseSandboxManager, container_id: str) -> None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:507:    """Installs the workspace package in editable mode using pre-cached wheels.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:531:    _ensure_container_site_packages(docker, container_id, repo, config)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:941:def setup_container_workspace(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py:958:    install_editable_package(docker, container_id)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/tracing/AGENTS.md
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/_experimental/mcp_server/AGENTS.md
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/client/cli/commands/configure_setup.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/telemetry/setup.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/rust_bridge/AGENTS.md
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/rust_bridge/host/AGENTS.md
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/_v2/cache/AGENTS.md
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/_v2/AGENTS.md
+

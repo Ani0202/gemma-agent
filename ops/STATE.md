@@ -29,7 +29,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 
 ## 2a DIAGNOSIS (cycle 75, local): results/plan003_kernel_setup_acceptance_r3local.json
 - CODEX CHECK (ops/codex/review-20261105T184723.md, cycle 76): RECORD-less injection -> uninstall-no-record-file -> index fallback is SUPPORTED as a harness hazard, but NOT shown for the Docker order (Docker runs an editable install BEFORE injection; existing RECORDs survive tar extraction). One fallback per setup.py call, not two. SETUP_FIX=0 'success' = contaminated control (empty cached base tar sp_base_local). -> 2a STOP not yet justified; round 4 fixes fidelity first. Report 005-prelim deferred until round-4 acceptance.
-- accept3 failed only because the bwrap re-exec loses sys.path (pytest-timeout 2.1.0 lives in pyimg). Fixed locally with PYTHONPATH=/home/ubuntu/gemma-local/imgrt-stub (pytest-timeout 2.1.0 + pathspec/trove-classifiers/shellingham copied from pyimg = local stand-in for the image runtime). accept8: tool deps closed (missing []).
 - SETUP_FIX=1 still fails on both tasks: the competition setup.py's offline editable install -> "uninstall-no-record-file" for rich 15.0.0 / fastapi 0.141.1. Cause: the harness's base tar (container_setup skip_base_pkgs) injects the task's OWN package without RECORD; pip then falls back to an index install (5 Retrying lines; on Kaggle ~103 s/call x2 = ~207 s). SETUP_FIX=0: editable rc 0 in ~3 s (why unclear).
 - If confirmed, this is the competition's own harness -> dec 027 item 2a STOP rule: the artifact conclusion is void, 2b is moot, S~210 s is likely a scorer property. Do NOT push Kaggle 2a/2b until the Director decides.
 
@@ -65,7 +64,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Any Kaggle GPU kernel must pin the starter docker_image (py3.12, cp312 wheelhouse).
 - Hosted-LLM-API data question OPEN; no new third-party services.
 - One pending Kaggle submission at a time; no partial credit on timeout (docs/RULES_FINDINGS.md).
-
 
 ## Timing facts (results/kaggle_timing_e4b_v000_setup.json)
 - Harness sandbox setup ~210 s/task, outside max_time_minutes (the budget clock starts after setup); flat across repos.
