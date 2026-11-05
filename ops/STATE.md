@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 18:30Z (cycle 72, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 18:34Z (cycle 73, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -18,11 +18,12 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
-## Running jobs (18:30Z)
+## Running jobs (18:34Z)
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
-- kernel-setup-accept (local plan003_kernel_setup.py, both SETUP_FIX modes, in worktree codex-kernel-setup-fix b21e400; output that worktree's results/plan003_kernel_setup_acceptance.json).
 - review-sandbox-limits3-light (codex review of 9d610b5; host test 460 pass/3 skip).
-- codex-memguard-fix3 (round 3).
+- memguard-fix3-livetest (MEMGUARD_LIVE=1 on b299167; Codex: 62 pass/1 skip offline, 63 live).
+- codex-kernel-setup-fix3 (round 3 on codex/kernel-setup-fix; spec ops/codex/build-kernel-setup-fix3.spec).
+- kernel-setup-accept FAILED (cycle 73): SETUP_FIX=0 OK locally (setup 2.9 s / 5.6 s, editable rc 0; no 210 s locally). SETUP_FIX=1 tool_install rc 1: wheelhouse lacks the line-9 dependency closure (pathspec, trove-classifiers for hatchling; shellingham for typer; pytest-timeout 2.1.0). Fix3 = --no-deps tools + closure from wheelhouse, else runtime copy, else log missing_tool_deps (non-fatal) + pip check step. Then re-run acceptance locally.
 
 ## bin/job, memguard, owner patch (cycles 62-66)
 - Linger=yes since ~18:05Z (dec 025): the scope path (MemoryMax=5G) is normal; Codex works under it.
@@ -73,6 +74,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
 ## Next 3
-1. kernel-setup-accept done -> read the acceptance JSON (setup durations, pip errors per mode), codex-review b21e400, push CPU stage 2a (log in ops/budget/kaggle.md).
-2. review-sandbox-limits3-light: no BLOCKING -> merge eval/ only; codex-memguard-fix3 -> livetest -> review -> deploy (no overlap).
+1. codex-kernel-setup-fix3 done -> re-run eval/repro/plan003_kernel_setup.py locally (both modes ok, editable rc 0) -> codex-review -> push CPU stage 2a (log in ops/budget/kaggle.md).
+2. review-sandbox-limits3-light: no BLOCKING -> merge eval/ only. memguard-fix3-livetest green -> codex-review b299167 -> deploy (no overlap: stop 7933, start memguard-light).
 3. EV-1 + the cpu8 gold/null run after the sandbox-limits merge; plan 005 A/B needs GPU (ask in report 005).
