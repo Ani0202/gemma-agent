@@ -482,3 +482,2857 @@ ops/codex/review-20261105T155357.md:1:**BLOCKING**
 ....ss.............................                                      [100%]
 460 passed, 3 skipped, 4 subtests passed in 15.21s
 
+exec
+/bin/bash -lc 'nl -ba eval/tests/test_sandbox_limits.py && nl -ba eval/sandbox_env.py' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+     1	"""Offline, bounded process-tree regression tests; no competition tasks."""
+     2	import os
+     3	from pathlib import Path
+     4	import shlex
+     5	import sys
+     6	import time
+     7	from dataclasses import replace
+     8	from types import SimpleNamespace
+     9	
+    10	import pytest
+    11	
+    12	os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
+    13	
+    14	from eval import proctree, sandbox_env
+    15	from adk_eval_core.sandbox.subprocess_sandbox import execute_subprocess_command as original
+    16	
+    17	
+    18	@pytest.fixture
+    19	def execute(tmp_path, monkeypatch):
+    20	    import swegemma.sandbox.subprocess as sb
+    21	    monkeypatch.setattr(sb, 'execute_subprocess_command', original)
+    22	    sandbox_env.apply_isolation([], [])
+    23	    metrics = {}
+    24	    token = sandbox_env.command_metrics.set(metrics)
+    25	    def run(command, **kwargs):
+    26	        return sb.execute_subprocess_command(command=command, cwd=tmp_path,
+    27	                                             env=dict(os.environ), **kwargs)
+    28	    yield run, metrics
+    29	    sandbox_env.command_metrics.reset(token)
+    30	
+    31	
+    32	def python(code):
+    33	    return [sys.executable, '-c', code]
+    34	
+    35	
+    36	def assert_dead(path):
+    37	    pid = int(path.read_text())
+    38	    p = proctree.snapshot().get(pid)
+    39	    assert p is None or p.state in ('Z', 'X')
+    40	
+    41	
+    42	@pytest.mark.parametrize('detach', [False, True])
+    43	def test_timeout_orphans(execute, tmp_path, detach):
+    44	    run, metrics = execute
+    45	    if detach:
+    46	        code = ("import os,time; p=os.fork(); "
+    47	                "os._exit(0) if p else None; os.setsid(); "
+    48	                "open('child.pid','w').write(str(os.getpid())); time.sleep(600)")
+    49	        cmd = ['/bin/bash', '-c', shlex.join(python(code)) + '; sleep 600']
+    50	    else:
+    51	        cmd = ['/bin/bash', '-c', '(sleep 600 & echo $! > child.pid); sleep 600']
+    52	    start = time.monotonic()
+    53	    result = run(cmd, timeout=1)
+    54	    assert result.status == 'timeout' and result.exit_code == 124
+    55	    assert metrics['cmd_timeouts'] == 1
+    56	    assert_dead(tmp_path / 'child.pid')
+    57	    assert time.monotonic() - start < 5
+    58	
+    59	
+    60	def test_memory_tree(execute, monkeypatch):
+    61	    run, metrics = execute
+    62	    monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(300 * 1024**2))
+    63	    code = ("import time; chunks=[]\nfor _ in range(60):\n"
+    64	            " chunks.append(bytearray(10*1024**2)); time.sleep(.04)\ntime.sleep(600)")
+    65	    # Allocate in a child, so accounting must include descendants.
+    66	    result = run(['/bin/bash', '-c', shlex.join(python(code)) + ' & wait'], timeout=8)
+    67	    assert result.status == 'error' and result.exit_code == 137
+    68	    assert 'killed: sandbox memory limit' in result.stderr
+    69	    assert metrics['mem_kills'] == 1
+    70	    assert metrics['peak_rss_bytes'] > 300 * 1024**2
+    71	
+    72	
+    73	@pytest.mark.parametrize('command,kwargs', [
+    74	    (['/bin/bash', '-c', 'echo hello'], {}),
+    75	    (['/bin/bash', '-c', 'exit 3'], {}),
+    76	    (['/bin/bash', '-c', 'exit 137'], {}),
+    77	    (['/bin/bash', '-c', 'echo err >&2'], {}),
+    78	    ('printf hello', {}),
+    79	    (['/bin/bash', '-c', 'printf abcdef'], {'max_output_chars': 3}),
+    80	    (python("import os; os.write(1, b'\\xff')"), {}),
+    81	])
+    82	def test_original_output_contract(execute, tmp_path, command, kwargs):
+    83	    run, metrics = execute
+    84	    expected = original(command, tmp_path, dict(os.environ), **kwargs)
+    85	    actual = run(command, **kwargs)
+    86	    assert type(actual) is type(expected)
+    87	    assert (actual.status, actual.exit_code, actual.stdout, actual.stderr) == (
+    88	        expected.status, expected.exit_code, expected.stdout, expected.stderr)
+    89	    assert metrics['peak_rss_bytes'] > 0
+    90	
+    91	
+    92	def test_normal_exit_daemon(execute, tmp_path):
+    93	    run, metrics = execute
+    94	    result = run(['/bin/bash', '-c', 'sleep 600 >/dev/null 2>&1 & echo $! > child.pid'], timeout=3)
+    95	    assert result.status == 'ok' and result.exit_code == 0
+    96	    assert metrics['orphan_kills'] >= 1
+    97	    assert_dead(tmp_path / 'child.pid')
+    98	
+    99	
+   100	def test_pid_reuse_is_not_a_survivor():
+   101	    p = proctree.snapshot()[os.getpid()]
+   102	    stale = replace(p, starttime=p.starttime - 1)
+   103	    assert proctree.survivors({p.pid: stale}) == {}
+   104	    assert proctree.kill_tree({p.pid: stale}) == 0
+   105	    assert proctree.tree_rss({p.pid: p}) > 0
+   106	
+   107	
+   108	def test_without_prlimit(execute, monkeypatch):
+   109	    run, metrics = execute
+   110	    source = proctree.supervisor_source().replace(
+   111	        "prlimit = shutil.which('prlimit')", 'prlimit = None')
+   112	    monkeypatch.setattr(proctree, 'supervisor_source', lambda: source)
+   113	    result = run(['/bin/bash', '-c', 'echo fallback'])
+   114	    assert result.status == 'ok' and result.stdout == 'fallback\n'
+   115	    assert metrics['peak_rss_bytes'] > 0
+   116	
+   117	
+   118	@pytest.mark.parametrize('without_prlimit', [False, True])
+   119	def test_submillisecond_command_rss_without_polling(execute, monkeypatch, without_prlimit):
+   120	    run, metrics = execute
+   121	    # /bin/true does sub-millisecond work. Force all tree RSS samples to miss
+   122	    # it, regardless of host scheduling or the overhead of starting a process.
+   123	    source = proctree.supervisor_source().replace(
+   124	        'rss = tree_rss(live, processes)', 'rss = 0')
+   125	    if without_prlimit:
+   126	        source = source.replace("prlimit = shutil.which('prlimit')", 'prlimit = None')
+   127	    monkeypatch.setattr(proctree, 'supervisor_source', lambda: source)
+   128	    result = run(['/bin/true'])
+   129	    assert result.status == 'ok' and result.exit_code == 0
+   130	    assert metrics['peak_rss_bytes'] > 0
+   131	    assert metrics['mem_kills'] == 0
+   132	
+   133	
+   134	@pytest.mark.parametrize('method', ['poll', 'wait', 'communicate'])
+   135	def test_direct_child_wait4_rss(method):
+   136	    # Verify all Popen reaping paths, including communicate's internal wait.
+   137	    proc = proctree.RusagePopen(['/bin/true'])
+   138	    try:
+   139	        if method == 'poll':
+   140	            deadline = time.monotonic() + 5
+   141	            while proc.poll() is None:
+   142	                assert time.monotonic() < deadline
+   143	                time.sleep(.001)
+   144	        else:
+   145	            getattr(proc, method)(timeout=5)
+   146	        assert proc.returncode == 0
+   147	        assert proc.peak_rss_bytes > 0
+   148	    finally:
+   149	        if proc.poll() is None:
+   150	            proc.kill()
+   151	        proc.wait()
+   152	
+   153	
+   154	@pytest.mark.parametrize('polled_rss', [0, 5 * 1024**2])
+   155	def test_reaped_rss_is_maximum_not_sum_or_kill_trigger(monkeypatch, tmp_path, polled_rss):
+   156	    import io
+   157	    runner = proctree.snapshot()[os.getpid()]
+   158	    parent = replace(runner, pid=runner.pid + 100000, ppid=runner.pid, rss=polled_rss)
+   159	    processes = {runner.pid: runner, parent.pid: parent}
+   160	
+   161	    class ExitingParent:
+   162	        pid = parent.pid
+   163	        returncode = None
+   164	        peak_rss_bytes = 3 * 1024**2
+   165	        stdout, stderr = io.StringIO(), io.StringIO()
+   166	
+   167	        def poll(self):
+   168	            return self.returncode
+   169	
+   170	        def communicate(self, timeout=None):
+   171	            processes.pop(parent.pid, None)
+   172	            self.returncode = 0
+   173	            return '', ''
+   174	
+   175	    # Two adopted children with peaks of 4 and 2 MiB. Their peaks must be
+   176	    # converted from Linux KiB and maximized with the direct child's 3 MiB.
+   177	    reaped = iter([(parent.pid + 1, 0, SimpleNamespace(ru_maxrss=4096)),
+   178	                   (parent.pid + 2, 0, SimpleNamespace(ru_maxrss=2048))])
+   179	
+   180	    def wait_children(pid, flags):
+   181	        assert (pid, flags) == (-1, os.WNOHANG)
+   182	        try:
+   183	            return next(reaped)
+   184	        except StopIteration:
+   185	            raise ChildProcessError() from None
+   186	
+   187	    monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(polled_rss + 1))
+   188	    monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
+   189	    monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
+   190	    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
+   191	    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
+   192	    def kill(live):
+   193	        assert live == {}
+   194	        return 0
+   195	
+   196	    monkeypatch.setattr(proctree, 'kill_tree', kill)
+   197	    result = proctree.run_limited(['fake'], tmp_path, {})
+   198	    assert result['status'] == 'ok' and result['exit_code'] == 0
+   199	    assert result['metrics']['peak_rss_bytes'] == max(polled_rss, 4 * 1024**2)
+   200	    assert result['metrics']['mem_kills'] == 0
+   201	
+   202	
+   203	def test_envless_double_fork_is_reaped(execute, tmp_path):
+   204	    run, metrics = execute
+   205	    code = """
+   206	import os, time
+   207	r, w = os.pipe()
+   208	if os.fork():
+   209	    os.close(w)
+   210	    os.read(r, 1)
+   211	    os._exit(0)
+   212	os.close(r)
+   213	if os.fork():
+   214	    os._exit(0)
+   215	os.environ.clear()
+   216	os.setsid()
+   217	os.close(1)
+   218	os.close(2)
+   219	open('child.pid', 'w').write(str(os.getpid()))
+   220	os.write(w, b'1')
+   221	os.close(w)
+   222	time.sleep(600)
+   223	"""
+   224	    result = run(python(code), timeout=3)
+   225	    assert result.status == 'ok' and result.exit_code == 0
+   226	    assert metrics['orphan_kills'] >= 1
+   227	    # The adopted grandchild must be reaped, not merely left as a zombie.
+   228	    assert int((tmp_path / 'child.pid').read_text()) not in proctree.snapshot()
+   229	
+   230	
+   231	def test_pid_reuse_during_pidfd_open(monkeypatch):
+   232	    p = proctree.snapshot()[os.getpid()]
+   233	    processes = {p.pid: p}
+   234	    events = []
+   235	
+   236	    def open_fd(pid):
+   237	        processes[pid] = replace(p, starttime=p.starttime + 1)
+   238	        events.append('open')
+   239	        return 123
+   240	
+   241	    monkeypatch.setattr(proctree.os, 'pidfd_open', open_fd)
+   242	    monkeypatch.setattr(proctree, 'snapshot', lambda: processes)
+   243	    monkeypatch.setattr(proctree.signal, 'pidfd_send_signal', lambda *a: pytest.fail('reused pid signaled'))
+   244	    monkeypatch.setattr(proctree.os, 'close', lambda fd: events.append(('close', fd)))
+   245	    assert proctree.kill_tree({p.pid: p}) == 0
+   246	    assert events == ['open', ('close', 123)]
+   247	
+   248	
+   249	def test_reuse_after_verification_signals_bound_fd(monkeypatch):
+   250	    p = proctree.snapshot()[os.getpid()]
+   251	    events = []
+   252	    monkeypatch.setattr(proctree.os, 'pidfd_open', lambda pid: 123)
+   253	
+   254	    def scan():
+   255	        events.append('verify')
+   256	        return {p.pid: p}
+   257	
+   258	    def send(fd, sig):
+   259	        # A pid may now refer to another process; signaling the previously
+   260	        # opened fd still targets only the old identity (or returns ESRCH).
+   261	        assert events == ['verify']
+   262	        assert fd == 123 and sig == proctree.signal.SIGKILL
+   263	        events.append('signal fd')
+   264	        raise ProcessLookupError()
+   265	
+   266	    monkeypatch.setattr(proctree, 'snapshot', scan)
+   267	    monkeypatch.setattr(proctree.signal, 'pidfd_send_signal', send)
+   268	    monkeypatch.setattr(proctree.os, 'kill', lambda *a: pytest.fail('bare pid signal'))
+   269	    monkeypatch.setattr(proctree.os, 'killpg', lambda *a: pytest.fail('group signal'))
+   270	    monkeypatch.setattr(proctree.os, 'close', lambda fd: events.append('close'))
+   271	    assert proctree.kill_tree({p.pid: p}) == 0
+   272	    assert events == ['verify', 'signal fd', 'close']
+   273	
+   274	
+   275	def test_stale_tracked_identity_replaced():
+   276	    runner = proctree.snapshot()[os.getpid()]
+   277	    child = replace(runner, pid=runner.pid + 100000, ppid=runner.pid)
+   278	    stale = replace(child, starttime=child.starttime - 1)
+   279	    tracked = {child.pid: stale}
+   280	    live = proctree.track_descendants(tracked, runner, {runner.pid: runner, child.pid: child})
+   281	    assert tracked[child.pid] == child
+   282	    assert live == {child.pid: child}
+   283	    with pytest.raises(RuntimeError, match='identity changed'):
+   284	        proctree.track_descendants(tracked, stale, {runner.pid: runner, child.pid: child})
+   285	
+   286	
+   287	def test_memory_excess_first_seen_in_cleanup(monkeypatch, tmp_path):
+   288	    import io
+   289	    runner = proctree.snapshot()[os.getpid()]
+   290	    parent = replace(runner, pid=runner.pid + 100000, ppid=runner.pid, rss=1024)
+   291	    child = replace(parent, pid=parent.pid + 1, rss=301 * 1024**2)
+   292	    processes = {runner.pid: runner, parent.pid: parent}
+   293	
+   294	    class ExitingParent:
+   295	        pid = parent.pid
+   296	        returncode = None
+   297	        peak_rss_bytes = 4096
+   298	        stdout, stderr = io.StringIO(), io.StringIO()
+   299	
+   300	        def poll(self):
+   301	            return self.returncode
+   302	
+   303	        def communicate(self, timeout=None):
+   304	            # Parent exits 0 between live scan and cleanup. Only the cleanup
+   305	            # scan sees its adopted child above the 300 MiB aggregate limit.
+   306	            if self.returncode is None:
+   307	                processes.pop(parent.pid)
+   308	                self.returncode = 0
+   309	            return '', ''
+   310	
+   311	    def kill(identities):
+   312	        if not identities:
+   313	            return 0
+   314	        assert identities == {child.pid: child}
+   315	        processes.pop(child.pid)
+   316	        return 1
+   317	
+   318	    monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(300 * 1024**2))
+   319	    monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
+   320	    monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
+   321	    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
+   322	    monkeypatch.setattr(proctree, 'kill_tree', kill)
+   323	    waits = 0
+   324	
+   325	    def wait_children(pid, flags):
+   326	        nonlocal waits
+   327	        assert pid == -1
+   328	        waits += 1
+   329	        if waits == 1:
+   330	            # Simulate /proc missing a child during a fork/reparent race.
+   331	            # wait4 still sees it, so cleanup must scan again before success.
+   332	            processes[child.pid] = child
+   333	            return 0, 0, None
+   334	        raise ChildProcessError()
+   335	
+   336	    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
+   337	    result = proctree.run_limited(['fake'], tmp_path, {})
+   338	    assert result['status'] == 'error' and result['exit_code'] == 137
+   339	    assert 'killed: sandbox memory limit' in result['stderr']
+   340	    assert result['metrics']['mem_kills'] == 1
+   341	    assert result['metrics']['peak_rss_bytes'] > 300 * 1024**2
+   342	    assert result['metrics']['orphan_kills'] == 1
+   343	
+   344	
+   345	def test_threaded_supervisors_are_independent(tmp_path):
+   346	    from concurrent.futures import ThreadPoolExecutor
+   347	
+   348	    def task(name, timeout):
+   349	        metrics = {}
+   350	        token = sandbox_env.command_metrics.set(metrics)
+   351	        try:
+   352	            code = ("import os,time; "
+   353	                    f"open('{name}.pid','w').write(str(os.getpid())); "
+   354	                    "time.sleep(.8); print('survived')")
+   355	            result = sandbox_env.execute_limited(python(code), tmp_path,
+   356	                                                  dict(os.environ), timeout=timeout)
+   357	            return result, metrics
+   358	        finally:
+   359	            sandbox_env.command_metrics.reset(token)
+   360	
+   361	    with ThreadPoolExecutor(max_workers=2) as pool:
+   362	        fast = pool.submit(task, 'fast', .3)
+   363	        slow = pool.submit(task, 'slow', 3)
+   364	        fast_result, fast_metrics = fast.result()
+   365	        slow_result, slow_metrics = slow.result()
+   366	    assert fast_result.status == 'timeout'
+   367	    assert slow_result.status == 'ok' and slow_result.stdout == 'survived\n'
+   368	    assert fast_metrics['peak_rss_bytes'] > 0
+   369	    assert slow_metrics['peak_rss_bytes'] > 0
+   370	    assert_dead(tmp_path / 'fast.pid')
+   371	    assert_dead(tmp_path / 'slow.pid')
+   372	
+   373	
+   374	def test_real_memory_child_on_parent_exit(execute, tmp_path, monkeypatch):
+   375	    run, metrics = execute
+   376	    monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(300 * 1024**2))
+   377	    code = """
+   378	import os, time
+   379	r, w = os.pipe()
+   380	if os.fork():
+   381	    os.close(w)
+   382	    os.read(r, 1)
+   383	    os._exit(0)
+   384	os.close(r)
+   385	os.environ.clear()
+   386	os.setsid()
+   387	os.close(1)
+   388	os.close(2)
+   389	chunks = bytearray(320 * 1024**2)
+   390	open('child.pid', 'w').write(str(os.getpid()))
+   391	os.write(w, b'1')
+   392	os.close(w)
+   393	time.sleep(600)
+   394	"""
+   395	    result = run(python(code), timeout=5)
+   396	    assert result.status == 'error' and result.exit_code == 137
+   397	    assert 'killed: sandbox memory limit' in result.stderr
+   398	    assert metrics['mem_kills'] >= 1
+   399	    assert metrics['peak_rss_bytes'] > 300 * 1024**2
+   400	    assert_dead(tmp_path / 'child.pid')
+     1	"""Shared local scorer environment; no installed harness source is modified.
+     2	
+     3	The executor hook is after swegemma's path translation, and covers exec_async,
+     4	run_command, setup, and verification as well as agent commands.
+     5	"""
+     6	from contextvars import ContextVar
+     7	import base64
+     8	import json
+     9	import os
+    10	from pathlib import Path
+    11	import re
+    12	import shlex
+    13	import shutil
+    14	import subprocess
+    15	import sys
+    16	import time
+    17	
+    18	from eval import proctree
+    19	
+    20	command_metrics = ContextVar('command_metrics', default=None)
+    21	gold_artifact_dir = ContextVar('gold_artifact_dir', default=None)
+    22	
+    23	BWRAP_TEMPLATE = [
+    24	    'bwrap', '--die-with-parent', '--unshare-net', '--unshare-pid',
+    25	    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
+    26	    '--tmpfs', '<each hidden path>', '--tmpfs', '/tmp',
+    27	    '--dir', '<each hidden path under /tmp, if any>',
+    28	    '--bind', '<sandbox_root>', '<sandbox_root>',
+    29	    '--ro-bind', '<each ro path>', '<same>',
+    30	    '--chdir', '<workspace>', '/bin/bash', '-c', '<translated_cmd>',
+    31	]
+    32	
+    33	
+    34	def bwrap_argv(command, workspace, hidden_paths, ro_paths):
+    35	    workspace = Path(workspace).resolve()
+    36	    root = workspace.parent
+    37	    argv = BWRAP_TEMPLATE[:11]
+    38	    # Mask parents first so nested masks don't get covered by their parents.
+    39	    for path in sorted({str(Path(p).absolute()) for p in hidden_paths},
+    40	                       key=lambda p: (len(Path(p).parts), p)):
+    41	        argv += ['--tmpfs', path]
+    42	    argv += ['--tmpfs', '/tmp']
+    43	    # A final /tmp mask removes nested hidden mountpoints. Recreate their empty
+    44	    # directories so temporary inventories can be probed with ls as well.
+    45	    for path in sorted({str(Path(p).absolute()) for p in hidden_paths}):
+    46	        if path != '/tmp' and Path(path).is_relative_to('/tmp'):
+    47	            argv += ['--dir', path]
+    48	    argv += ['--bind', str(root), str(root)]
+    49	    # Bind each asset at its resolved path and, when reached through a symlink
+    50	    # (uv's cpython-3.13 -> cpython-3.13.18 alias under a masked $HOME), at the
+    51	    # unresolved path too, so venv interpreter symlinks don't dangle in the sandbox.
+    52	    binds = set()
+    53	    for p in ro_paths:
+    54	        src = str(Path(p).resolve())
+    55	        binds |= {(src, src), (src, str(Path(p).absolute()))}
+    56	    for path, dest in sorted(binds, key=lambda b: (len(Path(b[1]).parts), b)):
+    57	        # Only explicit runtime assets may be re-exposed, never inventory/artifacts.
+    58	        if ({'tasks.jsonl', 'splits', 'runs', 'results'} & (set(Path(path).parts) | set(Path(dest).parts))
+    59	                or (Path(path).is_dir() and (Path(path) / 'tasks.jsonl').exists())):
+    60	            raise ValueError('Forbidden read-only exposure')
+    61	        argv += ['--ro-bind', path, dest]
+    62	    argv += ['--chdir', str(workspace), *command]
+    63	    return argv
+    64	
+    65	
+    66	def runtime_ro_paths(workspace, ro_paths):
+    67	    root = Path(workspace).resolve().parent
+    68	    cfg = (root / 'venv/pyvenv.cfg').read_text()
+    69	    home = next(line.split('=', 1)[1].strip() for line in cfg.splitlines()
+    70	                if line.startswith('home ='))
+    71	    prefix = Path(home).resolve().parent
+    72	    if prefix != Path(sys.base_prefix).resolve():
+    73	        raise ValueError('Sandbox python prefix differs from the scorer interpreter')
+    74	    # Keep the unresolved alias too; bwrap_argv binds the resolved target there.
+    75	    paths = {prefix, Path(home).absolute().parent, *(Path(p).resolve() for p in ro_paths)}
+    76	    def wheel_target(path):
+    77	        target = path.resolve()
+    78	        # Agent-created symlinks must not turn an arbitrary directory into a
+    79	        # new read-only exposure. Only wheel files or trusted wheelhouse subdirs
+    80	        # can be reached through symlinks; a file mount cannot expose siblings.
+    81	        if not (target.is_file() and target.suffix == '.whl') and not any(
+    82	                target.is_relative_to(Path(p).resolve()) for p in ro_paths):
+    83	            raise ValueError('Untrusted wheel symlink target')
+    84	        paths.add(target)
+    85	
+    86	    wheels = root / 'wheels'
+    87	    if wheels.is_symlink():
+    88	        wheel_target(wheels)
+    89	    for path in wheels.rglob('*'):
+    90	        if path.is_symlink():
+    91	            wheel_target(path)
+    92	    return paths
+    93	
+    94	
+    95	def execute_limited(command, cwd, env, timeout=300, *, shell=None,
+    96	                    max_output_chars=10 * 1024 * 1024):
+    97	    """Installed executor contract, with host process-tree limits and cleanup."""
+    98	    from adk_eval_core.errors import EvalCoreError
+    99	    from adk_eval_core.sandbox.base import ExecutionResult
+   100	
+   101	    start = time.perf_counter()
+   102	    try:
+   103	        # Fresh interpreters give threaded GOLD_CONCURRENCY workers separate
+   104	        # subreaper/adoption domains, without forking a multithreaded process.
+   105	        worker = subprocess.run(
+   106	            [sys.executable, '-c', proctree.supervisor_source() + '\nsupervisor_main()\n'],
+   107	            input=json.dumps(dict(command=command, cwd=str(cwd), env=dict(env),
+   108	                                 timeout=timeout, shell=shell,
+   109	                                 max_output_chars=max_output_chars)),
+   110	            capture_output=True, text=True)
+   111	        if worker.returncode:
+   112	            raise RuntimeError('Sandbox supervisor failed: ' + worker.stderr)
+   113	        result = json.loads(worker.stdout)
+   114	        observed = result.pop('metrics')
+   115	        metrics = command_metrics.get()
+   116	        if metrics is not None:
+   117	            metrics['peak_rss_bytes'] = max(metrics.get('peak_rss_bytes', 0),
+   118	                                            observed.get('peak_rss_bytes', 0))
+   119	            for key in ('mem_kills', 'orphan_kills'):
+   120	                metrics[key] = metrics.get(key, 0) + observed.get(key, 0)
+   121	        result['duration_seconds'] = round(time.perf_counter() - start, 3)
+   122	        return ExecutionResult(**result)
+   123	    except (RuntimeError, OSError, ValueError, EvalCoreError) as exc:
+   124	        return ExecutionResult(status='error', stdout='', stderr=str(exc), exit_code=-1,
+   125	                               duration_seconds=round(time.perf_counter() - start, 3))
+   126	
+   127	
+   128	def apply_isolation(hidden_paths, ro_paths):
+   129	    """Wrap the module executor, retaining the installed manager's translation/env.
+   130	
+   131	    Empty hidden_paths disables bwrap (explicit opt-out), but retains timeout
+   132	    accounting. Repeated setup replaces this hook rather than stacking it.
+   133	    """
+   134	    import swegemma.sandbox.subprocess as sb
+   135	    hidden_paths, ro_paths = tuple(hidden_paths), tuple(ro_paths)
+   136	    original = getattr(sb.execute_subprocess_command, '_unwrapped', sb.execute_subprocess_command)
+   137	
+   138	    def execute(command, cwd, env, **kwargs):
+   139	        if ro_paths:
+   140	            command = [*command[:2], re.sub(r'(?<![\w.-])/wheels(?![\w.-])',
+   141	                                           str(Path(ro_paths[0]).resolve()), command[2])]
+   142	        if hidden_paths:
+   143	            if not isinstance(command, list) or command[:2] != ['/bin/bash', '-c']:
+   144	                raise RuntimeError('Unsupported harness subprocess command')
+   145	            # The harness's fallback wheel search doesn't include custom data dirs.
+   146	            command = bwrap_argv(command, cwd, hidden_paths, runtime_ro_paths(cwd, ro_paths))
+   147	        result = execute_limited(command=command, cwd=cwd, env=env, **kwargs)
+   148	        metrics = command_metrics.get()
+   149	        if metrics is not None and (result.status == 'timeout' or result.exit_code == 124):
+   150	            metrics['cmd_timeouts'] = metrics.get('cmd_timeouts', 0) + 1
+   151	        return result
+   152	
+   153	    execute._unwrapped = original
+   154	    sb.execute_subprocess_command = execute
+   155	    return BWRAP_TEMPLATE.copy()
+   156	
+   157	
+   158	def probe_isolation(manager, inventory_path, data_dir, *, empty_data=True):
+   159	    """Fail closed on visibility, image imports, or broken workspace write-through."""
+   160	    sid = manager.start()
+   161	    try:
+   162	        # Encode host paths to bypass swegemma's /tmp path translation in probes
+   163	        # whose inventory is itself under /tmp. A failed ls must fail the probe.
+   164	        encoded = lambda p: shlex.quote(base64.b64encode(str(p).encode()).decode())
+   165	        empty_check = 'contents=$(ls -A "$data") && test -z "$contents" && ' if empty_data else ''
+   166	        cmd = (f'inventory=$(printf %s {encoded(inventory_path)} | base64 -d); '
+   167	               f'data=$(printf %s {encoded(data_dir)} | base64 -d); '
+   168	               'test ! -e "$inventory" && ' + empty_check +
+   169	               "python3 -c 'import pytest' && "
+   170	               'echo probe > /workspace/x && echo probe > /tmp/y')
+   171	        result = manager.exec(sid, cmd, timeout=60)
+   172	        workspace = manager.sandboxes[sid]['workspace']
+   173	        if result.exit_code != 0 or not (workspace / 'x').is_file():
+   174	            raise RuntimeError('bubblewrap startup probe failed: ' + result.stderr[:500])
+   175	    finally:
+   176	        manager.cleanup_all()
+   177	
+   178	
+   179	def isolate_gold_tempfiles():
+   180	    """Route verification's temporary patch serialization to the caller's out dir."""
+   181	    import tempfile
+   182	    import swegemma.harness.verification as vf
+   183	    if getattr(vf.tempfile, '_gold_redirect', False):
+   184	        return
+   185	
+   186	    class Tempfiles:
+   187	        _gold_redirect = True
+   188	
+   189	        def __getattr__(self, name):
+   190	            return getattr(tempfile, name)
+   191	
+   192	        def NamedTemporaryFile(self, *args, **kwargs):
+   193	            if gold_artifact_dir.get() is not None:
+   194	                kwargs['dir'] = gold_artifact_dir.get()
+   195	            return tempfile.NamedTemporaryFile(*args, **kwargs)
+   196	
+   197	    vf.tempfile = Tempfiles()
+   198	
+   199	
+   200	def setup_scorer_env(data_dir, *, out_dir=None, repo_root=None, allow_unsandboxed=False):
+   201	    """Common subprocess scorer setup for evaluation and gold calibration."""
+   202	    from swegemma.sandbox import SubprocessManager
+   203	    from swegemma.harness.container_setup import resolve_wheels_dir
+   204	    from types import SimpleNamespace
+   205	    data_dir = Path(data_dir).resolve()
+   206	    repo_root = Path(repo_root or Path(__file__).resolve().parents[1]).resolve()
+   207	    out_dir = Path(out_dir or data_dir.parent / 'gold-output').resolve()
+   208	    isolate_host_packages()
+   209	    patched = patch_subprocess_deps(data_dir)
+   210	    isolate_gold_tempfiles()
+   211	    hidden = [Path.home(), repo_root, data_dir, out_dir, Path('/home/ubuntu/work/gemma-wt')]
+   212	    wheels = resolve_wheels_dir(SimpleNamespace(wheels_dir=data_dir / 'wheels',
+   213	                                              tasks_path=data_dir / 'tasks.jsonl',
+   214	                                              snapshots_dir=data_dir / 'snapshots'))
+   215	    ro = [wheels.resolve()] if wheels else []
+   216	    try:
+   217	        if not shutil.which('bwrap'):
+   218	            raise RuntimeError('bubblewrap is not installed')
+   219	        # First check the empty inventory mask before mounting its wheelhouse
+   220	        # child. Then repeat with the complete runtime mounts: wheels may be
+   221	        # visible under data_dir, but the inventory must remain inaccessible.
+   222	        template = apply_isolation(hidden, [])
+   223	        probe_isolation(SubprocessManager(), data_dir / 'tasks.jsonl', data_dir)
+   224	        apply_isolation(hidden, ro)
+   225	        probe_isolation(SubprocessManager(), data_dir / 'tasks.jsonl', data_dir, empty_data=False)
+   226	        mode = 'bwrap'
+   227	    except Exception:
+   228	        # Never leave an unusable boundary or silently downgrade its protection.
+   229	        apply_isolation([], ro)
+   230	        if not allow_unsandboxed:
+   231	            raise
+   232	        mode, template = 'none', None
+   233	        import logging
+   234	        logging.warning('bubblewrap unavailable/probe failed; explicitly allowed unsandboxed run',
+   235	                        exc_info=True)
+   236	    return dict(sandbox=mode, bwrap_argv_template=template, patched=patched,
+   237	                wheels_dir=wheels)
+   238	
+   239	
+   240	def isolate_host_packages():
+   241	    """Keep pyimg system packages; remove swegemma's extra harness-venv .pth leak."""
+   242	    from swegemma.sandbox import SubprocessManager
+   243	    original = SubprocessManager.start
+   244	    if getattr(original, '_image_only', False):
+   245	        return
+   246	
+   247	    def start(self):
+   248	        base = getattr(self, 'base_dir', None)
+   249	        if gold_artifact_dir.get() is not None:
+   250	            self.base_dir = Path(gold_artifact_dir.get())
+   251	        try:
+   252	            sid = original(self)
+   253	        finally:
+   254	            self.base_dir = base
+   255	        for pth in self.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'):
+   256	            pth.unlink()
+   257	        return sid
+   258	    start._image_only = True
+   259	    SubprocessManager.start = start
+   260	
+   261	
+   262	def setup_script_path(data_dir):
+   263	    """The dependency setup script the subprocess installer copies and executes."""
+   264	    setup_py = Path(data_dir) / 'sandbox' / 'setup.py'
+   265	    if not setup_py.exists():
+   266	        setup_py = next(iter(sorted(Path(data_dir).rglob('setup.py'))), setup_py)  # competition sandbox/setup.py
+   267	    return setup_py
+   268	
+   269	
+   270	def setup_script_identity(data_dir):
+   271	    """Resolved path + content hash of the setup script (part of resume identity)."""
+   272	    import hashlib
+   273	    path = setup_script_path(data_dir)
+   274	    return dict(path=str(path.resolve()),
+   275	                sha256=hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None)
+   276	
+   277	
+   278	def patch_subprocess_deps(data_dir):
+   279	    """Emulate the docker-only dependency setup for the subprocess sandbox (swegemma skips it).
+   280	
+   281	    Contract (swegemma 0.2.11 container_setup): for docker, _ensure_container_site_packages
+   282	    unpacks every deduplicated (highest-version, py313-compatible) wheel from wheels_dir that is
+   283	    < 20 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
+   284	    site-packages, no resolver; large wheels are added only if imported by the workspace; then
+   285	    sandbox/setup.py runs with --fast-path. We replicate exactly that inside the sandbox venv.
+   286	    The sandbox venv uses system_site_packages=True, so the HOST python must mirror the image
+   287	    (Dockerfile.public: pytest, pytest-timeout==2.1.0, typer, build backends; nothing else).
+   288	    """
+   289	    import tarfile
+   290	    import swegemma.harness.container_setup as cs
+   291	    import swegemma.harness.verification as vf
+   292	    import swegemma.harness.sample_verification  # load all known by-name bindings
+   293	    import swegemma.evaluate
+   294	    import swegemma.cli
+   295	    import swegemma.harness.agent_runner
+   296	    orig = getattr(cs.install_test_dependencies, '_scorer_original', cs.install_test_dependencies)
+   297	    previous = cs.install_test_dependencies
+   298	    wheels_src = Path(data_dir) / 'wheels'
+   299	    if not wheels_src.is_dir():
+   300	        wheels_src = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+   301	    setup_py = setup_script_path(data_dir)
+   302	
+   303	    def install(docker, container_id, repo='', *, fast_path=True, config=None):
+   304	        if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
+   305	            return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+   306	        venv_dir = docker.sandboxes[container_id]['venv']
+   307	        sp_dir = next(iter(sorted(venv_dir.glob('lib/python3*/site-packages'))))
+   308	        base_wheels, large_wheels, _m2p, _req = cs._inspect_wheels_dir(wheels_src)
+   309	        selected = list(base_wheels)
+   310	        if large_wheels:  # public wheels have none; fail loudly rather than silently diverge
+   311	            raise RuntimeError('large wheels present; workspace-import scan not emulated')
+   312	        tar_path = cs._build_unpacked_wheels_tar(selected, 'sp_base_local', '.swegemma_base_injected')
+   313	        with tarfile.open(tar_path) as tf:
+   314	            tf.extractall(sp_dir, filter='data')
+   315	        docker.copy_to(container_id, setup_py, '/tmp/setup.py')
+   316	        flag = '--fast-path' if fast_path else ''
+   317	        docker.exec(container_id, f'python3 /tmp/setup.py {flag} {repo}'.strip(), timeout=280)
+   318	        probe_log = os.environ.get('GOLD_PROBE_LOG')  # diagnostic: which copy of the repo package is imported
+   319	        if probe_log:
+   320	            pkg = {'Textualize/rich': 'rich', 'encode/httpx': 'httpx', 'fastapi/fastapi': 'fastapi',
+   321	                   'psf/requests': 'requests'}.get(repo, repo.split('/')[-1])
+   322	            out = docker.exec(container_id, f'cd /workspace && PYTHONSAFEPATH=1 PYTHONNOUSERSITE=1 python3 -s -c '
+   323	                              f'"import {pkg};print({pkg}.__file__)"', timeout=60)
+   324	            with open(probe_log, 'a') as fh:
+   325	                fh.write(json.dumps({'container': str(container_id), 'repo': repo, 'probe': str(out)[:500]}) + '\n')
+   326	    install._scorer_original = orig
+   327	    for name, module in list(sys.modules.items()):
+   328	        if ((name == 'swegemma' or name.startswith('swegemma.'))
+   329	                and getattr(module, 'install_test_dependencies', None) in (orig, previous)):
+   330	            module.install_test_dependencies = install
+   331	    return install
+   332	
+
+exec
+/bin/bash -lc "rg -l 'sandbox-limits|eval/proctree|sandbox_env.py' ops/codex/review*.md && cat ops/codex/build-sandbox-limits.spec ops/codex/build-sandbox-limits2.spec && cat ops/codex/build-sandbox-limits3.md" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+ops/codex/review-20261105T175836.md
+ops/codex/review-20261105T155357.md
+ops/codex/review-20261105T154832.md
+ops/codex/review-20261105T153456.md
+Dec 020 item 6 + dec 021 item 4 (read ops/decisions/020-*.md and 021-*.md). Harden the LOCAL subprocess sandbox executor in eval/sandbox_env.py (the execute() wrapper installed by the hook that replaces swegemma.sandbox.subprocess.execute_subprocess_command; the original is adk_eval_core/sandbox/subprocess_sandbox.py:execute_subprocess_command in /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages, read it to mirror its return type and semantics exactly). Context: a local gold/null run OOM-stalled this shared 12 GB VM; two null-patch tasks ran ~45 min each despite 300 s command timeouts, with no per-sandbox memory limit and no RSS logging. Requirements: (1) New module eval/proctree.py (stdlib only, Linux /proc): snapshot of our-uid processes (pid, ppid, pgid, sid, rss, starttime), descendants(), tree_rss(), kill_tree(pids, verify starttime to avoid pid reuse), survivors(). (2) Our executor runs the command itself (do not call the original), with Popen(start_new_session=True), stdout/stderr captured exactly like the original (same decoding/truncation behaviour, same result object type and fields, same status values incl. 'timeout' and exit_code 124 on timeout), polling every 0.25 s: track the set of every pid ever seen in the tree (descendants of proc.pid, plus anything in its pgid/sid) so setsid'd or reparented orphans are still tracked; sum RSS over live tracked pids; record peak. (3) Memory limit: if summed tree RSS > GEMMA_SANDBOX_MEM_BYTES (default 4 GiB, the scorer sandbox limit) SIGKILL all tracked pids, return exit_code 137 with status 'error' (or the closest existing non-success status the original uses) and a clear stderr note 'killed: sandbox memory limit'. Backstop: prefix the command with prlimit --as=<GEMMA_SANDBOX_AS_BYTES, default 8 GiB> -- (skip if prlimit missing). (4) On timeout: SIGKILL every tracked live pid (killpg plus individual kills), then assert no survivors (re-scan up to 2 s); on any normal exit also kill any tracked survivors (background daemons left by tests) and count them. (5) Metrics: in the existing command_metrics ContextVar dict record peak_rss_bytes (max over commands), mem_kills, orphan_kills; and have eval/kaggle/gold_calibration.py write peak_rss_bytes, mem_kills, orphan_kills into each result row (numbers only, never task text) and log one line per task. Also add env GOLD_CONCURRENCY (default keep current 2) so a local run can use 1. (6) Must keep working with bwrap (--unshare-pid: inner processes are visible in host /proc with host pids) and without bwrap (hidden_paths empty). Tests: new eval/tests/test_sandbox_limits.py: (a) timeout with an orphaning grandchild via bash '(sleep 600 &); sleep 600' and a setsid'd grandchild via python os.setsid -> status timeout, exit 124, zero survivors; (b) memory: a child allocating ~600 MB in touched steps with GEMMA_SANDBOX_MEM_BYTES=300MB -> killed, 137, mem_kills=1; (c) normal command output/exit code identical to the original executor's for a few commands (echo, exit 3, stderr), peak_rss_bytes>0; (d) background daemon left after normal exit is killed and counted. Keep every test allocation <= 1 GB and test wall time < 60 s. Run ONLY eval/tests/test_sandbox_limits.py and eval/tests/test_eval_fixes.py plus eval/tests/test_gold_calibration.py (python: /home/ubuntu/gemma-local/venv/bin/python3 with /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages appended to sys.path, then pytest.main); do not run the full suite or any real gold calibration. No new dependencies.
+Round 2 on branch codex/sandbox-limits (you are in its worktree, which already holds round 1 at 2c42c7a). Fix the 3 BLOCKING findings of the Codex review ops/codex/review-20261105T175836.md. It may be missing from this worktree, so here they are:
+1. Detached children escape. A child that clears its env, calls setsid() and is reparented between polls is neither tracked nor killed, and cleanup reports ok. Fix: make the runner process that launches each sandbox task a child subreaper (prctl(PR_SET_CHILD_SUBREAPER=36, 1) via ctypes, Linux only, unprivileged), so orphans reparent to it and stay discoverable as its descendants whatever their env, pgid or sid. Discovery = descendants of the runner, minus the runner's own non-task threads/helpers, scoped to the task (track task roots; anything reparented to the runner while a task runs belongs to the running task, since tasks are sequential per runner process; if GOLD_CONCURRENCY>1 uses threads in one process, use one subprocess supervisor per task instead, so each task has its own subreaper). Reap zombies. Add a test where a grandchild clears its env, calls setsid, its parent exits, and it keeps running: it must be killed and counted.
+2. PID-reuse races. Bind identity with os.pidfd_open and signal.pidfd_send_signal for individual kills (open the pidfd, then re-verify starttime from /proc/<pid>/stat field 22, then signal via the fd). Do not killpg a group from an old snapshot: re-verify the group leader's identity, or signal members individually via pidfds. Tracked identities must be replaced, not setdefault'ed, when a pid's starttime changes. Never trust a bare root pid without its recorded starttime. Add tests for: reuse between check and signal (mocked), and a stale identity replaced.
+3. A memory excess seen during cleanup must classify the task as a memory failure (the same status/fields as a live-scan memory kill), not ok. Apply the limit check to EVERY scan, including exit and cleanup scans. Regression test: 300 MiB limit, the parent exits 0, a background child is over the limit at cleanup -> memory failure, mem_kills>=1.
+Keep: gold/null calibration semantics and the result schema, GOLD_CONCURRENCY, peak-RSS logging, the RLIMIT_AS backstop (state in a comment why it is a backstop only), and stage_kernel single-file staging. Do NOT edit ops/ files (round 1 edited ops/STATE.md, ops/journal.md and ops/status; revert those three files to their parent-commit content 02a883d). Tests must run offline. Acceptance: the full eval/tests suite passes; report counts and anything the sandbox prevented.
+Implemented Round 3 on `codex/sandbox-limits`.
+
+- Captures `wait4()` rusage for direct children and adopted descendants. Reports the maximum of polled tree RSS and reaped per-process peaks, converting Linux KiB to bytes.
+- Documents the metric; keeps the 4 GiB kill logic poll-based.
+- Adds timing-independent `/bin/true` regression tests.
+
+Offline full suite: **459 passed, 4 skipped, 4 subtests passed**. [JUnit report](/tmp/sandbox-limits-round3-eval.xml).
+
+Open issues: none identified. Sandbox blocked the bubblewrap probe; other skips were missing PyYAML alias support and two opt-in smoke tests. Normal-host execution remains unverified here.
+
+No `ops/` edits or commits.
+
+exec
+/bin/bash -lc 'git diff cfcc4c0..9d610b5 && git diff 02a883d..9d610b5 -- eval/sandbox_env.py eval/kaggle/gold_calibration.py eval/kaggle/stage_kernel.py eval/tests/test_gold_calibration.py eval/tests/test_eval_fixes.py docs/EVAL_RUNNER_SPEC.md && nl -ba eval/proctree.py' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+diff --git a/docs/EVAL_RUNNER_SPEC.md b/docs/EVAL_RUNNER_SPEC.md
+index 6ed5a9a..c5e9316 100644
+--- a/docs/EVAL_RUNNER_SPEC.md
++++ b/docs/EVAL_RUNNER_SPEC.md
+@@ -20,3 +20,10 @@ gold-local, i.e. the scorer docker image as emulated in `eval/kaggle/gold_calibr
+ - Concurrency N against one endpoint; per-task wall time, tokens, tool-call counts logged to runs/<name>/.
+ - Results file results/<run>.jsonl with schema header line; resumable (skip finished ids).
+ - Scratch in /tmp only; record any /workspace stray files and test-file edits per task.
++
++## Sandbox memory metrics
++`peak_rss_bytes` is the maximum of polled process-tree RSS and the largest
++`wait4().rusage.ru_maxrss` from reaped processes, converted from Linux KiB to
++bytes. Reaped RSS is a per-process peak, not a simultaneous tree sum; it also
++captures commands that exit before the first RSS poll. The 4 GiB tree-RSS kill
++decision uses only polled tree RSS.
+diff --git a/eval/proctree.py b/eval/proctree.py
+index 66e579a..f4e357f 100644
+--- a/eval/proctree.py
++++ b/eval/proctree.py
+@@ -1,6 +1,7 @@
+ """Linux process identities and RSS, restricted to our uid (stdlib only)."""
+ from dataclasses import dataclass
+ import ctypes
++import errno
+ import json
+ import os
+ import resource
+@@ -103,9 +104,53 @@ def track_descendants(tracked, runner, processes):
+     return survivors(tracked, processes)
+ 
+ 
++class RusagePopen(subprocess.Popen):
++    """Keep Popen's status/pipe handling while collecting the child's rusage.
++
++    POSIX Popen reaps through both _internal_poll and _try_wait (wait and
++    communicate). Both must use wait4 before the kernel discards the rusage.
++    """
++    peak_rss_bytes = 0
++
++    def _waitpid(self, pid, flags):
++        pid, status, usage = os.wait4(pid, flags)
++        if pid:
++            self.peak_rss_bytes = max(self.peak_rss_bytes, usage.ru_maxrss * 1024)
++        return pid, status
++
++    def _internal_poll(self, _deadstate=None):
++        # Popen's private poll callback signature differs between Python 3.12
++        # and 3.13. Keep its locking/status semantics with our wait4 callback.
++        if self.returncode is None and self._waitpid_lock.acquire(False):
++            try:
++                if self.returncode is None:
++                    pid, status = self._waitpid(self.pid, os.WNOHANG)
++                    if pid == self.pid:
++                        self._handle_exitstatus(status)
++            except OSError as exc:
++                if _deadstate is not None:
++                    self.returncode = _deadstate
++                elif exc.errno == errno.ECHILD:
++                    self.returncode = 0
++            finally:
++                self._waitpid_lock.release()
++        return self.returncode
++
++    def _try_wait(self, wait_flags):
++        try:
++            return self._waitpid(self.pid, wait_flags)
++        except ChildProcessError:
++            return self.pid, 0  # Match Popen's already-reaped child behavior.
++
++
+ def run_limited(command, cwd, env, timeout=300, *, shell=None,
+                 max_output_chars=10 * 1024 * 1024):
+-    """Installed executor contract, with host process-tree limits and cleanup."""
++    """Installed executor contract, with host process-tree limits and cleanup.
++
++    peak_rss_bytes is the maximum of sampled tree RSS and reaped ru_maxrss
++    (KiB on Linux, converted to bytes). The reaped value is a per-process
++    peak, not a simultaneous tree sum. Only sampled tree RSS triggers kills.
++    """
+     enable_subreaper()
+     runner = snapshot()[os.getpid()]
+     start = time.perf_counter()
+@@ -132,7 +177,7 @@ def run_limited(command, cwd, env, timeout=300, *, shell=None,
+                 command = [command]
+             command = [prlimit, f'--as={as_limit}', '--', *command]
+             shell = False
+-        proc = subprocess.Popen(command, shell=shell, cwd=str(cwd), env=env,
++        proc = RusagePopen(command, shell=shell, cwd=str(cwd), env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, encoding='utf-8', errors='replace',
+                                 start_new_session=True)
+@@ -157,18 +202,21 @@ def run_limited(command, cwd, env, timeout=300, *, shell=None,
+         return live
+ 
+     def reap():
++        nonlocal peak
+         if proc.poll() is None:
+             return False  # Popen owns the direct child's status.
++        peak = max(peak, proc.peak_rss_bytes)
+         # Once Popen has reaped its child, all remaining children are task
+         # orphans. ECHILD confirms cleanup even if a /proc snapshot missed a
+-        # fork/reparent race; waitpid(0) means another scan is still necessary.
++        # fork/reparent race; wait4 returning pid 0 requires another scan.
+         while True:
+             try:
+-                pid, _ = os.waitpid(-1, os.WNOHANG)
++                pid, _, usage = os.wait4(-1, os.WNOHANG)
+             except ChildProcessError:
+                 return True
+             if pid == 0:
+                 return False
++            peak = max(peak, usage.ru_maxrss * 1024)
+ 
+     def cleanup():
+         seen = set()
+diff --git a/eval/tests/test_sandbox_limits.py b/eval/tests/test_sandbox_limits.py
+index 24c7bc2..94f6fa9 100644
+--- a/eval/tests/test_sandbox_limits.py
++++ b/eval/tests/test_sandbox_limits.py
+@@ -5,6 +5,7 @@ import shlex
+ import sys
+ import time
+ from dataclasses import replace
++from types import SimpleNamespace
+ 
+ import pytest
+ 
+@@ -114,6 +115,91 @@ def test_without_prlimit(execute, monkeypatch):
+     assert metrics['peak_rss_bytes'] > 0
+ 
+ 
++@pytest.mark.parametrize('without_prlimit', [False, True])
++def test_submillisecond_command_rss_without_polling(execute, monkeypatch, without_prlimit):
++    run, metrics = execute
++    # /bin/true does sub-millisecond work. Force all tree RSS samples to miss
++    # it, regardless of host scheduling or the overhead of starting a process.
++    source = proctree.supervisor_source().replace(
++        'rss = tree_rss(live, processes)', 'rss = 0')
++    if without_prlimit:
++        source = source.replace("prlimit = shutil.which('prlimit')", 'prlimit = None')
++    monkeypatch.setattr(proctree, 'supervisor_source', lambda: source)
++    result = run(['/bin/true'])
++    assert result.status == 'ok' and result.exit_code == 0
++    assert metrics['peak_rss_bytes'] > 0
++    assert metrics['mem_kills'] == 0
++
++
++@pytest.mark.parametrize('method', ['poll', 'wait', 'communicate'])
++def test_direct_child_wait4_rss(method):
++    # Verify all Popen reaping paths, including communicate's internal wait.
++    proc = proctree.RusagePopen(['/bin/true'])
++    try:
++        if method == 'poll':
++            deadline = time.monotonic() + 5
++            while proc.poll() is None:
++                assert time.monotonic() < deadline
++                time.sleep(.001)
++        else:
++            getattr(proc, method)(timeout=5)
++        assert proc.returncode == 0
++        assert proc.peak_rss_bytes > 0
++    finally:
++        if proc.poll() is None:
++            proc.kill()
++        proc.wait()
++
++
++@pytest.mark.parametrize('polled_rss', [0, 5 * 1024**2])
++def test_reaped_rss_is_maximum_not_sum_or_kill_trigger(monkeypatch, tmp_path, polled_rss):
++    import io
++    runner = proctree.snapshot()[os.getpid()]
++    parent = replace(runner, pid=runner.pid + 100000, ppid=runner.pid, rss=polled_rss)
++    processes = {runner.pid: runner, parent.pid: parent}
++
++    class ExitingParent:
++        pid = parent.pid
++        returncode = None
++        peak_rss_bytes = 3 * 1024**2
++        stdout, stderr = io.StringIO(), io.StringIO()
++
++        def poll(self):
++            return self.returncode
++
++        def communicate(self, timeout=None):
++            processes.pop(parent.pid, None)
++            self.returncode = 0
++            return '', ''
++
++    # Two adopted children with peaks of 4 and 2 MiB. Their peaks must be
++    # converted from Linux KiB and maximized with the direct child's 3 MiB.
++    reaped = iter([(parent.pid + 1, 0, SimpleNamespace(ru_maxrss=4096)),
++                   (parent.pid + 2, 0, SimpleNamespace(ru_maxrss=2048))])
++
++    def wait_children(pid, flags):
++        assert (pid, flags) == (-1, os.WNOHANG)
++        try:
++            return next(reaped)
++        except StopIteration:
++            raise ChildProcessError() from None
++
++    monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(polled_rss + 1))
++    monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
++    monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
++    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
++    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
++    def kill(live):
++        assert live == {}
++        return 0
++
++    monkeypatch.setattr(proctree, 'kill_tree', kill)
++    result = proctree.run_limited(['fake'], tmp_path, {})
++    assert result['status'] == 'ok' and result['exit_code'] == 0
++    assert result['metrics']['peak_rss_bytes'] == max(polled_rss, 4 * 1024**2)
++    assert result['metrics']['mem_kills'] == 0
++
++
+ def test_envless_double_fork_is_reaped(execute, tmp_path):
+     run, metrics = execute
+     code = """
+@@ -208,6 +294,7 @@ def test_memory_excess_first_seen_in_cleanup(monkeypatch, tmp_path):
+     class ExitingParent:
+         pid = parent.pid
+         returncode = None
++        peak_rss_bytes = 4096
+         stdout, stderr = io.StringIO(), io.StringIO()
+ 
+         def poll(self):
+@@ -231,7 +318,7 @@ def test_memory_excess_first_seen_in_cleanup(monkeypatch, tmp_path):
+     monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(300 * 1024**2))
+     monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
+     monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
+-    monkeypatch.setattr(proctree.subprocess, 'Popen', lambda *a, **kw: ExitingParent())
++    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
+     monkeypatch.setattr(proctree, 'kill_tree', kill)
+     waits = 0
+ 
+@@ -241,12 +328,12 @@ def test_memory_excess_first_seen_in_cleanup(monkeypatch, tmp_path):
+         waits += 1
+         if waits == 1:
+             # Simulate /proc missing a child during a fork/reparent race.
+-            # waitpid still sees it, so cleanup must scan again before success.
++            # wait4 still sees it, so cleanup must scan again before success.
+             processes[child.pid] = child
+-            return 0, 0
++            return 0, 0, None
+         raise ChildProcessError()
+ 
+-    monkeypatch.setattr(proctree.os, 'waitpid', wait_children)
++    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
+     result = proctree.run_limited(['fake'], tmp_path, {})
+     assert result['status'] == 'error' and result['exit_code'] == 137
+     assert 'killed: sandbox memory limit' in result['stderr']
+diff --git a/docs/EVAL_RUNNER_SPEC.md b/docs/EVAL_RUNNER_SPEC.md
+index 6ed5a9a..c5e9316 100644
+--- a/docs/EVAL_RUNNER_SPEC.md
++++ b/docs/EVAL_RUNNER_SPEC.md
+@@ -20,3 +20,10 @@ gold-local, i.e. the scorer docker image as emulated in `eval/kaggle/gold_calibr
+ - Concurrency N against one endpoint; per-task wall time, tokens, tool-call counts logged to runs/<name>/.
+ - Results file results/<run>.jsonl with schema header line; resumable (skip finished ids).
+ - Scratch in /tmp only; record any /workspace stray files and test-file edits per task.
++
++## Sandbox memory metrics
++`peak_rss_bytes` is the maximum of polled process-tree RSS and the largest
++`wait4().rusage.ru_maxrss` from reaped processes, converted from Linux KiB to
++bytes. Reaped RSS is a per-process peak, not a simultaneous tree sum; it also
++captures commands that exit before the first RSS poll. The 4 GiB tree-RSS kill
++decision uses only polled tree RSS.
+diff --git a/eval/kaggle/gold_calibration.py b/eval/kaggle/gold_calibration.py
+index 706dce5..bd55f64 100644
+--- a/eval/kaggle/gold_calibration.py
++++ b/eval/kaggle/gold_calibration.py
+@@ -20,7 +20,9 @@ os.environ['PYTEST_ADDOPTS'] = (os.environ.get('PYTEST_ADDOPTS', '') + ' -p no:l
+ DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
+ WORKING_DIR = Path('/kaggle/working')
+ WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+-CONCURRENCY = 2
++CONCURRENCY = int(os.environ.get('GOLD_CONCURRENCY', '2'))
++if CONCURRENCY < 1:
++    raise ValueError('GOLD_CONCURRENCY must be positive')
+ ONLY_IDS = None  # all tasks (diag ids list removed after local repro, cycle 37)
+ 
+ 
+@@ -178,10 +180,10 @@ def choose_sandbox():
+ # push.sh embeds this module here when staging the single-file Kaggle kernel.
+ # BEGIN SHARED ENV IMPORT
+ try:
+-    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
++    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
+ except ModuleNotFoundError:
+     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+-    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
++    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
+ # END SHARED ENV IMPORT
+ 
+ 
+@@ -239,6 +241,8 @@ async def verify_gold(task, patch, data_dir, sandbox, out_dir=None):
+ def worker(args):
+     """No stdout/stderr from this process is exposed by the coordinator."""
+     logging.disable(logging.CRITICAL)
++    metrics = dict(peak_rss_bytes=0, mem_kills=0, orphan_kills=0)
++    metrics_token = command_metrics.set(metrics)
+     start = time.monotonic()
+     raw = next(t for t in load_inventory(args.data_dir) if t['instance_id'] == args.worker)
+     row = dict(instance_id=raw['instance_id'], repo=raw['repo'], resolved=False,
+@@ -282,6 +286,8 @@ def worker(args):
+         # Location only (file:line:function), never messages or values.
+         row['where'] = ' <- '.join(f'{Path(f.filename).name}:{f.lineno}:{f.name}'
+                                    for f in reversed(traceback.extract_tb(exc.__traceback__)[-4:]))
++    command_metrics.reset(metrics_token)
++    row.update({key: int(metrics[key]) for key in ('peak_rss_bytes', 'mem_kills', 'orphan_kills')})
+     row['duration_seconds'] = round(time.monotonic() - start, 3)
+     args.result.write_text(json.dumps(row) + '\n', encoding='utf-8')
+ 
+@@ -308,7 +314,8 @@ def run_one(task, data_dir, sandbox, allow_unsandboxed=False):
+         except Exception as exc:
+             error = f'Worker failure ({type(exc).__name__})'
+     return dict(instance_id=task['instance_id'], repo=task['repo'], resolved=False,
+-                exit_code=None, duration_seconds=round(time.monotonic() - start, 3),
++                exit_code=None, peak_rss_bytes=0, mem_kills=0, orphan_kills=0,
++                duration_seconds=round(time.monotonic() - start, 3),
+                 error=error, sandbox=sandbox)
+ 
+ 
+@@ -356,6 +363,7 @@ def main():
+                 os.fsync(stream.fileno())
+                 results[row['instance_id']] = row
+                 print(f"Finished {len(results)}/{len(tasks)}: {row['instance_id']} "
++                      f"peak_rss_bytes={row.get('peak_rss_bytes', 0)} mem_kills={row.get('mem_kills', 0)} orphan_kills={row.get('orphan_kills', 0)} "
+                       f"resolved={row['resolved']} exit_code={row['exit_code']} err={row.get('error')} where={row.get('where')} shape={row.get('shape')}", flush=True)
+     summary = summarize(tasks, results)
+     encoded = json.dumps(summary, indent=2, sort_keys=True) + '\n'
+diff --git a/eval/kaggle/stage_kernel.py b/eval/kaggle/stage_kernel.py
+index abd8a1e..6877cb9 100644
+--- a/eval/kaggle/stage_kernel.py
++++ b/eval/kaggle/stage_kernel.py
+@@ -7,15 +7,22 @@ def stage_kernel(destination):
+     here = Path(__file__).resolve().parent
+     source = (here / 'gold_calibration.py').read_text()
+     shared = (here.parent / 'sandbox_env.py').read_text()
++    proctree = (here.parent / 'proctree.py').read_text()
++    shared = shared.replace('from eval import proctree', 'import _gemma_proctree as proctree')
+     start = source.index('# BEGIN SHARED ENV IMPORT')
+     end = source.index('# END SHARED ENV IMPORT') + len('# END SHARED ENV IMPORT')
+     embedded = ("import types\n"
++                "_proctree = types.ModuleType('_gemma_proctree')\n"
++                "sys.modules['_gemma_proctree'] = _proctree\n"
++                f"exec(compile({proctree!r}, 'proctree.py', 'exec'), _proctree.__dict__)\n"
++                f"_proctree.SOURCE = {proctree!r}\n"
+                 "_shared_env = types.ModuleType('sandbox_env')\n"
+                 "_shared_env.__file__ = __file__\n"
+                 f"exec(compile({shared!r}, 'sandbox_env.py', 'exec'), _shared_env.__dict__)\n"
+                 "patch_subprocess_deps = _shared_env.patch_subprocess_deps\n"
+                 "setup_scorer_env = _shared_env.setup_scorer_env\n"
+-                "gold_artifact_dir = _shared_env.gold_artifact_dir\n")
++                "gold_artifact_dir = _shared_env.gold_artifact_dir\n"
++                "command_metrics = _shared_env.command_metrics\n")
+     Path(destination).write_text(source[:start] + embedded + source[end:])
+ 
+ 
+diff --git a/eval/sandbox_env.py b/eval/sandbox_env.py
+index 7966395..e8ff7ce 100644
+--- a/eval/sandbox_env.py
++++ b/eval/sandbox_env.py
+@@ -13,6 +13,9 @@ import shlex
+ import shutil
+ import subprocess
+ import sys
++import time
++
++from eval import proctree
+ 
+ command_metrics = ContextVar('command_metrics', default=None)
+ gold_artifact_dir = ContextVar('gold_artifact_dir', default=None)
+@@ -89,6 +92,39 @@ def runtime_ro_paths(workspace, ro_paths):
+     return paths
+ 
+ 
++def execute_limited(command, cwd, env, timeout=300, *, shell=None,
++                    max_output_chars=10 * 1024 * 1024):
++    """Installed executor contract, with host process-tree limits and cleanup."""
++    from adk_eval_core.errors import EvalCoreError
++    from adk_eval_core.sandbox.base import ExecutionResult
++
++    start = time.perf_counter()
++    try:
++        # Fresh interpreters give threaded GOLD_CONCURRENCY workers separate
++        # subreaper/adoption domains, without forking a multithreaded process.
++        worker = subprocess.run(
++            [sys.executable, '-c', proctree.supervisor_source() + '\nsupervisor_main()\n'],
++            input=json.dumps(dict(command=command, cwd=str(cwd), env=dict(env),
++                                 timeout=timeout, shell=shell,
++                                 max_output_chars=max_output_chars)),
++            capture_output=True, text=True)
++        if worker.returncode:
++            raise RuntimeError('Sandbox supervisor failed: ' + worker.stderr)
++        result = json.loads(worker.stdout)
++        observed = result.pop('metrics')
++        metrics = command_metrics.get()
++        if metrics is not None:
++            metrics['peak_rss_bytes'] = max(metrics.get('peak_rss_bytes', 0),
++                                            observed.get('peak_rss_bytes', 0))
++            for key in ('mem_kills', 'orphan_kills'):
++                metrics[key] = metrics.get(key, 0) + observed.get(key, 0)
++        result['duration_seconds'] = round(time.perf_counter() - start, 3)
++        return ExecutionResult(**result)
++    except (RuntimeError, OSError, ValueError, EvalCoreError) as exc:
++        return ExecutionResult(status='error', stdout='', stderr=str(exc), exit_code=-1,
++                               duration_seconds=round(time.perf_counter() - start, 3))
++
++
+ def apply_isolation(hidden_paths, ro_paths):
+     """Wrap the module executor, retaining the installed manager's translation/env.
+ 
+@@ -108,7 +144,7 @@ def apply_isolation(hidden_paths, ro_paths):
+                 raise RuntimeError('Unsupported harness subprocess command')
+             # The harness's fallback wheel search doesn't include custom data dirs.
+             command = bwrap_argv(command, cwd, hidden_paths, runtime_ro_paths(cwd, ro_paths))
+-        result = original(command=command, cwd=cwd, env=env, **kwargs)
++        result = execute_limited(command=command, cwd=cwd, env=env, **kwargs)
+         metrics = command_metrics.get()
+         if metrics is not None and (result.status == 'timeout' or result.exit_code == 124):
+             metrics['cmd_timeouts'] = metrics.get('cmd_timeouts', 0) + 1
+diff --git a/eval/tests/test_eval_fixes.py b/eval/tests/test_eval_fixes.py
+index 590f244..81a2e92 100644
+--- a/eval/tests/test_eval_fixes.py
++++ b/eval/tests/test_eval_fixes.py
+@@ -136,7 +136,7 @@ def test_executor_wraps_translated_commands_and_counts_timeouts(tmp_path, monkey
+     def execute(**kwargs):
+         seen.append(kwargs)
+         return SimpleNamespace(status='timeout', exit_code=124)
+-    monkeypatch.setattr(sb, 'execute_subprocess_command', execute)
++    monkeypatch.setattr(env, 'execute_limited', execute)
+     monkeypatch.setattr(env, 'runtime_ro_paths', lambda *args: [Path('/opt/python')])
+     env.apply_isolation(['/home/ubuntu'], [])
+     state = {}
+@@ -233,7 +233,14 @@ def test_shared_module_embedded_in_kernel(tmp_path):
+     result = subprocess.run([sys.executable, '-I', '-c',
+         "import runpy, sys; m=runpy.run_path(sys.argv[1]); "
+         "assert m['setup_scorer_env'].__module__ == 'sandbox_env'; "
+-        "assert m['patch_subprocess_deps'].__globals__ is m['setup_scorer_env'].__globals__",
++        "assert m['patch_subprocess_deps'].__globals__ is m['setup_scorer_env'].__globals__; "
++        "import _gemma_proctree as p, subprocess, json; "
++        "r=subprocess.run([sys.executable, '-I', '-c', p.supervisor_source() + '\\nsupervisor_main()'], "
++        "input=json.dumps(dict(command=['/bin/echo', 'staged'], cwd='/', env={})), "
++        "capture_output=True, text=True); "
++        "assert r.returncode == 0, r.stderr; "
++        "result=json.loads(r.stdout); "
++        "assert result['status'] == 'ok' and result['stdout'] == 'staged\\n', result",
+         str(staged)], capture_output=True, text=True)
+     assert result.returncode == 0, result.stderr
+ 
+diff --git a/eval/tests/test_gold_calibration.py b/eval/tests/test_gold_calibration.py
+index 3ffb7cc..b75cc29 100644
+--- a/eval/tests/test_gold_calibration.py
++++ b/eval/tests/test_gold_calibration.py
+@@ -151,6 +151,17 @@ class WorkerTests(unittest.TestCase):
+         self.assertEqual(row['exit_code'], 0)
+         self.assertNotIn('SECRET', json.dumps(row))
+         self.assertGreaterEqual(row['duration_seconds'], 0)
++        for key in ('peak_rss_bytes', 'mem_kills', 'orphan_kills'):
++            self.assertIs(type(row[key]), int)
++
++    def test_metrics_propagate_from_async_verifier(self):
++        async def verify(*args, **kwargs):
++            gold.command_metrics.get().update(peak_rss_bytes=123456, mem_kills=1, orphan_kills=2)
++            return dict(resolved=False, test_exit_code=137)
++        row = self.run_worker(verify)
++        self.assertEqual([row[k] for k in ('peak_rss_bytes', 'mem_kills', 'orphan_kills')],
++                         [123456, 1, 2])
++        self.assertIsNone(gold.command_metrics.get())
+ 
+     def test_exception_text_never_copied_into_result(self):
+         async def verify(*args, **kwargs):
+     1	"""Linux process identities and RSS, restricted to our uid (stdlib only)."""
+     2	from dataclasses import dataclass
+     3	import ctypes
+     4	import errno
+     5	import json
+     6	import os
+     7	import resource
+     8	import shutil
+     9	import subprocess
+    10	import sys
+    11	import time
+    12	from pathlib import Path
+    13	import signal
+    14	
+    15	
+    16	@dataclass(frozen=True)
+    17	class Process:
+    18	    pid: int
+    19	    ppid: int
+    20	    pgid: int
+    21	    sid: int
+    22	    rss: int
+    23	    starttime: int
+    24	    state: str
+    25	
+    26	
+    27	def snapshot():
+    28	    processes = {}
+    29	    for entry in Path('/proc').iterdir():
+    30	        if not entry.name.isdecimal():
+    31	            continue
+    32	        try:
+    33	            if entry.stat().st_uid != os.getuid():
+    34	                continue
+    35	            # comm may contain spaces and parentheses.
+    36	            fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+    37	            pid = int(entry.name)
+    38	            processes[pid] = Process(pid, int(fields[1]), int(fields[2]),
+    39	                                     int(fields[3]), int(fields[21]) * os.sysconf('SC_PAGE_SIZE'),
+    40	                                     int(fields[19]), fields[0])
+    41	        except (OSError, ValueError, IndexError):
+    42	            continue  # Process exited during the scan.
+    43	    return processes
+    44	
+    45	
+    46	def descendants(pids, processes=None):
+    47	    processes = snapshot() if processes is None else processes
+    48	    found = {pids} if isinstance(pids, int) else set(pids)
+    49	    while True:
+    50	        children = {p.pid for p in processes.values() if p.ppid in found}
+    51	        if children <= found:
+    52	            return found
+    53	        found.update(children)
+    54	
+    55	
+    56	def survivors(pids, processes=None):
+    57	    """Return live identities from a pid -> Process mapping, excluding zombies."""
+    58	    processes = snapshot() if processes is None else processes
+    59	    return {pid: p for pid, old in pids.items()
+    60	            if (p := processes.get(pid)) is not None
+    61	            and p.starttime == old.starttime and p.state not in ('Z', 'X')}
+    62	
+    63	
+    64	def tree_rss(pids, processes=None):
+    65	    return sum(p.rss for p in survivors(pids, processes).values())
+    66	
+    67	
+    68	def kill_tree(pids):
+    69	    """Open pidfds, then verify starttime, then signal the bound identities."""
+    70	    killed = 0
+    71	    for pid, old in pids.items():
+    72	        try:
+    73	            fd = os.pidfd_open(pid)
+    74	        except ProcessLookupError:
+    75	            continue
+    76	        try:
+    77	            if pid in survivors({pid: old}):
+    78	                signal.pidfd_send_signal(fd, signal.SIGKILL)
+    79	                killed += 1
+    80	        except ProcessLookupError:
+    81	            pass
+    82	        finally:
+    83	            os.close(fd)
+    84	    return killed
+    85	
+    86	
+    87	def enable_subreaper():
+    88	    if sys.platform != 'linux':
+    89	        raise RuntimeError('Sandbox supervision requires Linux')
+    90	    libc = ctypes.CDLL(None, use_errno=True)
+    91	    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER, unprivileged
+    92	        err = ctypes.get_errno()
+    93	        raise OSError(err, os.strerror(err))
+    94	
+    95	
+    96	def track_descendants(tracked, runner, processes):
+    97	    # Dedicated supervisor: no helper processes, and exactly one task. Adopted
+    98	    # orphans belong to that task regardless of their environment, pgid or sid.
+    99	    if runner.pid not in survivors({runner.pid: runner}, processes):
+   100	        raise RuntimeError('Supervisor identity changed')
+   101	    selected = descendants({runner.pid}, processes) - {runner.pid}
+   102	    for pid in selected:
+   103	        tracked[pid] = processes[pid]  # Replace stale identities on pid reuse.
+   104	    return survivors(tracked, processes)
+   105	
+   106	
+   107	class RusagePopen(subprocess.Popen):
+   108	    """Keep Popen's status/pipe handling while collecting the child's rusage.
+   109	
+   110	    POSIX Popen reaps through both _internal_poll and _try_wait (wait and
+   111	    communicate). Both must use wait4 before the kernel discards the rusage.
+   112	    """
+   113	    peak_rss_bytes = 0
+   114	
+   115	    def _waitpid(self, pid, flags):
+   116	        pid, status, usage = os.wait4(pid, flags)
+   117	        if pid:
+   118	            self.peak_rss_bytes = max(self.peak_rss_bytes, usage.ru_maxrss * 1024)
+   119	        return pid, status
+   120	
+   121	    def _internal_poll(self, _deadstate=None):
+   122	        # Popen's private poll callback signature differs between Python 3.12
+   123	        # and 3.13. Keep its locking/status semantics with our wait4 callback.
+   124	        if self.returncode is None and self._waitpid_lock.acquire(False):
+   125	            try:
+   126	                if self.returncode is None:
+   127	                    pid, status = self._waitpid(self.pid, os.WNOHANG)
+   128	                    if pid == self.pid:
+   129	                        self._handle_exitstatus(status)
+   130	            except OSError as exc:
+   131	                if _deadstate is not None:
+   132	                    self.returncode = _deadstate
+   133	                elif exc.errno == errno.ECHILD:
+   134	                    self.returncode = 0
+   135	            finally:
+   136	                self._waitpid_lock.release()
+   137	        return self.returncode
+   138	
+   139	    def _try_wait(self, wait_flags):
+   140	        try:
+   141	            return self._waitpid(self.pid, wait_flags)
+   142	        except ChildProcessError:
+   143	            return self.pid, 0  # Match Popen's already-reaped child behavior.
+   144	
+   145	
+   146	def run_limited(command, cwd, env, timeout=300, *, shell=None,
+   147	                max_output_chars=10 * 1024 * 1024):
+   148	    """Installed executor contract, with host process-tree limits and cleanup.
+   149	
+   150	    peak_rss_bytes is the maximum of sampled tree RSS and reaped ru_maxrss
+   151	    (KiB on Linux, converted to bytes). The reaped value is a per-process
+   152	    peak, not a simultaneous tree sum. Only sampled tree RSS triggers kills.
+   153	    """
+   154	    enable_subreaper()
+   155	    runner = snapshot()[os.getpid()]
+   156	    start = time.perf_counter()
+   157	    metrics = dict(peak_rss_bytes=0, mem_kills=0, orphan_kills=0)
+   158	    tracked = {}
+   159	    peak = 0
+   160	    if shell is None:
+   161	        shell = isinstance(command, str)
+   162	    try:
+   163	        limit = int(os.environ.get('GEMMA_SANDBOX_MEM_BYTES', 4 * 1024**3))
+   164	        as_limit = int(os.environ.get('GEMMA_SANDBOX_AS_BYTES', 8 * 1024**3))
+   165	        # A bin/job fallback may already impose a lower hard AS cap. Raising
+   166	        # that cap requires privileges; preserve the tighter inherited limit.
+   167	        hard_as = resource.getrlimit(resource.RLIMIT_AS)[1]
+   168	        if hard_as != resource.RLIM_INFINITY:
+   169	            as_limit = min(as_limit, hard_as)
+   170	        prlimit = shutil.which('prlimit')
+   171	        if prlimit:
+   172	            # RLIMIT_AS is a backstop only: virtual space differs from RSS, and
+   173	            # a per-process cap cannot enforce aggregate process-tree memory.
+   174	            if shell:
+   175	                command = ['/bin/sh', '-c', command] if isinstance(command, str) else ['/bin/sh', '-c', *command]
+   176	            elif isinstance(command, str):
+   177	                command = [command]
+   178	            command = [prlimit, f'--as={as_limit}', '--', *command]
+   179	            shell = False
+   180	        proc = RusagePopen(command, shell=shell, cwd=str(cwd), env=env,
+   181	                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+   182	                                text=True, encoding='utf-8', errors='replace',
+   183	                                start_new_session=True)
+   184	    except (RuntimeError, OSError, ValueError) as exc:
+   185	        return dict(status='error', stdout='', stderr=str(exc), exit_code=-1,
+   186	                    duration_seconds=round(time.perf_counter() - start, 3), metrics=metrics)
+   187	
+   188	    status, code = None, None
+   189	    memory_killed = False
+   190	
+   191	    def scan():
+   192	        nonlocal peak, status, code, memory_killed
+   193	        processes = snapshot()
+   194	        live = track_descendants(tracked, runner, processes)
+   195	        rss = tree_rss(live, processes)
+   196	        peak = max(peak, rss)
+   197	        # Every scan, including exit and cleanup, must classify memory excess.
+   198	        if rss > limit and not memory_killed:
+   199	            status, code = 'error', 137
+   200	            memory_killed = True
+   201	            metrics['mem_kills'] += 1
+   202	        return live
+   203	
+   204	    def reap():
+   205	        nonlocal peak
+   206	        if proc.poll() is None:
+   207	            return False  # Popen owns the direct child's status.
+   208	        peak = max(peak, proc.peak_rss_bytes)
+   209	        # Once Popen has reaped its child, all remaining children are task
+   210	        # orphans. ECHILD confirms cleanup even if a /proc snapshot missed a
+   211	        # fork/reparent race; wait4 returning pid 0 requires another scan.
+   212	        while True:
+   213	            try:
+   214	                pid, _, usage = os.wait4(-1, os.WNOHANG)
+   215	            except ChildProcessError:
+   216	                return True
+   217	            if pid == 0:
+   218	                return False
+   219	            peak = max(peak, usage.ru_maxrss * 1024)
+   220	
+   221	    def cleanup():
+   222	        seen = set()
+   223	        deadline = time.monotonic() + 2
+   224	        while True:
+   225	            live = scan()
+   226	            seen.update((p.pid, p.starttime) for p in live.values())
+   227	            kill_tree(live)
+   228	            empty = reap()
+   229	            if not live and empty:
+   230	                return len(seen)
+   231	            if time.monotonic() >= deadline:
+   232	                raise RuntimeError('Sandbox processes survived SIGKILL')
+   233	            time.sleep(0.025)
+   234	
+   235	    stdout, stderr = '', ''
+   236	    try:
+   237	        while True:
+   238	            scan()
+   239	            if memory_killed:
+   240	                cleanup()
+   241	                break
+   242	            if timeout is not None and time.perf_counter() - start >= timeout:
+   243	                status, code = 'timeout', 124
+   244	                cleanup()
+   245	                break
+   246	            if proc.poll() is not None:
+   247	                count = cleanup()
+   248	                metrics['orphan_kills'] += count
+   249	                break
+   250	            wait = 0.25 if timeout is None else max(0.001, min(0.25, timeout - (time.perf_counter() - start)))
+   251	            try:
+   252	                stdout, stderr = proc.communicate(timeout=wait)
+   253	            except subprocess.TimeoutExpired:
+   254	                continue
+   255	            # Scan and clean up even if detached daemons closed their pipe fds.
+   256	            count = cleanup()
+   257	            metrics['orphan_kills'] += count
+   258	            break
+   259	        try:
+   260	            stdout, stderr = proc.communicate(timeout=1)
+   261	        except subprocess.TimeoutExpired:
+   262	            stdout, stderr = '', ''
+   263	        if status is None:
+   264	            status, code = ('ok' if proc.returncode == 0 else 'error'), proc.returncode
+   265	        if status != 'timeout':
+   266	            if max_output_chars and len(stdout) > max_output_chars:
+   267	                stdout = stdout[:max_output_chars] + '\n...[Output truncated at 10MB limit]\n'
+   268	            if max_output_chars and len(stderr) > max_output_chars:
+   269	                stderr = stderr[:max_output_chars] + '\n...[Output truncated at 10MB limit]\n'
+   270	    except (RuntimeError, OSError, ValueError) as exc:
+   271	        status, code, stdout, stderr = 'error', 1, '', str(exc)
+   272	    finally:
+   273	        cleanup()  # Fail closed if a process cannot be killed.
+   274	        proc.stdout.close()
+   275	        proc.stderr.close()
+   276	        metrics['peak_rss_bytes'] = peak
+   277	    if memory_killed:
+   278	        status, code = 'error', 137
+   279	        stderr += '\nkilled: sandbox memory limit\n'
+   280	    return dict(status=status, stdout=stdout or '', stderr=stderr or '',
+   281	                exit_code=code, duration_seconds=round(time.perf_counter() - start, 3),
+   282	                metrics=metrics)
+   283	
+   284	
+   285	def supervisor_source():
+   286	    # Single-file Kaggle staging supplies SOURCE for the embedded module.
+   287	    return globals().get('SOURCE') or Path(__file__).read_text()
+   288	
+   289	
+   290	def supervisor_main():
+   291	    try:
+   292	        result = run_limited(**json.load(sys.stdin))
+   293	    except (RuntimeError, OSError, ValueError) as exc:
+   294	        result = dict(status='error', stdout='', stderr=str(exc), exit_code=-1,
+   295	                      duration_seconds=0, metrics={})
+   296	    print(json.dumps(result))
+
+exec
+/bin/bash -lc 'nl -ba eval/proctree.py' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+     1	"""Linux process identities and RSS, restricted to our uid (stdlib only)."""
+     2	from dataclasses import dataclass
+     3	import ctypes
+     4	import errno
+     5	import json
+     6	import os
+     7	import resource
+     8	import shutil
+     9	import subprocess
+    10	import sys
+    11	import time
+    12	from pathlib import Path
+    13	import signal
+    14	
+    15	
+    16	@dataclass(frozen=True)
+    17	class Process:
+    18	    pid: int
+    19	    ppid: int
+    20	    pgid: int
+    21	    sid: int
+    22	    rss: int
+    23	    starttime: int
+    24	    state: str
+    25	
+    26	
+    27	def snapshot():
+    28	    processes = {}
+    29	    for entry in Path('/proc').iterdir():
+    30	        if not entry.name.isdecimal():
+    31	            continue
+    32	        try:
+    33	            if entry.stat().st_uid != os.getuid():
+    34	                continue
+    35	            # comm may contain spaces and parentheses.
+    36	            fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+    37	            pid = int(entry.name)
+    38	            processes[pid] = Process(pid, int(fields[1]), int(fields[2]),
+    39	                                     int(fields[3]), int(fields[21]) * os.sysconf('SC_PAGE_SIZE'),
+    40	                                     int(fields[19]), fields[0])
+    41	        except (OSError, ValueError, IndexError):
+    42	            continue  # Process exited during the scan.
+    43	    return processes
+    44	
+    45	
+    46	def descendants(pids, processes=None):
+    47	    processes = snapshot() if processes is None else processes
+    48	    found = {pids} if isinstance(pids, int) else set(pids)
+    49	    while True:
+    50	        children = {p.pid for p in processes.values() if p.ppid in found}
+    51	        if children <= found:
+    52	            return found
+    53	        found.update(children)
+    54	
+    55	
+    56	def survivors(pids, processes=None):
+    57	    """Return live identities from a pid -> Process mapping, excluding zombies."""
+    58	    processes = snapshot() if processes is None else processes
+    59	    return {pid: p for pid, old in pids.items()
+    60	            if (p := processes.get(pid)) is not None
+    61	            and p.starttime == old.starttime and p.state not in ('Z', 'X')}
+    62	
+    63	
+    64	def tree_rss(pids, processes=None):
+    65	    return sum(p.rss for p in survivors(pids, processes).values())
+    66	
+    67	
+    68	def kill_tree(pids):
+    69	    """Open pidfds, then verify starttime, then signal the bound identities."""
+    70	    killed = 0
+    71	    for pid, old in pids.items():
+    72	        try:
+    73	            fd = os.pidfd_open(pid)
+    74	        except ProcessLookupError:
+    75	            continue
+    76	        try:
+    77	            if pid in survivors({pid: old}):
+    78	                signal.pidfd_send_signal(fd, signal.SIGKILL)
+    79	                killed += 1
+    80	        except ProcessLookupError:
+    81	            pass
+    82	        finally:
+    83	            os.close(fd)
+    84	    return killed
+    85	
+    86	
+    87	def enable_subreaper():
+    88	    if sys.platform != 'linux':
+    89	        raise RuntimeError('Sandbox supervision requires Linux')
+    90	    libc = ctypes.CDLL(None, use_errno=True)
+    91	    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER, unprivileged
+    92	        err = ctypes.get_errno()
+    93	        raise OSError(err, os.strerror(err))
+    94	
+    95	
+    96	def track_descendants(tracked, runner, processes):
+    97	    # Dedicated supervisor: no helper processes, and exactly one task. Adopted
+    98	    # orphans belong to that task regardless of their environment, pgid or sid.
+    99	    if runner.pid not in survivors({runner.pid: runner}, processes):
+   100	        raise RuntimeError('Supervisor identity changed')
+   101	    selected = descendants({runner.pid}, processes) - {runner.pid}
+   102	    for pid in selected:
+   103	        tracked[pid] = processes[pid]  # Replace stale identities on pid reuse.
+   104	    return survivors(tracked, processes)
+   105	
+   106	
+   107	class RusagePopen(subprocess.Popen):
+   108	    """Keep Popen's status/pipe handling while collecting the child's rusage.
+   109	
+   110	    POSIX Popen reaps through both _internal_poll and _try_wait (wait and
+   111	    communicate). Both must use wait4 before the kernel discards the rusage.
+   112	    """
+   113	    peak_rss_bytes = 0
+   114	
+   115	    def _waitpid(self, pid, flags):
+   116	        pid, status, usage = os.wait4(pid, flags)
+   117	        if pid:
+   118	            self.peak_rss_bytes = max(self.peak_rss_bytes, usage.ru_maxrss * 1024)
+   119	        return pid, status
+   120	
+   121	    def _internal_poll(self, _deadstate=None):
+   122	        # Popen's private poll callback signature differs between Python 3.12
+   123	        # and 3.13. Keep its locking/status semantics with our wait4 callback.
+   124	        if self.returncode is None and self._waitpid_lock.acquire(False):
+   125	            try:
+   126	                if self.returncode is None:
+   127	                    pid, status = self._waitpid(self.pid, os.WNOHANG)
+   128	                    if pid == self.pid:
+   129	                        self._handle_exitstatus(status)
+   130	            except OSError as exc:
+   131	                if _deadstate is not None:
+   132	                    self.returncode = _deadstate
+   133	                elif exc.errno == errno.ECHILD:
+   134	                    self.returncode = 0
+   135	            finally:
+   136	                self._waitpid_lock.release()
+   137	        return self.returncode
+   138	
+   139	    def _try_wait(self, wait_flags):
+   140	        try:
+   141	            return self._waitpid(self.pid, wait_flags)
+   142	        except ChildProcessError:
+   143	            return self.pid, 0  # Match Popen's already-reaped child behavior.
+   144	
+   145	
+   146	def run_limited(command, cwd, env, timeout=300, *, shell=None,
+   147	                max_output_chars=10 * 1024 * 1024):
+   148	    """Installed executor contract, with host process-tree limits and cleanup.
+   149	
+   150	    peak_rss_bytes is the maximum of sampled tree RSS and reaped ru_maxrss
+   151	    (KiB on Linux, converted to bytes). The reaped value is a per-process
+   152	    peak, not a simultaneous tree sum. Only sampled tree RSS triggers kills.
+   153	    """
+   154	    enable_subreaper()
+   155	    runner = snapshot()[os.getpid()]
+   156	    start = time.perf_counter()
+   157	    metrics = dict(peak_rss_bytes=0, mem_kills=0, orphan_kills=0)
+   158	    tracked = {}
+   159	    peak = 0
+   160	    if shell is None:
+   161	        shell = isinstance(command, str)
+   162	    try:
+   163	        limit = int(os.environ.get('GEMMA_SANDBOX_MEM_BYTES', 4 * 1024**3))
+   164	        as_limit = int(os.environ.get('GEMMA_SANDBOX_AS_BYTES', 8 * 1024**3))
+   165	        # A bin/job fallback may already impose a lower hard AS cap. Raising
+   166	        # that cap requires privileges; preserve the tighter inherited limit.
+   167	        hard_as = resource.getrlimit(resource.RLIMIT_AS)[1]
+   168	        if hard_as != resource.RLIM_INFINITY:
+   169	            as_limit = min(as_limit, hard_as)
+   170	        prlimit = shutil.which('prlimit')
+   171	        if prlimit:
+   172	            # RLIMIT_AS is a backstop only: virtual space differs from RSS, and
+   173	            # a per-process cap cannot enforce aggregate process-tree memory.
+   174	            if shell:
+   175	                command = ['/bin/sh', '-c', command] if isinstance(command, str) else ['/bin/sh', '-c', *command]
+   176	            elif isinstance(command, str):
+   177	                command = [command]
+   178	            command = [prlimit, f'--as={as_limit}', '--', *command]
+   179	            shell = False
+   180	        proc = RusagePopen(command, shell=shell, cwd=str(cwd), env=env,
+   181	                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+   182	                                text=True, encoding='utf-8', errors='replace',
+   183	                                start_new_session=True)
+   184	    except (RuntimeError, OSError, ValueError) as exc:
+   185	        return dict(status='error', stdout='', stderr=str(exc), exit_code=-1,
+   186	                    duration_seconds=round(time.perf_counter() - start, 3), metrics=metrics)
+   187	
+   188	    status, code = None, None
+   189	    memory_killed = False
+   190	
+   191	    def scan():
+   192	        nonlocal peak, status, code, memory_killed
+   193	        processes = snapshot()
+   194	        live = track_descendants(tracked, runner, processes)
+   195	        rss = tree_rss(live, processes)
+   196	        peak = max(peak, rss)
+   197	        # Every scan, including exit and cleanup, must classify memory excess.
+   198	        if rss > limit and not memory_killed:
+   199	            status, code = 'error', 137
+   200	            memory_killed = True
+   201	            metrics['mem_kills'] += 1
+   202	        return live
+   203	
+   204	    def reap():
+   205	        nonlocal peak
+   206	        if proc.poll() is None:
+   207	            return False  # Popen owns the direct child's status.
+   208	        peak = max(peak, proc.peak_rss_bytes)
+   209	        # Once Popen has reaped its child, all remaining children are task
+   210	        # orphans. ECHILD confirms cleanup even if a /proc snapshot missed a
+   211	        # fork/reparent race; wait4 returning pid 0 requires another scan.
+   212	        while True:
+   213	            try:
+   214	                pid, _, usage = os.wait4(-1, os.WNOHANG)
+   215	            except ChildProcessError:
+   216	                return True
+   217	            if pid == 0:
+   218	                return False
+   219	            peak = max(peak, usage.ru_maxrss * 1024)
+   220	
+   221	    def cleanup():
+   222	        seen = set()
+   223	        deadline = time.monotonic() + 2
+   224	        while True:
+   225	            live = scan()
+   226	            seen.update((p.pid, p.starttime) for p in live.values())
+   227	            kill_tree(live)
+   228	            empty = reap()
+   229	            if not live and empty:
+   230	                return len(seen)
+   231	            if time.monotonic() >= deadline:
+   232	                raise RuntimeError('Sandbox processes survived SIGKILL')
+   233	            time.sleep(0.025)
+   234	
+   235	    stdout, stderr = '', ''
+   236	    try:
+   237	        while True:
+   238	            scan()
+   239	            if memory_killed:
+   240	                cleanup()
+   241	                break
+   242	            if timeout is not None and time.perf_counter() - start >= timeout:
+   243	                status, code = 'timeout', 124
+   244	                cleanup()
+   245	                break
+   246	            if proc.poll() is not None:
+   247	                count = cleanup()
+   248	                metrics['orphan_kills'] += count
+   249	                break
+   250	            wait = 0.25 if timeout is None else max(0.001, min(0.25, timeout - (time.perf_counter() - start)))
+   251	            try:
+   252	                stdout, stderr = proc.communicate(timeout=wait)
+   253	            except subprocess.TimeoutExpired:
+   254	                continue
+   255	            # Scan and clean up even if detached daemons closed their pipe fds.
+   256	            count = cleanup()
+   257	            metrics['orphan_kills'] += count
+   258	            break
+   259	        try:
+   260	            stdout, stderr = proc.communicate(timeout=1)
+   261	        except subprocess.TimeoutExpired:
+   262	            stdout, stderr = '', ''
+   263	        if status is None:
+   264	            status, code = ('ok' if proc.returncode == 0 else 'error'), proc.returncode
+   265	        if status != 'timeout':
+   266	            if max_output_chars and len(stdout) > max_output_chars:
+   267	                stdout = stdout[:max_output_chars] + '\n...[Output truncated at 10MB limit]\n'
+   268	            if max_output_chars and len(stderr) > max_output_chars:
+   269	                stderr = stderr[:max_output_chars] + '\n...[Output truncated at 10MB limit]\n'
+   270	    except (RuntimeError, OSError, ValueError) as exc:
+   271	        status, code, stdout, stderr = 'error', 1, '', str(exc)
+   272	    finally:
+   273	        cleanup()  # Fail closed if a process cannot be killed.
+   274	        proc.stdout.close()
+   275	        proc.stderr.close()
+   276	        metrics['peak_rss_bytes'] = peak
+   277	    if memory_killed:
+   278	        status, code = 'error', 137
+   279	        stderr += '\nkilled: sandbox memory limit\n'
+   280	    return dict(status=status, stdout=stdout or '', stderr=stderr or '',
+   281	                exit_code=code, duration_seconds=round(time.perf_counter() - start, 3),
+   282	                metrics=metrics)
+   283	
+   284	
+   285	def supervisor_source():
+   286	    # Single-file Kaggle staging supplies SOURCE for the embedded module.
+   287	    return globals().get('SOURCE') or Path(__file__).read_text()
+   288	
+   289	
+   290	def supervisor_main():
+   291	    try:
+   292	        result = run_limited(**json.load(sys.stdin))
+   293	    except (RuntimeError, OSError, ValueError) as exc:
+   294	        result = dict(status='error', stdout='', stderr=str(exc), exit_code=-1,
+   295	                      duration_seconds=0, metrics={})
+   296	    print(json.dumps(result))
+
+exec
+/bin/bash -lc 'cat ops/codex/review-20261105T175836.md ops/codex/review-20261105T155357.md ops/codex/review-20261105T154832.md ops/codex/review-20261105T153456.md' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+**BLOCKING**
+
+1. **Detached children can escape tracking and survive cleanup.** At [eval/sandbox_env.py:140](/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/sandbox_env.py:140), discovery relies on ancestry, PGID/SID, or the inherited environment marker. A child that executes with a sanitized environment, calls `setsid()`, and becomes reparented between polls matches none of these. Cleanup then reports no tracked survivors while that process remains alive. This affects the required no-bwrap path. An in-memory reproduction returned `ok` with zero kill calls despite a live escaped child. Use supervision that survives environment clearing and reparenting, such as a dedicated subreaper supervisor. The existing detached-child test preserves the marker and misses this case.
+
+2. **PID-reuse protection is not race-free, and can target unrelated processes.** [eval/proctree.py:62](/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/proctree.py:62) checks identities before signaling; the process can exit and its PID be reused before `killpg()` or `kill()`. Group signaling uses an older snapshot without another identity check. Separately, [eval/sandbox_env.py:140](/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/sandbox_env.py:140) unconditionally trusts the numeric root PID, and line 156’s `setdefault()` retains stale identities when a tracked PID is reused. Consequences include signaling another same-UID process or excluding a current sandbox process from RSS and cleanup. Use stable identity handles for individual signaling and identity-aware discovery/tracking. [test_sandbox_limits.py:99](/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/tests/test_sandbox_limits.py:99) only tests an identity already stale before the check; it does not exercise these races.
+
+3. **Memory excess detected during cleanup returns success instead of the required memory failure.** The limit check at [eval/sandbox_env.py:179](/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/sandbox_env.py:179) precedes `communicate()`, but subsequent cleanup scans can raise `peak` without revisiting that check. At [eval/sandbox_env.py:201](/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/sandbox_env.py:201), a newly discovered over-limit background child is killed as an orphan, and the successful parent determines the result. A deterministic probe with a 300 MiB limit produced:
+   `status=ok, exit_code=0, peak_rss_bytes=419430400, mem_kills=0, orphan_kills=1`.
+   Apply the memory-failure classification to every scan that observes an excess, including exit/cleanup scans, and add this regression case.
+
+**Non-blocking**
+
+1. **The 8 GiB AS backstop changes valid low-RSS command outcomes.** [eval/sandbox_env.py:114](/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/sandbox_env.py:114) implements the spec, but virtual reservations count against it. On this VM, ordinary Node v22 startup succeeded under the cap; `new WebAssembly.Memory({initial:1,maximum:65536})` succeeded uncapped and failed capped with `RangeError: … could not allocate memory`. Thus the earlier V8 concern remains relevant even though basic startup works. Legitimate pytest cases or tools using large mappings can fail below the scorer’s RSS budget. Add representative reservation-heavy compatibility checks before claiming calibration equivalence.
+
+2. **The task-worker timeout still bypasses executor cleanup.** This is a pre-existing integration gap: [gold_calibration.py:304](/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/kaggle/gold_calibration.py:304) times out the worker using `subprocess.run`, while sandbox commands start independent sessions. Killing the worker at 3600 seconds prevents its cleanup from running and can leave those sessions alive. The implementation provides command-level groups, not an independently supervised task lifetime.
+
+3. **The tests do not establish the advertised guarantees.** [test_sandbox_limits.py:55](/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/tests/test_sandbox_limits.py:55) checks one recorded child rather than all survivors; the memory test at line 65 checks no survivors; the PID test misses signaling races. Fast-command `peak_rss_bytes > 0` assertions can also be flaky when the process exits before its first `/proc` observation. Live bubblewrap coverage remains unverified—the builder reports it was skipped because the sandbox blocked NETLINK_ROUTE.
+
+**Questions**
+
+- Is rejecting otherwise valid workloads that reserve more than 8 GiB of virtual memory an accepted calibration constraint?
+- Must task-worker death or timeout also satisfy the no-survivors guarantee?
+
+Gold/null patch selection, resolution handling, aggregation, and existing result fields are unchanged; the three numeric metrics are additive. I verified the generated single-file script imports in isolated Python 3.13, shares the intended metrics context, defaults to concurrency 2, accepts `GOLD_CONCURRENCY=1`, and rejects 0. Actual Kaggle execution remains unverified.
+
+No files were edited. I did not rerun pytest: repository rules require `bin/job`, which writes files unavailable under this read-only sandbox. The builder reports **76 passed, 1 skipped, 4 subtests passed in 8.55 seconds**.
+**BLOCKING**
+
+None found in HEAD `ac94b91`. Both previously reported cases are fixed:
+
+- Setup identity now records the resolved path and SHA-256 using the installer’s shared, deterministic selector: [sandbox_env.py:226](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/sandbox_env.py:226), [run_agent_eval.py:422](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:422).
+- The merged time and command caps are validated before environment setup: [run_agent_eval.py:415](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:415).
+
+**Non-blocking**
+
+1. **Other merged caps still bypass validation.** [run_agent_eval.py:319](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:319) checks only time and command limits. Reproduced acceptance of `budget: {tool_calls: -7}`, `budget: {turns: true}`, and flat `max_llm_calls: abc`. These can cause immediate exhaustion or runtime failures recorded as task failures. Extend validation to effective `budget.tool_calls` and `budget.turns`, with rejection tests.
+
+**Questions**
+
+None.
+
+Validation: **7 cap tests passed**, plus checks confirming both targeted nested fields reject booleans, strings, infinity, NaN, zero, and negatives. The read-only sandbox prevented running the setup-identity/journal tests requiring temporary files; those paths were inspected. The reported full suite was not independently rerun. No files changed.
+**BLOCKING**
+
+1. **B4 remains incomplete: the executed setup script is not fingerprinted.** The new hash covers only Python files under `eval/` ([run_agent_eval.py:243](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:243)). Dependency setup selects `data_dir/sandbox/setup.py`, with a recursive fallback, then copies and executes it ([sandbox_env.py:249](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/sandbox_env.py:249), [line 265](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/sandbox_env.py:265)). Changing that script leaves every current identity field unchanged, allowing resume to mix results from different setup implementations. Record the selected script’s resolved path and content hash in identity; add a synthetic resume-rejection test.
+
+**Non-blocking**
+
+1. **Nested caps bypass positive-finite validation.** `resolve_caps()` returns `None` for nested values ([run_agent_eval.py:305](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:305)), so validation of `caps.values()` skips them ([line 389](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:389)). Reproduced: nested `time_minutes: 0` and `command_timeout_seconds: -7` pass validation and reach the effective configuration unchanged. Validate the effective values after merging and add rejection tests.
+
+Validation: both new cap tests passed; additional checks confirmed CLI > flat > nested > fallback for both caps. Read-only temporary-directory restrictions prevented rerunning the source-hash/journal tests. No files changed.
+**BLOCKING**
+
+1. **B4 remains incomplete: dirty state does not identify the implementation.** [run_agent_eval.py:236](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:236) records only SHA plus a boolean. Different uncommitted implementations therefore share an identity; I reproduced `Journal` accepting two different dirty-tree states. Conversely, starting clean and writing the default, unignored results journal makes `git_dirty` change to true, causing an unchanged run to reject resume. The journal is created after fingerprinting at [line 375](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:375). Hash relevant working-tree source content, excluding generated artifacts, and test both cases.
+
+**Non-blocking**
+
+1. **N2 is partially fixed: nested settings are overwritten by fallback caps.** [run_agent_eval.py:344](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:344) supplies 5 minutes and 60 seconds even when the bundle specifies nested `budget`/`harness` settings. Those values override the nested configuration at [line 285](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:285). Reproduced: `budget.time_minutes: 2` becomes **5**, and `harness.command_timeout_seconds: 7` becomes **60**, without CLI overrides. Flat `verification_timeout_seconds` forwarding is fixed. Apply fallback defaults only when neither configuration form supplies a value.
+
+The remaining findings check out:
+
+| Finding | Assessment |
+|---|---|
+| **B1** | Fixed for the configured paths. Commands pass through bubblewrap; agent objects have gold fields cleared. The alias fix binds the **same resolved Python prefix** at both destinations, with source/destination exposure checks. I found no widening to inventory, splits, results, or runs. See [sandbox_env.py:49](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/sandbox_env.py:49) and [line 68](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/sandbox_env.py:68). |
+| **B2** | Fixed: absolute graph/embedding paths reach the supplied context at [run_agent_eval.py:436](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:436). Installed graph tools read them in the host process. |
+| **B3** | Fixed: timing uses monotonic callbacks and call IDs, with per-task `ContextVar` state. The real ADK parallel-tool/concurrent-context test passed independently. See [tool_timing.py:58](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/tool_timing.py:58). |
+| **B5** | Shared setup is fixed in both entrypoints: [runner:359](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:359), [calibration:248](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/kaggle/gold_calibration.py:248). Existing clean-list validity still needs calibration evidence. |
+| **N1** | Fixed: Git octal decoding works, and classification failures preserve diagnostics/results at [run_agent_eval.py:293](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:293). |
+| **N3** | Fixed: raw inventory IDs are checked before harness deduplication at [run_agent_eval.py:335](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:335). |
+
+Verification still delegates protected-file reset, test-patch application, pytest, and JUnit validation to installed swegemma. Results rows select metrics and sanitized error categories; I found no direct task-text or patch serialization into them. Raw artifacts remain separate at [run_agent_eval.py:459](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py:459).
+
+**Questions**
+
+- Has gold/null-control calibration been rerun under the shared isolation setup? The [implementation report:81](/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/ops/codex/implement-20261105-eval-runner-fix.md:81) says it has not. B5’s validation requirement remains open before relying on existing exclusions.
+
+Validation: **12 selected tests passed**. Read-only filesystem restrictions prevented a full-suite/E2E rerun; bubblewrap preflight was denied at `NETLINK_ROUTE` creation. Your reported **401 passed, 1 skipped** remains separate evidence. No files changed.
+
+codex
+Round 3 adds `wait4` accounting for both the direct child and adopted descendants, and keeps memory kills based on polled tree RSS. The host log confirms 460 passed and 3 skipped. The diff also includes a documentation change outside `eval/`; I’m checking the earlier cleanup and PID-reuse findings and comparing the executor’s output contract.
+exec
+/bin/bash -lc "nl -ba eval/tests/test_sandbox_limits.py | sed -n '1,290p' && cat /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py | head -n 205 && cat /home/ubuntu/work/gemma/ops/codex/sandbox-limits3-hosttest.sh" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+exec
+/bin/bash -lc "git diff 02a883d..9d610b5 -- eval/kaggle/gold_calibration.py eval/kaggle/stage_kernel.py eval/tests/test_gold_calibration.py eval/tests/test_eval_fixes.py eval/sandbox_env.py && nl -ba eval/kaggle/gold_calibration.py | sed -n '175,350p' && nl -ba eval/kaggle/stage_kernel.py | sed -n '1,160p'" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+     1	"""Offline, bounded process-tree regression tests; no competition tasks."""
+     2	import os
+     3	from pathlib import Path
+     4	import shlex
+     5	import sys
+     6	import time
+     7	from dataclasses import replace
+     8	from types import SimpleNamespace
+     9	
+    10	import pytest
+    11	
+    12	os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
+    13	
+    14	from eval import proctree, sandbox_env
+    15	from adk_eval_core.sandbox.subprocess_sandbox import execute_subprocess_command as original
+    16	
+    17	
+    18	@pytest.fixture
+    19	def execute(tmp_path, monkeypatch):
+    20	    import swegemma.sandbox.subprocess as sb
+    21	    monkeypatch.setattr(sb, 'execute_subprocess_command', original)
+    22	    sandbox_env.apply_isolation([], [])
+    23	    metrics = {}
+    24	    token = sandbox_env.command_metrics.set(metrics)
+    25	    def run(command, **kwargs):
+    26	        return sb.execute_subprocess_command(command=command, cwd=tmp_path,
+    27	                                             env=dict(os.environ), **kwargs)
+    28	    yield run, metrics
+    29	    sandbox_env.command_metrics.reset(token)
+    30	
+    31	
+    32	def python(code):
+    33	    return [sys.executable, '-c', code]
+    34	
+    35	
+    36	def assert_dead(path):
+    37	    pid = int(path.read_text())
+    38	    p = proctree.snapshot().get(pid)
+    39	    assert p is None or p.state in ('Z', 'X')
+    40	
+    41	
+    42	@pytest.mark.parametrize('detach', [False, True])
+    43	def test_timeout_orphans(execute, tmp_path, detach):
+    44	    run, metrics = execute
+    45	    if detach:
+    46	        code = ("import os,time; p=os.fork(); "
+    47	                "os._exit(0) if p else None; os.setsid(); "
+    48	                "open('child.pid','w').write(str(os.getpid())); time.sleep(600)")
+    49	        cmd = ['/bin/bash', '-c', shlex.join(python(code)) + '; sleep 600']
+    50	    else:
+    51	        cmd = ['/bin/bash', '-c', '(sleep 600 & echo $! > child.pid); sleep 600']
+    52	    start = time.monotonic()
+    53	    result = run(cmd, timeout=1)
+    54	    assert result.status == 'timeout' and result.exit_code == 124
+    55	    assert metrics['cmd_timeouts'] == 1
+    56	    assert_dead(tmp_path / 'child.pid')
+    57	    assert time.monotonic() - start < 5
+    58	
+    59	
+    60	def test_memory_tree(execute, monkeypatch):
+    61	    run, metrics = execute
+    62	    monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(300 * 1024**2))
+    63	    code = ("import time; chunks=[]\nfor _ in range(60):\n"
+    64	            " chunks.append(bytearray(10*1024**2)); time.sleep(.04)\ntime.sleep(600)")
+    65	    # Allocate in a child, so accounting must include descendants.
+    66	    result = run(['/bin/bash', '-c', shlex.join(python(code)) + ' & wait'], timeout=8)
+    67	    assert result.status == 'error' and result.exit_code == 137
+    68	    assert 'killed: sandbox memory limit' in result.stderr
+    69	    assert metrics['mem_kills'] == 1
+    70	    assert metrics['peak_rss_bytes'] > 300 * 1024**2
+    71	
+    72	
+    73	@pytest.mark.parametrize('command,kwargs', [
+    74	    (['/bin/bash', '-c', 'echo hello'], {}),
+    75	    (['/bin/bash', '-c', 'exit 3'], {}),
+    76	    (['/bin/bash', '-c', 'exit 137'], {}),
+    77	    (['/bin/bash', '-c', 'echo err >&2'], {}),
+    78	    ('printf hello', {}),
+    79	    (['/bin/bash', '-c', 'printf abcdef'], {'max_output_chars': 3}),
+    80	    (python("import os; os.write(1, b'\\xff')"), {}),
+    81	])
+    82	def test_original_output_contract(execute, tmp_path, command, kwargs):
+    83	    run, metrics = execute
+    84	    expected = original(command, tmp_path, dict(os.environ), **kwargs)
+    85	    actual = run(command, **kwargs)
+    86	    assert type(actual) is type(expected)
+    87	    assert (actual.status, actual.exit_code, actual.stdout, actual.stderr) == (
+    88	        expected.status, expected.exit_code, expected.stdout, expected.stderr)
+    89	    assert metrics['peak_rss_bytes'] > 0
+    90	
+    91	
+    92	def test_normal_exit_daemon(execute, tmp_path):
+    93	    run, metrics = execute
+    94	    result = run(['/bin/bash', '-c', 'sleep 600 >/dev/null 2>&1 & echo $! > child.pid'], timeout=3)
+    95	    assert result.status == 'ok' and result.exit_code == 0
+    96	    assert metrics['orphan_kills'] >= 1
+    97	    assert_dead(tmp_path / 'child.pid')
+    98	
+    99	
+   100	def test_pid_reuse_is_not_a_survivor():
+   101	    p = proctree.snapshot()[os.getpid()]
+   102	    stale = replace(p, starttime=p.starttime - 1)
+   103	    assert proctree.survivors({p.pid: stale}) == {}
+   104	    assert proctree.kill_tree({p.pid: stale}) == 0
+   105	    assert proctree.tree_rss({p.pid: p}) > 0
+   106	
+   107	
+   108	def test_without_prlimit(execute, monkeypatch):
+   109	    run, metrics = execute
+   110	    source = proctree.supervisor_source().replace(
+   111	        "prlimit = shutil.which('prlimit')", 'prlimit = None')
+   112	    monkeypatch.setattr(proctree, 'supervisor_source', lambda: source)
+   113	    result = run(['/bin/bash', '-c', 'echo fallback'])
+   114	    assert result.status == 'ok' and result.stdout == 'fallback\n'
+   115	    assert metrics['peak_rss_bytes'] > 0
+   116	
+   117	
+   118	@pytest.mark.parametrize('without_prlimit', [False, True])
+   119	def test_submillisecond_command_rss_without_polling(execute, monkeypatch, without_prlimit):
+   120	    run, metrics = execute
+   121	    # /bin/true does sub-millisecond work. Force all tree RSS samples to miss
+   122	    # it, regardless of host scheduling or the overhead of starting a process.
+   123	    source = proctree.supervisor_source().replace(
+   124	        'rss = tree_rss(live, processes)', 'rss = 0')
+   125	    if without_prlimit:
+   126	        source = source.replace("prlimit = shutil.which('prlimit')", 'prlimit = None')
+   127	    monkeypatch.setattr(proctree, 'supervisor_source', lambda: source)
+   128	    result = run(['/bin/true'])
+   129	    assert result.status == 'ok' and result.exit_code == 0
+   130	    assert metrics['peak_rss_bytes'] > 0
+   131	    assert metrics['mem_kills'] == 0
+   132	
+   133	
+   134	@pytest.mark.parametrize('method', ['poll', 'wait', 'communicate'])
+   135	def test_direct_child_wait4_rss(method):
+   136	    # Verify all Popen reaping paths, including communicate's internal wait.
+   137	    proc = proctree.RusagePopen(['/bin/true'])
+   138	    try:
+   139	        if method == 'poll':
+   140	            deadline = time.monotonic() + 5
+   141	            while proc.poll() is None:
+   142	                assert time.monotonic() < deadline
+   143	                time.sleep(.001)
+   144	        else:
+   145	            getattr(proc, method)(timeout=5)
+   146	        assert proc.returncode == 0
+   147	        assert proc.peak_rss_bytes > 0
+   148	    finally:
+   149	        if proc.poll() is None:
+   150	            proc.kill()
+   151	        proc.wait()
+   152	
+   153	
+   154	@pytest.mark.parametrize('polled_rss', [0, 5 * 1024**2])
+   155	def test_reaped_rss_is_maximum_not_sum_or_kill_trigger(monkeypatch, tmp_path, polled_rss):
+   156	    import io
+   157	    runner = proctree.snapshot()[os.getpid()]
+   158	    parent = replace(runner, pid=runner.pid + 100000, ppid=runner.pid, rss=polled_rss)
+   159	    processes = {runner.pid: runner, parent.pid: parent}
+   160	
+   161	    class ExitingParent:
+   162	        pid = parent.pid
+   163	        returncode = None
+   164	        peak_rss_bytes = 3 * 1024**2
+   165	        stdout, stderr = io.StringIO(), io.StringIO()
+   166	
+   167	        def poll(self):
+   168	            return self.returncode
+   169	
+   170	        def communicate(self, timeout=None):
+   171	            processes.pop(parent.pid, None)
+   172	            self.returncode = 0
+   173	            return '', ''
+   174	
+   175	    # Two adopted children with peaks of 4 and 2 MiB. Their peaks must be
+   176	    # converted from Linux KiB and maximized with the direct child's 3 MiB.
+   177	    reaped = iter([(parent.pid + 1, 0, SimpleNamespace(ru_maxrss=4096)),
+   178	                   (parent.pid + 2, 0, SimpleNamespace(ru_maxrss=2048))])
+   179	
+   180	    def wait_children(pid, flags):
+   181	        assert (pid, flags) == (-1, os.WNOHANG)
+   182	        try:
+   183	            return next(reaped)
+   184	        except StopIteration:
+   185	            raise ChildProcessError() from None
+   186	
+   187	    monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(polled_rss + 1))
+   188	    monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
+   189	    monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
+   190	    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
+   191	    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
+   192	    def kill(live):
+   193	        assert live == {}
+   194	        return 0
+   195	
+   196	    monkeypatch.setattr(proctree, 'kill_tree', kill)
+   197	    result = proctree.run_limited(['fake'], tmp_path, {})
+   198	    assert result['status'] == 'ok' and result['exit_code'] == 0
+   199	    assert result['metrics']['peak_rss_bytes'] == max(polled_rss, 4 * 1024**2)
+   200	    assert result['metrics']['mem_kills'] == 0
+   201	
+   202	
+   203	def test_envless_double_fork_is_reaped(execute, tmp_path):
+   204	    run, metrics = execute
+   205	    code = """
+   206	import os, time
+   207	r, w = os.pipe()
+   208	if os.fork():
+   209	    os.close(w)
+   210	    os.read(r, 1)
+   211	    os._exit(0)
+   212	os.close(r)
+   213	if os.fork():
+   214	    os._exit(0)
+   215	os.environ.clear()
+   216	os.setsid()
+   217	os.close(1)
+   218	os.close(2)
+   219	open('child.pid', 'w').write(str(os.getpid()))
+   220	os.write(w, b'1')
+   221	os.close(w)
+   222	time.sleep(600)
+   223	"""
+   224	    result = run(python(code), timeout=3)
+   225	    assert result.status == 'ok' and result.exit_code == 0
+   226	    assert metrics['orphan_kills'] >= 1
+   227	    # The adopted grandchild must be reaped, not merely left as a zombie.
+   228	    assert int((tmp_path / 'child.pid').read_text()) not in proctree.snapshot()
+   229	
+   230	
+   231	def test_pid_reuse_during_pidfd_open(monkeypatch):
+   232	    p = proctree.snapshot()[os.getpid()]
+   233	    processes = {p.pid: p}
+   234	    events = []
+   235	
+   236	    def open_fd(pid):
+   237	        processes[pid] = replace(p, starttime=p.starttime + 1)
+   238	        events.append('open')
+   239	        return 123
+   240	
+   241	    monkeypatch.setattr(proctree.os, 'pidfd_open', open_fd)
+   242	    monkeypatch.setattr(proctree, 'snapshot', lambda: processes)
+   243	    monkeypatch.setattr(proctree.signal, 'pidfd_send_signal', lambda *a: pytest.fail('reused pid signaled'))
+   244	    monkeypatch.setattr(proctree.os, 'close', lambda fd: events.append(('close', fd)))
+   245	    assert proctree.kill_tree({p.pid: p}) == 0
+   246	    assert events == ['open', ('close', 123)]
+   247	
+   248	
+   249	def test_reuse_after_verification_signals_bound_fd(monkeypatch):
+   250	    p = proctree.snapshot()[os.getpid()]
+   251	    events = []
+   252	    monkeypatch.setattr(proctree.os, 'pidfd_open', lambda pid: 123)
+   253	
+   254	    def scan():
+   255	        events.append('verify')
+   256	        return {p.pid: p}
+   257	
+   258	    def send(fd, sig):
+   259	        # A pid may now refer to another process; signaling the previously
+   260	        # opened fd still targets only the old identity (or returns ESRCH).
+   261	        assert events == ['verify']
+   262	        assert fd == 123 and sig == proctree.signal.SIGKILL
+   263	        events.append('signal fd')
+   264	        raise ProcessLookupError()
+   265	
+   266	    monkeypatch.setattr(proctree, 'snapshot', scan)
+   267	    monkeypatch.setattr(proctree.signal, 'pidfd_send_signal', send)
+   268	    monkeypatch.setattr(proctree.os, 'kill', lambda *a: pytest.fail('bare pid signal'))
+   269	    monkeypatch.setattr(proctree.os, 'killpg', lambda *a: pytest.fail('group signal'))
+   270	    monkeypatch.setattr(proctree.os, 'close', lambda fd: events.append('close'))
+   271	    assert proctree.kill_tree({p.pid: p}) == 0
+   272	    assert events == ['verify', 'signal fd', 'close']
+   273	
+   274	
+   275	def test_stale_tracked_identity_replaced():
+   276	    runner = proctree.snapshot()[os.getpid()]
+   277	    child = replace(runner, pid=runner.pid + 100000, ppid=runner.pid)
+   278	    stale = replace(child, starttime=child.starttime - 1)
+   279	    tracked = {child.pid: stale}
+   280	    live = proctree.track_descendants(tracked, runner, {runner.pid: runner, child.pid: child})
+   281	    assert tracked[child.pid] == child
+   282	    assert live == {child.pid: child}
+   283	    with pytest.raises(RuntimeError, match='identity changed'):
+   284	        proctree.track_descendants(tracked, stale, {runner.pid: runner, child.pid: child})
+   285	
+   286	
+   287	def test_memory_excess_first_seen_in_cleanup(monkeypatch, tmp_path):
+   288	    import io
+   289	    runner = proctree.snapshot()[os.getpid()]
+   290	    parent = replace(runner, pid=runner.pid + 100000, ppid=runner.pid, rss=1024)
+"""Subprocess sandbox implementation of BaseSandbox for local non-containerized execution."""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import os
+import pathlib
+import shutil
+import signal
+import subprocess
+import time
+
+from adk_eval_core.errors import (
+    EvalCoreError,
+    SandboxFileNotFoundError,
+    SandboxPathTraversalError,
+)
+from adk_eval_core.sandbox.base import BaseSandbox, ExecutionResult
+
+logger = logging.getLogger(__name__)
+
+
+_SAFE_ENV_KEYS = (
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "USER",
+    "LOGNAME",
+    "SYSTEMROOT",
+    "LD_LIBRARY_PATH",
+    "TMPDIR",
+    "TEST_TMPDIR",
+)
+
+
+def build_sanitized_env(
+    work_dir: pathlib.Path,
+    tmp_dir: pathlib.Path | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a sanitized environment dictionary from _SAFE_ENV_KEYS."""
+    eff_tmp = tmp_dir if tmp_dir is not None else work_dir
+    sanitized_env: dict[str, str] = {
+        k: os.environ[k] for k in _SAFE_ENV_KEYS if k in os.environ
+    }
+    sanitized_env["HOME"] = str(eff_tmp)
+    sanitized_env["TMPDIR"] = str(eff_tmp)
+    sanitized_env["TEST_TMPDIR"] = str(eff_tmp)
+    sanitized_env["PYTHONNOUSERSITE"] = "1"
+    if extra_env:
+        sanitized_env.update(extra_env)
+    return sanitized_env
+
+
+def execute_subprocess_command(
+    command: str | list[str],
+    cwd: pathlib.Path,
+    env: dict[str, str],
+    timeout: float | None = 300,
+    *,
+    shell: bool | None = None,
+    max_output_chars: int = 10 * 1024 * 1024,
+) -> ExecutionResult:
+    """Execute a command in a new process group with timeout and SIGKILL cleanup."""
+    if shell is None:
+        shell = isinstance(command, str)
+    start = time.perf_counter()
+    try:
+        proc = subprocess.Popen(
+            command,
+            shell=shell,
+            cwd=str(cwd),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            start_new_session=True,
+        )
+    except (RuntimeError, OSError, ValueError, EvalCoreError) as e:
+        duration = time.perf_counter() - start
+        return ExecutionResult(
+            status="error",
+            stdout="",
+            stderr=str(e),
+            exit_code=-1,
+            duration_seconds=round(duration, 3),
+        )
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        duration = time.perf_counter() - start
+        stdout = stdout or ""
+        stderr = stderr or ""
+        if max_output_chars and len(stdout) > max_output_chars:
+            stdout = stdout[:max_output_chars] + "\n...[Output truncated at 10MB limit]\n"
+        if max_output_chars and len(stderr) > max_output_chars:
+            stderr = stderr[:max_output_chars] + "\n...[Output truncated at 10MB limit]\n"
+        status = "ok" if proc.returncode == 0 else "error"
+        return ExecutionResult(
+            status=status,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=proc.returncode,
+            duration_seconds=round(duration, 3),
+        )
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            stdout, stderr = proc.communicate(timeout=1.0)
+        except (subprocess.TimeoutExpired, Exception):  # noqa: BLE001
+            stdout, stderr = "", ""
+        duration = time.perf_counter() - start
+        return ExecutionResult(
+            status="timeout",
+            stdout=stdout or "",
+            stderr=stderr or "",
+            exit_code=124,
+            duration_seconds=round(duration, 3),
+        )
+    except (RuntimeError, OSError, ValueError, EvalCoreError) as e:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        duration = time.perf_counter() - start
+        return ExecutionResult(
+            status="error",
+            stdout="",
+            stderr=str(e),
+            exit_code=1,
+            duration_seconds=round(duration, 3),
+        )
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+
+class SubprocessSandbox(BaseSandbox):
+    """Local process sandbox operating within a host directory."""
+
+    def __init__(
+        self,
+        work_dir: str | pathlib.Path | None = None,
+        environment: dict[str, str] | None = None,
+    ) -> None:
+        if work_dir is None:
+            import tempfile
+            self._temp_dir = tempfile.TemporaryDirectory(prefix="adk_sandbox_")
+            self._work_dir = pathlib.Path(self._temp_dir.name).resolve()
+        else:
+            self._temp_dir = None
+            self._work_dir = pathlib.Path(work_dir).resolve()
+            self._work_dir.mkdir(parents=True, exist_ok=True)
+        self._environment: dict[str, str] = dict(environment) if environment else {}
+        self._initial_files: dict[str, str | bytes] = {}
+
+    def initialize(self, files: dict[str, str | bytes] | None = None) -> None:
+        """Ensure working directory exists and write initial files."""
+        self._work_dir.mkdir(parents=True, exist_ok=True)
+        if files is not None:
+            self._initial_files = dict(files)
+            self._write_files(files)
+
+    def _write_files(self, files: dict[str, str | bytes]) -> None:
+        for rel_path, content in files.items():
+            self.write_file(rel_path, content)
+
+    def run_command(
+        self,
+        command: str,
+        timeout: float | None = 300,
+        work_dir: str | None = None,
+    ) -> ExecutionResult:
+        """Execute a shell command via subprocess."""
+        target_dir = self._resolve_sandbox_path(work_dir) if work_dir else self._work_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        sanitized_env = build_sanitized_env(
+            work_dir=self._work_dir,
+            extra_env=self._environment,
+        )
+        return execute_subprocess_command(
+            command=command,
+            cwd=target_dir,
+            env=sanitized_env,
+            timeout=timeout,
+            shell=True,
+        )
+
+    def _resolve_sandbox_path(self, path: str | pathlib.Path) -> pathlib.Path:
+        p = pathlib.Path(path)
+        if not p.is_absolute():
+            p = self._work_dir / p
+        resolved = p.resolve()
+        if not resolved.is_relative_to(self._work_dir.resolve()):
+            raise SandboxPathTraversalError(f"Path escapes sandbox: {path!r}", path=str(path))
+        return resolved
+#!/usr/bin/env bash
+# Host test of codex/sandbox-limits round 3 (full eval/tests suite, offline).
+cd /home/ubuntu/work/gemma-wt/codex-sandbox-limits || exit 1
+SP=$(ls -d /home/ubuntu/gemma-local/pyimg/cpython-3.13*/lib/python3.13/site-packages | head -1)
+/home/ubuntu/gemma-local/venv/bin/python3 -c "import sys; sys.path.append('$SP'); import pytest; sys.exit(pytest.main(['-q','-p','no:cacheprovider','eval/tests','--tb=line','--maxfail=20']))" 2>&1 | tail -30
+
+ succeeded in 0ms:
+diff --git a/eval/kaggle/gold_calibration.py b/eval/kaggle/gold_calibration.py
+index 706dce5..bd55f64 100644
+--- a/eval/kaggle/gold_calibration.py
++++ b/eval/kaggle/gold_calibration.py
+@@ -20,7 +20,9 @@ os.environ['PYTEST_ADDOPTS'] = (os.environ.get('PYTEST_ADDOPTS', '') + ' -p no:l
+ DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
+ WORKING_DIR = Path('/kaggle/working')
+ WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+-CONCURRENCY = 2
++CONCURRENCY = int(os.environ.get('GOLD_CONCURRENCY', '2'))
++if CONCURRENCY < 1:
++    raise ValueError('GOLD_CONCURRENCY must be positive')
+ ONLY_IDS = None  # all tasks (diag ids list removed after local repro, cycle 37)
+ 
+ 
+@@ -178,10 +180,10 @@ def choose_sandbox():
+ # push.sh embeds this module here when staging the single-file Kaggle kernel.
+ # BEGIN SHARED ENV IMPORT
+ try:
+-    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
++    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
+ except ModuleNotFoundError:
+     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+-    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
++    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
+ # END SHARED ENV IMPORT
+ 
+ 
+@@ -239,6 +241,8 @@ async def verify_gold(task, patch, data_dir, sandbox, out_dir=None):
+ def worker(args):
+     """No stdout/stderr from this process is exposed by the coordinator."""
+     logging.disable(logging.CRITICAL)
++    metrics = dict(peak_rss_bytes=0, mem_kills=0, orphan_kills=0)
++    metrics_token = command_metrics.set(metrics)
+     start = time.monotonic()
+     raw = next(t for t in load_inventory(args.data_dir) if t['instance_id'] == args.worker)
+     row = dict(instance_id=raw['instance_id'], repo=raw['repo'], resolved=False,
+@@ -282,6 +286,8 @@ def worker(args):
+         # Location only (file:line:function), never messages or values.
+         row['where'] = ' <- '.join(f'{Path(f.filename).name}:{f.lineno}:{f.name}'
+                                    for f in reversed(traceback.extract_tb(exc.__traceback__)[-4:]))
++    command_metrics.reset(metrics_token)
++    row.update({key: int(metrics[key]) for key in ('peak_rss_bytes', 'mem_kills', 'orphan_kills')})
+     row['duration_seconds'] = round(time.monotonic() - start, 3)
+     args.result.write_text(json.dumps(row) + '\n', encoding='utf-8')
+ 
+@@ -308,7 +314,8 @@ def run_one(task, data_dir, sandbox, allow_unsandboxed=False):
+         except Exception as exc:
+             error = f'Worker failure ({type(exc).__name__})'
+     return dict(instance_id=task['instance_id'], repo=task['repo'], resolved=False,
+-                exit_code=None, duration_seconds=round(time.monotonic() - start, 3),
++                exit_code=None, peak_rss_bytes=0, mem_kills=0, orphan_kills=0,
++                duration_seconds=round(time.monotonic() - start, 3),
+                 error=error, sandbox=sandbox)
+ 
+ 
+@@ -356,6 +363,7 @@ def main():
+                 os.fsync(stream.fileno())
+                 results[row['instance_id']] = row
+                 print(f"Finished {len(results)}/{len(tasks)}: {row['instance_id']} "
++                      f"peak_rss_bytes={row.get('peak_rss_bytes', 0)} mem_kills={row.get('mem_kills', 0)} orphan_kills={row.get('orphan_kills', 0)} "
+                       f"resolved={row['resolved']} exit_code={row['exit_code']} err={row.get('error')} where={row.get('where')} shape={row.get('shape')}", flush=True)
+     summary = summarize(tasks, results)
+     encoded = json.dumps(summary, indent=2, sort_keys=True) + '\n'
+diff --git a/eval/kaggle/stage_kernel.py b/eval/kaggle/stage_kernel.py
+index abd8a1e..6877cb9 100644
+--- a/eval/kaggle/stage_kernel.py
++++ b/eval/kaggle/stage_kernel.py
+@@ -7,15 +7,22 @@ def stage_kernel(destination):
+     here = Path(__file__).resolve().parent
+     source = (here / 'gold_calibration.py').read_text()
+     shared = (here.parent / 'sandbox_env.py').read_text()
++    proctree = (here.parent / 'proctree.py').read_text()
++    shared = shared.replace('from eval import proctree', 'import _gemma_proctree as proctree')
+     start = source.index('# BEGIN SHARED ENV IMPORT')
+     end = source.index('# END SHARED ENV IMPORT') + len('# END SHARED ENV IMPORT')
+     embedded = ("import types\n"
++                "_proctree = types.ModuleType('_gemma_proctree')\n"
++                "sys.modules['_gemma_proctree'] = _proctree\n"
++                f"exec(compile({proctree!r}, 'proctree.py', 'exec'), _proctree.__dict__)\n"
++                f"_proctree.SOURCE = {proctree!r}\n"
+                 "_shared_env = types.ModuleType('sandbox_env')\n"
+                 "_shared_env.__file__ = __file__\n"
+                 f"exec(compile({shared!r}, 'sandbox_env.py', 'exec'), _shared_env.__dict__)\n"
+                 "patch_subprocess_deps = _shared_env.patch_subprocess_deps\n"
+                 "setup_scorer_env = _shared_env.setup_scorer_env\n"
+-                "gold_artifact_dir = _shared_env.gold_artifact_dir\n")
++                "gold_artifact_dir = _shared_env.gold_artifact_dir\n"
++                "command_metrics = _shared_env.command_metrics\n")
+     Path(destination).write_text(source[:start] + embedded + source[end:])
+ 
+ 
+diff --git a/eval/sandbox_env.py b/eval/sandbox_env.py
+index 7966395..e8ff7ce 100644
+--- a/eval/sandbox_env.py
++++ b/eval/sandbox_env.py
+@@ -13,6 +13,9 @@ import shlex
+ import shutil
+ import subprocess
+ import sys
++import time
++
++from eval import proctree
+ 
+ command_metrics = ContextVar('command_metrics', default=None)
+ gold_artifact_dir = ContextVar('gold_artifact_dir', default=None)
+@@ -89,6 +92,39 @@ def runtime_ro_paths(workspace, ro_paths):
+     return paths
+ 
+ 
++def execute_limited(command, cwd, env, timeout=300, *, shell=None,
++                    max_output_chars=10 * 1024 * 1024):
++    """Installed executor contract, with host process-tree limits and cleanup."""
++    from adk_eval_core.errors import EvalCoreError
++    from adk_eval_core.sandbox.base import ExecutionResult
++
++    start = time.perf_counter()
++    try:
++        # Fresh interpreters give threaded GOLD_CONCURRENCY workers separate
++        # subreaper/adoption domains, without forking a multithreaded process.
++        worker = subprocess.run(
++            [sys.executable, '-c', proctree.supervisor_source() + '\nsupervisor_main()\n'],
++            input=json.dumps(dict(command=command, cwd=str(cwd), env=dict(env),
++                                 timeout=timeout, shell=shell,
++                                 max_output_chars=max_output_chars)),
++            capture_output=True, text=True)
++        if worker.returncode:
++            raise RuntimeError('Sandbox supervisor failed: ' + worker.stderr)
++        result = json.loads(worker.stdout)
++        observed = result.pop('metrics')
++        metrics = command_metrics.get()
++        if metrics is not None:
++            metrics['peak_rss_bytes'] = max(metrics.get('peak_rss_bytes', 0),
++                                            observed.get('peak_rss_bytes', 0))
++            for key in ('mem_kills', 'orphan_kills'):
++                metrics[key] = metrics.get(key, 0) + observed.get(key, 0)
++        result['duration_seconds'] = round(time.perf_counter() - start, 3)
++        return ExecutionResult(**result)
++    except (RuntimeError, OSError, ValueError, EvalCoreError) as exc:
++        return ExecutionResult(status='error', stdout='', stderr=str(exc), exit_code=-1,
++                               duration_seconds=round(time.perf_counter() - start, 3))
++
++
+ def apply_isolation(hidden_paths, ro_paths):
+     """Wrap the module executor, retaining the installed manager's translation/env.
+ 
+@@ -108,7 +144,7 @@ def apply_isolation(hidden_paths, ro_paths):
+                 raise RuntimeError('Unsupported harness subprocess command')
+             # The harness's fallback wheel search doesn't include custom data dirs.
+             command = bwrap_argv(command, cwd, hidden_paths, runtime_ro_paths(cwd, ro_paths))
+-        result = original(command=command, cwd=cwd, env=env, **kwargs)
++        result = execute_limited(command=command, cwd=cwd, env=env, **kwargs)
+         metrics = command_metrics.get()
+         if metrics is not None and (result.status == 'timeout' or result.exit_code == 124):
+             metrics['cmd_timeouts'] = metrics.get('cmd_timeouts', 0) + 1
+diff --git a/eval/tests/test_eval_fixes.py b/eval/tests/test_eval_fixes.py
+index 590f244..81a2e92 100644
+--- a/eval/tests/test_eval_fixes.py
++++ b/eval/tests/test_eval_fixes.py
+@@ -136,7 +136,7 @@ def test_executor_wraps_translated_commands_and_counts_timeouts(tmp_path, monkey
+     def execute(**kwargs):
+         seen.append(kwargs)
+         return SimpleNamespace(status='timeout', exit_code=124)
+-    monkeypatch.setattr(sb, 'execute_subprocess_command', execute)
++    monkeypatch.setattr(env, 'execute_limited', execute)
+     monkeypatch.setattr(env, 'runtime_ro_paths', lambda *args: [Path('/opt/python')])
+     env.apply_isolation(['/home/ubuntu'], [])
+     state = {}
+@@ -233,7 +233,14 @@ def test_shared_module_embedded_in_kernel(tmp_path):
+     result = subprocess.run([sys.executable, '-I', '-c',
+         "import runpy, sys; m=runpy.run_path(sys.argv[1]); "
+         "assert m['setup_scorer_env'].__module__ == 'sandbox_env'; "
+-        "assert m['patch_subprocess_deps'].__globals__ is m['setup_scorer_env'].__globals__",
++        "assert m['patch_subprocess_deps'].__globals__ is m['setup_scorer_env'].__globals__; "
++        "import _gemma_proctree as p, subprocess, json; "
++        "r=subprocess.run([sys.executable, '-I', '-c', p.supervisor_source() + '\\nsupervisor_main()'], "
++        "input=json.dumps(dict(command=['/bin/echo', 'staged'], cwd='/', env={})), "
++        "capture_output=True, text=True); "
++        "assert r.returncode == 0, r.stderr; "
++        "result=json.loads(r.stdout); "
++        "assert result['status'] == 'ok' and result['stdout'] == 'staged\\n', result",
+         str(staged)], capture_output=True, text=True)
+     assert result.returncode == 0, result.stderr
+ 
+diff --git a/eval/tests/test_gold_calibration.py b/eval/tests/test_gold_calibration.py
+index 3ffb7cc..b75cc29 100644
+--- a/eval/tests/test_gold_calibration.py
++++ b/eval/tests/test_gold_calibration.py
+@@ -151,6 +151,17 @@ class WorkerTests(unittest.TestCase):
+         self.assertEqual(row['exit_code'], 0)
+         self.assertNotIn('SECRET', json.dumps(row))
+         self.assertGreaterEqual(row['duration_seconds'], 0)
++        for key in ('peak_rss_bytes', 'mem_kills', 'orphan_kills'):
++            self.assertIs(type(row[key]), int)
++
++    def test_metrics_propagate_from_async_verifier(self):
++        async def verify(*args, **kwargs):
++            gold.command_metrics.get().update(peak_rss_bytes=123456, mem_kills=1, orphan_kills=2)
++            return dict(resolved=False, test_exit_code=137)
++        row = self.run_worker(verify)
++        self.assertEqual([row[k] for k in ('peak_rss_bytes', 'mem_kills', 'orphan_kills')],
++                         [123456, 1, 2])
++        self.assertIsNone(gold.command_metrics.get())
+ 
+     def test_exception_text_never_copied_into_result(self):
+         async def verify(*args, **kwargs):
+   175	        except (OSError, subprocess.TimeoutExpired):
+   176	            pass
+   177	    return 'subprocess'
+   178	
+   179	
+   180	# push.sh embeds this module here when staging the single-file Kaggle kernel.
+   181	# BEGIN SHARED ENV IMPORT
+   182	try:
+   183	    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
+   184	except ModuleNotFoundError:
+   185	    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+   186	    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
+   187	# END SHARED ENV IMPORT
+   188	
+   189	
+   190	async def verify_gold(task, patch, data_dir, sandbox, out_dir=None):
+   191	    """The only swegemma API adapter; see docs/GOLD_CALIBRATION.md assumptions.
+   192	
+   193	    verify_task owns fresh sandbox staging, baseline setup, and test_patch.
+   194	    Bind explicit parameters from Evaluator resources, failing closed on an
+   195	    unknown required argument rather than guessing positional argument order.
+   196	    """
+   197	    from swegemma.config import EvalConfig
+   198	    from swegemma.evaluate import Evaluator
+   199	    from swegemma.harness.verification import verify_task
+   200	
+   201	    out_dir = Path(out_dir or WORKING_DIR).resolve()
+   202	    out_dir.mkdir(parents=True, exist_ok=True)
+   203	    with tempfile.TemporaryDirectory(prefix='gold-verify-', dir=out_dir) as scratch:
+   204	        config = EvalConfig(tasks_path=data_dir / 'tasks.jsonl',
+   205	                            snapshots_dir=data_dir / 'snapshots', wheels_dir=data_dir / 'wheels',
+   206	                            results_dir=Path(scratch), submission_dir=data_dir / 'sample_submission',
+   207	                            models={}, sandbox=sandbox, verification_timeout_seconds=300, verbose=False)
+   208	        evaluator = Evaluator(config)
+   209	        context = {name.lstrip('_'): value for name, value in vars(evaluator).items()}
+   210	        context.update(task=task, agent_patch=patch, config=config,
+   211	                       snapshots_dir=config.snapshots_dir, wheels_dir=config.wheels_dir,
+   212	                       timeout_seconds=300, verification_timeout_seconds=300)
+   213	        from swegemma.deduplication import resolve_task_snapshot_paths
+   214	        _paths = resolve_task_snapshot_paths(config.snapshots_dir, task.instance_id, task.repo)
+   215	        context.update(snapshot_path=_paths[0], base_snapshot_path=_paths[1], patch_path=_paths[2])
+   216	        parameters = inspect.signature(verify_task).parameters
+   217	        if not {'task', 'agent_patch'} <= parameters.keys():
+   218	            raise RuntimeError('Unsupported verify_task signature')
+   219	        kwargs = {name: context[name] for name, p in parameters.items()
+   220	                  if name in context and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD)}
+   221	        try:
+   222	            inspect.signature(verify_task).bind(**kwargs)
+   223	        except TypeError as exc:
+   224	            sig = inspect.signature(verify_task)
+   225	            req = [n for n, p in sig.parameters.items() if p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
+   226	            import swegemma.evaluate as _ev, swegemma.harness.verification as _vf, re as _re
+   227	            _src = (inspect.getsource(_ev) + '\n' + inspect.getsource(_vf)).splitlines()
+   228	            _hits = [l.strip() for l in _src if _re.search(r'snapshot', l)]
+   229	            _d1 = ' || '.join(_hits)[:3000]
+   230	            import swegemma.sandbox as _sb
+   231	            _d2 = ','.join(n for n in dir(_sb) if 'Manager' in n or 'Sandbox' in n)
+   232	            raise RuntimeError('bind failed; SRC=' + _d1 + '; SB=' + _d2 + '; sig=' + str(sig)[:300] + '; required=' + ','.join(req) + '; ctx=' + ','.join(sorted(context))[:300]) from None
+   233	        token = gold_artifact_dir.set(Path(scratch))
+   234	        try:
+   235	            result = verify_task(**kwargs)
+   236	            return await result if inspect.isawaitable(result) else result
+   237	        finally:
+   238	            gold_artifact_dir.reset(token)
+   239	
+   240	
+   241	def worker(args):
+   242	    """No stdout/stderr from this process is exposed by the coordinator."""
+   243	    logging.disable(logging.CRITICAL)
+   244	    metrics = dict(peak_rss_bytes=0, mem_kills=0, orphan_kills=0)
+   245	    metrics_token = command_metrics.set(metrics)
+   246	    start = time.monotonic()
+   247	    raw = next(t for t in load_inventory(args.data_dir) if t['instance_id'] == args.worker)
+   248	    row = dict(instance_id=raw['instance_id'], repo=raw['repo'], resolved=False,
+   249	               exit_code=None, duration_seconds=0.0, error=None, sandbox=args.sandbox)
+   250	    try:
+   251	        if args.sandbox == 'subprocess':
+   252	            environment = setup_scorer_env(
+   253	                args.data_dir, out_dir=args.result.parent,
+   254	                allow_unsandboxed=getattr(args, 'allow_unsandboxed', False))
+   255	            row['sandbox'] = environment['sandbox']
+   256	        from swegemma.models import load_tasks
+   257	        task = next(t for t in load_tasks(args.data_dir / 'tasks.jsonl')
+   258	                    if t.instance_id == args.worker)
+   259	        patch = raw.get('patch')
+   260	        if os.environ.get('GOLD_NULL_PATCH'):  # control: no source change; tests should fail
+   261	            patch = ('diff --git a/NULL_CONTROL.txt b/NULL_CONTROL.txt\nnew file mode 100644\n'
+   262	                     '--- /dev/null\n+++ b/NULL_CONTROL.txt\n@@ -0,0 +1 @@\n+null\n')
+   263	        if not isinstance(patch, str) or not patch.strip():
+   264	            row['error'] = 'Missing or empty gold patch'
+   265	        else:
+   266	            result = asyncio.run(verify_gold(task, patch, args.data_dir, args.sandbox, out_dir=args.result.parent))
+   267	            # Assumed result is a mapping or TaskResult-like object, never a bare bool.
+   268	            get = result.get if isinstance(result, dict) else lambda k, d=None: getattr(result, k, d)
+   269	            resolved = get('resolved')
+   270	            exit_code = get('test_exit_code', get('exit_code'))
+   271	            if type(resolved) is not bool or (exit_code is not None and type(exit_code) is not int):
+   272	                # Shape diagnostics only: type and field names, never values.
+   273	                names = sorted(result) if isinstance(result, dict) else [n for n in dir(result) if not n.startswith('_')]
+   274	                row['shape'] = f'{type(result).__module__}.{type(result).__name__}: {",".join(map(str, names))[:400]}'
+   275	                raise TypeError('Unsupported verification result')
+   276	            row.update(resolved=resolved, exit_code=exit_code)
+   277	            if not resolved:
+   278	                # Harness exception/error text can embed patches or task source. Never copy it.
+   279	                row['error'] = ('Harness verification error' if get('error') else
+   280	                                f'Phase 2 unresolved (exit_code={exit_code}; includes JUnit validation)')
+   281	    except Exception as exc:
+   282	        row['error'] = f'Verification/setup exception ({type(exc).__name__})'
+   283	        if str(exc).startswith('bind failed'):
+   284	            row['shape'] = str(exc)[:3600]  # API signature text only, no task data
+   285	        import traceback
+   286	        # Location only (file:line:function), never messages or values.
+   287	        row['where'] = ' <- '.join(f'{Path(f.filename).name}:{f.lineno}:{f.name}'
+   288	                                   for f in reversed(traceback.extract_tb(exc.__traceback__)[-4:]))
+   289	    command_metrics.reset(metrics_token)
+   290	    row.update({key: int(metrics[key]) for key in ('peak_rss_bytes', 'mem_kills', 'orphan_kills')})
+   291	    row['duration_seconds'] = round(time.monotonic() - start, 3)
+   292	    args.result.write_text(json.dumps(row) + '\n', encoding='utf-8')
+   293	
+   294	
+   295	def run_one(task, data_dir, sandbox, allow_unsandboxed=False):
+   296	    start = time.monotonic()
+   297	    with tempfile.TemporaryDirectory(prefix='gold-worker-', dir='/tmp') as scratch:
+   298	        output = Path(scratch) / 'result.json'
+   299	        command = [sys.executable, str(Path(__file__).resolve()), '--worker', task['instance_id'],
+   300	                   '--data-dir', str(data_dir), '--sandbox', sandbox, '--result', str(output)]
+   301	        if allow_unsandboxed:
+   302	            command.append('--allow-unsandboxed')
+   303	        try:
+   304	            proc = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+   305	                                  timeout=3600)
+   306	            if proc.returncode == 0 and output.exists():
+   307	                row = next(iter(finished_results(output.read_text(encoding='utf-8')).values()))
+   308	                if row['instance_id'] != task['instance_id'] or row['repo'] != task['repo']:
+   309	                    raise ValueError('Worker result identity mismatch')
+   310	                return row
+   311	            error = f'Worker exited ({proc.returncode})'
+   312	        except subprocess.TimeoutExpired:
+   313	            error = 'Worker timed out after 3600s (setup and verification)'
+   314	        except Exception as exc:
+   315	            error = f'Worker failure ({type(exc).__name__})'
+   316	    return dict(instance_id=task['instance_id'], repo=task['repo'], resolved=False,
+   317	                exit_code=None, peak_rss_bytes=0, mem_kills=0, orphan_kills=0,
+   318	                duration_seconds=round(time.monotonic() - start, 3),
+   319	                error=error, sandbox=sandbox)
+   320	
+   321	
+   322	def main():
+   323	    # Kaggle-only cleanup belongs at execution time, never on library import.
+   324	    if Path('/kaggle/working').is_dir():
+   325	        subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 'langsmith'],
+   326	                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+   327	    parser = argparse.ArgumentParser(description=__doc__)
+   328	    parser.add_argument('--data-dir', type=Path, default=DATA_DIR)
+   329	    parser.add_argument('--working-dir', type=Path, default=WORKING_DIR)
+   330	    parser.add_argument('--allow-unsandboxed', action='store_true',
+   331	                        default=os.environ.get('GOLD_ALLOW_UNSANDBOXED') == '1')
+   332	    parser.add_argument('--worker', help=argparse.SUPPRESS)
+   333	    parser.add_argument('--result', type=Path, help=argparse.SUPPRESS)
+   334	    parser.add_argument('--sandbox', choices=('docker', 'subprocess'), help=argparse.SUPPRESS)
+   335	    args = parser.parse_args()
+   336	    os.environ.update(PIP_NO_INDEX='1', HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1',
+   337	                      OTEL_SDK_DISABLED='true', LITELLM_TELEMETRY='False', TMPDIR='/tmp')
+   338	    if args.worker:
+   339	        worker(args)
+   340	        return
+   341	    tasks = load_inventory(args.data_dir)
+   342	    ids = ONLY_IDS or ([l.strip() for l in open(os.environ['GOLD_IDS_FILE']) if l.strip()]
+   343	                       if os.environ.get('GOLD_IDS_FILE') else None)
+   344	    if ids:
+   345	        tasks = [t for t in tasks if t['instance_id'] in set(ids)]
+   346	    args.working_dir.mkdir(parents=True, exist_ok=True)
+   347	    journal = args.working_dir / 'gold_results.jsonl'
+   348	    results = resume_journal(journal)
+   349	    pending = pending_tasks(tasks, results)
+   350	    if os.environ.get('GOLD_LIMIT'):  # smoke runs only: first task of each repo
+     1	"""Embed the shared scorer environment in Kaggle's single-file script artifact."""
+     2	from pathlib import Path
+     3	import sys
+     4	
+     5	
+     6	def stage_kernel(destination):
+     7	    here = Path(__file__).resolve().parent
+     8	    source = (here / 'gold_calibration.py').read_text()
+     9	    shared = (here.parent / 'sandbox_env.py').read_text()
+    10	    proctree = (here.parent / 'proctree.py').read_text()
+    11	    shared = shared.replace('from eval import proctree', 'import _gemma_proctree as proctree')
+    12	    start = source.index('# BEGIN SHARED ENV IMPORT')
+    13	    end = source.index('# END SHARED ENV IMPORT') + len('# END SHARED ENV IMPORT')
+    14	    embedded = ("import types\n"
+    15	                "_proctree = types.ModuleType('_gemma_proctree')\n"
+    16	                "sys.modules['_gemma_proctree'] = _proctree\n"
+    17	                f"exec(compile({proctree!r}, 'proctree.py', 'exec'), _proctree.__dict__)\n"
+    18	                f"_proctree.SOURCE = {proctree!r}\n"
+    19	                "_shared_env = types.ModuleType('sandbox_env')\n"
+    20	                "_shared_env.__file__ = __file__\n"
+    21	                f"exec(compile({shared!r}, 'sandbox_env.py', 'exec'), _shared_env.__dict__)\n"
+    22	                "patch_subprocess_deps = _shared_env.patch_subprocess_deps\n"
+    23	                "setup_scorer_env = _shared_env.setup_scorer_env\n"
+    24	                "gold_artifact_dir = _shared_env.gold_artifact_dir\n"
+    25	                "command_metrics = _shared_env.command_metrics\n")
+    26	    Path(destination).write_text(source[:start] + embedded + source[end:])
+    27	
+    28	
+    29	if __name__ == '__main__':
+    30	    stage_kernel(sys.argv[1])
+
+exec
+/bin/bash -lc "git status --short && git diff --check 02a883d..9d610b5 && git diff --numstat 02a883d..9d610b5 && rg -n '4 GiB|memory_limit|mem_limit|4g|4096m|memory.*4|Memory' docs/COMPETITION.md docs/RULES_FINDINGS.md docs/EVAL_RUNNER_SPEC.md eval --glob '*.py' --glob '*.md' --glob '*.yaml'" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+7	0	docs/EVAL_RUNNER_SPEC.md
+12	4	eval/kaggle/gold_calibration.py
+8	1	eval/kaggle/stage_kernel.py
+296	0	eval/proctree.py
+37	1	eval/sandbox_env.py
+9	2	eval/tests/test_eval_fixes.py
+11	0	eval/tests/test_gold_calibration.py
+400	0	eval/tests/test_sandbox_limits.py
+docs/EVAL_RUNNER_SPEC.md:28:captures commands that exit before the first RSS poll. The 4 GiB tree-RSS kill
+docs/COMPETITION.md:53:  - The sandbox has 2 vCPU and 4 GiB, offline, with wheels at `/wheels`.
+eval/kaggle/gold_calibration.py:164:             '--network=none', '--memory=4g', '--cpus=2',
+eval/tests/test_eval_fixes.py:316:    from google.adk.sessions import InMemorySessionService
+eval/tests/test_eval_fixes.py:343:        service = InMemorySessionService()
+
