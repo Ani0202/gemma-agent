@@ -13,7 +13,7 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Splits v2 FROZEN: clean 48 (rich 39, fastapi 9), dev 33, holdout 15; holdout uses = 0. Hashes: eval/splits/MANIFEST.json.
 - requests/httpx dropped (wheel shadowing = scorer property, dec 014). Gold v2 files in results/ (gold_calibration_*, gold_failure_causes).
 
-## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 023 item 1b)
+## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
 - Linger check (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`; if not, tell the Director. After the NEXT reboot, once: `systemctl --user list-units --type=service --state=running`, names only; report non-ours units to the Director, never inspect or touch them (may be Etho).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
@@ -25,7 +25,7 @@ Builder on Opus (dec 010: local-first, two-strike).
 
 ## bin/job, memguard, owner patch (cycles 62-66)
 - Linger=yes since ~18:05Z (dec 025): the scope path (MemoryMax=5G) is normal; Codex works under it.
-- Owner patch v2 = ONE diff (dec 024 item 3): ops/patches/bin-job-fallback.diff (linger-gated scope, ulimit -d fallback, 6-field status with boot_id+starttime, GEMMA_JOB_ID marker, stale-boot refusal, trusted-pgid check, setsid escapes killed+reported, scope stop only if active). Smoke test ops/patches/bin-job-killtest.sh: 4/4 pass. v1 review clean; v2 review job review-job-patch2-light. Then mail the Director the path.
+- Owner patch v2 = ONE diff (dec 024 item 3; dec 026: HOLD for Aniket, low urgency, keep the RLIMIT_DATA comment): ops/patches/bin-job-fallback.diff (linger-gated scope, ulimit -d fallback, 6-field status with boot_id+starttime, GEMMA_JOB_ID marker, stale-boot refusal, trusted-pgid check, setsid escapes killed+reported, scope stop only if active). Smoke test ops/patches/bin-job-killtest.sh: 4/4 pass. v1 review clean; v2 review job review-job-patch2-light. Then mail the Director the path.
 - memguard-fix: branch codex/memguard-fix (53c87da + my ddf9746: status parse >=3 fields for the v2 patch). 22 pass/1 skip. Review job review-memguard-fix-light. Merge only with no BLOCKING; deploy as memguard-light, start the new one BEFORE stopping old pid 7933 (dec 024 item 4).
 
 ## Dec 022 item 2: CONCLUDED "artifact" -> report 004 (NEEDS_DECISION)

@@ -113,3 +113,4 @@
 2026-11-05T18:07Z | memguard-fix built (22 pass); status parse loosened for patch v2 (ddf9746); review launched | ops/codex/build-memguard-fix.md
 2026-11-05T18:08Z | owner patch v2 (kill-path: stale boot/pgid, setsid escapes) + 4-case smoke test pass; review launched | ops/patches/bin-job-fallback.diff, ops/patches/bin-job-killtest.sh
 2026-11-05T18:10Z | codex-build kernel-setup-fix launched; report 004 (setup root cause) -> NEEDS_DECISION | ops/reports/004-setup-210s-root-cause.md
+2026-11-05T18:10Z | dec 026 read: already satisfied (v2 combined diff under review; linger-off lines already removed in cycle 66) | ops/decisions/026-20261105T180404-9575-from-builder.md
