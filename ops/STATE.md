@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 19:08Z (cycle 78, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 19:16Z (cycle 79, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -18,12 +18,12 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
-## Running jobs (19:08Z)
+## Running jobs (19:16Z)
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
 - kernel-setup-accept-r4 DONE (status failed = acceptance gate, not a crash): results/plan003_kernel_setup_acceptance_r4local.json (worktree). Docker order (SETUP_FIX=1): rich_3006 editable rc 1, 5 Retrying (base tar re-injects rich-15.0.0 dist-info, record_exists false, over the 13.4.2 editable); fastapi_14986 rc 0, 0 Retrying (0.132.0 with RECORD seen). SETUP_FIX=0: both fail.
 - Builder reading: the REAL harness causes it: swegemma container_setup.py:266 strips '/RECORD' from injected wheels, base set includes the task's own package (skip set only pytest/pip/...), injection runs after install_editable_package. -> likely dec 027 2a STOP (S~210 s = scorer property). fastapi pass may be dist-info ordering luck.
-- review-kernel-setup4-light: codex-review falsifying that claim (+ fastapi pass, fidelity, scorer-image escape hatches). -> then report 005-prelim NEEDS_DECISION.
-- memguard-fix5-livetest (heavy): host livetest of round 5 652f2cd (Codex: 87 pass/1 skip offline, 88 live) in worktree gemma-wt/codex-memguard-fix5, script ops/codex/memguard-fix5-livetest.sh. Green -> codex-review -> merge + deploy.
+- review-kernel-setup4-light DONE (ops/codex/review-20261105T190713.md): RECORD-strip hazard SUPPORTED (STOP threshold met); 'S~210 s scorer property' NOT SUPPORTED (local = 1 fallback, ~8 s); sandbox_env.py not Docker-faithful (BLOCKING for eval/). Keep interim rule; v001 cap 1.4 passes both. -> report ops/reports/005-prelim-2a-cause-harness-record-strip.md NEEDS_DECISION (rec: A = one L4x4 re-time of v001 with setup_calls logging).
+- memguard-fix5-livetest GREEN (88 passed). review-memguard-fix5-light RUNNING (codex-review of 652f2cd). No BLOCKING -> merge + deploy (stop 7933, start memguard-light at once).
 - NOTE: bin/codex-build always branches from main HEAD; for follow-up rounds reset the new worktree onto the previous round's commit before running ops/codex/build-<name>.sh.
 - sandbox-limits r3 on main: full eval/tests on main NOT yet run (one heavy at a time). Caveats: 8 GiB AS backstop; gold_calibration worker timeout lacks descendant cleanup.
 
@@ -75,6 +75,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
 ## Next 3
-1. review-kernel-setup4-light done -> report 005-prelim (2a cause = competition harness RECORD strip? STOP per dec 027 2a, or push Kaggle CPU 2a/2b) -> NEEDS_DECISION.
-2. memguard-fix5-livetest done -> codex-review; no BLOCKING -> merge, deploy (stop 7933, start memguard-light at once).
-3. Full eval/tests on main; then EV-1 + cpu8 gold/null run.
+1. Director answer on 005-prelim -> if A: codex-review merge diff of agent_timing.py (round 4) -> push ONE L4x4 re-time of e4b-v001.
+2. review-memguard-fix5-light done -> no BLOCKING -> merge, deploy; else round 6.
+3. Fix eval/sandbox_env.py Docker order + cache key (Codex finding 2) via codex-build; full eval/tests on main; then EV-1 + cpu8 gold/null.
