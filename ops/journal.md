@@ -28,3 +28,4 @@
 2026-11-05T00:08Z | gold v3 all-TypeError (adapter result shape); diagnostics added, smoke kernel pushed | eval/kaggle/gold_calibration.py
 2026-11-05T00:12Z | smoke TypeError not from shape check; added 'where' traceback loc, repushed smoke | eval/kaggle/gold_calibration.py
 2026-11-05T00:15Z | smoke2 SyntaxError (__future__ import), removed, repushed v4; waiting gold-smoke-wait3 | eval/kaggle/gold_calibration.py
+2026-11-05T00:36Z | smoke3 cancelled after full-set run, no where info; repushed smoke v5 w/ where in log, job gold-smoke-wait4 | runs/gold-smoke3, ops/jobs/gold-smoke-wait4
