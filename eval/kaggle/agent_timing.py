@@ -880,11 +880,15 @@ async def evaluate(config, journal, started, caps, totals):
                 missing_tool_deps=times.get('missing_tool_deps', []),
                 setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
                 editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
-            raw = WORK / 'runs' / iid
-            raw.mkdir(parents=True, exist_ok=True)
-            (raw / 'agent.patch').write_text(patch)
-            (raw / 'trace.json').write_text(json.dumps(evaluator.trace.to_dict(format='legacy') if evaluator.trace else {}, default=str))
-            (raw / 'result.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result else {'error': error}, default=str))
+            # Raw artifacts are diagnostics written after the row; never lose the remaining tasks over them.
+            try:
+                raw = WORK / 'runs' / iid
+                raw.mkdir(parents=True, exist_ok=True)
+                (raw / 'agent.patch').write_text(patch)
+                (raw / 'trace.json').write_text(json.dumps(evaluator.trace.to_dict(format='legacy') if evaluator.trace else {}, default=str))
+                (raw / 'result.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result else {'error': error}, default=str))
+            except Exception as exc:
+                append(journal, {'_artifact_error': dict(instance_id=iid, type=type(exc).__name__)})
     finally:
         ev.verify_task, vf.strip_protected_files_from_patch = original_verify, original_strip
         ar.asyncio = original_asyncio
@@ -948,7 +952,9 @@ def check_hook_targets():
     import swegemma.evaluate as ev
     import swegemma.harness.agent_runner as ar
     import swegemma.harness.verification as vf
+    import swegemma.harness.container_setup as cs
     wanted = ((ar, ('asyncio', 'sandbox_start', 'sandbox_stop', 'sandbox_exec')),
+              (cs, ('install_test_dependencies', '_inspect_wheels_dir', '_LARGE_WHEEL_THRESHOLD_BYTES')),
               (ev, ('verify_task', 'Evaluator')),
               (vf, ('strip_protected_files_from_patch', '_is_protected_test_or_config_path')))
     missing = [m.__name__ + '.' + n for m, names in wanted for n in names if not hasattr(m, n)]

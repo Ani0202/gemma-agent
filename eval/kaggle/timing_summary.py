@@ -44,6 +44,7 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
     if not records or records[0].get('_schema') != 'kaggle_timing_v1':
         raise ValueError('Expected kaggle_timing_v1 header')
     header, rows, startup, done, stopped = records[0], [], records[0].get('vllm_startup_seconds'), None, []
+    artifact_errors = []
     for row in records[1:]:
         if 'instance_id' in row:
             rows.append(row)
@@ -53,6 +54,8 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
             done = row['_done']
         elif '_stopped' in row:
             stopped.append(row['_stopped'])
+        elif '_artifact_error' in row:
+            artifact_errors.append(row['_artifact_error'])
         else:
             raise ValueError('Unknown journal record')
     ids = [r['instance_id'] for r in rows]
@@ -139,6 +142,7 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                     stray_files_files='Total stray paths', decision='Legacy total-wall/cap projection check',
                     projected_minutes='p90 total seconds times 125 plus vLLM, in minutes',
                     cap_worst_case_minutes='Configured cap times 125 plus 30 minutes', cap_minutes='Configured agent cap',
+                    artifact_errors='Raw artifact write failures (diagnostic; rows unaffected)',
                     missing_task_ids='Header task IDs absent from task rows', done_present='Journal contains _done', stopped='Journal stop reasons'),
                 tasks=tasks, gate=gate, n_complete_no_error=complete,
                 provenance={k: header.get(k) for k in ('git_sha', 'bundle_sha256', 'agent_yaml_sha256', 'gpu_names',
@@ -167,7 +171,7 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                 decision='PASS' if timing_minutes is not None and cap_minutes is not None and timing_minutes <= 660 and cap_minutes <= 660 else 'FAIL',
                 projected_minutes=timing_minutes, cap_worst_case_minutes=cap_minutes,
                 cap_minutes=cap, missing_task_ids=missing,
-                done_present=done is not None, stopped=stopped)
+                done_present=done is not None, stopped=stopped, artifact_errors=artifact_errors)
 
 
 def main():
