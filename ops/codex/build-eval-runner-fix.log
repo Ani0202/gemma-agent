@@ -4044,3 +4044,1941 @@ from .discovery import (
     SubmissionDirectory,
     discover_adapters,
 
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/kaggle/gold_calibration.py')
+s=p.read_text()
+a=s.index('def patch_subprocess_deps('); b=s.index('\\n\\nasync def verify_gold', a)
+deps=s[a:b].replace(\"wheels_src = WHEELHOUSE\", \"wheels_src = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')\")
+isolate=Path('eval/run_agent_eval.py').read_text().split('def isolate_host_packages():')[1].split('\\n\\ndef sha_file')[0]
+Path('eval/sandbox_env.py').write_text('''\"\"\"Shared local scorer environment; no installed harness source is modified.
+
+The executor hook is after swegemma's path translation, and covers exec_async,
+run_command, setup, and verification as well as agent commands.
+\"\"\"
+from contextvars import ContextVar
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+
+command_metrics = ContextVar('command_metrics', default=None)
+gold_artifact_dir = ContextVar('gold_artifact_dir', default=None)
+
+
+def isolate_host_packages():''' + isolate + '\\n\\n' + deps + '\\n')
+s=s[:a]+'''# push.sh embeds this module here when staging the single-file Kaggle kernel.
+# BEGIN SHARED ENV IMPORT
+try:
+    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
+# END SHARED ENV IMPORT
+''' + s[b:]
+p.write_text(s)
+PY" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/sandbox_env.py
+diff --git a/eval/sandbox_env.py b/eval/sandbox_env.py
+index 98be80d6d77db34b9ff5ec0d24c6e78096fa1d75..7fb51842438937116ff4f450f7237e8c7d2df22d
+--- a/eval/sandbox_env.py
++++ b/eval/sandbox_env.py
+@@ -16,6 +16,151 @@
+ command_metrics = ContextVar('command_metrics', default=None)
+ gold_artifact_dir = ContextVar('gold_artifact_dir', default=None)
+ 
++BWRAP_TEMPLATE = [
++    'bwrap', '--die-with-parent', '--unshare-net', '--unshare-pid',
++    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
++    '--tmpfs', '<each hidden path>', '--tmpfs', '/tmp',
++    '--bind', '<sandbox_root>', '<sandbox_root>',
++    '--ro-bind', '<each ro path>', '<same>',
++    '--chdir', '<workspace>', '/bin/bash', '-c', '<translated_cmd>',
++]
++
++
++def bwrap_argv(command, workspace, hidden_paths, ro_paths):
++    workspace = Path(workspace).resolve()
++    root = workspace.parent
++    argv = BWRAP_TEMPLATE[:12]
++    # Mask parents first so nested masks don't get covered by their parents.
++    for path in sorted({str(Path(p).absolute()) for p in hidden_paths},
++                       key=lambda p: (len(Path(p).parts), p)):
++        argv += ['--tmpfs', path]
++    argv += ['--tmpfs', '/tmp', '--bind', str(root), str(root)]
++    for path in sorted({str(Path(p).resolve()) for p in ro_paths}):
++        # Only explicit runtime assets may be re-exposed, never inventory/artifacts.
++        if {'tasks.jsonl', 'splits', 'runs', 'results'} & set(Path(path).parts):
++            raise ValueError('Forbidden read-only exposure')
++        argv += ['--ro-bind', path, path]
++    argv += ['--chdir', str(workspace), *command]
++    return argv
++
++
++def runtime_ro_paths(workspace, ro_paths):
++    root = Path(workspace).resolve().parent
++    cfg = (root / 'venv/pyvenv.cfg').read_text()
++    home = next(line.split('=', 1)[1].strip() for line in cfg.splitlines()
++                if line.startswith('home ='))
++    prefix = Path(home).resolve().parent
++    paths = {prefix, *(Path(p).resolve() for p in ro_paths)}
++    wheels = root / 'wheels'
++    if wheels.is_symlink():
++        paths.add(wheels.resolve())
++    for path in wheels.rglob('*'):
++        if path.is_symlink():
++            paths.add(path.resolve())
++    return paths
++
++
++def apply_isolation(hidden_paths, ro_paths):
++    """Wrap the module executor, retaining the installed manager's translation/env.
++
++    Empty hidden_paths disables bwrap (explicit opt-out), but retains timeout
++    accounting. Repeated setup replaces this hook rather than stacking it.
++    """
++    import swegemma.sandbox.subprocess as sb
++    original = getattr(sb.execute_subprocess_command, '_unwrapped', sb.execute_subprocess_command)
++
++    def execute(command, cwd, env, **kwargs):
++        if hidden_paths:
++            if not isinstance(command, list) or command[:2] != ['/bin/bash', '-c']:
++                raise RuntimeError('Unsupported harness subprocess command')
++            # The harness's fallback wheel search doesn't include custom data dirs.
++            if ro_paths:
++                command = [*command[:2], re.sub(r'(?<![\w.-])/wheels(?![\w.-])',
++                                               str(Path(ro_paths[0]).resolve()), command[2])]
++            command = bwrap_argv(command, cwd, hidden_paths, runtime_ro_paths(cwd, ro_paths))
++        result = original(command=command, cwd=cwd, env=env, **kwargs)
++        metrics = command_metrics.get()
++        if metrics is not None and (result.status == 'timeout' or result.exit_code == 124):
++            metrics['cmd_timeouts'] = metrics.get('cmd_timeouts', 0) + 1
++        return result
++
++    execute._unwrapped = original
++    sb.execute_subprocess_command = execute
++    return BWRAP_TEMPLATE.copy()
++
++
++def probe_isolation(manager, inventory_path, data_dir):
++    """Fail closed on visibility, image imports, or broken workspace write-through."""
++    sid = manager.start()
++    try:
++        q = shlex.quote
++        cmd = (f'test ! -e {q(str(inventory_path))} && '
++               f'test -z "$(ls -A {q(str(data_dir))})" && '
++               "python3 -c 'import pytest' && "
++               'echo probe > /workspace/x && echo probe > /tmp/y')
++        result = manager.exec(sid, cmd, timeout=60)
++        workspace = manager.sandboxes[sid]['workspace']
++        if result.exit_code != 0 or not (workspace / 'x').is_file():
++            raise RuntimeError('bubblewrap startup probe failed: ' + result.stderr[:500])
++    finally:
++        manager.cleanup_all()
++
++
++def isolate_gold_tempfiles():
++    """Route verification's temporary patch serialization to the caller's out dir."""
++    import tempfile
++    import swegemma.harness.verification as vf
++    if getattr(vf.tempfile, '_gold_redirect', False):
++        return
++
++    class Tempfiles:
++        _gold_redirect = True
++
++        def __getattr__(self, name):
++            return getattr(tempfile, name)
++
++        def NamedTemporaryFile(self, *args, **kwargs):
++            if gold_artifact_dir.get() is not None:
++                kwargs['dir'] = gold_artifact_dir.get()
++            return tempfile.NamedTemporaryFile(*args, **kwargs)
++
++    vf.tempfile = Tempfiles()
++
++
++def setup_scorer_env(data_dir, *, out_dir=None, repo_root=None, allow_unsandboxed=False):
++    """Common subprocess scorer setup for evaluation and gold calibration."""
++    from swegemma.sandbox import SubprocessManager
++    from swegemma.harness.container_setup import resolve_wheels_dir
++    from types import SimpleNamespace
++    data_dir = Path(data_dir).resolve()
++    repo_root = Path(repo_root or Path(__file__).resolve().parents[1]).resolve()
++    out_dir = Path(out_dir or data_dir.parent / 'gold-output').resolve()
++    isolate_host_packages()
++    patched = patch_subprocess_deps(data_dir)
++    isolate_gold_tempfiles()
++    hidden = [Path.home(), repo_root, data_dir, out_dir, Path('/home/ubuntu/work/gemma-wt')]
++    wheels = resolve_wheels_dir(SimpleNamespace(wheels_dir=data_dir / 'wheels',
++                                              tasks_path=data_dir / 'tasks.jsonl',
++                                              snapshots_dir=data_dir / 'snapshots'))
++    ro = [wheels.resolve()] if wheels else []
++    try:
++        if not shutil.which('bwrap'):
++            raise RuntimeError('bubblewrap is not installed')
++        template = apply_isolation(hidden, ro)
++        probe_isolation(SubprocessManager(), data_dir / 'tasks.jsonl', data_dir)
++        mode = 'bwrap'
++    except Exception:
++        # Never leave an unusable boundary or silently downgrade its protection.
++        apply_isolation([], ro)
++        if not allow_unsandboxed:
++            raise
++        mode, template = 'none', None
++        import logging
++        logging.warning('bubblewrap unavailable/probe failed; explicitly allowed unsandboxed run',
++                        exc_info=True)
++    return dict(sandbox=mode, bwrap_argv_template=template, patched=patched,
++                wheels_dir=wheels)
++
+ 
+ def isolate_host_packages():
+     """Keep pyimg system packages; remove swegemma's extra harness-venv .pth leak."""
+
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/sandbox_env.py
+/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/tool_timing.py
+diff --git a/eval/sandbox_env.py b/eval/sandbox_env.py
+index 98be80d6d77db34b9ff5ec0d24c6e78096fa1d75..0378508f696374e5692b4906844b483285c624a7
+--- a/eval/sandbox_env.py
++++ b/eval/sandbox_env.py
+@@ -16,7 +16,153 @@
+ command_metrics = ContextVar('command_metrics', default=None)
+ gold_artifact_dir = ContextVar('gold_artifact_dir', default=None)
+ 
++BWRAP_TEMPLATE = [
++    'bwrap', '--die-with-parent', '--unshare-net', '--unshare-pid',
++    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
++    '--tmpfs', '<each hidden path>', '--tmpfs', '/tmp',
++    '--bind', '<sandbox_root>', '<sandbox_root>',
++    '--ro-bind', '<each ro path>', '<same>',
++    '--chdir', '<workspace>', '/bin/bash', '-c', '<translated_cmd>',
++]
++
++
++def bwrap_argv(command, workspace, hidden_paths, ro_paths):
++    workspace = Path(workspace).resolve()
++    root = workspace.parent
++    argv = BWRAP_TEMPLATE[:11]
++    # Mask parents first so nested masks don't get covered by their parents.
++    for path in sorted({str(Path(p).absolute()) for p in hidden_paths},
++                       key=lambda p: (len(Path(p).parts), p)):
++        argv += ['--tmpfs', path]
++    argv += ['--tmpfs', '/tmp', '--bind', str(root), str(root)]
++    for path in sorted({str(Path(p).resolve()) for p in ro_paths}):
++        # Only explicit runtime assets may be re-exposed, never inventory/artifacts.
++        if ({'tasks.jsonl', 'splits', 'runs', 'results'} & set(Path(path).parts)
++                or (Path(path).is_dir() and (Path(path) / 'tasks.jsonl').exists())):
++            raise ValueError('Forbidden read-only exposure')
++        argv += ['--ro-bind', path, path]
++    argv += ['--chdir', str(workspace), *command]
++    return argv
++
++
++def runtime_ro_paths(workspace, ro_paths):
++    root = Path(workspace).resolve().parent
++    cfg = (root / 'venv/pyvenv.cfg').read_text()
++    home = next(line.split('=', 1)[1].strip() for line in cfg.splitlines()
++                if line.startswith('home ='))
++    prefix = Path(home).resolve().parent
++    paths = {prefix, *(Path(p).resolve() for p in ro_paths)}
++    wheels = root / 'wheels'
++    if wheels.is_symlink():
++        paths.add(wheels.resolve())
++    for path in wheels.rglob('*'):
++        if path.is_symlink():
++            paths.add(path.resolve())
++    return paths
++
++
++def apply_isolation(hidden_paths, ro_paths):
++    """Wrap the module executor, retaining the installed manager's translation/env.
++
++    Empty hidden_paths disables bwrap (explicit opt-out), but retains timeout
++    accounting. Repeated setup replaces this hook rather than stacking it.
++    """
++    import swegemma.sandbox.subprocess as sb
++    original = getattr(sb.execute_subprocess_command, '_unwrapped', sb.execute_subprocess_command)
++
++    def execute(command, cwd, env, **kwargs):
++        if hidden_paths:
++            if not isinstance(command, list) or command[:2] != ['/bin/bash', '-c']:
++                raise RuntimeError('Unsupported harness subprocess command')
++            # The harness's fallback wheel search doesn't include custom data dirs.
++            if ro_paths:
++                command = [*command[:2], re.sub(r'(?<![\w.-])/wheels(?![\w.-])',
++                                               str(Path(ro_paths[0]).resolve()), command[2])]
++            command = bwrap_argv(command, cwd, hidden_paths, runtime_ro_paths(cwd, ro_paths))
++        result = original(command=command, cwd=cwd, env=env, **kwargs)
++        metrics = command_metrics.get()
++        if metrics is not None and (result.status == 'timeout' or result.exit_code == 124):
++            metrics['cmd_timeouts'] = metrics.get('cmd_timeouts', 0) + 1
++        return result
++
++    execute._unwrapped = original
++    sb.execute_subprocess_command = execute
++    return BWRAP_TEMPLATE.copy()
++
++
++def probe_isolation(manager, inventory_path, data_dir):
++    """Fail closed on visibility, image imports, or broken workspace write-through."""
++    sid = manager.start()
++    try:
++        q = shlex.quote
++        cmd = (f'test ! -e {q(str(inventory_path))} && '
++               f'test -z "$(ls -A {q(str(data_dir))})" && '
++               "python3 -c 'import pytest' && "
++               'echo probe > /workspace/x && echo probe > /tmp/y')
++        result = manager.exec(sid, cmd, timeout=60)
++        workspace = manager.sandboxes[sid]['workspace']
++        if result.exit_code != 0 or not (workspace / 'x').is_file():
++            raise RuntimeError('bubblewrap startup probe failed: ' + result.stderr[:500])
++    finally:
++        manager.cleanup_all()
++
++
++def isolate_gold_tempfiles():
++    """Route verification's temporary patch serialization to the caller's out dir."""
++    import tempfile
++    import swegemma.harness.verification as vf
++    if getattr(vf.tempfile, '_gold_redirect', False):
++        return
+ 
++    class Tempfiles:
++        _gold_redirect = True
++
++        def __getattr__(self, name):
++            return getattr(tempfile, name)
++
++        def NamedTemporaryFile(self, *args, **kwargs):
++            if gold_artifact_dir.get() is not None:
++                kwargs['dir'] = gold_artifact_dir.get()
++            return tempfile.NamedTemporaryFile(*args, **kwargs)
++
++    vf.tempfile = Tempfiles()
++
++
++def setup_scorer_env(data_dir, *, out_dir=None, repo_root=None, allow_unsandboxed=False):
++    """Common subprocess scorer setup for evaluation and gold calibration."""
++    from swegemma.sandbox import SubprocessManager
++    from swegemma.harness.container_setup import resolve_wheels_dir
++    from types import SimpleNamespace
++    data_dir = Path(data_dir).resolve()
++    repo_root = Path(repo_root or Path(__file__).resolve().parents[1]).resolve()
++    out_dir = Path(out_dir or data_dir.parent / 'gold-output').resolve()
++    isolate_host_packages()
++    patched = patch_subprocess_deps(data_dir)
++    isolate_gold_tempfiles()
++    hidden = [Path.home(), repo_root, data_dir, out_dir, Path('/home/ubuntu/work/gemma-wt')]
++    wheels = resolve_wheels_dir(SimpleNamespace(wheels_dir=data_dir / 'wheels',
++                                              tasks_path=data_dir / 'tasks.jsonl',
++                                              snapshots_dir=data_dir / 'snapshots'))
++    ro = [wheels.resolve()] if wheels else []
++    try:
++        if not shutil.which('bwrap'):
++            raise RuntimeError('bubblewrap is not installed')
++        template = apply_isolation(hidden, ro)
++        probe_isolation(SubprocessManager(), data_dir / 'tasks.jsonl', data_dir)
++        mode = 'bwrap'
++    except Exception:
++        # Never leave an unusable boundary or silently downgrade its protection.
++        apply_isolation([], ro)
++        if not allow_unsandboxed:
++            raise
++        mode, template = 'none', None
++        import logging
++        logging.warning('bubblewrap unavailable/probe failed; explicitly allowed unsandboxed run',
++                        exc_info=True)
++    return dict(sandbox=mode, bwrap_argv_template=template, patched=patched,
++                wheels_dir=wheels)
++
++
+ def isolate_host_packages():
+     """Keep pyimg system packages; remove swegemma's extra harness-venv .pth leak."""
+     from swegemma.sandbox import SubprocessManager
+@@ -25,7 +171,13 @@
+         return
+ 
+     def start(self):
+-        sid = original(self)
++        base = self.base_dir
++        if gold_artifact_dir.get() is not None:
++            self.base_dir = Path(gold_artifact_dir.get())
++        try:
++            sid = original(self)
++        finally:
++            self.base_dir = base
+         for pth in self.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'):
+             pth.unlink()
+         return sid
+diff --git a/eval/tool_timing.py b/eval/tool_timing.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..29594208efe489aded56384a093c6eb5468bb9c7
+--- /dev/null
++++ b/eval/tool_timing.py
+@@ -0,0 +1,95 @@
++"""Per-task monotonic ADK tool timing, usable by the Kaggle timing kernel.
++
++No harness dependencies are imported until installation. Call IDs, rather than
++names or merged trace response timestamps, identify overlapping executions.
++"""
++from contextvars import ContextVar
++from dataclasses import dataclass, field
++import time
++
++current_timing = ContextVar('current_tool_timing', default=None)
++
++
++@dataclass
++class ToolTiming:
++    pending: dict = field(default_factory=dict)
++    seconds: dict = field(default_factory=dict)
++    unmatched: int = 0
++    completed: set = field(default_factory=set)
++
++    def before(self, call_id, name):
++        if not call_id:
++            self.unmatched += 1
++            return
++        if call_id in self.pending or call_id in self.completed:
++            self.unmatched += 1
++            return
++        self.pending[call_id] = (name, time.monotonic())
++
++    def after(self, call_id):
++        # Error callbacks may be followed by after_tool_callback on recovery.
++        if call_id in self.completed:
++            return
++        item = self.pending.pop(call_id, None)
++        if item is None:
++            self.unmatched += 1
++            return
++        name, start = item
++        elapsed = time.monotonic() - start
++        stat = self.seconds.setdefault(name, dict(n=0, total=0.0, max=0.0))
++        stat['n'] += 1
++        stat['total'] += elapsed
++        stat['max'] = max(stat['max'], elapsed)
++        self.completed.add(call_id)
++
++    def metrics(self):
++        return dict(tool_seconds=self.seconds,
++                    tool_calls_timed=sum(s['n'] for s in self.seconds.values()),
++                    tool_seconds_unmatched=self.unmatched + len(self.pending))
++
++
++def make_timing_plugin():
++    from google.adk.plugins.base_plugin import BasePlugin
++
++    class TimingPlugin(BasePlugin):
++        def __init__(self):
++            super().__init__(name='eval_tool_timing')
++
++        async def before_tool_callback(self, *, tool, tool_args, tool_context):
++            state = current_timing.get()
++            if state is not None:
++                state.before(tool_context.function_call_id, tool.name)
++
++        async def after_tool_callback(self, *, tool, tool_args, tool_context, result):
++            state = current_timing.get()
++            if state is not None:
++                state.after(tool_context.function_call_id)
++
++        async def on_tool_error_callback(self, *, tool, tool_args, tool_context, error):
++            state = current_timing.get()
++            if state is not None:
++                state.after(tool_context.function_call_id)
++
++    return TimingPlugin()
++
++
++def install_harness_timing():
++    """Installed swegemma builds an App with plugins; prepend ours to that list.
++
++    Prepending ensures timing runs before any error-recovery callback short
++    circuits the plugin chain. It also covers MCP and agent_tool subclasses.
++    Returns a restoration function for callers embedding the runner.
++    """
++    import swegemma.harness.agent_runner as ar
++    original = ar.App
++
++    def app(*args, **kwargs):
++        kwargs['plugins'] = [make_timing_plugin(), *kwargs.get('plugins', [])]
++        return original(*args, **kwargs)
++
++    ar.App = app
++
++    def restore():
++        ar.App = original
++
++    return restore
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/run_agent_eval.py'); s=p.read_text()
+s=s.replace('import argparse\\n', 'import argparse\\nimport ast\\nimport importlib.metadata\\n')
+s=s.replace('from eval.kaggle.gold_calibration import patch_subprocess_deps, verify_gold', '''from eval.kaggle.gold_calibration import verify_gold
+from eval.sandbox_env import (isolate_host_packages, patch_subprocess_deps,
+                              setup_scorer_env, command_metrics)
+from eval.tool_timing import ToolTiming, current_timing, install_harness_timing''')
+a=s.index('def isolate_host_packages():'); b=s.index('def sha_file',a); s=s[:a]+s[b:]
+s=s.replace(\"tool_seconds='Per tool: n, total, max wall seconds call->response (trace timestamps)',\", \"tool_seconds='Per tool: n, total, max monotonic execution seconds',\\n              tool_calls_timed='Calls measured at ADK execution callbacks',\\n              tool_seconds_unmatched='Calls missing a timing boundary',\\n              cmd_timeouts='Command timeouts, including recovered timeouts',\\n              sandbox='bwrap or explicitly allowed none',\\n              leak_suspect='Sensitive tokens appeared in tool arguments',\\n              leak_hits='Matched sensitive tokens only', diag_error='Diagnostic exception category',\")
+s=s.replace(\"                identity = ('_schema', 'bundle', 'bundle_sha256', 'caps', 'split',\\n                            'concurrency', 'endpoint', 'models_yaml', 'data_dir')\\n                if any(old.get(k) "'!= header.get(k) for k in identity):'"\\n                    raise ValueError('Results header mismatch; use a new run name or --force-new')\", \"\"\"                identity = (old.keys() | header.keys()) - {'created_utc'}
+                diff = {k: {'old': old.get(k), 'new': header.get(k)}
+                        for k in sorted(identity) if old.get(k) "'!= header.get(k)}
+                if diff:
+                    raise ValueError('"'Results header mismatch; use --force-new-out or a new run name: '
+                                     + json.dumps(diff, default=str, sort_keys=True))\"\"\")
+s=s.replace(\"value = json.loads(raw) if raw.startswith('\\\"') else raw\", \"value = decode_git_path(raw) if raw.startswith('\\\"') else raw\")
+a=s.index('def tool_seconds(entries):'); b=s.index('def observe_patch_strip',a); s=s[:a]+s[b:]
+s=s.replace('return dict(counts), tokens, tool_seconds(entries)', 'return dict(counts), tokens, {}')
+s=s.replace(\"    isolate_host_packages()\\n    patched = patch_subprocess_deps(args.data_dir)\\n    assert_dependency_bindings(patched)\\n\", '')
+s=s.replace(\"    inventory = load_tasks(args.data_dir / 'tasks.jsonl')\", \"    validate_inventory_ids(args.data_dir / 'tasks.jsonl')\\n    inventory = load_tasks(args.data_dir / 'tasks.jsonl')\")
+s=s.replace(\"    if len(tasks) "'!= len(inventory):'"\\n        raise ValueError('Duplicate inventory IDs')\\n\", '')
+a=s.index(\"    header = dict(_schema=\"); b=s.index('    import swegemma.evaluate as evaluate_module',a)
+s=s[:a]+'''    raw_dir = args.out / args.run_name
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    config = build_config(defaults, args, models, raw_dir, caps)
+    environment = setup_scorer_env(args.data_dir, out_dir=args.out, repo_root=ROOT,
+                                   allow_unsandboxed=args.allow_unsandboxed)
+    patched = environment['patched']
+    assert_dependency_bindings(patched)
+    header = dict(_schema='agent_eval_v2', fields=FIELDS, bundle=str(args.bundle),
+                  bundle_sha256=bundle_sha(args.bundle), **runner_revision(),
+                  tasks_sha256=sha_file(args.data_dir / 'tasks.jsonl'),
+                  split=dict(path=str(args.split), sha256=sha_file(args.split)), caps=caps,
+                  versions={name: importlib.metadata.version(name) for name in
+                            ('swegemma', 'adk_submission', 'google-adk', 'litellm')},
+                  python_version=sys.version, wheels_listing_sha256=wheels_listing_sha(environment['wheels_dir']),
+                  sandbox=environment['sandbox'], bwrap_argv_template=environment['bwrap_argv_template'],
+                  effective_config=config_snapshot(config),
+                  concurrency=args.concurrency, endpoint=args.endpoint,
+                  models_yaml=sha_file(args.models_yaml) if args.models_yaml else None,
+                  data_dir=str(args.data_dir), created_utc=datetime.now(timezone.utc).isoformat())
+    journal_path = (args.out / f'{args.run_name}.jsonl' if args.out_explicit else
+                    ROOT / 'results' / f'{args.run_name}.jsonl')
+    if args.force_new_out and journal_path.exists():
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')
+        journal_path.rename(journal_path.with_name(journal_path.stem + '-' + stamp + '.jsonl'))
+        raw_dir.rename(raw_dir.with_name(raw_dir.name + '-' + stamp))
+        raw_dir.mkdir()
+    journal = Journal(journal_path, header, args.force_new)
+    if not journal.finished <= split_ids:
+        journal.close()
+        raise ValueError('Resume records contain IDs outside the split')
+    logging.getLogger().addHandler(logging.FileHandler(raw_dir / 'harness.log'))
+    restore_timing = install_harness_timing()
+''' + s[b:]
+s=s.replace(\"        phase_times.set(times)\\n\", \"        phase_times.set(times)\\n        command_metrics.set(times)\\n        timing = ToolTiming()\\n        current_timing.set(timing)\\n\")
+s=s.replace(\"                                 budget=config.budget, harness=config.harness)\", \"                                 budget=config.budget, harness=config.harness,\\n                                 graph_dir=config.graph_dir, embeddings_dir=config.embeddings_dir)\")
+s=s.replace(\"        per_tool, tokens, per_tool_seconds = trace_counts(trace)\", \"        diagnostics = task_diagnostics(trace, patch, task.repo,\\n                                       _is_protected_test_or_config_path, task.test_files,\\n                                       args.data_dir)\\n        per_tool = diagnostics.pop('per_tool')\")
+s=s.replace(\"per_tool=per_tool), tool_seconds=per_tool_seconds, **tokens,\\n                   **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),\", \"per_tool=per_tool), **timing.metrics(), **diagnostics,\\n                   sandbox=environment['sandbox'], cmd_timeouts=times.get('cmd_timeouts', 0),\")
+s=s.replace(\"trace_path=str(trace_path.relative_to(ROOT)))\", \"trace_path=os.path.relpath(trace_path, ROOT))\")
+s=s.replace(\"args.data_dir, 'subprocess')\\n                (raw_dir\", \"args.data_dir, 'subprocess', out_dir=raw_dir)\\n                (raw_dir\")
+s=s.replace(\"        journal.close()\\n\\n\\ndef main\", \"        restore_timing()\\n        journal.close()\\n\\n\\ndef main\")
+s=s.replace(\"    parser.add_argument('--run-name', required=True)\", \"    parser.add_argument('--run-name', required=True)\\n    parser.add_argument('--out', type=Path, help='Artifact and journal directory (default: runs/)')\")
+s=s.replace(\"('skip-selfcheck', 'force-new', 'allow-foreign-python')\", \"('skip-selfcheck', 'force-new', 'force-new-out', 'allow-foreign-python', 'allow-unsandboxed')\")
+s=s.replace(\"    guard_python(args.allow_foreign_python)\", \"    args.out_explicit = args.out is not None\\n    args.out = (args.out or ROOT / 'runs').resolve()\\n    guard_python(args.allow_foreign_python)\")
+p.write_text(s)
+PY" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/run_agent_eval.py
+diff --git a/eval/run_agent_eval.py b/eval/run_agent_eval.py
+index 11885fab64e8f9468d3b9a7b0779ef04913f8789..8dab6eb1ab1af5452e793cb7e6bc4779bbfdbd30
+--- a/eval/run_agent_eval.py
++++ b/eval/run_agent_eval.py
+@@ -213,6 +213,110 @@
+             if line.strip() and not line.lstrip().startswith('#')}
+ 
+ 
++def decode_git_path(raw):
++    # Git C-quotes UTF-8 bytes using octal escapes, which JSON doesn't accept.
++    # literal_eval on bytes understands both octal and ordinary C escapes.
++    escaped = ''.join(c if ord(c) < 128 else ''.join(f'\\{b:03o}' for b in c.encode())
++                      for c in raw)
++    return ast.literal_eval('b' + escaped).decode('utf-8', errors='surrogateescape')
++
++
++def validate_inventory_ids(path):
++    seen = set()
++    with path.open() as stream:
++        for number, line in enumerate(stream, 1):
++            if not line.strip():
++                continue
++            iid = json.loads(line)['instance_id']
++            if iid in seen:
++                raise ValueError(f'Duplicate inventory IDs at line {number}')
++            seen.add(iid)
++
++
++def runner_revision():
++    return dict(git_sha=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
++                                               text=True).strip(),
++                git_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)))
++
++
++def wheels_listing_sha(path):
++    listing = []
++    if path:
++        for p in sorted(Path(path).rglob('*')):
++            listing.append((p.relative_to(path).as_posix(), p.stat().st_size,
++                            str(p.resolve()) if p.is_symlink() else None))
++    return hashlib.sha256(json.dumps(listing, sort_keys=True).encode()).hexdigest()
++
++
++def config_snapshot(value):
++    if dataclasses.is_dataclass(value):
++        return {f.name: config_snapshot(getattr(value, f.name)) for f in dataclasses.fields(value)
++                if f.name != 'models'}
++    if hasattr(value, 'model_dump'):
++        return value.model_dump(mode='json')
++    if isinstance(value, dict):
++        return {k: config_snapshot(v) for k, v in value.items()}
++    if isinstance(value, (list, tuple, set, frozenset)):
++        values = [config_snapshot(v) for v in value]
++        return sorted(values) if isinstance(value, (set, frozenset)) else values
++    if isinstance(value, Path):
++        return str(value)
++    return value
++
++
++def build_config(defaults, args, models, raw_dir, caps):
++    from swegemma import config as sc
++    from swegemma.budget import EvaluationBudget, HarnessLimits
++    names = {f.name for f in dataclasses.fields(sc.EvalConfig)}
++    for key in defaults.keys() - names:
++        logging.warning('Unknown EvalConfig key: %s', key)
++    options = {k: v for k, v in defaults.items() if k in names}
++    types = dict(budget=EvaluationBudget, harness=HarnessLimits,
++                 limits=sc.SubmissionLimits, generation_constraints=sc.GenerationConstraints,
++                 context_cache_config=sc.ContextCacheConfig,
++                 events_compaction_config=sc.EventsCompactionConfig,
++                 adapter_manifest=sc.AdapterManifest)
++    for key, cls in types.items():
++        if isinstance(options.get(key), dict):
++            options[key] = cls(**options[key])
++    paths = dict(tasks_path=args.data_dir / 'tasks.jsonl', snapshots_dir=args.data_dir / 'snapshots',
++                 wheels_dir=args.data_dir / 'wheels', results_dir=raw_dir, submission_dir=args.bundle)
++    # Explicit CLI runtime settings own these fields. Other bundle fields pass through.
++    options.update(paths, models=models, sandbox='subprocess', concurrency=args.concurrency,
++                   display_mode='quiet', **caps)
++    for key, fallback in [('graph_dir', 'graphs'), ('embeddings_dir', 'embeddings')]:
++        path = Path(options.get(key, fallback))
++        options[key] = str((path if path.is_absolute() else args.data_dir / path).resolve())
++    return sc.EvalConfig(**options)
++
++
++def task_diagnostics(trace, patch, repo, protected, test_files, data_dir):
++    out = dict(per_tool={}, prompt_tokens=None, completion_tokens=None,
++               patch_bytes=len(patch.encode()), patch_files=[], test_files_edited=[],
++               stray_files=[], empty_patch=not patch.strip(), leak_suspect=False, leak_hits=[],
++               diag_error=None)
++    errors = []
++    try:
++        out['per_tool'], tokens, _ = trace_counts(trace)
++        out.update(tokens)
++    except Exception as exc:
++        errors.append(type(exc).__name__)
++    try:
++        out.update(classify_patch(patch, repo, protected, test_files))
++    except Exception as exc:
++        errors.append(type(exc).__name__)
++    try:
++        tokens = (str(ROOT), str(data_dir), 'tasks.jsonl', 'test_patch', 'FAIL_TO_PASS')
++        arguments = [json.dumps(e.tool_args, ensure_ascii=False) for e in trace.entries
++                     if e.event_type == 'tool_call'] if trace else []
++        out['leak_hits'] = [t for t in dict.fromkeys(tokens) if any(t in a for a in arguments)]
++        out['leak_suspect'] = bool(out['leak_hits'])
++    except Exception as exc:
++        errors.append(type(exc).__name__)
++    out['diag_error'] = ','.join(errors) or None
++    return out
++
++
+ async def run(args):
+     from swegemma.cli import _build_cli_model_registry
+     from swegemma.config import EvalConfig
+diff --git a/eval/sandbox_env.py b/eval/sandbox_env.py
+index 98be80d6d77db34b9ff5ec0d24c6e78096fa1d75..0378508f696374e5692b4906844b483285c624a7
+--- a/eval/sandbox_env.py
++++ b/eval/sandbox_env.py
+@@ -16,7 +16,153 @@
+ command_metrics = ContextVar('command_metrics', default=None)
+ gold_artifact_dir = ContextVar('gold_artifact_dir', default=None)
+ 
++BWRAP_TEMPLATE = [
++    'bwrap', '--die-with-parent', '--unshare-net', '--unshare-pid',
++    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
++    '--tmpfs', '<each hidden path>', '--tmpfs', '/tmp',
++    '--bind', '<sandbox_root>', '<sandbox_root>',
++    '--ro-bind', '<each ro path>', '<same>',
++    '--chdir', '<workspace>', '/bin/bash', '-c', '<translated_cmd>',
++]
++
++
++def bwrap_argv(command, workspace, hidden_paths, ro_paths):
++    workspace = Path(workspace).resolve()
++    root = workspace.parent
++    argv = BWRAP_TEMPLATE[:11]
++    # Mask parents first so nested masks don't get covered by their parents.
++    for path in sorted({str(Path(p).absolute()) for p in hidden_paths},
++                       key=lambda p: (len(Path(p).parts), p)):
++        argv += ['--tmpfs', path]
++    argv += ['--tmpfs', '/tmp', '--bind', str(root), str(root)]
++    for path in sorted({str(Path(p).resolve()) for p in ro_paths}):
++        # Only explicit runtime assets may be re-exposed, never inventory/artifacts.
++        if ({'tasks.jsonl', 'splits', 'runs', 'results'} & set(Path(path).parts)
++                or (Path(path).is_dir() and (Path(path) / 'tasks.jsonl').exists())):
++            raise ValueError('Forbidden read-only exposure')
++        argv += ['--ro-bind', path, path]
++    argv += ['--chdir', str(workspace), *command]
++    return argv
++
++
++def runtime_ro_paths(workspace, ro_paths):
++    root = Path(workspace).resolve().parent
++    cfg = (root / 'venv/pyvenv.cfg').read_text()
++    home = next(line.split('=', 1)[1].strip() for line in cfg.splitlines()
++                if line.startswith('home ='))
++    prefix = Path(home).resolve().parent
++    paths = {prefix, *(Path(p).resolve() for p in ro_paths)}
++    wheels = root / 'wheels'
++    if wheels.is_symlink():
++        paths.add(wheels.resolve())
++    for path in wheels.rglob('*'):
++        if path.is_symlink():
++            paths.add(path.resolve())
++    return paths
++
++
++def apply_isolation(hidden_paths, ro_paths):
++    """Wrap the module executor, retaining the installed manager's translation/env.
++
++    Empty hidden_paths disables bwrap (explicit opt-out), but retains timeout
++    accounting. Repeated setup replaces this hook rather than stacking it.
++    """
++    import swegemma.sandbox.subprocess as sb
++    original = getattr(sb.execute_subprocess_command, '_unwrapped', sb.execute_subprocess_command)
++
++    def execute(command, cwd, env, **kwargs):
++        if hidden_paths:
++            if not isinstance(command, list) or command[:2] != ['/bin/bash', '-c']:
++                raise RuntimeError('Unsupported harness subprocess command')
++            # The harness's fallback wheel search doesn't include custom data dirs.
++            if ro_paths:
++                command = [*command[:2], re.sub(r'(?<![\w.-])/wheels(?![\w.-])',
++                                               str(Path(ro_paths[0]).resolve()), command[2])]
++            command = bwrap_argv(command, cwd, hidden_paths, runtime_ro_paths(cwd, ro_paths))
++        result = original(command=command, cwd=cwd, env=env, **kwargs)
++        metrics = command_metrics.get()
++        if metrics is not None and (result.status == 'timeout' or result.exit_code == 124):
++            metrics['cmd_timeouts'] = metrics.get('cmd_timeouts', 0) + 1
++        return result
++
++    execute._unwrapped = original
++    sb.execute_subprocess_command = execute
++    return BWRAP_TEMPLATE.copy()
++
++
++def probe_isolation(manager, inventory_path, data_dir):
++    """Fail closed on visibility, image imports, or broken workspace write-through."""
++    sid = manager.start()
++    try:
++        q = shlex.quote
++        cmd = (f'test ! -e {q(str(inventory_path))} && '
++               f'test -z "$(ls -A {q(str(data_dir))})" && '
++               "python3 -c 'import pytest' && "
++               'echo probe > /workspace/x && echo probe > /tmp/y')
++        result = manager.exec(sid, cmd, timeout=60)
++        workspace = manager.sandboxes[sid]['workspace']
++        if result.exit_code != 0 or not (workspace / 'x').is_file():
++            raise RuntimeError('bubblewrap startup probe failed: ' + result.stderr[:500])
++    finally:
++        manager.cleanup_all()
++
++
++def isolate_gold_tempfiles():
++    """Route verification's temporary patch serialization to the caller's out dir."""
++    import tempfile
++    import swegemma.harness.verification as vf
++    if getattr(vf.tempfile, '_gold_redirect', False):
++        return
+ 
++    class Tempfiles:
++        _gold_redirect = True
++
++        def __getattr__(self, name):
++            return getattr(tempfile, name)
++
++        def NamedTemporaryFile(self, *args, **kwargs):
++            if gold_artifact_dir.get() is not None:
++                kwargs['dir'] = gold_artifact_dir.get()
++            return tempfile.NamedTemporaryFile(*args, **kwargs)
++
++    vf.tempfile = Tempfiles()
++
++
++def setup_scorer_env(data_dir, *, out_dir=None, repo_root=None, allow_unsandboxed=False):
++    """Common subprocess scorer setup for evaluation and gold calibration."""
++    from swegemma.sandbox import SubprocessManager
++    from swegemma.harness.container_setup import resolve_wheels_dir
++    from types import SimpleNamespace
++    data_dir = Path(data_dir).resolve()
++    repo_root = Path(repo_root or Path(__file__).resolve().parents[1]).resolve()
++    out_dir = Path(out_dir or data_dir.parent / 'gold-output').resolve()
++    isolate_host_packages()
++    patched = patch_subprocess_deps(data_dir)
++    isolate_gold_tempfiles()
++    hidden = [Path.home(), repo_root, data_dir, out_dir, Path('/home/ubuntu/work/gemma-wt')]
++    wheels = resolve_wheels_dir(SimpleNamespace(wheels_dir=data_dir / 'wheels',
++                                              tasks_path=data_dir / 'tasks.jsonl',
++                                              snapshots_dir=data_dir / 'snapshots'))
++    ro = [wheels.resolve()] if wheels else []
++    try:
++        if not shutil.which('bwrap'):
++            raise RuntimeError('bubblewrap is not installed')
++        template = apply_isolation(hidden, ro)
++        probe_isolation(SubprocessManager(), data_dir / 'tasks.jsonl', data_dir)
++        mode = 'bwrap'
++    except Exception:
++        # Never leave an unusable boundary or silently downgrade its protection.
++        apply_isolation([], ro)
++        if not allow_unsandboxed:
++            raise
++        mode, template = 'none', None
++        import logging
++        logging.warning('bubblewrap unavailable/probe failed; explicitly allowed unsandboxed run',
++                        exc_info=True)
++    return dict(sandbox=mode, bwrap_argv_template=template, patched=patched,
++                wheels_dir=wheels)
++
++
+ def isolate_host_packages():
+     """Keep pyimg system packages; remove swegemma's extra harness-venv .pth leak."""
+     from swegemma.sandbox import SubprocessManager
+@@ -25,7 +171,13 @@
+         return
+ 
+     def start(self):
+-        sid = original(self)
++        base = self.base_dir
++        if gold_artifact_dir.get() is not None:
++            self.base_dir = Path(gold_artifact_dir.get())
++        try:
++            sid = original(self)
++        finally:
++            self.base_dir = base
+         for pth in self.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'):
+             pth.unlink()
+         return sid
+diff --git a/eval/tool_timing.py b/eval/tool_timing.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..29594208efe489aded56384a093c6eb5468bb9c7
+--- /dev/null
++++ b/eval/tool_timing.py
+@@ -0,0 +1,95 @@
++"""Per-task monotonic ADK tool timing, usable by the Kaggle timing kernel.
++
++No harness dependencies are imported until installation. Call IDs, rather than
++names or merged trace response timestamps, identify overlapping executions.
++"""
++from contextvars import ContextVar
++from dataclasses import dataclass, field
++import time
++
++current_timing = ContextVar('current_tool_timing', default=None)
++
++
++@dataclass
++class ToolTiming:
++    pending: dict = field(default_factory=dict)
++    seconds: dict = field(default_factory=dict)
++    unmatched: int = 0
++    completed: set = field(default_factory=set)
++
++    def before(self, call_id, name):
++        if not call_id:
++            self.unmatched += 1
++            return
++        if call_id in self.pending or call_id in self.completed:
++            self.unmatched += 1
++            return
++        self.pending[call_id] = (name, time.monotonic())
++
++    def after(self, call_id):
++        # Error callbacks may be followed by after_tool_callback on recovery.
++        if call_id in self.completed:
++            return
++        item = self.pending.pop(call_id, None)
++        if item is None:
++            self.unmatched += 1
++            return
++        name, start = item
++        elapsed = time.monotonic() - start
++        stat = self.seconds.setdefault(name, dict(n=0, total=0.0, max=0.0))
++        stat['n'] += 1
++        stat['total'] += elapsed
++        stat['max'] = max(stat['max'], elapsed)
++        self.completed.add(call_id)
++
++    def metrics(self):
++        return dict(tool_seconds=self.seconds,
++                    tool_calls_timed=sum(s['n'] for s in self.seconds.values()),
++                    tool_seconds_unmatched=self.unmatched + len(self.pending))
++
++
++def make_timing_plugin():
++    from google.adk.plugins.base_plugin import BasePlugin
++
++    class TimingPlugin(BasePlugin):
++        def __init__(self):
++            super().__init__(name='eval_tool_timing')
++
++        async def before_tool_callback(self, *, tool, tool_args, tool_context):
++            state = current_timing.get()
++            if state is not None:
++                state.before(tool_context.function_call_id, tool.name)
++
++        async def after_tool_callback(self, *, tool, tool_args, tool_context, result):
++            state = current_timing.get()
++            if state is not None:
++                state.after(tool_context.function_call_id)
++
++        async def on_tool_error_callback(self, *, tool, tool_args, tool_context, error):
++            state = current_timing.get()
++            if state is not None:
++                state.after(tool_context.function_call_id)
++
++    return TimingPlugin()
++
++
++def install_harness_timing():
++    """Installed swegemma builds an App with plugins; prepend ours to that list.
++
++    Prepending ensures timing runs before any error-recovery callback short
++    circuits the plugin chain. It also covers MCP and agent_tool subclasses.
++    Returns a restoration function for callers embedding the runner.
++    """
++    import swegemma.harness.agent_runner as ar
++    original = ar.App
++
++    def app(*args, **kwargs):
++        kwargs['plugins'] = [make_timing_plugin(), *kwargs.get('plugins', [])]
++        return original(*args, **kwargs)
++
++    ar.App = app
++
++    def restore():
++        ar.App = original
++
++    return restore
+
+codex
+The core changes are in place: shared environment setup, fail-closed startup probing, ADK timing callbacks keyed by call ID, and expanded resume identity checks. Next I’ll test the failure paths, including probe failure and diagnostic errors, to verify they don’t silently weaken isolation or lose completed task rows.
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/kaggle/gold_calibration.py'); s=p.read_text()
+s=s.replace('async def verify_gold(task, patch, data_dir, sandbox):', 'async def verify_gold(task, patch, data_dir, sandbox, out_dir=None):')
+s=s.replace(\"    with tempfile.TemporaryDirectory(prefix='gold-verify-', dir='/tmp') as scratch:\", \"    out_dir = Path(out_dir or WORKING_DIR).resolve()\\n    out_dir.mkdir(parents=True, exist_ok=True)\\n    with tempfile.TemporaryDirectory(prefix='gold-verify-', dir=out_dir) as scratch:\")
+s=s.replace(\"        result = verify_task(**kwargs)\\n        return await result if inspect.isawaitable(result) else result\", \"        token = [REDACTED_SECRET]        try:\\n            result = verify_task(**kwargs)\\n            return await result if inspect.isawaitable(result) else result\\n        finally:\\n            gold_artifact_dir.reset(token)\")
+s=s.replace(\"            patch_subprocess_deps(args.data_dir)\", \"            environment = setup_scorer_env(\\n                args.data_dir, out_dir=args.result.parent,\\n                allow_unsandboxed=getattr(args, 'allow_unsandboxed', False))\\n            row['sandbox'] = environment['sandbox']\")
+s=s.replace(\"verify_gold(task, patch, args.data_dir, args.sandbox)\", \"verify_gold(task, patch, args.data_dir, args.sandbox, out_dir=args.result.parent)\")
+s=s.replace(\"def run_one(task, data_dir, sandbox):\", \"def run_one(task, data_dir, sandbox, allow_unsandboxed=False):\")
+s=s.replace(\"                   '--data-dir', str(data_dir), '--sandbox', sandbox, '--result', str(output)]\", \"                   '--data-dir', str(data_dir), '--sandbox', sandbox, '--result', str(output)]\\n        if allow_unsandboxed:\\n            command.append('--allow-unsandboxed')\")
+s=s.replace(\"    parser.add_argument('--worker',\", \"    parser.add_argument('--allow-unsandboxed', action='store_true',\\n                        default=os.environ.get('GOLD_ALLOW_UNSANDBOXED') == '1')\\n    parser.add_argument('--worker',\")
+s=s.replace(\"pool.submit(run_one, task, args.data_dir, sandbox)\", \"pool.submit(run_one, task, args.data_dir, sandbox, args.allow_unsandboxed)\")
+p.write_text(s)
+PY" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/kaggle/push.sh
+/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/kaggle/stage_kernel.py
+diff --git a/eval/kaggle/push.sh b/eval/kaggle/push.sh
+index dcb7211e5919d6ff80b2141d3dce8037d74022f0..af50ad5dd9d537f4e941651c92fde4197dfbc982
+--- a/eval/kaggle/push.sh
++++ b/eval/kaggle/push.sh
+@@ -8,7 +8,7 @@
+ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+ stage_dir=$(mktemp -d /tmp/gold-kernel-push.XXXXXX)
+ trap 'rm -rf -- "$stage_dir"' EXIT
+-cp -- "$script_dir/gold_calibration.py" "$stage_dir/gold_calibration.py"
++python3 "$script_dir/stage_kernel.py" "$stage_dir/gold_calibration.py"
+ python3 - "$script_dir/gold_calibration_metadata.json" "$stage_dir/kernel-metadata.json" "$1" <<'PY'
+ import json
+ import sys
+diff --git a/eval/kaggle/stage_kernel.py b/eval/kaggle/stage_kernel.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..abd8a1ef8e5a51229741b4a7adadd117d34b6e92
+--- /dev/null
++++ b/eval/kaggle/stage_kernel.py
+@@ -0,0 +1,23 @@
++"""Embed the shared scorer environment in Kaggle's single-file script artifact."""
++from pathlib import Path
++import sys
++
++
++def stage_kernel(destination):
++    here = Path(__file__).resolve().parent
++    source = (here / 'gold_calibration.py').read_text()
++    shared = (here.parent / 'sandbox_env.py').read_text()
++    start = source.index('# BEGIN SHARED ENV IMPORT')
++    end = source.index('# END SHARED ENV IMPORT') + len('# END SHARED ENV IMPORT')
++    embedded = ("import types\n"
++                "_shared_env = types.ModuleType('sandbox_env')\n"
++                "_shared_env.__file__ = __file__\n"
++                f"exec(compile({shared!r}, 'sandbox_env.py', 'exec'), _shared_env.__dict__)\n"
++                "patch_subprocess_deps = _shared_env.patch_subprocess_deps\n"
++                "setup_scorer_env = _shared_env.setup_scorer_env\n"
++                "gold_artifact_dir = _shared_env.gold_artifact_dir\n")
++    Path(destination).write_text(source[:start] + embedded + source[end:])
++
++
++if __name__ == '__main__':
++    stage_kernel(sys.argv[1])
+diff --git a/eval/run_agent_eval.py b/eval/run_agent_eval.py
+index 11885fab64e8f9468d3b9a7b0779ef04913f8789..8dab6eb1ab1af5452e793cb7e6bc4779bbfdbd30
+--- a/eval/run_agent_eval.py
++++ b/eval/run_agent_eval.py
+@@ -213,6 +213,110 @@
+             if line.strip() and not line.lstrip().startswith('#')}
+ 
+ 
++def decode_git_path(raw):
++    # Git C-quotes UTF-8 bytes using octal escapes, which JSON doesn't accept.
++    # literal_eval on bytes understands both octal and ordinary C escapes.
++    escaped = ''.join(c if ord(c) < 128 else ''.join(f'\\{b:03o}' for b in c.encode())
++                      for c in raw)
++    return ast.literal_eval('b' + escaped).decode('utf-8', errors='surrogateescape')
++
++
++def validate_inventory_ids(path):
++    seen = set()
++    with path.open() as stream:
++        for number, line in enumerate(stream, 1):
++            if not line.strip():
++                continue
++            iid = json.loads(line)['instance_id']
++            if iid in seen:
++                raise ValueError(f'Duplicate inventory IDs at line {number}')
++            seen.add(iid)
++
++
++def runner_revision():
++    return dict(git_sha=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
++                                               text=True).strip(),
++                git_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)))
++
++
++def wheels_listing_sha(path):
++    listing = []
++    if path:
++        for p in sorted(Path(path).rglob('*')):
++            listing.append((p.relative_to(path).as_posix(), p.stat().st_size,
++                            str(p.resolve()) if p.is_symlink() else None))
++    return hashlib.sha256(json.dumps(listing, sort_keys=True).encode()).hexdigest()
++
++
++def config_snapshot(value):
++    if dataclasses.is_dataclass(value):
++        return {f.name: config_snapshot(getattr(value, f.name)) for f in dataclasses.fields(value)
++                if f.name != 'models'}
++    if hasattr(value, 'model_dump'):
++        return value.model_dump(mode='json')
++    if isinstance(value, dict):
++        return {k: config_snapshot(v) for k, v in value.items()}
++    if isinstance(value, (list, tuple, set, frozenset)):
++        values = [config_snapshot(v) for v in value]
++        return sorted(values) if isinstance(value, (set, frozenset)) else values
++    if isinstance(value, Path):
++        return str(value)
++    return value
++
++
++def build_config(defaults, args, models, raw_dir, caps):
++    from swegemma import config as sc
++    from swegemma.budget import EvaluationBudget, HarnessLimits
++    names = {f.name for f in dataclasses.fields(sc.EvalConfig)}
++    for key in defaults.keys() - names:
++        logging.warning('Unknown EvalConfig key: %s', key)
++    options = {k: v for k, v in defaults.items() if k in names}
++    types = dict(budget=EvaluationBudget, harness=HarnessLimits,
++                 limits=sc.SubmissionLimits, generation_constraints=sc.GenerationConstraints,
++                 context_cache_config=sc.ContextCacheConfig,
++                 events_compaction_config=sc.EventsCompactionConfig,
++                 adapter_manifest=sc.AdapterManifest)
++    for key, cls in types.items():
++        if isinstance(options.get(key), dict):
++            options[key] = cls(**options[key])
++    paths = dict(tasks_path=args.data_dir / 'tasks.jsonl', snapshots_dir=args.data_dir / 'snapshots',
++                 wheels_dir=args.data_dir / 'wheels', results_dir=raw_dir, submission_dir=args.bundle)
++    # Explicit CLI runtime settings own these fields. Other bundle fields pass through.
++    options.update(paths, models=models, sandbox='subprocess', concurrency=args.concurrency,
++                   display_mode='quiet', **caps)
++    for key, fallback in [('graph_dir', 'graphs'), ('embeddings_dir', 'embeddings')]:
++        path = Path(options.get(key, fallback))
++        options[key] = str((path if path.is_absolute() else args.data_dir / path).resolve())
++    return sc.EvalConfig(**options)
++
++
++def task_diagnostics(trace, patch, repo, protected, test_files, data_dir):
++    out = dict(per_tool={}, prompt_tokens=None, completion_tokens=None,
++               patch_bytes=len(patch.encode()), patch_files=[], test_files_edited=[],
++               stray_files=[], empty_patch=not patch.strip(), leak_suspect=False, leak_hits=[],
++               diag_error=None)
++    errors = []
++    try:
++        out['per_tool'], tokens, _ = trace_counts(trace)
++        out.update(tokens)
++    except Exception as exc:
++        errors.append(type(exc).__name__)
++    try:
++        out.update(classify_patch(patch, repo, protected, test_files))
++    except Exception as exc:
++        errors.append(type(exc).__name__)
++    try:
++        tokens = (str(ROOT), str(data_dir), 'tasks.jsonl', 'test_patch', 'FAIL_TO_PASS')
++        arguments = [json.dumps(e.tool_args, ensure_ascii=False) for e in trace.entries
++                     if e.event_type == 'tool_call'] if trace else []
++        out['leak_hits'] = [t for t in dict.fromkeys(tokens) if any(t in a for a in arguments)]
++        out['leak_suspect'] = bool(out['leak_hits'])
++    except Exception as exc:
++        errors.append(type(exc).__name__)
++    out['diag_error'] = ','.join(errors) or None
++    return out
++
++
+ async def run(args):
+     from swegemma.cli import _build_cli_model_registry
+     from swegemma.config import EvalConfig
+diff --git a/eval/sandbox_env.py b/eval/sandbox_env.py
+index 98be80d6d77db34b9ff5ec0d24c6e78096fa1d75..0378508f696374e5692b4906844b483285c624a7
+--- a/eval/sandbox_env.py
++++ b/eval/sandbox_env.py
+@@ -16,7 +16,153 @@
+ command_metrics = ContextVar('command_metrics', default=None)
+ gold_artifact_dir = ContextVar('gold_artifact_dir', default=None)
+ 
++BWRAP_TEMPLATE = [
++    'bwrap', '--die-with-parent', '--unshare-net', '--unshare-pid',
++    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
++    '--tmpfs', '<each hidden path>', '--tmpfs', '/tmp',
++    '--bind', '<sandbox_root>', '<sandbox_root>',
++    '--ro-bind', '<each ro path>', '<same>',
++    '--chdir', '<workspace>', '/bin/bash', '-c', '<translated_cmd>',
++]
++
++
++def bwrap_argv(command, workspace, hidden_paths, ro_paths):
++    workspace = Path(workspace).resolve()
++    root = workspace.parent
++    argv = BWRAP_TEMPLATE[:11]
++    # Mask parents first so nested masks don't get covered by their parents.
++    for path in sorted({str(Path(p).absolute()) for p in hidden_paths},
++                       key=lambda p: (len(Path(p).parts), p)):
++        argv += ['--tmpfs', path]
++    argv += ['--tmpfs', '/tmp', '--bind', str(root), str(root)]
++    for path in sorted({str(Path(p).resolve()) for p in ro_paths}):
++        # Only explicit runtime assets may be re-exposed, never inventory/artifacts.
++        if ({'tasks.jsonl', 'splits', 'runs', 'results'} & set(Path(path).parts)
++                or (Path(path).is_dir() and (Path(path) / 'tasks.jsonl').exists())):
++            raise ValueError('Forbidden read-only exposure')
++        argv += ['--ro-bind', path, path]
++    argv += ['--chdir', str(workspace), *command]
++    return argv
++
++
++def runtime_ro_paths(workspace, ro_paths):
++    root = Path(workspace).resolve().parent
++    cfg = (root / 'venv/pyvenv.cfg').read_text()
++    home = next(line.split('=', 1)[1].strip() for line in cfg.splitlines()
++                if line.startswith('home ='))
++    prefix = Path(home).resolve().parent
++    paths = {prefix, *(Path(p).resolve() for p in ro_paths)}
++    wheels = root / 'wheels'
++    if wheels.is_symlink():
++        paths.add(wheels.resolve())
++    for path in wheels.rglob('*'):
++        if path.is_symlink():
++            paths.add(path.resolve())
++    return paths
++
++
++def apply_isolation(hidden_paths, ro_paths):
++    """Wrap the module executor, retaining the installed manager's translation/env.
++
++    Empty hidden_paths disables bwrap (explicit opt-out), but retains timeout
++    accounting. Repeated setup replaces this hook rather than stacking it.
++    """
++    import swegemma.sandbox.subprocess as sb
++    original = getattr(sb.execute_subprocess_command, '_unwrapped', sb.execute_subprocess_command)
++
++    def execute(command, cwd, env, **kwargs):
++        if hidden_paths:
++            if not isinstance(command, list) or command[:2] != ['/bin/bash', '-c']:
++                raise RuntimeError('Unsupported harness subprocess command')
++            # The harness's fallback wheel search doesn't include custom data dirs.
++            if ro_paths:
++                command = [*command[:2], re.sub(r'(?<![\w.-])/wheels(?![\w.-])',
++                                               str(Path(ro_paths[0]).resolve()), command[2])]
++            command = bwrap_argv(command, cwd, hidden_paths, runtime_ro_paths(cwd, ro_paths))
++        result = original(command=command, cwd=cwd, env=env, **kwargs)
++        metrics = command_metrics.get()
++        if metrics is not None and (result.status == 'timeout' or result.exit_code == 124):
++            metrics['cmd_timeouts'] = metrics.get('cmd_timeouts', 0) + 1
++        return result
++
++    execute._unwrapped = original
++    sb.execute_subprocess_command = execute
++    return BWRAP_TEMPLATE.copy()
++
++
++def probe_isolation(manager, inventory_path, data_dir):
++    """Fail closed on visibility, image imports, or broken workspace write-through."""
++    sid = manager.start()
++    try:
++        q = shlex.quote
++        cmd = (f'test ! -e {q(str(inventory_path))} && '
++               f'test -z "$(ls -A {q(str(data_dir))})" && '
++               "python3 -c 'import pytest' && "
++               'echo probe > /workspace/x && echo probe > /tmp/y')
++        result = manager.exec(sid, cmd, timeout=60)
++        workspace = manager.sandboxes[sid]['workspace']
++        if result.exit_code != 0 or not (workspace / 'x').is_file():
++            raise RuntimeError('bubblewrap startup probe failed: ' + result.stderr[:500])
++    finally:
++        manager.cleanup_all()
++
++
++def isolate_gold_tempfiles():
++    """Route verification's temporary patch serialization to the caller's out dir."""
++    import tempfile
++    import swegemma.harness.verification as vf
++    if getattr(vf.tempfile, '_gold_redirect', False):
++        return
+ 
++    class Tempfiles:
++        _gold_redirect = True
++
++        def __getattr__(self, name):
++            return getattr(tempfile, name)
++
++        def NamedTemporaryFile(self, *args, **kwargs):
++            if gold_artifact_dir.get() is not None:
++                kwargs['dir'] = gold_artifact_dir.get()
++            return tempfile.NamedTemporaryFile(*args, **kwargs)
++
++    vf.tempfile = Tempfiles()
++
++
++def setup_scorer_env(data_dir, *, out_dir=None, repo_root=None, allow_unsandboxed=False):
++    """Common subprocess scorer setup for evaluation and gold calibration."""
++    from swegemma.sandbox import SubprocessManager
++    from swegemma.harness.container_setup import resolve_wheels_dir
++    from types import SimpleNamespace
++    data_dir = Path(data_dir).resolve()
++    repo_root = Path(repo_root or Path(__file__).resolve().parents[1]).resolve()
++    out_dir = Path(out_dir or data_dir.parent / 'gold-output').resolve()
++    isolate_host_packages()
++    patched = patch_subprocess_deps(data_dir)
++    isolate_gold_tempfiles()
++    hidden = [Path.home(), repo_root, data_dir, out_dir, Path('/home/ubuntu/work/gemma-wt')]
++    wheels = resolve_wheels_dir(SimpleNamespace(wheels_dir=data_dir / 'wheels',
++                                              tasks_path=data_dir / 'tasks.jsonl',
++                                              snapshots_dir=data_dir / 'snapshots'))
++    ro = [wheels.resolve()] if wheels else []
++    try:
++        if not shutil.which('bwrap'):
++            raise RuntimeError('bubblewrap is not installed')
++        template = apply_isolation(hidden, ro)
++        probe_isolation(SubprocessManager(), data_dir / 'tasks.jsonl', data_dir)
++        mode = 'bwrap'
++    except Exception:
++        # Never leave an unusable boundary or silently downgrade its protection.
++        apply_isolation([], ro)
++        if not allow_unsandboxed:
++            raise
++        mode, template = 'none', None
++        import logging
++        logging.warning('bubblewrap unavailable/probe failed; explicitly allowed unsandboxed run',
++                        exc_info=True)
++    return dict(sandbox=mode, bwrap_argv_template=template, patched=patched,
++                wheels_dir=wheels)
++
++
+ def isolate_host_packages():
+     """Keep pyimg system packages; remove swegemma's extra harness-venv .pth leak."""
+     from swegemma.sandbox import SubprocessManager
+@@ -25,7 +171,13 @@
+         return
+ 
+     def start(self):
+-        sid = original(self)
++        base = self.base_dir
++        if gold_artifact_dir.get() is not None:
++            self.base_dir = Path(gold_artifact_dir.get())
++        try:
++            sid = original(self)
++        finally:
++            self.base_dir = base
+         for pth in self.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'):
+             pth.unlink()
+         return sid
+diff --git a/eval/tool_timing.py b/eval/tool_timing.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..29594208efe489aded56384a093c6eb5468bb9c7
+--- /dev/null
++++ b/eval/tool_timing.py
+@@ -0,0 +1,95 @@
++"""Per-task monotonic ADK tool timing, usable by the Kaggle timing kernel.
++
++No harness dependencies are imported until installation. Call IDs, rather than
++names or merged trace response timestamps, identify overlapping executions.
++"""
++from contextvars import ContextVar
++from dataclasses import dataclass, field
++import time
++
++current_timing = ContextVar('current_tool_timing', default=None)
++
++
++@dataclass
++class ToolTiming:
++    pending: dict = field(default_factory=dict)
++    seconds: dict = field(default_factory=dict)
++    unmatched: int = 0
++    completed: set = field(default_factory=set)
++
++    def before(self, call_id, name):
++        if not call_id:
++            self.unmatched += 1
++            return
++        if call_id in self.pending or call_id in self.completed:
++            self.unmatched += 1
++            return
++        self.pending[call_id] = (name, time.monotonic())
++
++    def after(self, call_id):
++        # Error callbacks may be followed by after_tool_callback on recovery.
++        if call_id in self.completed:
++            return
++        item = self.pending.pop(call_id, None)
++        if item is None:
++            self.unmatched += 1
++            return
++        name, start = item
++        elapsed = time.monotonic() - start
++        stat = self.seconds.setdefault(name, dict(n=0, total=0.0, max=0.0))
++        stat['n'] += 1
++        stat['total'] += elapsed
++        stat['max'] = max(stat['max'], elapsed)
++        self.completed.add(call_id)
++
++    def metrics(self):
++        return dict(tool_seconds=self.seconds,
++                    tool_calls_timed=sum(s['n'] for s in self.seconds.values()),
++                    tool_seconds_unmatched=self.unmatched + len(self.pending))
++
++
++def make_timing_plugin():
++    from google.adk.plugins.base_plugin import BasePlugin
++
++    class TimingPlugin(BasePlugin):
++        def __init__(self):
++            super().__init__(name='eval_tool_timing')
++
++        async def before_tool_callback(self, *, tool, tool_args, tool_context):
++            state = current_timing.get()
++            if state is not None:
++                state.before(tool_context.function_call_id, tool.name)
++
++        async def after_tool_callback(self, *, tool, tool_args, tool_context, result):
++            state = current_timing.get()
++            if state is not None:
++                state.after(tool_context.function_call_id)
++
++        async def on_tool_error_callback(self, *, tool, tool_args, tool_context, error):
++            state = current_timing.get()
++            if state is not None:
++                state.after(tool_context.function_call_id)
++
++    return TimingPlugin()
++
++
++def install_harness_timing():
++    """Installed swegemma builds an App with plugins; prepend ours to that list.
++
++    Prepending ensures timing runs before any error-recovery callback short
++    circuits the plugin chain. It also covers MCP and agent_tool subclasses.
++    Returns a restoration function for callers embedding the runner.
++    """
++    import swegemma.harness.agent_runner as ar
++    original = ar.App
++
++    def app(*args, **kwargs):
++        kwargs['plugins'] = [make_timing_plugin(), *kwargs.get('plugins', [])]
++        return original(*args, **kwargs)
++
++    ar.App = app
++
++    def restore():
++        ar.App = original
++
++    return restore
+
+exec
+/bin/bash -lc '/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest --version; bwrap --die-with-parent --unshare-net --unshare-pid --ro-bind / / --dev /dev --proc /proc /bin/true; git diff --stat' in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+pytest 9.2.0
+bwrap: loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted
+ eval/kaggle/gold_calibration.py |  90 +++++-----------
+ eval/kaggle/push.sh             |   2 +-
+ eval/run_agent_eval.py          | 229 +++++++++++++++++++++++++++++-----------
+ 3 files changed, 198 insertions(+), 123 deletions(-)
+
+exec
+/bin/bash -lc 'PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q -rs' in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+exec
+/bin/bash -lc "sed -n '1,260p' eval/sandbox_env.py; sed -n '355,565p' eval/run_agent_eval.py" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+"""Shared local scorer environment; no installed harness source is modified.
+
+The executor hook is after swegemma's path translation, and covers exec_async,
+run_command, setup, and verification as well as agent commands.
+"""
+from contextvars import ContextVar
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+
+command_metrics = ContextVar('command_metrics', default=None)
+gold_artifact_dir = ContextVar('gold_artifact_dir', default=None)
+
+BWRAP_TEMPLATE = [
+    'bwrap', '--die-with-parent', '--unshare-net', '--unshare-pid',
+    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
+    '--tmpfs', '<each hidden path>', '--tmpfs', '/tmp',
+    '--bind', '<sandbox_root>', '<sandbox_root>',
+    '--ro-bind', '<each ro path>', '<same>',
+    '--chdir', '<workspace>', '/bin/bash', '-c', '<translated_cmd>',
+]
+
+
+def bwrap_argv(command, workspace, hidden_paths, ro_paths):
+    workspace = Path(workspace).resolve()
+    root = workspace.parent
+    argv = BWRAP_TEMPLATE[:11]
+    # Mask parents first so nested masks don't get covered by their parents.
+    for path in sorted({str(Path(p).absolute()) for p in hidden_paths},
+                       key=lambda p: (len(Path(p).parts), p)):
+        argv += ['--tmpfs', path]
+    argv += ['--tmpfs', '/tmp', '--bind', str(root), str(root)]
+    for path in sorted({str(Path(p).resolve()) for p in ro_paths}):
+        # Only explicit runtime assets may be re-exposed, never inventory/artifacts.
+        if ({'tasks.jsonl', 'splits', 'runs', 'results'} & set(Path(path).parts)
+                or (Path(path).is_dir() and (Path(path) / 'tasks.jsonl').exists())):
+            raise ValueError('Forbidden read-only exposure')
+        argv += ['--ro-bind', path, path]
+    argv += ['--chdir', str(workspace), *command]
+    return argv
+
+
+def runtime_ro_paths(workspace, ro_paths):
+    root = Path(workspace).resolve().parent
+    cfg = (root / 'venv/pyvenv.cfg').read_text()
+    home = next(line.split('=', 1)[1].strip() for line in cfg.splitlines()
+                if line.startswith('home ='))
+    prefix = Path(home).resolve().parent
+    paths = {prefix, *(Path(p).resolve() for p in ro_paths)}
+    wheels = root / 'wheels'
+    if wheels.is_symlink():
+        paths.add(wheels.resolve())
+    for path in wheels.rglob('*'):
+        if path.is_symlink():
+            paths.add(path.resolve())
+    return paths
+
+
+def apply_isolation(hidden_paths, ro_paths):
+    """Wrap the module executor, retaining the installed manager's translation/env.
+
+    Empty hidden_paths disables bwrap (explicit opt-out), but retains timeout
+    accounting. Repeated setup replaces this hook rather than stacking it.
+    """
+    import swegemma.sandbox.subprocess as sb
+    original = getattr(sb.execute_subprocess_command, '_unwrapped', sb.execute_subprocess_command)
+
+    def execute(command, cwd, env, **kwargs):
+        if hidden_paths:
+            if not isinstance(command, list) or command[:2] != ['/bin/bash', '-c']:
+                raise RuntimeError('Unsupported harness subprocess command')
+            # The harness's fallback wheel search doesn't include custom data dirs.
+            if ro_paths:
+                command = [*command[:2], re.sub(r'(?<![\w.-])/wheels(?![\w.-])',
+                                               str(Path(ro_paths[0]).resolve()), command[2])]
+            command = bwrap_argv(command, cwd, hidden_paths, runtime_ro_paths(cwd, ro_paths))
+        result = original(command=command, cwd=cwd, env=env, **kwargs)
+        metrics = command_metrics.get()
+        if metrics is not None and (result.status == 'timeout' or result.exit_code == 124):
+            metrics['cmd_timeouts'] = metrics.get('cmd_timeouts', 0) + 1
+        return result
+
+    execute._unwrapped = original
+    sb.execute_subprocess_command = execute
+    return BWRAP_TEMPLATE.copy()
+
+
+def probe_isolation(manager, inventory_path, data_dir):
+    """Fail closed on visibility, image imports, or broken workspace write-through."""
+    sid = manager.start()
+    try:
+        q = shlex.quote
+        cmd = (f'test ! -e {q(str(inventory_path))} && '
+               f'test -z "$(ls -A {q(str(data_dir))})" && '
+               "python3 -c 'import pytest' && "
+               'echo probe > /workspace/x && echo probe > /tmp/y')
+        result = manager.exec(sid, cmd, timeout=60)
+        workspace = manager.sandboxes[sid]['workspace']
+        if result.exit_code != 0 or not (workspace / 'x').is_file():
+            raise RuntimeError('bubblewrap startup probe failed: ' + result.stderr[:500])
+    finally:
+        manager.cleanup_all()
+
+
+def isolate_gold_tempfiles():
+    """Route verification's temporary patch serialization to the caller's out dir."""
+    import tempfile
+    import swegemma.harness.verification as vf
+    if getattr(vf.tempfile, '_gold_redirect', False):
+        return
+
+    class Tempfiles:
+        _gold_redirect = True
+
+        def __getattr__(self, name):
+            return getattr(tempfile, name)
+
+        def NamedTemporaryFile(self, *args, **kwargs):
+            if gold_artifact_dir.get() is not None:
+                kwargs['dir'] = gold_artifact_dir.get()
+            return tempfile.NamedTemporaryFile(*args, **kwargs)
+
+    vf.tempfile = Tempfiles()
+
+
+def setup_scorer_env(data_dir, *, out_dir=None, repo_root=None, allow_unsandboxed=False):
+    """Common subprocess scorer setup for evaluation and gold calibration."""
+    from swegemma.sandbox import SubprocessManager
+    from swegemma.harness.container_setup import resolve_wheels_dir
+    from types import SimpleNamespace
+    data_dir = Path(data_dir).resolve()
+    repo_root = Path(repo_root or Path(__file__).resolve().parents[1]).resolve()
+    out_dir = Path(out_dir or data_dir.parent / 'gold-output').resolve()
+    isolate_host_packages()
+    patched = patch_subprocess_deps(data_dir)
+    isolate_gold_tempfiles()
+    hidden = [Path.home(), repo_root, data_dir, out_dir, Path('/home/ubuntu/work/gemma-wt')]
+    wheels = resolve_wheels_dir(SimpleNamespace(wheels_dir=data_dir / 'wheels',
+                                              tasks_path=data_dir / 'tasks.jsonl',
+                                              snapshots_dir=data_dir / 'snapshots'))
+    ro = [wheels.resolve()] if wheels else []
+    try:
+        if not shutil.which('bwrap'):
+            raise RuntimeError('bubblewrap is not installed')
+        template = apply_isolation(hidden, ro)
+        probe_isolation(SubprocessManager(), data_dir / 'tasks.jsonl', data_dir)
+        mode = 'bwrap'
+    except Exception:
+        # Never leave an unusable boundary or silently downgrade its protection.
+        apply_isolation([], ro)
+        if not allow_unsandboxed:
+            raise
+        mode, template = 'none', None
+        import logging
+        logging.warning('bubblewrap unavailable/probe failed; explicitly allowed unsandboxed run',
+                        exc_info=True)
+    return dict(sandbox=mode, bwrap_argv_template=template, patched=patched,
+                wheels_dir=wheels)
+
+
+def isolate_host_packages():
+    """Keep pyimg system packages; remove swegemma's extra harness-venv .pth leak."""
+    from swegemma.sandbox import SubprocessManager
+    original = SubprocessManager.start
+    if getattr(original, '_image_only', False):
+        return
+
+    def start(self):
+        base = self.base_dir
+        if gold_artifact_dir.get() is not None:
+            self.base_dir = Path(gold_artifact_dir.get())
+        try:
+            sid = original(self)
+        finally:
+            self.base_dir = base
+        for pth in self.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'):
+            pth.unlink()
+        return sid
+    start._image_only = True
+    SubprocessManager.start = start
+
+
+def patch_subprocess_deps(data_dir):
+    """Emulate the docker-only dependency setup for the subprocess sandbox (swegemma skips it).
+
+    Contract (swegemma 0.2.11 container_setup): for docker, _ensure_container_site_packages
+    unpacks every deduplicated (highest-version, py313-compatible) wheel from wheels_dir that is
+    < 20 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
+    site-packages, no resolver; large wheels are added only if imported by the workspace; then
+    sandbox/setup.py runs with --fast-path. We replicate exactly that inside the sandbox venv.
+    The sandbox venv uses system_site_packages=True, so the HOST python must mirror the image
+    (Dockerfile.public: pytest, pytest-timeout==2.1.0, typer, build backends; nothing else).
+    """
+    import tarfile
+    import swegemma.harness.container_setup as cs
+    import swegemma.harness.verification as vf
+    import swegemma.harness.sample_verification  # load all known by-name bindings
+    import swegemma.evaluate
+    import swegemma.cli
+    import swegemma.harness.agent_runner
+    orig = cs.install_test_dependencies
+    wheels_src = Path(data_dir) / 'wheels'
+    if not wheels_src.is_dir():
+        wheels_src = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+    setup_py = Path(data_dir) / 'sandbox' / 'setup.py'
+    if not setup_py.exists():
+        setup_py = next(iter(Path(data_dir).rglob('setup.py')), setup_py)  # competition sandbox/setup.py
+
+    def install(docker, container_id, repo='', *, fast_path=True, config=None):
+        if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
+            return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+        venv_dir = docker.sandboxes[container_id]['venv']
+        sp_dir = next(iter(sorted(venv_dir.glob('lib/python3*/site-packages'))))
+        base_wheels, large_wheels, _m2p, _req = cs._inspect_wheels_dir(wheels_src)
+        selected = list(base_wheels)
+        if large_wheels:  # public wheels have none; fail loudly rather than silently diverge
+            raise RuntimeError('large wheels present; workspace-import scan not emulated')
+        tar_path = cs._build_unpacked_wheels_tar(selected, 'sp_base_local', '.swegemma_base_injected')
+        with tarfile.open(tar_path) as tf:
+            tf.extractall(sp_dir, filter='data')
+        docker.copy_to(container_id, setup_py, '/tmp/setup.py')
+        flag = '--fast-path' if fast_path else ''
+        docker.exec(container_id, f'python3 /tmp/setup.py {flag} {repo}'.strip(), timeout=280)
+        probe_log = os.environ.get('GOLD_PROBE_LOG')  # diagnostic: which copy of the repo package is imported
+        if probe_log:
+            pkg = {'Textualize/rich': 'rich', 'encode/httpx': 'httpx', 'fastapi/fastapi': 'fastapi',
+                   'psf/requests': 'requests'}.get(repo, repo.split('/')[-1])
+            out = docker.exec(container_id, f'cd /workspace && PYTHONSAFEPATH=1 PYTHONNOUSERSITE=1 python3 -s -c '
+                              f'"import {pkg};print({pkg}.__file__)"', timeout=60)
+            with open(probe_log, 'a') as fh:
+                fh.write(json.dumps({'container': str(container_id), 'repo': repo, 'probe': str(out)[:500]}) + '\n')
+    for name, module in list(sys.modules.items()):
+        if (name == 'swegemma' or name.startswith('swegemma.')) and getattr(module, 'install_test_dependencies', None) is orig:
+            module.install_test_dependencies = install
+    return install
+
+        model._additional_args['api_base'] = args.endpoint
+    raw_dir = args.out / args.run_name
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    config = build_config(defaults, args, models, raw_dir, caps)
+    environment = setup_scorer_env(args.data_dir, out_dir=args.out, repo_root=ROOT,
+                                   allow_unsandboxed=args.allow_unsandboxed)
+    patched = environment['patched']
+    assert_dependency_bindings(patched)
+    header = dict(_schema='agent_eval_v2', fields=FIELDS, bundle=str(args.bundle),
+                  bundle_sha256=bundle_sha(args.bundle), **runner_revision(),
+                  tasks_sha256=sha_file(args.data_dir / 'tasks.jsonl'),
+                  split=dict(path=str(args.split), sha256=sha_file(args.split)), caps=caps,
+                  versions={name: importlib.metadata.version(name) for name in
+                            ('swegemma', 'adk_submission', 'google-adk', 'litellm')},
+                  python_version=sys.version, wheels_listing_sha256=wheels_listing_sha(environment['wheels_dir']),
+                  sandbox=environment['sandbox'], bwrap_argv_template=environment['bwrap_argv_template'],
+                  effective_config=config_snapshot(config),
+                  concurrency=args.concurrency, endpoint=args.endpoint,
+                  models_yaml=sha_file(args.models_yaml) if args.models_yaml else None,
+                  data_dir=str(args.data_dir), created_utc=datetime.now(timezone.utc).isoformat())
+    journal_path = (args.out / f'{args.run_name}.jsonl' if args.out_explicit else
+                    ROOT / 'results' / f'{args.run_name}.jsonl')
+    if args.force_new_out and journal_path.exists():
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')
+        journal_path.rename(journal_path.with_name(journal_path.stem + '-' + stamp + '.jsonl'))
+        raw_dir.rename(raw_dir.with_name(raw_dir.name + '-' + stamp))
+        raw_dir.mkdir()
+    journal = Journal(journal_path, header, args.force_new)
+    if not journal.finished <= split_ids:
+        journal.close()
+        raise ValueError('Resume records contain IDs outside the split')
+    logging.getLogger().addHandler(logging.FileHandler(raw_dir / 'harness.log'))
+    restore_timing = install_harness_timing()
+    import swegemma.evaluate as evaluate_module
+    original_verify = evaluate_module.verify_task
+    phase_times = ContextVar('phase_times')
+    import swegemma.harness.verification as verification_module
+    original_strip = verification_module.strip_protected_files_from_patch
+    verification_module.strip_protected_files_from_patch = observe_patch_strip(original_strip, phase_times)
+
+    async def timed_verify(*pos, **kw):
+        start = time.perf_counter()
+        try:
+            return await original_verify(*pos, **kw)
+        finally:
+            phase_times.get()['verification'] = time.perf_counter() - start
+    evaluate_module.verify_task = timed_verify
+
+    class LocalEvaluator(Evaluator):
+        agent_seconds = 0.0
+        patch = ''
+        trace = None
+
+        def _hydrate_task_from_secret(self, task):
+            return task  # Explicit inventory only; no implicit sibling secret discovery.
+
+        def _get_secret_bundle_data(self):
+            return {}, {}, None
+
+        async def _run_agent_sandbox(self, task, *pos, **kw):
+            safe = dataclasses.replace(task, patch='', test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=())
+            kw['context'].task = safe
+            start = time.perf_counter()
+            phase_times.get()['agent_active'] = True
+            try:
+                self.patch, error, self.trace = await super()._run_agent_sandbox(safe, *pos, **kw)
+                self.agent_error = error or ''
+                return self.patch, error, self.trace
+            finally:
+                self.agent_seconds = time.perf_counter() - start
+                phase_times.get()['agent_active'] = False
+
+    async def one(iid):
+        times = dict(verification=0.0)
+        phase_times.set(times)
+        command_metrics.set(times)
+        timing = ToolTiming()
+        current_timing.set(timing)
+        evaluator = LocalEvaluator(config)
+        task = dataclasses.replace(tasks[iid], patch='')
+        context = SwegemmaContext(docker_manager=evaluator.docker, container_id='',
+                                 problem_statement=task.problem_statement, repo=task.repo,
+                                 task=dataclasses.replace(task, test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=()),
+                                 budget=config.budget, harness=config.harness,
+                                 graph_dir=config.graph_dir, embeddings_dir=config.embeddings_dir)
+        start = time.perf_counter()
+        result, error, code, resolved = None, None, None, False
+        try:
+            assert_dependency_bindings(patched)
+            result = await evaluator.evaluate_task(task, context=context)
+            resolved, code = result.resolved, result.test_exit_code
+            error = 'Harness task failure (see raw artifacts)' if result.error else None
+        except Exception as exc:
+            logging.exception('Task failed: %s', iid)
+            error = f'Evaluation exception ({type(exc).__name__})'
+        finally:
+            evaluator.docker.cleanup_all()
+        total = time.perf_counter() - start
+        patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch)
+        task_dir = raw_dir / iid
+        task_dir.mkdir(exist_ok=True)
+        (task_dir / 'agent.patch').write_text(patch)
+        (task_dir / 'output.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result
+                                                       else dict(error=error), default=str))
+        trace = evaluator.trace
+        trace_path = task_dir / 'trace.json'
+        trace_path.write_text(json.dumps(trace.to_dict(format='legacy') if trace else {}, default=str))
+        diagnostics = task_diagnostics(trace, patch, task.repo,
+                                       _is_protected_test_or_config_path, task.test_files,
+                                       args.data_dir)
+        per_tool = diagnostics.pop('per_tool')
+        raw_error = result.error or '' if result else error or ''
+        row = dict(instance_id=iid, repo=task.repo, resolved=resolved, exit_code=code, error=error,
+                   wall_seconds=dict(agent=evaluator.agent_seconds,
+                                     verification=times['verification'],
+                                     total=total), llm_turns=context.llm_calls_used,
+                   tool_calls=dict(total=sum(per_tool.values()) if trace else context.tool_calls_used,
+                                   per_tool=per_tool), **timing.metrics(), **diagnostics,
+                   sandbox=environment['sandbox'], cmd_timeouts=times.get('cmd_timeouts', 0),
+                   timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' +
+                                           getattr(evaluator, 'agent_error', ''), re.I)) or code == 124,
+                   trace_path=os.path.relpath(trace_path, ROOT))
+        journal.append(row)
+        print(f'{iid}: resolved={resolved}', flush=True)
+
+    try:
+        if not args.skip_selfcheck:
+            clean = split_ids & read_ids(ROOT / 'eval/splits/clean.txt')
+            check = args.selfcheck_ids.split(',') if args.selfcheck_ids else sorted(clean)[:2]
+            if len(check) != 2 or len(set(check)) != 2 or not set(check) <= clean:
+                raise ValueError('Self-check requires two distinct clean IDs from the split')
+            for iid in check:
+                if not tasks[iid].patch.strip():
+                    raise ValueError('Self-check gold patch missing')
+                result = await verify_gold(tasks[iid], tasks[iid].patch, args.data_dir, 'subprocess', out_dir=raw_dir)
+                (raw_dir / f'selfcheck-{iid}.json').write_text(json.dumps(result.model_dump(exclude={'trace'}), default=str))
+                if result.resolved is not True:
+                    raise RuntimeError('Gold self-check unresolved; see runs artifacts')
+        queue = asyncio.Queue()
+        for iid in sorted(selected - journal.finished):
+            queue.put_nowait(iid)
+        async def worker():
+            while not queue.empty():
+                await one(queue.get_nowait())
+        await asyncio.gather(*(worker() for _ in range(args.concurrency)))
+    finally:
+        evaluate_module.verify_task = original_verify
+        verification_module.strip_protected_files_from_patch = original_strip
+        restore_timing()
+        journal.close()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ('bundle', 'data-dir', 'split'):
+        parser.add_argument('--' + name, type=Path, required=name != 'data-dir', default=Path('data/raw'))
+    parser.add_argument('--run-name', required=True)
+    parser.add_argument('--out', type=Path, help='Artifact and journal directory (default: runs/)')
+    parser.add_argument('--concurrency', type=int, required=True)
+    for name in ('ids', 'selfcheck-ids'):
+        parser.add_argument('--' + name)
+    for name in ('max-tool-calls', 'max-turns', 'command-timeout'):
+        parser.add_argument('--' + name, type=int)
+    parser.add_argument('--session-minutes', type=float)
+    parser.add_argument('--endpoint', default=os.environ.get('LOCAL_INFERENCE_URL') or
+                        os.environ.get('OPENAI_BASE_URL') or 'http://localhost:8000/v1')
+    parser.add_argument('--models-yaml', type=Path)
+    for name in ('skip-selfcheck', 'force-new', 'force-new-out', 'allow-foreign-python', 'allow-unsandboxed'):
+        parser.add_argument('--' + name, action='store_true')
+    args = parser.parse_args(argv)
+    args.out_explicit = args.out is not None
+    args.out = (args.out or ROOT / 'runs').resolve()
+    guard_python(args.allow_foreign_python)
+    if urlparse(args.endpoint).hostname not in {'localhost', '127.0.0.1', '::1'}:
+        parser.error('Only localhost inference endpoints are permitted')
+    if args.concurrency < 1 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', args.run_name):
+        parser.error('Positive concurrency and a safe run name required')
+    for name in ('bundle', 'data_dir', 'split'):
+        setattr(args, name, getattr(args, name).resolve())
+    if not (args.bundle / 'agent.yaml').is_file():
+        parser.error('Bundle must contain agent.yaml')
+    os.environ.update(LOCAL_INFERENCE_URL=args.endpoint, OPENAI_BASE_URL=args.endpoint,
+                      MODEL_PROXY_URL=args.endpoint, LITELLM_API_BASE=args.endpoint,
+                      PIP_NO_INDEX='1', HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1',
+                      LITELLM_LOCAL_MODEL_COST_MAP='True', OTEL_SDK_DISABLED='true',
+                      LITELLM_TELEMETRY='False', TMPDIR='/tmp')
+    asyncio.run(run(args))
+
+
+if __name__ == '__main__':
+    main()
+
+ exited 1 in 5747ms:
+...........FF....................................................... [ 18%]
+........................................................................ [ 37%]
+........................................................................ [ 56%]
+........................................................................ [ 76%]
+............................................................s........... [ 95%]
+...........F..s.F                                                        [100%]
+=================================== FAILURES ===================================
+___________ WorkerTests.test_exception_text_never_copied_into_result ___________
+
+self = <test_gold_calibration.WorkerTests testMethod=test_exception_text_never_copied_into_result>
+
+    def test_exception_text_never_copied_into_result(self):
+        async def verify(*args):
+            raise RuntimeError('GOLD_PATCH_SECRET TASK_TEXT_SECRET')
+        row = self.run_worker(verify)
+        self.assertFalse(row['resolved'])
+        self.assertIsNone(row['exit_code'])
+>       self.assertEqual(row['error'], 'Verification/setup exception (RuntimeError)')
+E       AssertionError: 'Verification/setup exception (ModuleNotFoundError)' != 'Verification/setup exception (RuntimeError)'
+E       - Verification/setup exception (ModuleNotFoundError)
+E       ?                               ^^^^^^^^^^^  ^
+E       + Verification/setup exception (RuntimeError)
+E       ?                               ^  ^^^^
+
+eval/tests/test_gold_calibration.py:145: AssertionError
+________ WorkerTests.test_gold_patch_only_and_harness_verdict_preserved ________
+
+self = <test_gold_calibration.WorkerTests testMethod=test_gold_patch_only_and_harness_verdict_preserved>
+
+    def test_gold_patch_only_and_harness_verdict_preserved(self):
+        async def verify(task, patch_text, data_dir, sandbox):
+            self.assertEqual(patch_text, 'GOLD_PATCH_SECRET')
+            self.assertEqual(sandbox, 'subprocess')
+            # Exit 0 can still fail the harness's required-test/JUnit checks.
+            return dict(resolved=False, test_exit_code=0, error='TEST_PATCH_SECRET')
+        row = self.run_worker(verify)
+        self.assertFalse(row['resolved'])
+>       self.assertEqual(row['exit_code'], 0)
+E       AssertionError: None != 0
+
+eval/tests/test_gold_calibration.py:135: AssertionError
+_________________ test_tool_seconds_pairs_calls_fifo_per_tool __________________
+
+    def test_tool_seconds_pairs_calls_fifo_per_tool():
+        e = lambda t, name, ts: types.SimpleNamespace(event_type=t, tool_name=name, timestamp=ts, usage=None)
+>       out = runner.tool_seconds([e('tool_call', 'run_tests', 10.0), e('tool_call', 'read_file', 10.5),
+              ^^^^^^^^^^^^^^^^^^^
+                                   e('tool_response', 'read_file', 11.0), e('tool_response', 'run_tests', 14.0),
+                                   e('tool_call', 'run_tests', 20.0), e('tool_response', 'run_tests', 21.0),
+                                   e('tool_response', 'orphan', 30.0)])
+E       AttributeError: module 'eval.run_agent_eval' has no attribute 'tool_seconds'
+
+eval/tests/test_run_agent_eval.py:150: AttributeError
+_____________ test_host_package_isolation_removes_only_harness_pth _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-516/test_host_package_isolation_re0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7cc36ea606e0>
+
+    def test_host_package_isolation_removes_only_harness_pth(tmp_path, monkeypatch):
+        pth = tmp_path / 'lib/python3.13/site-packages/_host_env.pth'
+        pth.parent.mkdir(parents=True)
+        pth.write_text('/harness/site-packages\n')
+        image_pth = pth.with_name('image.pth')
+        image_pth.write_text('keep')
+    
+        class SubprocessManager:
+            def start(self):
+                self.sandboxes = {'id': {'venv': tmp_path}}
+                return 'id'
+    
+        monkeypatch.setitem(sys.modules, 'swegemma.sandbox',
+                            types.SimpleNamespace(SubprocessManager=SubprocessManager))
+        runner.isolate_host_packages()
+        runner.isolate_host_packages()  # Idempotent across repeated evaluations.
+>       assert SubprocessManager().start() == 'id'
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+eval/tests/test_run_agent_eval.py:262: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_run_agent_eval.test_host_package_isolation_removes_only_harness_pth.<locals>.SubprocessManager object at 0x7cc36cc9f230>
+
+    def start(self):
+>       base = self.base_dir
+               ^^^^^^^^^^^^^
+E       AttributeError: 'SubprocessManager' object has no attribute 'base_dir'
+
+eval/sandbox_env.py:174: AttributeError
+=========================== short test summary info ============================
+SKIPPED [1] eval/tests/test_pack.py:578: aliases require PyYAML
+SKIPPED [1] eval/tests/test_run_agent_eval.py:192: opt-in real harness smoke test
+4 failed, 367 passed, 2 skipped, 4 subtests passed in 4.83s
+
