@@ -140,3 +140,5 @@
 2026-11-05T18:55Z | memguard-fix4-livetest green (78 passed live) -> review-memguard-fix4-light | ops/jobs/memguard-fix4-livetest.log
 2026-11-05T19:01Z | codex-kernel-setup-fix4 done (c4c9528, 462 pass/4 skip; bwrap blocked in Codex) -> local acceptance job kernel-setup-accept-r4 | ops/codex/build-kernel-setup-fix4.md
 2026-11-05T19:01Z | review-memguard-fix4: 3 BLOCKING (stale watchdog protection at action time; previous-boot records admit unrelated procs; python-option watchdog evades detection) -> round 5 codex-memguard-fix5b (worktree reset onto 5cb49c2) | ops/codex/review-20261105T185456.md ops/codex/build-memguard-fix5.spec
+2026-11-05T19:08Z | memguard-fix5 round 5 built (652f2cd, Codex 87p/1s offline, 88 live); host livetest job memguard-fix5-livetest launched | ops/codex/build-memguard-fix5.log
+2026-11-05T19:08Z | kernel-setup r4 local acceptance: Docker order rich_3006 still uninstall-no-record fallback (5 Retrying), fastapi_14986 OK; cause traced to swegemma container_setup.py RECORD strip; codex-review launched | results/plan003_kernel_setup_acceptance_r4local.json (worktree codex-kernel-setup-fix)
