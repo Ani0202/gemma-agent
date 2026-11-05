@@ -1,4 +1,4 @@
-"""Offline identity/membership tests; opt-in live allocation test (under bin/job, <3 GiB)."""
+"""Offline identity/membership tests; opt-in live allocation test (<3 GiB)."""
 import importlib.machinery
 import importlib.util
 import os
@@ -27,8 +27,7 @@ def mg():
 
 @pytest.fixture
 def args():
-    return SimpleNamespace(marker="GEMMA_JOB_CAP", unmarked_rss=3 * 1024**3,
-                           roots=["/tmp", "/home/ubuntu/work/gemma"])
+    return SimpleNamespace()
 
 
 def proc(pid, ppid=1, pgid=10, starttime=123, comm="python", rss=1024, uid=None):
@@ -39,8 +38,19 @@ def proc(pid, ppid=1, pgid=10, starttime=123, comm="python", rss=1024, uid=None)
 def mock_world(monkeypatch, mg, initial, markers, records=()):
     world = dict(initial)
     monkeypatch.setattr(mg, "snapshot", lambda: dict(world))
-    monkeypatch.setattr(mg, "marker_value", lambda p, marker: markers.get(p) if marker == "GEMMA_JOB_CAP" else None)
-    monkeypatch.setattr(mg, "cwd_of", lambda p: "/tmp/test")
+    # Legacy records exercise ancestry admission; record-free fixtures use job IDs.
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                        markers.get(p) if marker == "GEMMA_JOB_CAP" or
+                        (marker == "GEMMA_JOB_ID" and not records) else None)
+    original_read = mg.read
+    source = (REPO / "bin/job").read_text()
+    script = "\n" + source.split("GEMMA_JOB_CAP=$cap setsid nohup bash -c '\n", 1)[1].split("    ' _ \"$name\"", 1)[0]
+    def read(path, mode="r"):
+        for record in records:
+            if str(path) == f"/proc/{record['pid']}/cmdline":
+                return b"\0".join([b"bash", b"-c", script.encode(), b"_", record["name"].encode(), b"command", b""])
+        return original_read(path, mode)
+    monkeypatch.setattr(mg, "read", read)
     monkeypatch.setattr(mg, "running_jobs", lambda: list(records))
     monkeypatch.setattr(mg, "proc_stat", lambda p: world.get(p))
     monkeypatch.setattr(mg, "proc_info", lambda p: world.get(p))
@@ -57,11 +67,11 @@ def select(mg, args):
     return next(iter(jobs.values()))
 
 
-def test_unmarked_small_child_is_never_signalled(monkeypatch, mg, args):
+def test_child_without_job_provenance_is_never_signalled(monkeypatch, mg, args):
     world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)}, {10: b"cap"})
     sent = []
 
-    def kill(d, log, args):
+    def kill(d, log, args, known_jobs=None):
         sent.append(d["pid"])
         world.pop(d["pid"])
         return True
@@ -101,7 +111,7 @@ def test_pidfd_is_opened_before_identity_check(monkeypatch, mg, args):
     monkeypatch.setattr(mg.signal, "pidfd_send_signal", lambda *a: calls.append("signal"))
     monkeypatch.setattr(mg.os, "close", lambda fd: calls.append("close"))
     assert mg.send_kill(proc(10), lambda _: None, args)
-    assert calls == ["open", "check", "signal", "close"]
+    assert calls == ["open", "check", "check", "signal", "close"]
 
 
 def test_oom_write_skips_reused_identity(monkeypatch, mg, args):
@@ -121,10 +131,12 @@ def test_marked_orphans_and_separate_wrappers(monkeypatch, mg, args):
     world = mock_world(monkeypatch, mg, {
         11: proc(11, pgid=10), 21: proc(21, pgid=20), 31: proc(31, pgid=30)},
         {11: b"cap", 21: b"cap", 31: b"cap"}, records)
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                        str(p).encode() if marker == "GEMMA_JOB_ID" else None)
     _, jobs = mg.find_jobs(world, args, set())
     assert sorted(sorted(j["pids"]) for j in jobs.values()) == [[11], [21], [31]]
     for j in list(jobs.values()):
-        monkeypatch.setattr(mg, "send_kill", lambda d, log, args: world.pop(d["pid"]) is not None)
+        monkeypatch.setattr(mg, "send_kill", lambda d, log, args, known_jobs=None: world.pop(d["pid"]) is not None)
         assert mg.kill_tree(j, args, set(), lambda _: None) == (j["pids"], [])
     assert not world
 
@@ -133,12 +145,16 @@ def test_fork_during_kill_is_found_after_root_grace(monkeypatch, mg, args):
     records = [dict(name="job", pid=10, pgid=10)]
     world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
                        {10: b"cap", 11: b"cap", 12: b"cap"}, records)
+    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+                        b"job/boot/123" if marker == "GEMMA_JOB_ID" else b"cap")
+    records[0]["job_id"] = b"job/boot/123"
     sent = []
 
-    def kill(d, log, args):
+    def kill(d, log, args, known_jobs=None):
         sent.append(d["pid"])
         world.pop(d["pid"])
         if d["pid"] == 10:
+            assert mg.time.monotonic() >= 3
             world[12] = proc(12)  # new orphan discovered after wrapper grace/kill
         return True
 
@@ -172,12 +188,20 @@ def test_legacy_status_and_job_names(monkeypatch, mg, args, tmp_path):
     monkeypatch.setattr(mg, "REPO", str(tmp_path))
     records = mg.running_jobs()
     assert records == [dict(name="current", pid=20, pgid=20), dict(name="legacy", pid=10, pgid=None)]
-    world = {10: proc(10), 11: proc(11, ppid=10), 21: proc(21, pgid=20)}
-    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
-                        b"cap" if marker == args.marker else None)
+    world = mock_world(monkeypatch, mg, {
+        10: proc(10), 11: proc(11, ppid=10), 20: proc(20, pgid=20),
+        21: proc(21, ppid=20, pgid=20)}, {}, records)
+    # The fixture supplies the actual installed wrapper body, even though status
+    # records here live in a temporary repository.
+    original_read = mg.read
+    monkeypatch.setattr(mg, "read", lambda path, mode="r":
+                        (REPO / "bin/job").read_text() if str(path) == str(tmp_path / "bin/job")
+                        else original_read(path, mode))
     targets, jobs = mg.find_jobs(world, args, set())
-    assert set(targets) == {10, 11, 21}
-    assert {j["name"]: sorted(j["pids"]) for j in jobs.values()} == {"legacy": [10, 11], "current": [21]}
+    assert set(targets) == {10, 11, 20, 21}
+    assert {j["name"]: sorted(j["pids"]) for j in jobs.values()} == {
+        "legacy": [10, 11], "current": [20, 21]}
+
 
 
 def test_job_name_matches_pid_and_process_group(mg):
@@ -210,7 +234,7 @@ def test_final_root_is_reclassified_before_signal(monkeypatch, mg, args):
     job = select(mg, args)
     sent = []
 
-    def kill(d, log, args):
+    def kill(d, log, args, known_jobs=None):
         sent.append(d["pid"])
         world.pop(d["pid"])
         # The wrapper execs a protected session process during its grace period.
@@ -226,7 +250,7 @@ def test_other_uid_and_small_unmarked_are_excluded(monkeypatch, mg, args):
     world = mock_world(monkeypatch, mg, {
         10: proc(10, uid=os.getuid() + 1), 11: proc(11),
         12: proc(12, rss=4 * 1024**3)}, {10: b"cap"})
-    assert set(mg.find_jobs(world, args, set())[0]) == {12}
+    assert mg.find_jobs(world, args, set())[0] == {}
 
 
 def test_self_job_siblings_are_excluded(monkeypatch, mg, args):
@@ -266,7 +290,8 @@ def test_proc_stat_field_22_and_allowed_reads(monkeypatch, mg):
 
 STEP = 200 * 1024 * 1024
 ALLOC = f"""
-import time
+import resource, time
+resource.setrlimit(resource.RLIMIT_AS, (1536 * 1024**2, 1536 * 1024**2))
 held = []
 for _ in range(6):
     held.append(b"\\x01" * {STEP})
@@ -280,15 +305,15 @@ time.sleep(120)
 """
 
 
-def marked_live(mg, marker):
+def marked_live(mg, marker, value):
     return {p for p, d in mg.snapshot().items()
-            if d["state"] not in {"Z", "X"} and mg.marker_value(p, marker) is not None}
+            if d["state"] not in {"Z", "X"} and mg.marker_value(p, marker) == value.encode()}
 
 
-@pytest.mark.skipif(os.environ.get("MEMGUARD_LIVE") != "1", reason="set MEMGUARD_LIVE=1 under bin/job")
+@pytest.mark.skipif(os.environ.get("MEMGUARD_LIVE") != "1", reason="set MEMGUARD_LIVE=1")
 def test_memguard_kills_job_tree_and_spares_dummy(tmp_path, mg, args):
-    assert "GEMMA_JOB_CAP" in os.environ, "run the live test under bin/job"
-    marker = "GEMMA_MGTEST_" + uuid.uuid4().hex
+    marker = "GEMMA_JOB_ID"
+    job_id = "mgtest-workload/" + uuid.uuid4().hex
     root = tmp_path / "jobcwd"
     root.mkdir()
     rcfile = tmp_path / "rc"
@@ -300,15 +325,28 @@ def test_memguard_kills_job_tree_and_spares_dummy(tmp_path, mg, args):
     baseline = Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip()
     job = subprocess.Popen(["bash", "-c", '"$PYTHON" -c "$CHILD_SRC"; echo $? > "$RCFILE"'],
                            cwd=root, start_new_session=True,
-                           env={**env_clean, marker: "test", "CHILD_SRC": CHILD,
+                           env={**env_clean, marker: job_id, "CHILD_SRC": CHILD,
                                 "PYTHON": sys.executable, "RCFILE": str(rcfile)})
     guard = None
     try:
         time.sleep(3)
-        assert len(marked_live(mg, marker)) >= 3
+        assert len(marked_live(mg, marker, job_id)) >= 3
+        # Confine the live guard's discovery to this test's unique job identity.
+        # Production admission remains fixed to GEMMA_JOB_ID; no private marker bypass.
+        guard_source = f"""
+import os, types
+from pathlib import Path
+module = types.ModuleType("memguard_test")
+module.__file__ = {str(MG)!r}
+exec(compile(Path(module.__file__).read_text(), module.__file__, "exec"), module.__dict__)
+snapshot = module.snapshot
+module.snapshot = lambda: {{p: d for p, d in snapshot().items()
+    if p == os.getpid() or module.marker_value(p, "GEMMA_JOB_ID") == {job_id.encode()!r}}}
+module.main()
+"""
         guard = subprocess.Popen(
-            [sys.executable, str(MG), "--marker", marker, "--max-total", "0.8", "--min-available", "0",
-             "--unmarked-rss", "0.5", "--interval", "0.5", "--roots", str(tmp_path),
+            [sys.executable, "-c", guard_source, "--max-total", "0.8", "--min-available", "0",
+             "--interval", "0.5",
              "--log", str(log), "--no-mail"], env=env_clean,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.monotonic() + 30
@@ -317,7 +355,7 @@ def test_memguard_kills_job_tree_and_spares_dummy(tmp_path, mg, args):
         text = log.read_text()
         assert "KILL" in text and "survivors=[]" in text, text
         job.wait(timeout=10)
-        assert marked_live(mg, marker) == set(), "fresh inventory found marked survivors"
+        assert marked_live(mg, marker, job_id) == set(), "fresh inventory found marked survivors"
         assert rcfile.read_text().strip() == "137"
         assert mg.proc_info(dummy.pid)["state"] not in {"Z", "X"}
         assert mg.marker_value(dummy.pid, "GEMMA_JOB_CAP") is None
@@ -329,12 +367,11 @@ def test_memguard_kills_job_tree_and_spares_dummy(tmp_path, mg, args):
             guard.wait(timeout=5)
         # Discover descendants and marked orphans BEFORE killing their parents.
         procs = mg.snapshot()
-        cleanup = set(mg.descendants(job.pid, procs)) | marked_live(mg, marker)
+        cleanup = set(mg.descendants(job.pid, procs)) | marked_live(mg, marker, job_id)
         for p in sorted(cleanup - {job.pid}):
             d = procs.get(p)
             if d:
-                mg.send_kill(d, lambda _: None, SimpleNamespace(
-                    marker=marker, unmarked_rss=args.unmarked_rss, roots=args.roots))
+                mg.send_kill(d, lambda _: None, args)
         for child in (dummy, job):
             if child.poll() is None:
                 child.kill()
@@ -359,7 +396,7 @@ def test_escaped_members_remain_in_job(monkeypatch, mg, args, legacy, survives):
     assert set(jobs[job["key"]]["members"]) == {10, 11}
     sent = []
 
-    def kill(d, log, args):
+    def kill(d, log, args, known_jobs=None):
         sent.append(d["pid"])
         if survives and d["pid"] == 11:
             return False
@@ -383,8 +420,8 @@ def test_job_id_is_exact_primary_key_and_keeps_allowlist(monkeypatch, mg, args):
     monkeypatch.setattr(mg, "marker_value", lambda p, marker:
                         ids.get(p) if marker == "GEMMA_JOB_ID" else caps.get(p))
     targets, jobs = mg.find_jobs(world, args, set())
-    assert set(targets) == {10, 11, 12}
-    assert sorted(sorted(j["pids"]) for j in jobs.values()) == [[10, 11], [12]]
+    assert set(targets) == {10, 11, 12, 14}
+    assert sorted(sorted(j["pids"]) for j in jobs.values()) == [[10, 11, 14], [12]]
 
 
 def test_legacy_known_members_do_not_follow_reused_pid(monkeypatch, mg, args):
@@ -402,9 +439,12 @@ def test_legacy_history_survives_new_first_member_and_temporary_node(monkeypatch
         10: proc(10), 11: proc(11, ppid=10, comm="node"),
         12: proc(12, ppid=10), 13: proc(13, ppid=10)},
         {p: b"cap" for p in (10, 11, 12, 13)}, records)
-    _, jobs = mg.find_jobs(world, args, set())  # poll 1
+    world[11] = proc(11, ppid=10)
+    _, seeded = mg.find_jobs(world, args, set())
+    world[11] = proc(11, ppid=10, comm="node")
+    _, jobs = mg.find_jobs(world, args, set(), known_jobs=seeded)  # poll 1
     key = next(iter(jobs))
-    assert set(jobs[key]["known_members"]) == {10, 12, 13}
+    assert set(jobs[key]["known_members"]) == {10, 11, 12, 13}
     del world[10]
     world[11] = proc(11, comm="python")
     world[13] = proc(13, comm="node")
@@ -417,7 +457,7 @@ def test_legacy_history_survives_new_first_member_and_temporary_node(monkeypatch
     assert set(jobs[key]["members"]) == {11, 12, 13}
     sent = []
 
-    def kill(d, log, args):
+    def kill(d, log, args, known_jobs=None):
         assert world[d["pid"]]["comm"] != "node"
         sent.append(d["pid"])
         if survives and d["pid"] == 13:
@@ -434,7 +474,8 @@ def test_legacy_history_survives_new_first_member_and_temporary_node(monkeypatch
 
 
 def test_legacy_history_survives_poll_with_no_eligible_members(monkeypatch, mg, args):
-    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"})
+    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"},
+                       [dict(name="job", pid=10, pgid=None)])
     _, jobs = mg.find_jobs(world, args, set())
     key = next(iter(jobs))
     world[10] = proc(10, comm="node")
@@ -519,13 +560,12 @@ def test_cmdline_watchdog_match_requires_exact_basename_in_first_two_args(monkey
 
 
 @pytest.mark.parametrize("action", ["signal", "oom"])
-@pytest.mark.parametrize("change", ["node", "uid", "shell", "marker", "cwd", "rss",
+@pytest.mark.parametrize("change", ["node", "uid", "shell", "marker",
                                     "guard-id", "guard-cmd", "guard-child"])
 def test_action_revalidates_allowlist_after_handle_open(monkeypatch, mg, args, action, change):
     import io
-    marked = {} if change in {"cwd", "rss"} else {10: b"cap"}
-    rss = 4 * 1024**3 if change in {"cwd", "rss"} else 1024
-    world = mock_world(monkeypatch, mg, {10: proc(10, rss=rss)}, marked)
+    marked = {10: b"cap"}
+    world = mock_world(monkeypatch, mg, {10: proc(10)}, marked)
     targets, _ = mg.find_jobs(world, args, set())
     assert 10 in targets
     class File(io.StringIO):
@@ -543,10 +583,6 @@ def test_action_revalidates_allowlist_after_handle_open(monkeypatch, mg, args, a
             world[9] = proc(9, comm="claude")
         elif change == "marker":
             marked.clear()
-        elif change == "cwd":
-            monkeypatch.setattr(mg, "cwd_of", lambda p: "/elsewhere")
-        elif change == "rss":
-            world[10] = proc(10, rss=1024)
         elif change == "guard-id":
             monkeypatch.setattr(mg, "marker_value", lambda p, marker:
                                 b"memguard-light/boot/123" if marker == "GEMMA_JOB_ID" else b"cap")
@@ -593,3 +629,107 @@ def test_six_field_status_retains_identity_and_names_escaped_job(monkeypatch, mg
     assert job["name"] == "new"
     assert job["root"] == 10
     assert job["pids"] == [11]
+
+
+@pytest.mark.parametrize("action", ["signal", "oom"])
+@pytest.mark.parametrize("change", ["node", "reused", "missing"])
+@pytest.mark.parametrize("phase", ["snapshot", "protection"])
+def test_recipient_is_refreshed_after_scans(monkeypatch, mg, args, action, change, phase):
+    import io
+    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"job/boot/123"})
+    candidate = world[10]
+    def change_recipient():
+        if change == "missing":
+            world.clear()
+        else:
+            world[10] = proc(10, comm="node" if change == "node" else "python",
+                             starttime=999 if change == "reused" else 123)
+    if phase == "snapshot":
+        def snapshot():
+            change_recipient()
+            return dict(world)
+        monkeypatch.setattr(mg, "snapshot", snapshot)
+    else:
+        def protected(procs, records):
+            change_recipient()
+            return set()
+        monkeypatch.setattr(mg, "protected_watchdogs", protected)
+    class File(io.StringIO):
+        def close(self):
+            pass
+    output, sent = File(), []
+    monkeypatch.setattr("builtins.open", lambda *a, **kw: output)
+    monkeypatch.setattr(mg.os, "pidfd_open", lambda p: 42)
+    monkeypatch.setattr(mg.os, "close", lambda fd: None)
+    monkeypatch.setattr(mg.signal, "pidfd_send_signal", lambda *a: sent.append(a))
+    monkeypatch.setattr(mg.os, "kill", lambda *a: sent.append(a))
+    if action == "signal":
+        assert mg.send_kill(candidate, lambda _: None, args) is False
+    else:
+        assert mg.raise_oom_adj({10: candidate}, False, args) == 0
+    assert sent == []
+    assert output.getvalue() == ""
+
+
+@pytest.mark.parametrize("record_kind", ["three", "four", "identity"])
+def test_large_unrelated_process_requires_verified_wrapper(monkeypatch, mg, args, record_kind):
+    import io
+    record = dict(name="work", pid=20, pgid=None if record_kind == "three" else 20)
+    if record_kind == "identity":
+        record["starttime"] = "123"
+    world = mock_world(monkeypatch, mg, {10: proc(10, rss=4 * 1024**3)}, {}, [record])
+    # Its cwd is intentionally irrelevant, even when it is /tmp/other-project.
+    monkeypatch.setattr(mg.os, "readlink", lambda p: "/tmp/other-project")
+    assert mg.find_jobs(world, args, set()) == ({}, {})
+    class File(io.StringIO):
+        def close(self):
+            pass
+    output, sent = File(), []
+    real_open = open
+    def open_oom(path, *a, **kw):
+        return output if str(path).endswith("oom_score_adj") else real_open(path, *a, **kw)
+    monkeypatch.setattr("builtins.open", open_oom)
+    monkeypatch.delattr(mg.os, "pidfd_open", raising=False)
+    monkeypatch.setattr(mg.os, "kill", lambda *a: sent.append(a))
+    assert mg.send_kill(world[10], lambda _: None, args) is False
+    assert mg.raise_oom_adj(world, False, args) == 0
+    assert sent == [] and output.getvalue() == ""
+    world[20] = proc(20, comm="bash", pgid=20)
+    # Sharing a PGID alone is insufficient.
+    world[10] = proc(10, pgid=20, rss=4 * 1024**3)
+    assert 10 not in mg.find_jobs(world, args, set())[0]
+    world[10] = proc(10, ppid=20, pgid=20, rss=4 * 1024**3)
+    targets, jobs = mg.find_jobs(world, args, set())
+    assert set(targets) == {10, 20}
+    assert mg.action_eligible(world[10], args)
+    # Retained provenance survives losing both marker and wrapper ancestry.
+    del world[20]
+    world[10] = proc(10, pgid=99, rss=4 * 1024**3)
+    targets, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)
+    assert set(targets) == {10}
+    assert mg.raise_oom_adj(targets, False, args, jobs) == 1
+    assert mg.send_kill(targets[10], lambda _: None, args, jobs)
+    assert sent == [(10, signal.SIGKILL)] and output.getvalue() == "1000"
+    world[10] = proc(10, starttime=999, rss=4 * 1024**3)
+    assert mg.find_jobs(world, args, set(), known_jobs=jobs) == ({}, {})
+
+
+@pytest.mark.parametrize("bad_wrapper", ["dead", "reused", "cmdline", "cap-only"])
+def test_status_and_cap_alone_are_not_provenance(monkeypatch, mg, args, bad_wrapper):
+    record = dict(name="work", pid=20, pgid=20)
+    world = mock_world(monkeypatch, mg, {10: proc(10, ppid=20), 20: proc(20)},
+                       {10: b"cap", 20: b"cap"}, [record])
+    if bad_wrapper == "dead":
+        world[20]["state"] = "Z"
+    elif bad_wrapper == "reused":
+        record["starttime"] = "999"
+    elif bad_wrapper == "cmdline":
+        original_read = mg.read
+        monkeypatch.setattr(mg, "read", lambda path, mode="r":
+                            b"bash\0-c\0echo bin/job\0_\0work\0" if mode == "rb"
+                            else original_read(path, mode))
+    else:
+        world.clear()
+        world[10] = proc(10, rss=4 * 1024**3)
+    assert mg.find_jobs(world, args, set()) == ({}, {})
+    assert not mg.action_eligible(world[10], args)

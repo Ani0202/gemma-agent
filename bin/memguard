@@ -3,21 +3,18 @@
 
 Protects Etho (and the Claude sessions) from our own runaway work. No sudo, no systemd.
 Every --interval seconds (default 2):
-  1. Find TARGETS, only processes of our own uid that are either
-     (i)  carrying the bin/job env marker (GEMMA_JOB_CAP=... in /proc/<pid>/environ), i.e. bin/job
-          descendants, including orphans re-parented away from their wrapper; or
-     (ii) cwd under /home/ubuntu/work/gemma or /tmp, RSS > 3G, and comm not a session process
-          (claude/node/codex/tmux, or a bash/sh whose parent is one of those).
-     Session processes and all memguard jobs/wrappers are excluded from both sets.
+  1. Find TARGETS of our own uid with positive bin/job provenance: GEMMA_JOB_ID,
+     verified running wrapper ancestry, or retained (pid, starttime) job membership.
+     Session processes and all memguard jobs/wrappers are excluded.
   2. Raise oom_score_adj to 1000 on every target (unprivileged), so the kernel picks us first.
   3. Group by exact GEMMA_JOB_ID when present; retain legacy member identities.
-     Marked orphans outside running groups remain targets in an orphan job.
+     Job-ID marked orphans outside running groups remain targets.
   4. On memory pressure, kill eligible members of the largest job, allowing its wrapper
      3 seconds to record failure. Re-inventory for up to 5 seconds, including new forks.
-Reads only /proc/<pid>/{status,stat,environ,cwd,cmdline} of our own uid; writes oom_score_adj.
+Reads only /proc/<pid>/{status,stat,environ,cmdline} of our own uid; writes oom_score_adj.
 Python stdlib only. No process-group signals: every recipient must pass the allowlist.
 Usage: bin/memguard [--once] [--dry-run] [--interval S] [--min-available G] [--max-total G]
-                    [--unmarked-rss G] [--marker NAME] [--roots DIR,DIR] [--log PATH] [--no-mail]
+                    [--log PATH] [--no-mail]
 """
 import argparse, errno, os, signal, subprocess, sys, threading, time
 from pathlib import Path
@@ -100,17 +97,6 @@ def marker_value(pid, marker):
     return None
 
 
-def cwd_of(pid):
-    try:
-        return os.readlink(f"/proc/{pid}/cwd")
-    except OSError:
-        return ""
-
-
-def under(path, roots):
-    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
-
-
 def ancestors(pid, procs):
     out, seen = [], set()
     p = procs.get(pid, {}).get("ppid", 0)
@@ -189,17 +175,55 @@ def protected_watchdogs(procs, records):
     return guards | {procs[p]["ppid"] for p in guards}
 
 
-def eligible(pid, procs, args, protected=()):
+def verified_records(procs, records):
+    """A status pid/PGID alone is never proof of current job ownership."""
+    if not records:
+        return []
+    # Compare the full bash -c wrapper body with our installed bin/job. Fail closed
+    # if its layout changes; substring matches could admit unrelated shell scripts.
+    source = read(os.path.join(REPO, "bin/job")) or ""
+    prefix = "GEMMA_JOB_CAP=$cap setsid nohup bash -c '\n"
+    suffix = "    ' _ \"$name\""
+    script = source.split(prefix, 1)[1].split(suffix, 1)[0] if prefix in source and suffix in source else None
+    verified = []
+    for record in records:
+        d = procs.get(record["pid"])
+        if not d or d["state"] in {"Z", "X"} or d["uid"] != UID:
+            continue
+        if "starttime" in record:
+            if str(d["starttime"]) != str(record["starttime"]):
+                continue
+        else:
+            argv = (read(f"/proc/{record['pid']}/cmdline", "rb") or b"").split(b"\0")
+            if not (script is not None and len(argv) >= 6 and
+                    os.path.basename(argv[0]) == b"bash" and argv[1] == b"-c" and
+                    argv[2] == ("\n" + script).encode() and argv[3] == b"_" and
+                    argv[4] == record["name"].encode()):
+                continue
+        verified.append(record)
+    return verified
+
+
+def provenance(pid, procs, records, known_jobs=None):
+    if marker_value(pid, "GEMMA_JOB_ID") is not None:
+        return True
+    identity = procs[pid]["starttime"]
+    if any(j["known_members"].get(pid) == identity for j in (known_jobs or {}).values()):
+        return True
+    lineage = [pid] + ancestors(pid, procs)
+    return any(r["pid"] in lineage for r in records)
+
+
+def eligible(pid, procs, args, protected=(), records=(), known_jobs=None):
     d = procs[pid]
     return (pid not in protected and d["uid"] == UID and d["state"] not in {"Z", "X"} and
-            not is_session(pid, procs) and
-            (marker_value(pid, args.marker) is not None or
-             (d["rss"] > args.unmarked_rss and under(cwd_of(pid), args.roots))))
+            not is_session(pid, procs) and provenance(pid, procs, records, known_jobs))
 
 
 def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
-    """Classify every recipient independently; ancestry only associates eligible members."""
+    """Require positive provenance and classify every recipient independently."""
     records = running_jobs() if records is None else records
+    verified = verified_records(procs, records)
     known = {(p, start): j for j in (known_jobs or {}).values()
              for p, start in j["known_members"].items()}
     protected = protected_watchdogs(procs, records)
@@ -213,9 +237,8 @@ def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
             jobs[key] = {**previous, "pids": [], "members": {}, "rss": 0,
                          "records": records, "known_members": dict(previous["known_members"])}
     for p, d in procs.items():
-        if not eligible(p, procs, args, protected):
+        if not eligible(p, procs, args, protected, verified, known_jobs):
             continue
-        value = marker_value(p, args.marker)
         job_id = marker_value(p, "GEMMA_JOB_ID")
         record = None
         previous = known.get((p, d["starttime"])) if job_id is None else None
@@ -226,15 +249,12 @@ def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
             key = ("job_id", job_id)
         elif previous:
             key = previous["key"]
-        elif value is not None:
-            lineage = [p] + ancestors(p, procs)
-            record = next((r for r in records if
-                           (r["pgid"] is not None and d["pgid"] == r["pgid"]) or
-                           (r["pgid"] is None and r["pid"] in lineage)), None)
-            key = (("job", value, record["pid"], record["pgid"]) if record else
-                   ("orphan", value))
         else:
-            key = ("unmarked", p, d["starttime"])
+            lineage = [p] + ancestors(p, procs)
+            record = next((r for r in verified if r["pid"] in lineage), None)
+            if record is None:
+                continue  # The job-ID marker may have disappeared since eligibility.
+            key = ("job", record["pid"], procs[record["pid"]]["starttime"])
         root = record["pid"] if record else p
         if previous:
             root = previous["root"]
@@ -245,8 +265,7 @@ def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
             j["name"] = previous["name"]
             for member, start in previous["known_members"].items():
                 j["known_members"].setdefault(member, start)
-        if job_id is None:
-            j["known_members"][p] = d["starttime"]
+        j["known_members"][p] = d["starttime"]
         j["pids"].append(p)
         j["members"][p] = d
         j["rss"] += d["rss"]
@@ -259,25 +278,34 @@ def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
     return targets, jobs
 
 
-def action_eligible(d, args):
-    """Refresh identity AND allowlist after opening the process handle (exec keeps starttime)."""
-    current = proc_info(d["pid"])
-    if not current or current["starttime"] != d["starttime"]:
+def action_eligible(d, args, known_jobs=None):
+    """Refresh the recipient AFTER discovery/protection scans (exec keeps starttime)."""
+    initial = proc_info(d["pid"])
+    if not initial or initial["starttime"] != d["starttime"]:
         return False
-    # Include children so a guard's bin/job parent is protected at action time too.
     procs = snapshot()
-    procs[d["pid"]] = current
-    parent = current["ppid"]
-    while current["comm"] in SHELL_COMMS and parent and parent not in procs:
+    # Preserve session ancestry checks when a shell's parent was missed by the scan.
+    parent = initial["ppid"]
+    while initial["comm"] in SHELL_COMMS and parent and parent not in procs:
         info = proc_info(parent)
         if not info:
             break
         procs[parent] = info
         parent = info["ppid"]
-    return eligible(d["pid"], procs, args, protected_watchdogs(procs, running_jobs()))
+    records = running_jobs()
+    verified = verified_records(procs, records)
+    protected = protected_watchdogs(procs, records)
+    current = proc_info(d["pid"])
+    if not current or current["starttime"] != d["starttime"]:
+        return False
+    if current["comm"] in SHELL_COMMS and current["ppid"] and current["ppid"] not in procs:
+        return False
+    procs[d["pid"]] = current
+    # Re-evaluate fresh recipient metadata against the scanned protections/ancestry.
+    return eligible(d["pid"], procs, args, protected, verified, known_jobs)
 
 
-def send_kill(d, log, args):
+def send_kill(d, log, args, known_jobs=None):
     """Pin a pidfd before the final identity check; never signal a recycled pid."""
     fd = None
     try:
@@ -287,7 +315,7 @@ def send_kill(d, log, args):
             except OSError as exc:
                 if exc.errno not in (errno.ENOSYS, errno.EINVAL, errno.EPERM):
                     raise
-        if not action_eligible(d, args):
+        if not action_eligible(d, args, known_jobs):
             return False
         if fd is not None:
             signal.pidfd_send_signal(fd, signal.SIGKILL)
@@ -304,7 +332,7 @@ def send_kill(d, log, args):
             os.close(fd)
 
 
-def raise_oom_adj(targets, dry, args):
+def raise_oom_adj(targets, dry, args, known_jobs=None):
     n = 0
     if dry:
         return n
@@ -312,7 +340,7 @@ def raise_oom_adj(targets, dry, args):
         # Opening first pins the proc file to this process, even if its numeric pid is reused.
         try:
             with open(f"/proc/{p}/oom_score_adj", "w") as f:
-                if action_eligible(d, args):
+                if action_eligible(d, args, known_jobs):
                     f.write("1000")
                     n += 1
         except OSError:
@@ -322,7 +350,7 @@ def raise_oom_adj(targets, dry, args):
 
 def inventory(job, args, self_pids):
     # Use the same job ID / known legacy identities for every scan, including survivors.
-    _, jobs = find_jobs(snapshot(), args, self_pids, job["records"], {job["key"]: job})
+    _, jobs = find_jobs(snapshot(), args, self_pids, known_jobs={job["key"]: job})
     current = jobs.get(job["key"], {})
     job["known_members"].update(current.get("known_members", {}))
     return current.get("members", {})
@@ -344,7 +372,7 @@ def kill_tree(job, args, self_pids, log):
         for p, d in members.items():
             if grace and p == job["root"] and d["starttime"] == root_identity["starttime"]:
                 continue
-            if send_kill(d, log, args):
+            if send_kill(d, log, args, {job["key"]: job}):
                 killed.add(p)
         empty_scans = empty_scans + 1 if not members else 0
         if empty_scans >= 2 and not grace:
@@ -370,18 +398,14 @@ def main():
     ap.add_argument("--interval", type=float, default=2.0)
     ap.add_argument("--min-available", type=float, default=2.5, help="GiB")
     ap.add_argument("--max-total", type=float, default=6.0, help="GiB of summed targeted RSS")
-    ap.add_argument("--unmarked-rss", type=float, default=3.0, help="GiB, for unmarked targets (ii)")
     ap.add_argument("--min-kill-rss", type=float, default=0.25,
                     help="GiB; on low MemAvailable alone, skip jobs smaller than this (killing a waiter frees nothing)")
-    ap.add_argument("--marker", default="GEMMA_JOB_CAP")
-    ap.add_argument("--roots", default="/home/ubuntu/work/gemma,/tmp")
     ap.add_argument("--log", default=os.path.join(REPO, "ops/logs/memguard.log"))
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-mail", action="store_true")
     args = ap.parse_args()
-    args.roots = [r for r in args.roots.split(",") if r]
-    for k in ("min_available", "max_total", "unmarked_rss", "min_kill_rss"):
+    for k in ("min_available", "max_total", "min_kill_rss"):
         setattr(args, k, int(getattr(args, k) * GIB))
     os.makedirs(os.path.dirname(args.log), exist_ok=True)
 
@@ -392,7 +416,7 @@ def main():
         print(line, flush=True)
 
     log(f"start pid={os.getpid()} min_available={args.min_available/GIB:.2f}G max_total={args.max_total/GIB:.2f}G "
-        f"marker={args.marker} roots={args.roots} dry_run={args.dry_run}")
+        f"dry_run={args.dry_run}")
     last_beat = 0
     jobs = {}
     while True:
@@ -404,7 +428,7 @@ def main():
             log(f"targets={sorted(targets)} jobs=" + repr([
                 {"name": j["name"], "root": j["root"], "pids": sorted(j["pids"])}
                 for j in jobs.values()]))
-        raise_oom_adj(targets, args.dry_run, args)
+        raise_oom_adj(targets, args.dry_run, args, jobs)
         avail = mem_available() or 0
         total = sum(j["rss"] for j in jobs.values())
         if time.time() - last_beat > 600:
@@ -428,7 +452,7 @@ def main():
             if not args.dry_run:
                 killed, surv = kill_tree(j, args, self_pids, log)
                 log(f"  killed {len(killed)} pids; survivors={surv}")
-                msg = (f"memguard killed job {name or '(unmarked pid %d %s)' % (root, comm)}: "
+                msg = (f"memguard killed job {name or '(job pid %d %s)' % (root, comm)}: "
                        f"{j['rss']/GIB:.2f}G, {reason}. Survivors: {surv or 'none'}. See ops/logs/memguard.log.")
                 if name:
                     time.sleep(0.5)
