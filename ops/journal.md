@@ -114,3 +114,5 @@
 2026-11-05T18:08Z | owner patch v2 (kill-path: stale boot/pgid, setsid escapes) + 4-case smoke test pass; review launched | ops/patches/bin-job-fallback.diff, ops/patches/bin-job-killtest.sh
 2026-11-05T18:10Z | codex-build kernel-setup-fix launched; report 004 (setup root cause) -> NEEDS_DECISION | ops/reports/004-setup-210s-root-cause.md
 2026-11-05T18:10Z | dec 026 read: already satisfied (v2 combined diff under review; linger-off lines already removed in cycle 66) | ops/decisions/026-20261105T180404-9575-from-builder.md
+2026-11-05T18:15Z | dec 027: option B approved with the fidelity rule (no PIP prefix) and the stress-margin ship-cap rule; plan 004 + id lists pre-registered; follow-up kernel spec written | ops/decisions/027-004-setup-210s-root-cause.md, eval/plans/004.md, ops/codex/build-kernel-setup-check.spec
+2026-11-05T18:12Z | dec 027 item 6: codex-ask scoping of the dec 022 item 4 levers | ops/jobs/ask-item4-light.log

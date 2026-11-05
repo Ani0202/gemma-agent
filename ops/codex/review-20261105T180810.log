@@ -2426,3 +2426,165 @@ exec
 .....................s
 21 passed, 1 skipped, 1 deselected in 0.08s
 
+codex
+Mocked probes reproduced both failures: a child that changes group or loses its legacy-wrapper ancestry remains alive while the kill reports `survivors=[]`; a process that execs `node` after classification is still signalled because starttime is unchanged.
+
+The offline tests report 21 passed, 1 skipped, and 1 deselected under Python 3.12 using the existing local pytest package. I deselected the test that writes temporary status files because the sandbox is read-only; the live allocation test remains skipped.
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import importlib.machinery, importlib.util
+from types import SimpleNamespace
+from unittest.mock import patch
+loader=importlib.machinery.SourceFileLoader('mg','bin/memguard')
+spec=importlib.util.spec_from_loader('mg',loader); mg=importlib.util.module_from_spec(spec); loader.exec_module(mg)
+class Status:
+    def __init__(self, name, text): self.stem=name; self.text=text
+class JobsDir:
+    def __init__(self,*args): pass
+    def glob(self,pattern): return statuses
+statuses=[Status('current','running 20 now 20\\n'), Status('done','done 0 now\\n'), Status('legacy','running 10 now\\n'), Status('six','running 30 now 30 boot-previous 9999\\n')]
+with patch.object(mg,'Path',JobsDir), patch.object(mg,'read',lambda p:p.text):
+    records=mg.running_jobs()
+    assert records==[dict(name='current',pid=20,pgid=20),dict(name='legacy',pid=10,pgid=None),dict(name='six',pid=30,pgid=30)]
+    print('3/4/6-field in-memory parser check OK:',records)
+    print('Six-field identity metadata retained:', any('boot' in r or 'starttime' in r for r in records))
+# Verify original parser unit test's classification assertions with virtual status files.
+def proc(pid,ppid=1,pgid=10):
+    return dict(pid=pid,ppid=ppid,pgid=pgid,starttime=123,comm='python',rss=1024,uid=mg.UID,state='S')
+a=SimpleNamespace(marker='GEMMA_JOB_CAP',unmarked_rss=3*mg.GIB,roots=['/tmp','/home/ubuntu/work/gemma'])
+world={10:proc(10),11:proc(11,ppid=10),21:proc(21,pgid=20)}
+with patch.object(mg,'marker_value',lambda *args:b'cap'):
+    targets,jobs=mg.find_jobs(world,a,set(),records[:2])
+    assert set(targets)=={10,11,21}
+    assert {j['name']: sorted(j['pids']) for j in jobs.values()}=={'legacy':[10,11],'current':[21]}
+print('Legacy status/name unit assertions passed with an in-memory filesystem stand-in')
+PY
+" in /home/ubuntu/work/gemma-wt/codex-memguard-fix
+ exited 1 in 0ms:
+Traceback (most recent call last):
+  File "<stdin>", line 13, in <module>
+  File "bin/memguard", line 144, in running_jobs
+    for path in sorted(Path(REPO, "ops/jobs").glob("*.status")):
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: '<' not supported between instances of 'Status' and 'Status'
+
+exec
+/bin/bash -lc "git status --short && git diff --name-only 5361eb7..HEAD && nl -ba bin/memguard | sed -n '252,292p'" in /home/ubuntu/work/gemma-wt/codex-memguard-fix
+ succeeded in 0ms:
+bin/memguard
+eval/tests/test_memguard.py
+   252	def inventory(job, args, self_pids):
+   253	    # Keep the original wrapper/pgid association even after it records done or exits.
+   254	    _, jobs = find_jobs(snapshot(), args, self_pids, job["records"])
+   255	    return jobs.get(job["key"], {}).get("members", {})
+   256	
+   257	
+   258	def kill_tree(job, args, self_pids, log):
+   259	    """Two empty scans, bounded by five seconds, then an independent survivor inventory."""
+   260	    killed = set()
+   261	    started = time.monotonic()
+   262	    deadline = started + 5
+   263	    root_identity = job["members"].get(job["root"])
+   264	    empty_scans = 0
+   265	    while time.monotonic() < deadline:
+   266	        members = inventory(job, args, self_pids)
+   267	        # The wrapper gets a grace period to record the child's failure. A new process
+   268	        # with the same numeric pid does not inherit this special treatment.
+   269	        grace = (root_identity and time.monotonic() < started + 3 and
+   270	                 any(p != job["root"] for p in job["members"]))
+   271	        for p, d in members.items():
+   272	            if grace and p == job["root"] and d["starttime"] == root_identity["starttime"]:
+   273	                continue
+   274	            if send_kill(d, log):
+   275	                killed.add(p)
+   276	        empty_scans = empty_scans + 1 if not members else 0
+   277	        if empty_scans >= 2 and not grace:
+   278	            break
+   279	        time.sleep(0.2)
+   280	    survivors = sorted(inventory(job, args, self_pids))
+   281	    return sorted(killed), survivors
+   282	
+   283	
+   284	def send_mail(msg, log):
+   285	    try:
+   286	        result = subprocess.run([os.path.join(REPO, "bin/send"), "builder", msg],
+   287	                                env={**os.environ, "SEND_FROM": "memguard", "GEMMA_ROLE": "memguard"},
+   288	                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+   289	        if result.returncode:
+   290	            log(f"  mail failed: exit {result.returncode}")
+   291	    except (OSError, subprocess.TimeoutExpired) as exc:
+   292	        log(f"  mail failed: {exc}")
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import importlib.machinery, importlib.util
+from types import SimpleNamespace
+from unittest.mock import patch
+loader=importlib.machinery.SourceFileLoader('mg','bin/memguard')
+spec=importlib.util.spec_from_loader('mg',loader); mg=importlib.util.module_from_spec(spec); loader.exec_module(mg)
+class Status:
+    def __init__(self,name,text): self.stem=name; self.text=text
+    def __lt__(self,other): return self.stem<other.stem
+class JobsDir:
+    def __init__(self,*args): pass
+    def glob(self,pattern): return statuses
+statuses=[Status('current','running 20 now 20\\n'),Status('done','done 0 now\\n'),Status('legacy','running 10 now\\n'),Status('six','running 30 now 30 boot-previous 9999\\n')]
+with patch.object(mg,'Path',JobsDir),patch.object(mg,'read',lambda p:p.text):
+    records=mg.running_jobs()
+    assert records==[dict(name='current',pid=20,pgid=20),dict(name='legacy',pid=10,pgid=None),dict(name='six',pid=30,pgid=30)]
+    print('3/4/6-field in-memory parser check OK:',records)
+    print('Six-field identity metadata retained:',any('boot' in r or 'starttime' in r for r in records))
+def proc(pid,ppid=1,pgid=10):
+    return dict(pid=pid,ppid=ppid,pgid=pgid,starttime=123,comm='python',rss=1024,uid=mg.UID,state='S')
+a=SimpleNamespace(marker='GEMMA_JOB_CAP',unmarked_rss=3*mg.GIB,roots=['/tmp','/home/ubuntu/work/gemma'])
+world={10:proc(10),11:proc(11,ppid=10),21:proc(21,pgid=20)}
+with patch.object(mg,'marker_value',lambda *args:b'cap'):
+    targets,jobs=mg.find_jobs(world,a,set(),records[:2])
+    assert set(targets)=={10,11,21}
+    assert {j['name']:sorted(j['pids']) for j in jobs.values()}=={'legacy':[10,11],'current':[21]}
+print('Legacy status/name unit assertions passed with in-memory status files')
+PY" in /home/ubuntu/work/gemma-wt/codex-memguard-fix
+ succeeded in 0ms:
+3/4/6-field in-memory parser check OK: [{'name': 'current', 'pid': 20, 'pgid': 20}, {'name': 'legacy', 'pid': 10, 'pgid': None}, {'name': 'six', 'pid': 30, 'pgid': 30}]
+Six-field identity metadata retained: False
+Legacy status/name unit assertions passed with in-memory status files
+
+codex
+**BLOCKING**
+
+1. **Job members can escape discovery and produce a false `survivors=[]`.** [bin/memguard:182](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:182) associates four-field jobs only by current PGID; legacy jobs depend on current ancestry. [bin/memguard:255](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:255) then restricts every inventory—including the final survivor check—to the original job key.
+
+   Mocked reproductions both returned `killed=[10], survivors=[]` with marked PID 11 still alive:
+   - A previously discovered child calls `setsid()`.
+   - A legacy three-field job’s child is reparented.
+
+   **Yes: use `GEMMA_JOB_ID` as the primary grouping identity when present**, while retaining the existing eligibility allowlist. Accepting six status fields alone does not provide compatibility with the owner patch’s escaped-member tracking. Preserve known `(pid, starttime)` members across membership changes for legacy jobs. Add regressions that change PGID/ancestry; the current fork test keeps the same PGID ([test_memguard.py:127](/home/ubuntu/work/gemma-wt/codex-memguard-fix/eval/tests/test_memguard.py:127)).
+
+2. **The final signal check validates identity but not current eligibility.** [bin/memguard:219](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:219) checks only starttime and process state before signalling. An `exec()` preserves starttime, so a classified Python process that becomes protected `node` can still receive SIGKILL.
+
+   A mocked transition during `pidfd_open()` reproduced `current_comm=node` followed by `pidfd_send_signal(..., SIGKILL)`. Revalidate UID, session exclusion, and marker-or-cwd/RSS eligibility immediately before acting. The existing root test changes eligibility between inventories, so it misses this case ([test_memguard.py:201](/home/ubuntu/work/gemma-wt/codex-memguard-fix/eval/tests/test_memguard.py:201)). OOM adjustment similarly checks identity alone ([bin/memguard:244](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:244)).
+
+**Non-blocking**
+
+- **Original-findings disposition:**
+
+  | Original finding | Result |
+  |---|---|
+  | #1: allowlist for every recipient | Applied during inventory; action-time gap remains in blocker 2. |
+  | #2: PID reuse | Fixed as specified: pidfd opened before starttime check; OOM file opened before identity check. |
+  | #3: orphan/fork completeness and survivors | Repeated scans and a separate final inventory exist; blocker 1 still causes false negatives. |
+  | #4: stale wrapper PGID | Unchanged by these commits; deployed [bin/job:52](/home/ubuntu/work/gemma/bin/job:52) still trusts the stored group. |
+  | #5: wrapper escaped/legacy descendants | Unchanged by these commits. The proposed owner patch improves new jobs, but retains direct-child termination for three-field records ([bin-job-fallback.diff:92](/home/ubuntu/work/gemma/ops/patches/bin-job-fallback.diff:92)). |
+  | #6: test validity | Dummy marker removal, inherited OOM baseline, fresh survivor discovery, and cleanup-before-parent termination are corrected ([test_memguard.py:290](/home/ubuntu/work/gemma-wt/codex-memguard-fix/eval/tests/test_memguard.py:290), [test_memguard.py:324](/home/ubuntu/work/gemma-wt/codex-memguard-fix/eval/tests/test_memguard.py:324)). Coverage gaps remain above. |
+
+- **Six-field parsing passes syntactically, but discards identity metadata.** [bin/memguard:154](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:154) retains neither boot ID nor wrapper starttime. Retain that metadata when implementing job identity; current status tests cover only three/four fields.
+
+- **Restricted `/proc` reads and mail handling pass inspection.** The `cmdline` read is removed. Mail has a ten-second timeout, logs failures, and runs outside the polling thread ([bin/memguard:284](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:284), [bin/memguard:368](/home/ubuntu/work/gemma-wt/codex-memguard-fix/bin/memguard:368)).
+
+**Questions**
+
+- None required to proceed.
+
+Validation: Python 3.12 syntax and diff checks passed; offline pytest reported **21 passed, 1 skipped, 1 deselected** using the existing local pytest package. The temporary-file test was deselected because the sandbox is read-only; equivalent parser/classification assertions passed in memory, including six-field parsing. Live allocation and live dry-run were not executed. No files changed.
+tokens used
+54,658

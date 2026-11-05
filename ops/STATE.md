@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 18:12Z (cycle 66, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 18:16Z (cycle 68, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -20,7 +20,7 @@ Builder on Opus (dec 010: local-first, two-strike).
 
 ## Running jobs (18:12Z)
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
-- review-job-patch2-light, review-memguard-fix-light, codex-sandbox-limits2, codex-kernel-setup-fix.
+- review-job-patch2-light, review-memguard-fix-light, codex-sandbox-limits2, codex-kernel-setup-fix, ask-item4-light.
 - Done this cycle: pipfb2-light (plan 003), scout (ops/scout/2026-11-05-timing-caps.md; RULES_FINDINGS C1-C3).
 
 ## bin/job, memguard, owner patch (cycles 62-66)
@@ -28,10 +28,15 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Owner patch v2 = ONE diff (dec 024 item 3; dec 026: HOLD for Aniket, low urgency, keep the RLIMIT_DATA comment): ops/patches/bin-job-fallback.diff (linger-gated scope, ulimit -d fallback, 6-field status with boot_id+starttime, GEMMA_JOB_ID marker, stale-boot refusal, trusted-pgid check, setsid escapes killed+reported, scope stop only if active). Smoke test ops/patches/bin-job-killtest.sh: 4/4 pass. v1 review clean; v2 review job review-job-patch2-light. Then mail the Director the path.
 - memguard-fix: branch codex/memguard-fix (53c87da + my ddf9746: status parse >=3 fields for the v2 patch). 22 pass/1 skip. Review job review-memguard-fix-light. Merge only with no BLOCKING; deploy as memguard-light, start the new one BEFORE stopping old pid 7933 (dec 024 item 4).
 
-## Dec 022 item 2: CONCLUDED "artifact" -> report 004 (NEEDS_DECISION)
-- Plan 003 repro: one hung-index fallback pip = 103.4 s; 2 calls = 206.8 s vs Kaggle 207.4-210.8; verification 4 calls = 413 vs 410-412. results/plan003_pip_fallback_repro.json. Why Kaggle's offline install failed is unproven.
-- Kernel fix: codex-build kernel-setup-fix (branch codex/kernel-setup-fix; spec ops/codex/build-kernel-setup-fix.spec). Needs my review + codex-review before any Kaggle push.
-- Report 004 recommends B: Kaggle CPU-only setup check (no GPU quota), then ONE GPU re-time of v000 at cap 5. Even with the fix, the ship cap is ~4.75 (cap 5 + 0.2 setup = 680 > 660).
+## Dec 027 (report 004 approved, option B with fidelity changes): plan 004 pre-registered (eval/plans/004.md)
+- FIDELITY: the timing kernel may only reproduce Dockerfile.public (pip + the line-9 tool set, offline). NO PIP_NO_INDEX/retry prefixes. setup_calls logging is mandatory.
+- Build chain on branch codex/kernel-setup-fix: (1) codex-kernel-setup-fix RUNNING (its spec still had the PIP prefix item); (2) NEXT, run the follow-up ops/codex/build-kernel-setup-check.spec in the same worktree (remove the prefix, SETUP_FIX toggle, SETUP_ONLY CPU mode, CPU push variant, summarizer). Launch it like ops/codex/build-sandbox-limits2.sh (codex-build would reset the branch). Then my review + codex-review.
+- Kaggle CPU session (no GPU quota): 2a UNFIXED on rich_3006 + fastapi_14986 -> WHY. If the cause is the competition's own harness/wheel ABI, STOP and report. 2b FIXED on 16 ids (eval/plans/004-setup-check-ids.txt). Gate: setup <= 30 s, editable rc 0 16/16, 0 Retrying. -> results/kaggle_setup_cpu_check.json; log in ops/budget/kaggle.md.
+- Only if 2b passes: ONE GPU re-time of v000 cap 5 on eval/plans/004-gpu-retime-ids.txt (not a ship candidate). If 2b fails: re-time v001 instead.
+- Ship cap = both (i) (cap+S)x125+30 <= 660 and (ii) (cap + 0.875 + 0.75S)x125+30 <= 660 -> ~4.0 min at S~10 s -> e4b-v002 after the re-time.
+- Report 005: the 2a cause, the CPU gate, the GPU re-time, and the first-submission bundle with its cap derivation (the Director will run a codex-ask adversarial check).
+- Item 6 / dec 022 item 4 levers (CPU): scoping ask job ask-item4-light (harness diff-on-timeout, patch contents, tool-output trimming knobs, compaction).
+- Background (plan 003): hung-index fallback 103.4 s/call; 2 calls = 206.8 s vs Kaggle 207-211 s. results/plan003_pip_fallback_repro.json.
 
 ## OOM incident (dec 020/021)
 - Root cause from runs/gold-null2: null-phase rows 22 rich_4006 (327 s), 38 rich_3480 (2683 s), 39 rich_3772 (2867 s) hit exit 124. The harness executor already uses start_new_session+killpg (adk_eval_core subprocess_sandbox.py:57), so the orphan theory is weaker; the leading suspect is unbounded memory in a null-patch rich test with no per-sandbox memory cap (none locally; the scorer has 4 GiB). Unproven: no RSS was logged. The codex-sandbox-limits fix covers both.
@@ -66,6 +71,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
 ## Next 3
-1. Await dec on report 004. Review + merge kernel-setup-fix; on approval push the CPU setup check.
-2. Act on reviews: review-job-patch2-light (then mail the Director), review-memguard-fix-light (merge, deploy memguard-light), codex-sandbox-limits2 (then re-review, merge eval/ only).
-3. EV-1 + the cpu8 gold/null run (dec 019/020) after the sandbox-limits merge; then dec 022 item 4 levers (truncation-safe diff, patch hygiene, tool-output trimming).
+1. When codex-kernel-setup-fix finishes: launch the build-kernel-setup-check follow-up; review it; codex-review it; push CPU stage 2a (record it in ops/budget/kaggle.md).
+2. Act on reviews: review-job-patch2-light (then mail the Director, on HOLD for Aniket per dec 026), review-memguard-fix-light (merge, deploy memguard-light), codex-sandbox-limits2 (re-review, merge eval/ only).
+3. Dec 022 item 4 levers from ask-item4-light; EV-1 + the cpu8 gold/null run after the sandbox-limits merge.
