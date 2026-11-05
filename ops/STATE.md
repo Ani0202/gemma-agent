@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 22:59Z (cycle 98, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 23:14Z (cycle 99, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - 31b: dist/31b-v000.zip sha256=4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161 (repo a12f0b7; static+codex static OK)
@@ -6,11 +6,10 @@ History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Build
 - e4b-v001 (dec 022 item 3, cap 5 -> 1.4 only): dist/e4b-v001.zip sha256=f2ced9c97ee1447cb3a78c0ebf65f4ecaff90c84b18313645d5d043c62d277e9 (re-pack, comment fix only), codex-review clean (no BLOCKING); re-time HELD until item 2 concludes.
 - e4b-v002 (dec 032 item 1: v001 + cap 1.0 + max_output_tokens 8192 at both occurrences): dist/e4b-v002.zip
   sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad, bin/pack PASS, load check OK
-  (results/bundle_load_check_e4b_v002.json: 8192/8192, 60 s). SUBMIT conditions (dec 032 item 3): (i) done; (ii) v002 review
-  (review-e4b-v002-light, 23:09Z) no BLOCKING; (iii) fix5c review clean or BLOCKING = summary/gate-only; (iv) diff = item 1 (yes).
-  All hold -> send SUBMIT dist/e4b-v002.zip sha256=60c0...4dad track=e4b + both review links (dec 033: Director authorizes at once).
-  Slot cutoff ~23:45Z else Nov 6. Cap derivation for the SUBMIT mail (dec 033 item 2): overrun F = 7 s (5 s floor execution.py:37
-  + killpg), worst = 60+7+221.6 = 288.6 s -> 631 min <= 660; post-cap fallback git 60 s default timeout = unmeasured tail.
+  (results/bundle_load_check_e4b_v002.json: 8192/8192, 60 s). Dec 032 item 3 conditions (i)-(iv) all hold (23:11Z).
+  SUBMIT MAIL SENT 23:11Z (ops/mail/director/20261105T231112-18464-from-builder.md): v002 review ops/codex/review-20261105T230900.md
+  BLOCKING none; fix5c review ops/codex/review-20261105T230800.md 1 BLOCKING = gate-only (exempt). Cap derivation 7 s F -> 631 min.
+  Awaiting Director authorization; after submit: log times in ops/budget/kaggle.md + LB score results file (dec 038 item 3).
 - No local pass-rate scores yet. eval-runner-fix MERGED to main 70c0d9f (codex review clean + N1 count-cap fix d13ceac; 421 pass, 3 skip).
   Test cmd: /home/ubuntu/gemma-local/venv/bin/python3 with pyimg cp3.13 site-packages appended to sys.path, pytest eval/tests.
 ## Eval data
@@ -20,11 +19,13 @@ History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Build
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
-## Running jobs (22:58Z): fix5c + v002 reviews sleeping to Codex-limit reset (~23:08Z), review-kernel-probes-light (waits for both; reviews 63127c8 with the OLD minus-image prompt; bin/job stop was denied by the permission classifier),
-  review-memguard-fix6e-light (waits for probes), review-kernel-probes-gate-light (waits for probes; dec 036 delta), memguard 7933 (0 kills).
+## Running jobs (23:14Z): review-kernel-probes-light (now starting; OLD minus-image prompt, dec 037 moot), review-kernel-probes-gate-light
+  + review-memguard-fix6e-light (wait for probes), review-kernel-gate-finfix-light (waits for all 3), memguard 7933 (0 kills).
 - KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
   dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
-- fix5 branch codex/kernel-setup-fix5 @87001e4: merge after fix5c review clean, then host eval/tests on main. Item 6 docker-order
+- fix5c BLOCKING 1 (gate a ignored failed finalization git rc/exception) FIXED on codex/kernel-gate-finfix e02666f (on 92a74c7;
+  109 tests pass; v5 unchanged a=7/8). Stack fix5->probes->gate->finfix merges together once all reviews are clean, then host eval/tests
+  on main. fix5c NON-BLOCKING 4: add the 5 vendored wheels to docs/ATTRIBUTION.md before merge. Item 6 docker-order
   MERGED 8c55985; main eval/tests 469p/3s/1f (stale test_memguard oom_score_adj; fixed by the fix6 merge).
 - memguard-fix6 eedf84b+0f5de3d livetest GREEN. Review clean -> merge + full eval/tests + deploy (stop 7933, start memguard-light). BLOCKING -> short report.
 - NOTE: codex-build branches from main HEAD; follow-ups: manual worktree on prev commit + sed prev build-*.sh + bin/job start.
@@ -75,6 +76,6 @@ History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Build
   pass-rate evals start, pre-register which environment the local sandbox models and why. Don't act on it before then.
 - Dec 032 item 5: decision_note is in timing_summary (probes branch); add the same note field to results/kaggle_timing_e4b_v001.json at merge.
 ## Next 3
-1. 23:08Z fix5c + v002 reviews -> evaluate v002 SUBMIT conditions (ii)/(iii) -> SUBMIT mail to Director (slot cutoff ~23:45Z).
-2. fix5c clean: merge fix5 branch; probes + probes-gate reviews clean -> push codex/kernel-probes-gate (cap 4.0) -> timing_summary --gate-mode stock-path -> report 010.
-3. fix6e review -> merge + deploy memguard-light. Then dec 032 item 8 (= dec 022 item 4, plan 005) + plan 007 time budget (dec 039) = first quality levers after report 010.
+1. Director authorizes v002 -> bin/kaggle-submit; log submit/complete/runtime (ops/budget/kaggle.md); LB score -> results file (dec 038 item 3).
+2. probes + probes-gate reviews clean -> push codex/kernel-probes-gate (cap 4.0) -> timing_summary from finfix branch --gate-mode stock-path -> report 010.
+3. finfix + fix6e reviews -> merge stack / deploy memguard-light. Then plan 005 (dec 022 item 4) + plan 007 (dec 039) = first quality levers.
