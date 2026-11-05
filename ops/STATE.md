@@ -76,5 +76,5 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
    fail-closed (csv exact header, field count, ISO date; any doubt refuses; all pages, or refuse if rows == page size; re-read UTC day
    AFTER the query, refuse if changed). FULL adversarial review of the whole guard. BLOCKING only in the pre-check -> drop the pre-check,
    re-review that removal = last round. Clean -> bin/send aniket "apply ops/patches/kaggle-submit-kernel-v5.diff" -> commit -> dry checks -> submit.
-2. DEC 047: gate (b) formula kept (conservative; report 010 leads with h1_composite). fix7 review clean -> merge stack -> host eval/tests -> push codex/kernel-probes-gate (cap 4.0) -> timing_summary from finfix branch --gate-mode stock-path -> report 010.
-3. finfix + fix6e reviews -> merge stack / deploy memguard-light. Then plan 005 (dec 022 item 4) + plan 007 (dec 039) = first quality levers.
+2. DEC 047: gate (b) formula kept (conservative; report 010 leads with h1_composite). fix7 review clean -> merge stack -> host eval/tests -> push from codex/kernel-gate-finfix (cap 4.0, <= 4 quota-h, log ops/budget/kaggle.md) -> timing_summary --gate-mode stock-path -> report 010.
+3. After report 010: plan 005 (dec 022 item 4) + plan 007 (dec 039) = first quality levers; ops/patches cleanup (dec 045 item 4).
