@@ -10,7 +10,7 @@ Every --interval seconds (default 2):
           (claude/node/codex/tmux, or a bash/sh whose parent is one of those).
      Session processes are excluded from both sets. Nothing else is ever signalled. memguard's own job group is never a target.
   2. Raise oom_score_adj to 1000 on every target (unprivileged), so the kernel picks us first.
-  3. Group marked members by marker value and bin/job's recorded wrapper/process group.
+  3. Group by exact GEMMA_JOB_ID when present; retain legacy member identities.
      Marked orphans outside running groups remain targets in an orphan job.
   4. On memory pressure, kill eligible members of the largest job, allowing its wrapper
      3 seconds to record failure. Re-inventory for up to 5 seconds, including new forks.
@@ -151,7 +151,11 @@ def running_jobs():
             pgid = int(fields[3]) if len(fields) >= 4 else None
         except ValueError:
             continue
-        records.append({"name": path.stem, "pid": pid, "pgid": pgid})
+        record = {"name": path.stem, "pid": pid, "pgid": pgid}
+        if len(fields) >= 6:
+            record.update(boot_id=fields[4], starttime=fields[5],
+                          job_id=f"{path.stem}/{fields[4]}/{fields[5]}".encode())
+        records.append(record)
     return records
 
 
@@ -165,19 +169,35 @@ def job_name(root, procs, records):
     return None
 
 
-def find_jobs(procs, args, self_pids, records=None):
+def eligible(pid, procs, args):
+    d = procs[pid]
+    return (d["uid"] == UID and d["state"] not in {"Z", "X"} and
+            not is_session(pid, procs) and
+            (marker_value(pid, args.marker) is not None or
+             (d["rss"] > args.unmarked_rss and under(cwd_of(pid), args.roots))))
+
+
+def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
     """Classify every recipient independently; ancestry only associates eligible members."""
     records = running_jobs() if records is None else records
-    marked = {p: marker_value(p, args.marker) for p in procs}
+    known = {(p, start): j for j in (known_jobs or {}).values()
+             for p, start in j["known_members"].items()}
     jobs = {}
     for p, d in procs.items():
-        if d["uid"] != UID or d["state"] in {"Z", "X"} or is_session(p, procs):
+        if not eligible(p, procs, args):
             continue
-        value = marked[p]
-        if value is None and not (d["rss"] > args.unmarked_rss and under(cwd_of(p), args.roots)):
-            continue
+        value = marker_value(p, args.marker)
+        job_id = marker_value(p, "GEMMA_JOB_ID")
         record = None
-        if value is not None:
+        previous = known.get((p, d["starttime"])) if job_id is None else None
+        if job_id is not None:
+            # Bytes equality, never a prefix/substring/regex match. Identity takes
+            # precedence over PGID, ancestry, and the eligibility marker's value.
+            record = next((r for r in records if r.get("job_id") == job_id), None)
+            key = ("job_id", job_id)
+        elif previous:
+            key = previous["key"]
+        elif value is not None:
             lineage = [p] + ancestors(p, procs)
             record = next((r for r in records if
                            (r["pgid"] is not None and d["pgid"] == r["pgid"]) or
@@ -187,8 +207,15 @@ def find_jobs(procs, args, self_pids, records=None):
         else:
             key = ("unmarked", p, d["starttime"])
         root = record["pid"] if record else p
-        j = jobs.setdefault(key, {"key": key, "root": root, "name": job_name(root, procs, records),
-                                  "pids": [], "members": {}, "rss": 0, "records": records})
+        if previous:
+            root = previous["root"]
+        j = jobs.setdefault(key, {"key": key, "root": root, "name": record["name"] if record else job_name(root, procs, records),
+                                  "pids": [], "members": {}, "rss": 0, "records": records,
+                                  "known_members": dict(previous["known_members"]) if previous else {}})
+        if previous:
+            j["name"] = previous["name"]
+        if job_id is None:
+            j["known_members"][p] = d["starttime"]
         j["pids"].append(p)
         j["members"][p] = d
         j["rss"] += d["rss"]
@@ -200,13 +227,23 @@ def find_jobs(procs, args, self_pids, records=None):
     return targets, jobs
 
 
-def same_process(d):
-    current = proc_stat(d["pid"])
-    return bool(current and current["starttime"] == d["starttime"] and
-                current["state"] not in {"Z", "X"})
+def action_eligible(d, args):
+    """Refresh identity AND allowlist after opening the process handle (exec keeps starttime)."""
+    current = proc_info(d["pid"])
+    if not current or current["starttime"] != d["starttime"]:
+        return False
+    procs = {d["pid"]: current}
+    parent = current["ppid"]
+    while current["comm"] in SHELL_COMMS and parent and parent not in procs:
+        info = proc_info(parent)
+        if not info:
+            break
+        procs[parent] = info
+        parent = info["ppid"]
+    return eligible(d["pid"], procs, args)
 
 
-def send_kill(d, log):
+def send_kill(d, log, args):
     """Pin a pidfd before the final identity check; never signal a recycled pid."""
     fd = None
     try:
@@ -216,7 +253,7 @@ def send_kill(d, log):
             except OSError as exc:
                 if exc.errno not in (errno.ENOSYS, errno.EINVAL, errno.EPERM):
                     raise
-        if not same_process(d):
+        if not action_eligible(d, args):
             return False
         if fd is not None:
             signal.pidfd_send_signal(fd, signal.SIGKILL)
@@ -233,7 +270,7 @@ def send_kill(d, log):
             os.close(fd)
 
 
-def raise_oom_adj(targets, dry):
+def raise_oom_adj(targets, dry, args):
     n = 0
     if dry:
         return n
@@ -241,7 +278,7 @@ def raise_oom_adj(targets, dry):
         # Opening first pins the proc file to this process, even if its numeric pid is reused.
         try:
             with open(f"/proc/{p}/oom_score_adj", "w") as f:
-                if same_process(d):
+                if action_eligible(d, args):
                     f.write("1000")
                     n += 1
         except OSError:
@@ -250,9 +287,11 @@ def raise_oom_adj(targets, dry):
 
 
 def inventory(job, args, self_pids):
-    # Keep the original wrapper/pgid association even after it records done or exits.
-    _, jobs = find_jobs(snapshot(), args, self_pids, job["records"])
-    return jobs.get(job["key"], {}).get("members", {})
+    # Use the same job ID / known legacy identities for every scan, including survivors.
+    _, jobs = find_jobs(snapshot(), args, self_pids, job["records"], {job["key"]: job})
+    current = jobs.get(job["key"], {})
+    job["known_members"].update(current.get("known_members", {}))
+    return current.get("members", {})
 
 
 def kill_tree(job, args, self_pids, log):
@@ -271,7 +310,7 @@ def kill_tree(job, args, self_pids, log):
         for p, d in members.items():
             if grace and p == job["root"] and d["starttime"] == root_identity["starttime"]:
                 continue
-            if send_kill(d, log):
+            if send_kill(d, log, args):
                 killed.add(p)
         empty_scans = empty_scans + 1 if not members else 0
         if empty_scans >= 2 and not grace:
@@ -321,16 +360,17 @@ def main():
     log(f"start pid={os.getpid()} min_available={args.min_available/GIB:.2f}G max_total={args.max_total/GIB:.2f}G "
         f"marker={args.marker} roots={args.roots} dry_run={args.dry_run}")
     last_beat = 0
+    jobs = {}
     while True:
         procs = snapshot()
         self_pids = {os.getpid()} | set(ancestors(os.getpid(), procs))
         # Our ancestors include the bin/job wrapper and maybe a Claude shell; they're never targets.
-        targets, jobs = find_jobs(procs, args, self_pids)
+        targets, jobs = find_jobs(procs, args, self_pids, known_jobs=jobs)
         if args.dry_run:
             log(f"targets={sorted(targets)} jobs=" + repr([
                 {"name": j["name"], "root": j["root"], "pids": sorted(j["pids"])}
                 for j in jobs.values()]))
-        raise_oom_adj(targets, args.dry_run)
+        raise_oom_adj(targets, args.dry_run, args)
         avail = mem_available() or 0
         total = sum(j["rss"] for j in jobs.values())
         if time.time() - last_beat > 600:
