@@ -82,3 +82,4 @@
 2026-11-05T15:54Z | codex review 154832: BLOCKING setup.py unfingerprinted + N1 nested-cap validation fixed in worktree ac94b91 (411 pass); re-review job review-eval-runner-fix3 | ops/codex/review-20261105T154832.md
 2026-11-05T15:58Z | codex re-review of ac94b91 clean (1 non-blocking: count caps unvalidated); fixed d13ceac (budget.tool_calls/turns/total_tokens, max_llm_calls int-only) 421 pass; merged codex/eval-runner-fix to main | ops/codex/review-20261105T155357.md, 70c0d9f
 2026-11-05T15:59Z | launched gold-rerun-b5 (pre-reg B5: gold-local2 + gold-null2 in shared env) | ops/jobs/gold-rerun-b5.cmd
+2026-11-05T16:01Z | router swap verified (dec 018 item 1): router.log 'router started (pid 2601754)' 15:57:54Z, 'clear builder' logged 16:00:15Z before delivery; bin/.router.new gone | ops/logs/router.log

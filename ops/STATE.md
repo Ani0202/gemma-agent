@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 ~16:00Z (cycle 57, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 ~16:01Z (cycle 58, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -33,9 +33,7 @@ Builder on Opus (dec 010: local-first, two-strike).
 
 ## Dec 017 (context clears): in progress
 - Done: CLAUDE.md top line; this STATE trim + archive.
-- Router: review done; BLOCKING fixed in bin/.router.new (clear gated on tmux success). Swap DENIED by the permission system
-  for the Builder. Dec 018: Director asked Aniket to do the swap himself; leave bin/.router.new untouched. He runs: mv bin/.router.new bin/router &&
-  tmux respawn-window -k -c ~/work/gemma -t gemma:router bin/router; then check ops/logs/router.log for a 'clear <role>'/'no clear' line on the next delivery and journal it.
+- Router: swapped by Aniket 15:57Z (pid 2601754); VERIFIED router.log 'clear builder' 16:00:15Z before delivery. Done.
 - Dec 018 policy: owner activity keeps precedence over the 2 h clear valve.
 
 ## On job finish
@@ -46,6 +44,6 @@ Builder on Opus (dec 010: local-first, two-strike).
   Identical pass set + null control => splits v2 stand (journal it, write results file); any change => short report to Director.
 
 ## Next 3
-1. Router swap: waiting on Aniket (dec 018); verify router.log afterwards.
+1. Wait for jobs (gold-rerun-b5, e4b-timing-wait3); router swap done.
 2. e4b-timing results -> results/ + plan-001 p90 rule (parallel with 3).
 3. gold-rerun-b5 verdict -> report 002 (first-submission candidate + LORO caveat).
