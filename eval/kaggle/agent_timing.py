@@ -103,45 +103,43 @@ def pytest_timeout_wheels(wheels):
             *sorted(extra_wheels().glob('pytest_timeout-2.1.0-*.whl'))]
 
 
-def missing_tool_closure(wheels):
-    """Approximate the sandbox tool_deps walk with the kernel interpreter's markers (same Python as the sandbox)."""
-    from importlib.metadata import distribution, PackageNotFoundError
+def missing_tool_closure(wheels, tags=None, runtime=True):
+    """Mirror the sandbox tool_deps walk: compatible_wheels (wheelhouse, then embedded), then runtime copy.
+
+    tags default to the kernel interpreter's, which is the sandbox venv's interpreter on Kaggle.
+    """
     from packaging.markers import default_environment
     from packaging.requirements import Requirement
+    from packaging.tags import sys_tags
     from packaging.utils import canonicalize_name, parse_wheel_filename
-    available = {}
-    for path in [*Path(wheels).glob('*.whl'), *extra_wheels().glob('*.whl')]:
-        try:
-            name, version, _, _ = parse_wheel_filename(path.name)
-        except Exception:
-            continue
-        available.setdefault(canonicalize_name(name), []).append((version, path))
-    roots = [n for n in SCORER_TOOLS if n != 'pip']
-    queue = []
-    for n in roots:
-        hits = [(v, p) for v, p in available.get(canonicalize_name(n), []) if n != 'pytest-timeout' or str(v) == '2.1.0']
-        if hits:
-            queue.append(max(hits, key=lambda h: h[0])[1])
-    env, seen, missing = dict(default_environment(), extra=''), set(), []
+    tags = [str(t) for t in sys_tags()] if tags is None else tags
+    extra = extra_wheels()
+    selected = compatible_wheels(wheels, tags)
+    roots = [wheel_metadata(selected[canonicalize_name(n)]) for n in SCORER_TOOLS
+             if n not in ('pip', 'pytest-timeout') and canonicalize_name(n) in selected]
+    timeout = [p for p in pytest_timeout_wheels(wheels)
+               if any(str(t) in tags for t in parse_wheel_filename(p.name)[3])]
+    roots.extend(wheel_metadata(p) for p in timeout[:1])
+    env, seen, missing, queue = dict(default_environment(), extra=''), set(), [], list(roots)
     while queue:
-        path = queue.pop()
-        if path in seen:
+        metadata = queue.pop()
+        key = (canonicalize_name(metadata['Name']), metadata['Version'])
+        if key in seen:
             continue
-        seen.add(path)
-        for raw in wheel_metadata(path).get_all('Requires-Dist', []):
+        seen.add(key)
+        for raw in metadata.get_all('Requires-Dist', []):
             req = Requirement(raw)
             if req.marker and not req.marker.evaluate(env):
                 continue
             name = canonicalize_name(req.name)
-            hits = [(v, p) for v, p in available.get(name, []) if v in req.specifier]
-            if hits:
-                queue.append(max(hits, key=lambda h: h[0])[1])  # highest matching version, like compatible_wheels
+            candidate = compatible_wheels(wheels, tags, req).get(name) or compatible_wheels(extra, tags, req).get(name)
+            if candidate:
+                queue.append(wheel_metadata(candidate))
                 continue
-            try:
-                runtime_ok = distribution(name).version in req.specifier
-            except PackageNotFoundError:
-                runtime_ok = False
-            if not runtime_ok and name not in missing:
+            found = runtime_copyable(name) if runtime else None
+            if found is not None and found[0].version in req.specifier:
+                queue.append(found[0].metadata)
+            elif name not in missing:
                 missing.append(name)
     return missing
 
@@ -158,7 +156,7 @@ def check_tool_sources(wheels):
     missing = [n for n in SCORER_TOOLS if n not in ('pip', 'pytest-timeout') and canonicalize_name(n) not in names]
     if not pytest_timeout_wheels(wheels):
         missing.append('pytest-timeout==2.1.0')
-    if fallback_wheel(wheels, 'pip') is None:
+    if fallback_wheel(wheels, 'pip') is None and runtime_copyable('pip') is None:  # same sources as bootstrap_pip
         missing.append('pip')
     missing.extend(missing_tool_closure(wheels))
     if missing:
@@ -302,23 +300,32 @@ def fallback_wheel(wheels, package):
     return max(found, key=lambda p: parse_wheel_filename(p.name)[1]) if found else None
 
 
-def copy_runtime_package(name, destination):
-    """Copy only the pure Python image package and metadata; no host path injection."""
+def runtime_copyable(name):
+    """(dist, files) if copy_runtime_package can copy this runtime package, else None. Copies nothing."""
     from importlib.metadata import distribution, PackageNotFoundError
     try:
         dist = distribution(name)
     except PackageNotFoundError:
-        return 'missing'
+        return None
     if name == 'pytest-timeout' and dist.version != '2.1.0':
-        return 'missing'
+        return None
     # Distribution names need not match import names (trove-classifiers, PyYAML).
     files = list(dist.files or [])
     if not files or any(str(p).endswith(('.so', '.pyd', '.dll', '.dylib')) for p in files):
-        return 'missing'
+        return None
     files = [p for p in files if '..' not in p.parts and not p.is_absolute()
              and not p.parts[0].endswith('.data')]
     if not any(str(p).endswith('.py') and not p.parts[0].endswith('.dist-info') for p in files):
+        return None
+    return dist, files
+
+
+def copy_runtime_package(name, destination):
+    """Copy only the pure Python image package and metadata; no host path injection."""
+    found = runtime_copyable(name)
+    if found is None:
         return 'missing'
+    dist, files = found
     for entry in files:
         target = destination / entry
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1156,7 +1163,8 @@ def main():
             gpu_preflight()  # cheap fail-fast before the multi-minute install (torch check below stays authoritative)
             install()
             check_hook_targets()  # fail before vLLM startup if the wheelhouse swegemma lacks the hook targets
-            check_tool_sources(DATA / 'wheels' if (DATA / 'wheels').is_dir() else WHEELHOUSE)  # same choice as patch_subprocess_deps
+            if os.environ.get('SETUP_FIX') == '1':  # only the fixed path installs the line-9 tools
+                check_tool_sources(DATA / 'wheels' if (DATA / 'wheels').is_dir() else WHEELHOUSE)  # same choice as patch_subprocess_deps
             try:
                 import mcp  # noqa: F401
                 header['mcp_import_ok'] = True

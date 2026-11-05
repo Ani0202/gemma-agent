@@ -969,12 +969,17 @@ def test_missing_tool_closure_uses_wheelhouse_extra_and_runtime(monkeypatch, tmp
     _wheel(house, 'zz-old-dep', '2.0')
     _wheel(extra, 'pytest-timeout', '2.1.0', ['pytest>=5', 'zz-old-dep'])
     _wheel(extra, 'pathspec', '1.1.1')
-    missing = timing.missing_tool_closure(house)
+    tags = ['py3-none-any']
+    missing = timing.missing_tool_closure(house, tags)
     assert 'pathspec' not in missing and 'tomli' not in missing
     assert 'zz-legacy-only-pkg' not in missing  # highest matching version (2.0) is walked, not 1.0
     assert 'zz-not-anywhere-pkg' in missing and 'zz-extra-only-pkg' in missing
     _wheel(extra, 'zz-extra-only-pkg', '2.5')
-    assert 'zz-extra-only-pkg' not in timing.missing_tool_closure(house)
+    assert 'zz-extra-only-pkg' not in timing.missing_tool_closure(house, tags)
+    # a cp313-only newer wheel is ignored with py3 tags
+    _wheel(house, 'zz-old-dep', '9.0', ['zz-tagged-only-pkg'])
+    (house / 'zz_old_dep-9.0-py3-none-any.whl').rename(house / 'zz_old_dep-9.0-cp313-cp313-linux_x86_64.whl')
+    assert 'zz-tagged-only-pkg' not in timing.missing_tool_closure(house, tags)
 
 
 def test_vendored_closure_complete_against_local_wheelhouse():
@@ -990,6 +995,28 @@ def test_vendored_closure_complete_against_local_wheelhouse():
         extra[name] = [digest, b64.b64encode((vendor / name).read_bytes()).decode()]
     timing.EXTRA_WHEELS = extra
     try:
-        assert timing.missing_tool_closure(wheels) == []
+        # Strict: no runtime fallback, so a local venv package cannot hide a gap Kaggle might have.
+        assert timing.missing_tool_closure(wheels, runtime=False) == []
     finally:
         timing.EXTRA_WHEELS = {}
+
+
+def test_check_tool_sources_accepts_runtime_pip(monkeypatch, tmp_path):
+    """Kaggle: no pip wheel, no ensurepip bundle, but a pure-Python runtime pip (bootstrap_pip copies it)."""
+    house = tmp_path / 'house'
+    house.mkdir()
+    monkeypatch.setattr(timing, 'missing_tool_closure', lambda wheels: [])
+    monkeypatch.setattr(timing, 'SCORER_TOOLS', ('pip', 'pytest-timeout'))
+    monkeypatch.setattr(timing, 'fallback_wheel', lambda wheels, package: None)
+    _embed(monkeypatch, tmp_path)
+    monkeypatch.setattr(timing, 'runtime_copyable', lambda name: (Entry(version='26.0'), []) if name == 'pip' else None)
+    timing.check_tool_sources(house)
+    monkeypatch.setattr(timing, 'runtime_copyable', lambda name: None)
+    with pytest.raises(RuntimeError, match='pip'):
+        timing.check_tool_sources(house)
+
+
+def test_runtime_copyable_matches_copy_runtime_package(tmp_path):
+    found = timing.runtime_copyable('pytest')
+    result = timing.copy_runtime_package('pytest', tmp_path / 'dest')
+    assert (found is None) == (result == 'missing')
