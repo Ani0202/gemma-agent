@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 19:40Z (cycle 86, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 19:50Z (cycle 86, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -19,11 +19,15 @@ Builder on Opus (dec 010: local-first, two-strike).
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
 ## Running jobs (19:31Z)
-- CODEX USAGE LIMIT hit 19:28Z (resets ~23:04Z). DEC 029 (report 006 B approved w/ changes): Claude subagent review of fix5
-  RUNNING (-> ops/reviews/claude-review-fix5.md); no BLOCKING -> push e4b-v001 re-time from fix5 worktree (ids copied in;
-  dry run OK, budget 3900 s, -t 5700 s; bundle dir == dist zip except MANIFEST.md). Codex reruns queued (relaunch script edited):
-  review-kernel-setup-fix5c-light at 23:08Z, CODEX_EFFORT=medium, alone; review-memguard-fix6c-light waits for it to finish.
-  Nothing from the run goes into report 005/SUBMIT until the Codex fix5 review is clean + merged + gate (a)-(e) passes.
+- DEC 029: Claude review of fix5 = BLOCKING (gate (a) logic: timeouts/no-submit labelled harness errors; setup_failed gated;
+  n_expected from rows) ops/reviews/claude-review-fix5.md. Builder fix ef72e7e + guards 9ec991f on codex/kernel-setup-fix5; 102 tests
+  pass; Claude re-review NO BLOCKING ops/reviews/claude-rereview-fix5.md. e4b-v001 re-time PUSHED 19:46Z = kernel v4 (budget 3900 s,
+  -t 5700). Waiter e4b-v001-timing-wait-light -> output in runs/e4b-v001-timing. Then: timing_summary.py runs/e4b-v001-timing/timing.jsonl
+  --output results/kaggle_timing_e4b_v001.json; check provenance agent_yaml_sha256 == zip's agent.yaml, n_expected 8, verification_skipped.
+  Codex (limit resets ~23:04Z): review-kernel-setup-fix5c-light 23:08Z medium, alone (cmd updated: HEAD 9ec991f, run already pushed);
+  review-memguard-fix6c-light waits for it. Nothing from v4 goes into report 005/SUBMIT until the Codex fix5 review is clean + merged +
+  gate (a)-(e) passes. If Codex BLOCKING affects the measurement -> discard + redo; summary-only -> re-summarize.
+  Report 005 must note: subprocess sandbox has no 2vCPU/4GiB cap (underestimate risk); image_emulation diag excludes probes.
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
 - DEC 028 (report 005-prelim, option A APPROVED): 2a STOP met; artifact branch closed, 2b moot, no v000 re-time. CPU 2a dropped.
   Item 1-3: kernel-setup-fix5 BUILT aa116cb (branch codex/kernel-setup-fix5 on round-4 c4c9528; Codex 80 offline pass). Builder dry run
