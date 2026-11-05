@@ -1373,3 +1373,998 @@ def main():
 if __name__ == '__main__':
     raise SystemExit(main())
 
+codex
+The tool install currently lets pip resolve dependencies, which aborts when an offline wheel is missing. I’ll install the tools with `--no-deps`, then walk their metadata using the sandbox’s marker environment. Dependency gaps and `pip check` failures will be logged without failing setup; a missing top-level tool will still stop it.
+exec
+/bin/bash -lc "ls /home/ubuntu/gemma-local/venv/bin/python* && rg --files /home/ubuntu/gemma-local/pyimg | rg '/site-packages/pytest/__init__.py"'$'"'" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/venv/bin/python
+/home/ubuntu/gemma-local/venv/bin/python3
+/home/ubuntu/gemma-local/venv/bin/python3.13
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pytest/__init__.py
+
+exec
+/bin/bash -lc "sed -n '510,590p' eval/kaggle/agent_timing.py && rg -n 'missing_tool|setup_calls|setup_failed' eval/kaggle/agent_timing.py" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+            patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch) or ''
+            try:
+                counts, tokens, seconds = trace_counts(evaluator.trace)
+            except Exception as exc:  # never lose the run over trace parsing
+                counts, tokens, seconds = {}, dict(prompt_tokens=None, completion_tokens=None), {}
+                error = (error or '') + ' trace parse (' + type(exc).__name__ + ')'
+            code = result.test_exit_code if result else None
+            raw_error = (result.error or '') if result else error or ''
+            try:
+              append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
+                llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
+                tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
+                completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
+                **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+                timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+            except Exception as exc:
+                append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+                                     wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
+            raw = WORK / 'runs' / iid
+            raw.mkdir(parents=True, exist_ok=True)
+            (raw / 'agent.patch').write_text(patch)
+            (raw / 'trace.json').write_text(json.dumps(evaluator.trace.to_dict(format='legacy') if evaluator.trace else {}, default=str))
+            (raw / 'result.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result else {'error': error}, default=str))
+    finally:
+        ev.verify_task, vf.strip_protected_files_from_patch = original_verify, original_strip
+
+def start_server(holder):
+    import torch
+    from adk_submission import VllmConfig, VllmServer, discover_adapters
+    from adk_submission.discovery import discover_declared_models
+    from swegemma.config import ALLOWED_ADAPTER_EXTENSIONS
+    MODEL_VLLM_EXTRA_ARGS = {'gemma-4-12b-it-qat-w4a16-ct': (
+        '--hf-overrides', '{"architectures": ["Gemma4ForCausalLM"], "model_type": "gemma4"}')}
+    _SAFE_PATH_COMPONENT = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
+    declared_models = discover_declared_models(BUNDLE)
+    assert len(declared_models) == 1, f'Expected exactly 1 declared model, got: {sorted(declared_models)}'
+    declared_model = next(iter(declared_models))
+    assert declared_model in {'gemma-4-' + x + '-it-qat-w4a16-ct' for x in ('31b', '12b', 'e4b', 'e2b')}, 'Unsupported declared model'
+    MODEL_PATH = Path(f'/kaggle/input/models/google/gemma-4/other/{declared_model}/2')
+    assert MODEL_PATH.exists(), f'Model weights not found at {MODEL_PATH}. Ensure the model input is attached.'
+    adapters = discover_adapters(str(BUNDLE), adapter_extensions=ALLOWED_ADAPTER_EXTENSIONS)
+    adapter_map = getattr(adapters, 'adapters', None) or {}
+    for adapter_name in adapter_map:
+        assert _SAFE_PATH_COMPONENT.fullmatch(adapter_name), 'Unsafe adapter name'
+    detected_ranks = [r for info in adapter_map.values() if (r := getattr(info, 'rank', None)) is not None and r > 0]
+    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    tp_size = 4 if gpu_count >= 4 else (2 if gpu_count >= 2 else 1)
+    vllm_cfg = VllmConfig(
+        model=str(MODEL_PATH), port=8000, host='127.0.0.1',
+        tool_call_parser='gemma4', reasoning_parser='gemma4', max_model_len=32768,
+        dtype='bfloat16' if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else 'auto',
+        gpu_memory_utilization=0.90, enable_auto_tool_choice=True,
+        enable_lora=bool(adapter_map), max_loras=max(1, len(adapter_map)),
+        max_lora_rank=max(detected_ranks) if detected_ranks else 128,
+        scheduler_reserve_full_isl=False, tensor_parallel_size=tp_size, startup_timeout=60 * 20,
+        extra_args=MODEL_VLLM_EXTRA_ARGS.get(declared_model, ()),
+    )
+    server_instance = VllmServer(vllm_cfg, adapter_manifest=adapters)
+    holder.append(server_instance)
+    start = time.perf_counter()
+    server_instance.start()
+    startup = time.perf_counter() - start
+    return server_instance, adapters, declared_model, startup
+
+class WrongAccelerator(RuntimeError):
+    pass
+
+
+def setup_task(data_dir, wheels_dir, iid, repo, state):
+    """Real agent_runner setup path through dependency installation; no agent/verification."""
+    from types import SimpleNamespace
+    from swegemma.sandbox import SubprocessManager
+    from swegemma.deduplication import resolve_task_snapshot_paths
+    import swegemma.harness.container_setup as cs
+116:    current['setup_calls'].append(row)
+127:        current['setup_failed'] = True
+132:            current['setup_failed'] = True
+221:            started=time.perf_counter(), setup_calls=[], setup_failed=False)
+251:                    current['setup_calls'][-1]['source'] = str(pip_wheel)
+256:                    current['setup_calls'][-1]['source'] = copy_runtime_package('pip', sp)
+257:                    if current['setup_calls'][-1]['source'] == 'missing':
+293:                current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
+318:            setup_row = next(c for c in reversed(current['setup_calls']) if c['step'] == 'setup.py')
+321:            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+492:            times = dict(verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+520:                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+521:                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+532:                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+592:                   started=time.perf_counter(), setup_calls=[], setup_failed=False,
+610:        current.update(setup_failed=True, error=type(exc).__name__ + ': ' + str(exc)[:2048])
+663:                          sandbox_setup_seconds='Sum of measured setup steps', setup_calls='Bounded setup command timings/output', setup_failed='Any setup failure', resolved='Harness verdict', exit_code='Verification exit code or null',
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+p='eval/kaggle/agent_timing.py'
+s=open(p).read().replace('def compatible_wheels(wheels, tags):','def compatible_wheels(wheels, tags, requirement=None):').replace('        matches = [rank[str(tag)]', '        if requirement is not None and (name "'!= requirement.name or version not in requirement.specifier):'"\\n            continue\\n        matches = [rank[str(tag)]')
+s=s.replace('def setup_step(current, name, action):','def setup_step(current, name, action, *, fatal=True):').replace(\"        if row['rc'] "'!= 0:'"\\n\", \"        if fatal and row['rc'] "'!= 0:'"\\n\")
+a=s.index(\"    module = 'pytest_timeout'\"); b=s.index('    for entry in files:',a)
+s=s[:a]+'''    # Distribution names need not match import names (trove-classifiers, PyYAML).
+    files = list(dist.files or [])
+    if (not files or not any(not p.parts[0].endswith('.dist-info') for p in files)
+            or any(str(p).endswith(('.so', '.pyd', '.dll', '.dylib')) for p in files)):
+        return 'missing'
+    files = [p for p in files if '..' not in p.parts and not p.is_absolute()
+             and not p.parts[0].endswith('.data')]
+''' + s[b:]
+pos=s.index('\\n\\n# Capture setup.py')
+s=s[:pos]+'''
+
+def wheel_metadata(path):
+    from email.parser import BytesParser
+    import zipfile
+    with zipfile.ZipFile(path) as archive:
+        name = next(n for n in archive.namelist() if n.endswith('.dist-info/METADATA'))
+        return BytesParser().parsebytes(archive.read(name))
+
+
+def close_tool_dependencies(roots, wheels, tags, environment, destination, install_wheel):
+    \"\"\"Walk runtime requirements only, using sandbox markers and no pip resolver.
+
+    Existing sandbox metadata describes base wheels and copied tools. Each requirement
+    edge is checked, while each installed distribution/version is expanded only once.
+    Missing edges remain diagnostic and never prevent installing the tools themselves.
+    \"\"\"
+    from importlib.metadata import distributions, distribution, PackageNotFoundError
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+    installed = {canonicalize_name(d.metadata['Name']): d.metadata
+                 for d in distributions(path=[str(destination)])}
+    queue = list(roots)
+    installed.update({canonicalize_name(m['Name']): m for m in queue})
+    visited, entries, missing = set(), [], []
+    while queue:
+        metadata = queue.pop(0)
+        key = (canonicalize_name(metadata['Name']), metadata['Version'])
+        if key in visited:
+            continue
+        visited.add(key)
+        for raw in metadata.get_all('Requires-Dist', []):
+            req = Requirement(raw)
+            if req.marker and not req.marker.evaluate(dict(environment, extra='')):
+                continue
+            name = canonicalize_name(req.name)
+            req.name = name
+            current = installed.get(name)
+            row = dict(name=name, required_spec=str(req.specifier), requirement=raw,
+                       source='missing', version_installed=None)
+            if current is not None and current['Version'] in req.specifier:
+                row.update(source=sources.get(name, 'sandbox metadata'),
+                           version_installed=current['Version'])
+            else:
+                candidate = compatible_wheels(wheels, tags, req).get(name)
+                current = None
+                if candidate:
+                    result = install_wheel(candidate)
+                    row['rc'] = result.exit_code
+                    for field in ('stdout', 'stderr'):
+                        row[field] = (getattr(result, field, '') or '').encode()[-2048:].decode(errors='ignore')
+                    if result.exit_code == 0:
+                        current = wheel_metadata(candidate)
+                        row['source'] = str(candidate)
+                else:
+                    try:
+                        runtime = distribution(name)
+                    except PackageNotFoundError:
+                        runtime = None
+                    if runtime is not None and runtime.version in req.specifier:
+                        source = copy_runtime_package(name, destination)
+                        if source "'!= '"'missing':
+                            current = runtime.metadata
+                            row['source'] = source
+                if current is not None:
+                    installed[name] = current
+                    sources[name] = row['source']
+                    row['version_installed'] = current['Version']
+            entries.append(row)
+            if current is not None:
+                queue.append(current)
+            elif name not in missing:
+                missing.append(name)
+    return entries, missing
+''' +s[pos:]
+# sources initialized from roots/base metadata paths, no vague source
+s=s.replace('    visited, entries, missing = set(), [], []','    sources = {name: str(destination) for name in installed}\\n    for path in compatible_wheels(wheels, tags).values():\\n        from packaging.utils import parse_wheel_filename\\n        name, version, _, _ = parse_wheel_filename(path.name)\\n        if name in installed and installed[name][\\'Version\\'] == str(version):\\n            sources[name] = str(path)\\n    visited, entries, missing = set(), [], []')
+s=s.replace('\"print(json.dumps({\\'version\\':sys.version,\\'tags\\':[str(t) for t in sys_tags()]}))\")','\"from pip._vendor.packaging.markers import default_environment;\"\\n                     \"print(json.dumps({\\'version\\':sys.version,\\'tags\\':[str(t) for t in sys_tags()],\"\\n                     \"\\'environment\\':default_environment()}))\")')
+s=s.replace(\"                current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)\\n\", \"                current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)\\n                if current['setup_calls'][-1]['source'] == 'missing':\\n                    raise RuntimeError('No offline pytest-timeout 2.1.0 source available')\\n\")
+s=s.replace('pip install --ignore-installed --no-index --find-links=/wheels ', 'pip install --ignore-installed --no-index --find-links=/wheels --no-deps ')
+needle=\"                raise RuntimeError('Offline scorer tool installation failed')\\n\"
+s=s.replace(needle,needle+'''            def tool_deps():
+                from importlib.metadata import distributions
+                roots = [wheel_metadata(selected[n]) for n in SCORER_TOOLS if n in selected]
+                roots.extend(d.metadata for d in distributions(path=[str(sp)])
+                             if d.metadata['Name'].lower() in ('pip', 'pytest-timeout')
+                             and d.metadata['Name'].lower() not in selected)
+                def install_dependency(path):
+                    return docker.exec(container_id,
+                        'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
+                        shlex.quote('/wheels/' + path.name), timeout=60)
+                entries, missing = close_tool_dependencies(
+                    roots, wheels, identity['tags'], identity['environment'], sp, install_dependency)
+                current['setup_calls'][-1]['dependencies'] = entries
+                current['missing_tool_deps'] = missing
+            setup_step(current, 'tool_deps', tool_deps)
+            setup_step(current, 'pip_check', lambda: docker.exec(
+                container_id, 'python3 -m pip check', timeout=30), fatal=False)
+''')
+s=s.replace(\"setup_fix=times.get('setup_fix'), setup_subprocesses=\", \"missing_tool_deps=times.get('missing_tool_deps', []),\\n                setup_fix=times.get('setup_fix'), setup_subprocesses=\")
+open(p,'w').write(s)
+PY" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+exec
+/bin/bash -lc "python3 - <<'PY'
+p='eval/kaggle/agent_timing.py'
+s=open(p).read().replace(\"sources = {name: str(destination) for name in installed}\",\"sources = {name: 'runtime-site-packages:' + str(destination) for name in installed}\")
+s=s.replace('                def install_dependency(path):\\n                    return docker.exec',\"                def install_dependency(path):\\n                    docker.copy_to(container_id, path, '/wheels/' + path.name)\\n                    return docker.exec\")
+open(p,'w').write(s)
+p='eval/tests/test_agent_timing.py'
+s=open(p).read().replace(\"        with zipfile.ZipFile(wheels / f'{tool.replace(\\\"-\\\", \\\"_\\\")}-{version}-py3-none-any.whl', 'w'):\\n            pass\", \"        make_wheel(wheels, tool, version)\")
+s=s.replace(\"dict(version='3.12', tags=['py3-none-any'])\", \"dict(version='3.12', tags=['py3-none-any'], environment=sandbox_markers())\")
+s=s.replace(\"        'pytest_timeout_source', 'tool_install', 'setup.py']\", \"        'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check', 'setup.py']\")
+# fake pip_check failure exercise nonfatal
+s=s.replace(\"exit_code=setup_rc if '/tmp/setup.py' in command else 0,\", \"exit_code=setup_rc if '/tmp/setup.py' in command else (1 if 'pip check' in command else 0),\")
+s=s.replace(\"    assert any('--no-index --find-links=/wheels' in c for c in commands)\",\"    assert any('--no-index --find-links=/wheels --no-deps' in c for c in commands)\\n    assert current['missing_tool_deps'] == []\\n    assert next(r for r in current['setup_calls'] if r['step'] == 'pip_check')['rc'] == 1\")
+s+='''
+
+def sandbox_markers():
+    from packaging.markers import default_environment
+    return dict(default_environment(), python_version='3.12', python_full_version='3.12.0')
+
+
+def make_wheel(directory, name, version='1.0', requires=()):
+    import zipfile
+    normalized = name.replace('-', '_')
+    path = directory / f'{normalized}-{version}-py3-none-any.whl'
+    with zipfile.ZipFile(path, 'w') as archive:
+        archive.writestr(f'{normalized}-{version}.dist-info/METADATA',
+                         f'Metadata-Version: 2.1\\\\nName: {name}\\\\nVersion: {version}\\\\n' +
+                         ''.join(f'Requires-Dist: {req}\\\\n' for req in requires))
+    return path
+
+
+def test_dependency_closure_markers_extras_and_cycles(tmp_path, monkeypatch):
+    root = make_wheel(tmp_path, 'root', requires=[
+        'dep>=1; python_version < \"3.13\"', 'wrong; python_version >= \"3.13\"',
+        'optional; extra == \"test\"'])
+    dep = make_wheel(tmp_path, 'dep', requires=['root', 'leaf[optional]'])
+    make_wheel(tmp_path, 'leaf', requires=['excluded; extra == \"optional\"'])
+    calls = []
+    def install(path):
+        calls.append(path.name)
+        return Entry(exit_code=0, stdout='', stderr='')
+    def no_runtime(*args):
+        pytest.fail('wheelhouse must be preferred')
+    monkeypatch.setattr(timing, 'copy_runtime_package', no_runtime)
+    entries, missing = timing.close_tool_dependencies(
+        [timing.wheel_metadata(root)], tmp_path, ['py3-none-any'], sandbox_markers(),
+        tmp_path / 'site', install)
+    assert not missing
+    assert [e['name'] for e in entries] == ['dep', 'root', 'leaf']
+    assert entries[0]['source'] == str(dep)
+    assert entries[0]['version_installed'] == '1.0'
+    assert len(calls) == 2
+
+
+def test_dependency_closure_runtime_and_missing(tmp_path, monkeypatch):
+    import importlib.metadata
+    root = make_wheel(tmp_path, 'root', requires=['runtime-package>=2', 'absent', 'old>=2'])
+    runtime = timing.wheel_metadata(make_wheel(tmp_path, 'metadata', requires=['transitive']))
+    runtime.replace_header('Name', 'runtime-package')
+    runtime.replace_header('Version', '2.0')
+    from importlib.metadata import PackageNotFoundError
+    def distribution(name):
+        if name == 'runtime-package':
+            return Entry(version='2.0', metadata=runtime)
+        if name == 'old':
+            return Entry(version='1.0', metadata=runtime)
+        raise PackageNotFoundError(name)
+    monkeypatch.setattr(importlib.metadata, 'distribution', distribution)
+    copies = []
+    def copy(name, destination):
+        copies.append(name)
+        return 'runtime-site-packages:/image'
+    monkeypatch.setattr(timing, 'copy_runtime_package', copy)
+    entries, missing = timing.close_tool_dependencies(
+        [timing.wheel_metadata(root)], tmp_path, ['py3-none-any'], sandbox_markers(),
+        tmp_path / 'site', lambda path: pytest.fail('no matching wheel'))
+    assert copies == ['runtime-package']
+    assert missing == ['absent', 'old', 'transitive']
+    assert entries[0]['source'] == 'runtime-site-packages:/image'
+    assert entries[0]['version_installed'] == '2.0'
+    assert entries[1]['source'] == 'missing' and entries[1]['version_installed'] is None
+
+
+def test_dependency_closure_selects_satisfying_wheel(tmp_path):
+    root = make_wheel(tmp_path, 'root', requires=['dep<2'])
+    expected = make_wheel(tmp_path, 'dep')
+    make_wheel(tmp_path, 'dep', '2.0')
+    calls = []
+    def install(path):
+        calls.append(path)
+        return Entry(exit_code=0, stdout='', stderr='')
+    entries, missing = timing.close_tool_dependencies(
+        [timing.wheel_metadata(root)], tmp_path, ['py3-none-any'], sandbox_markers(),
+        tmp_path / 'site', install)
+    assert calls == [expected] and not missing
+    assert entries[0]['required_spec'] == '<2'
+
+
+def test_copy_runtime_package_handles_distribution_import_names(tmp_path, monkeypatch):
+    import importlib.metadata
+    source = tmp_path / 'image'
+    (source / 'trove_classifiers').mkdir(parents=True)
+    (source / 'trove_classifiers/__init__.py').write_text('')
+    (source / 'trove_classifiers-1.dist-info').mkdir()
+    (source / 'trove_classifiers-1.dist-info/METADATA').write_text('Name: trove-classifiers')
+    files = [importlib.metadata.PackagePath(str(p.relative_to(source)))
+             for p in source.rglob('*') if p.is_file()]
+    monkeypatch.setattr(importlib.metadata, 'distribution', lambda name: Entry(
+        version='1', files=files, locate_file=lambda path: source / path))
+    dest = tmp_path / 'site'
+    assert timing.copy_runtime_package('trove-classifiers', dest).startswith('runtime-site-packages:')
+    assert (dest / 'trove_classifiers/__init__.py').exists()
+    files.append(importlib.metadata.PackagePath('native.so'))
+    assert timing.copy_runtime_package('trove-classifiers', dest) == 'missing'
+'''
+open(p,'w').write(s)
+PY
+/home/ubuntu/gemma-local/venv/bin/python -c 'import sys; sys.path.append(\"/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages\"); import pytest; raise SystemExit(pytest.main([\"-q\", \"eval/tests/test_agent_timing.py\"]))'" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 301ms:
+...................                                                      [100%]
+19 passed in 0.21s
+
+exec
+/bin/bash -lc 'git diff --stat && git diff -- eval/kaggle/agent_timing.py' in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+ eval/kaggle/agent_timing.py                  | 126 ++++-
+ eval/tests/test_agent_timing.py              | 114 ++++-
+ results/plan003_kernel_setup_acceptance.json | 723 +++++++++++++++++++++++++--
+ 3 files changed, 903 insertions(+), 60 deletions(-)
+diff --git a/eval/kaggle/agent_timing.py b/eval/kaggle/agent_timing.py
+index e7d3f52..8d29f78 100644
+--- a/eval/kaggle/agent_timing.py
++++ b/eval/kaggle/agent_timing.py
+@@ -92,13 +92,15 @@ def setup_command(repo, fast_path=True):
+             ('--fast-path ' if fast_path else '') + shlex.quote(repo))
+ 
+ 
+-def compatible_wheels(wheels, tags):
++def compatible_wheels(wheels, tags, requirement=None):
+     """Highest version per distribution, with sandbox PEP 425 tags (never host tags)."""
+     from packaging.utils import parse_wheel_filename
+     rank = {tag: i for i, tag in enumerate(tags)}
+     selected = {}
+     for path in sorted(Path(wheels).glob('*.whl')):
+         name, version, build, wheel_tags = parse_wheel_filename(path.name)
++        if requirement is not None and (name != requirement.name or version not in requirement.specifier):
++            continue
+         matches = [rank[str(tag)] for tag in wheel_tags if str(tag) in rank]
+         if not matches:
+             continue
+@@ -108,7 +110,7 @@ def compatible_wheels(wheels, tags):
+     return {name: item[1] for name, item in selected.items()}
+ 
+ 
+-def setup_step(current, name, action):
++def setup_step(current, name, action, *, fatal=True):
+     """Time setup steps and retain bounded output plus retry counts."""
+     start = time.perf_counter()
+     row = dict(step=name, start_offset_s=round(start-current['started'], 6),
+@@ -128,7 +130,7 @@ def setup_step(current, name, action):
+         raise
+     finally:
+         row['duration_s'] = round(time.perf_counter()-start, 6)
+-        if row['rc'] != 0:
++        if fatal and row['rc'] != 0:
+             current['setup_failed'] = True
+ 
+ 
+@@ -154,11 +156,13 @@ def copy_runtime_package(name, destination):
+         return 'missing'
+     if name == 'pytest-timeout' and dist.version != '2.1.0':
+         return 'missing'
+-    module = 'pytest_timeout' if name == 'pytest-timeout' else name
+-    files = [p for p in dist.files or [] if p.parts[0] in (module, module + '.py')
+-             or p.parts[0].endswith('.dist-info')]
+-    if not files or any(str(p).endswith(('.so', '.pyd')) for p in files):
++    # Distribution names need not match import names (trove-classifiers, PyYAML).
++    files = list(dist.files or [])
++    if (not files or not any(not p.parts[0].endswith('.dist-info') for p in files)
++            or any(str(p).endswith(('.so', '.pyd', '.dll', '.dylib')) for p in files)):
+         return 'missing'
++    files = [p for p in files if '..' not in p.parts and not p.is_absolute()
++             and not p.parts[0].endswith('.data')]
+     for entry in files:
+         target = destination / entry
+         target.parent.mkdir(parents=True, exist_ok=True)
+@@ -166,6 +170,86 @@ def copy_runtime_package(name, destination):
+     return 'runtime-site-packages:' + str(dist.locate_file(''))
+ 
+ 
++def wheel_metadata(path):
++    from email.parser import BytesParser
++    import zipfile
++    with zipfile.ZipFile(path) as archive:
++        name = next(n for n in archive.namelist() if n.endswith('.dist-info/METADATA'))
++        return BytesParser().parsebytes(archive.read(name))
++
++
++def close_tool_dependencies(roots, wheels, tags, environment, destination, install_wheel):
++    """Walk runtime requirements only, using sandbox markers and no pip resolver.
++
++    Existing sandbox metadata describes base wheels and copied tools. Each requirement
++    edge is checked, while each installed distribution/version is expanded only once.
++    Missing edges remain diagnostic and never prevent installing the tools themselves.
++    """
++    from importlib.metadata import distributions, distribution, PackageNotFoundError
++    from packaging.requirements import Requirement
++    from packaging.utils import canonicalize_name
++    installed = {canonicalize_name(d.metadata['Name']): d.metadata
++                 for d in distributions(path=[str(destination)])}
++    queue = list(roots)
++    installed.update({canonicalize_name(m['Name']): m for m in queue})
++    sources = {name: 'runtime-site-packages:' + str(destination) for name in installed}
++    for path in compatible_wheels(wheels, tags).values():
++        from packaging.utils import parse_wheel_filename
++        name, version, _, _ = parse_wheel_filename(path.name)
++        if name in installed and installed[name]['Version'] == str(version):
++            sources[name] = str(path)
++    visited, entries, missing = set(), [], []
++    while queue:
++        metadata = queue.pop(0)
++        key = (canonicalize_name(metadata['Name']), metadata['Version'])
++        if key in visited:
++            continue
++        visited.add(key)
++        for raw in metadata.get_all('Requires-Dist', []):
++            req = Requirement(raw)
++            if req.marker and not req.marker.evaluate(dict(environment, extra='')):
++                continue
++            name = canonicalize_name(req.name)
++            req.name = name
++            current = installed.get(name)
++            row = dict(name=name, required_spec=str(req.specifier), requirement=raw,
++                       source='missing', version_installed=None)
++            if current is not None and current['Version'] in req.specifier:
++                row.update(source=sources.get(name, 'sandbox metadata'),
++                           version_installed=current['Version'])
++            else:
++                candidate = compatible_wheels(wheels, tags, req).get(name)
++                current = None
++                if candidate:
++                    result = install_wheel(candidate)
++                    row['rc'] = result.exit_code
++                    for field in ('stdout', 'stderr'):
++                        row[field] = (getattr(result, field, '') or '').encode()[-2048:].decode(errors='ignore')
++                    if result.exit_code == 0:
++                        current = wheel_metadata(candidate)
++                        row['source'] = str(candidate)
++                else:
++                    try:
++                        runtime = distribution(name)
++                    except PackageNotFoundError:
++                        runtime = None
++                    if runtime is not None and runtime.version in req.specifier:
++                        source = copy_runtime_package(name, destination)
++                        if source != 'missing':
++                            current = runtime.metadata
++                            row['source'] = source
++                if current is not None:
++                    installed[name] = current
++                    sources[name] = row['source']
++                    row['version_installed'] = current['Version']
++            entries.append(row)
++            if current is not None:
++                queue.append(current)
++            elif name not in missing:
++                missing.append(name)
++    return entries, missing
++
++
+ # Capture setup.py's otherwise discarded subprocess output without changing setup.py.
+ # Write after EVERY call so an outer timeout still leaves completed calls visible.
+ SETUP_OBSERVER = r'''import json, runpy, subprocess, sys, time
+@@ -261,7 +345,9 @@ def patch_subprocess_deps(data_dir, state=None):
+             if result.exit_code != 0:
+                 raise RuntimeError('Sandbox pip bootstrap failed')
+             probe = ("import sys,json;from pip._vendor.packaging.tags import sys_tags;"
+-                     "print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()]}))")
++                     "from pip._vendor.packaging.markers import default_environment;"
++                     "print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()],"
++                     "'environment':default_environment()}))")
+             result = setup_step(current, 'interpreter_probe', lambda: docker.exec(
+                 container_id, 'python3 -c ' + shlex.quote(probe), timeout=30))
+             if result.exit_code != 0:
+@@ -291,6 +377,8 @@ def patch_subprocess_deps(data_dir, state=None):
+             def timeout_source():
+                 source = selected.get('pytest-timeout')
+                 current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
++                if current['setup_calls'][-1]['source'] == 'missing':
++                    raise RuntimeError('No offline pytest-timeout 2.1.0 source available')
+             setup_step(current, 'pytest_timeout_source', timeout_source)
+             def install_tools():
+                 for path in selected.values():
+@@ -298,11 +386,29 @@ def patch_subprocess_deps(data_dir, state=None):
+                 tools = ['/wheels/' + selected[n].name for n in SCORER_TOOLS
+                          if n in selected and n != 'pip']
+                 return docker.exec(container_id,
+-                    'python3 -m pip install --ignore-installed --no-index --find-links=/wheels ' +
++                    'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
+                     ' '.join(shlex.quote(n) for n in tools), timeout=60)
+             result = setup_step(current, 'tool_install', install_tools)
+             if result.exit_code != 0:
+                 raise RuntimeError('Offline scorer tool installation failed')
++            def tool_deps():
++                from importlib.metadata import distributions
++                roots = [wheel_metadata(selected[n]) for n in SCORER_TOOLS if n in selected]
++                roots.extend(d.metadata for d in distributions(path=[str(sp)])
++                             if d.metadata['Name'].lower() in ('pip', 'pytest-timeout')
++                             and d.metadata['Name'].lower() not in selected)
++                def install_dependency(path):
++                    docker.copy_to(container_id, path, '/wheels/' + path.name)
++                    return docker.exec(container_id,
++                        'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
++                        shlex.quote('/wheels/' + path.name), timeout=60)
++                entries, missing = close_tool_dependencies(
++                    roots, wheels, identity['tags'], identity['environment'], sp, install_dependency)
++                current['setup_calls'][-1]['dependencies'] = entries
++                current['missing_tool_deps'] = missing
++            setup_step(current, 'tool_deps', tool_deps)
++            setup_step(current, 'pip_check', lambda: docker.exec(
++                container_id, 'python3 -m pip check', timeout=30), fatal=False)
+         def run_setup():
+             docker.copy_to(container_id, setup, '/tmp/setup.py')
+             # All observer files are scratch files, never workspace patch inputs.
+@@ -519,6 +625,7 @@ async def evaluate(config, journal, started, caps, totals):
+               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+                 wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+                 setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
++                missing_tool_deps=times.get('missing_tool_deps', []),
+                 setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                 editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
+                 llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
+@@ -530,6 +637,7 @@ async def evaluate(config, journal, started, caps, totals):
+                 append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+                                      wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+                                      setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
++                missing_tool_deps=times.get('missing_tool_deps', []),
+                 setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                 editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
+             raw = WORK / 'runs' / iid
+
+exec
+/bin/bash -lc "/home/ubuntu/gemma-local/venv/bin/python -c 'import sys; sys.path.append(\"/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages\"); import pytest; raise SystemExit(pytest.main([\"-q\", \"eval/tests\"]))'" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+codex
+The focused offline tests pass. The new checks cover sandbox markers, skipped extras, wheel preference, runtime copies, missing dependencies, and cycles.
+
+The acceptance run is blocked by `bwrap`: it cannot create the network namespace socket in this sandbox. I wrote that result to `/tmp` and preserved the existing acceptance file. The full `eval/tests` suite is running.
+ exited 1 in 16844ms:
+............................s.....................................................F......................................................... [ 30%]
+........................................................................ [ 46%]
+........................................................................ [ 62%]
+........................................................................ [ 78%]
+...........................................................s............ [ 94%]
+.............ss...........                                               [100%]
+=================================== FAILURES ===================================
+________________ test_memguard_kills_job_tree_and_spares_dummy _________________
+
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-48/test_memguard_kills_job_tree_a0')
+
+    def test_memguard_kills_job_tree_and_spares_dummy(tmp_path):
+        marker = "GEMMA_MGTEST_" + uuid.uuid4().hex[:8]
+        root = tmp_path / "jobcwd"; root.mkdir()
+        rcfile = tmp_path / "rc"; log = tmp_path / "memguard.log"
+        env_clean = {k: v for k, v in os.environ.items() if not k.startswith("GEMMA_MGTEST_")}
+    
+        dummy = subprocess.Popen([sys.executable, "-c", ALLOC], cwd="/", env=env_clean)
+        job = subprocess.Popen(
+            ["bash", "-c", f'{sys.executable} -c "$CHILD_SRC"; echo $? > {rcfile}'],
+            cwd=root, env={**env_clean, marker: "test", "CHILD_SRC": CHILD})
+        mg = None
+        try:
+            time.sleep(3.0)  # dummy reaches ~1.2G; job grandchild is ramping
+            pids = [job.pid] + tree(job.pid)
+            assert len(pids) >= 3, f"synthetic tree not built: {pids}"
+            mg = subprocess.Popen(
+                [sys.executable, str(MG), "--marker", marker, "--max-total", "0.8", "--min-available", "0",
+                 "--unmarked-rss", "0.5", "--interval", "0.5", "--roots", str(tmp_path),
+                 "--log", str(log), "--no-mail"], env=env_clean,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = time.time() + 30
+            while time.time() < deadline and "survivors=" not in (log.read_text() if log.exists() else ""):
+                time.sleep(0.5)
+            text = log.read_text()
+            assert "KILL" in text and "survivors=[]" in text, text
+            job.wait(timeout=10)
+            for p in pids:
+                assert not alive(p), f"survivor {p}"
+            assert rcfile.read_text().strip() == "137"
+            assert alive(dummy.pid), "dummy non-target was killed"
+>           assert Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip() == "0"
+E           AssertionError: assert '1000' == '0'
+E             
+E             - 0
+E             + 1000
+
+eval/tests/test_memguard.py:82: AssertionError
+----------------------------- Captured stderr call -----------------------------
+bash: line 1:    56 Killed                  /home/ubuntu/gemma-local/venv/bin/python -c "$CHILD_SRC"
+=========================== short test summary info ============================
+FAILED eval/tests/test_memguard.py::test_memguard_kills_job_tree_and_spares_dummy
+1 failed, 449 passed, 4 skipped, 4 subtests passed in 15.28s
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+p='eval/kaggle/agent_timing.py'
+s=open(p).read().replace(\"        current['setup_failed'] = True\\n        raise\\n    finally:\",\"        if fatal:\\n            current['setup_failed'] = True\\n            raise\\n    finally:\",1)
+s=s.replace(\"    if (not files or not any(not p.parts[0].endswith('.dist-info') for p in files)\\n            or any(str(p).endswith(('.so', '.pyd', '.dll', '.dylib')) for p in files)):\",\"    if not files or any(str(p).endswith(('.so', '.pyd', '.dll', '.dylib')) for p in files):\")
+s=s.replace(\"             and not p.parts[0].endswith('.data')]\\n    for entry in files:\",\"             and not p.parts[0].endswith('.data')]\\n    if not any(str(p).endswith('.py') and not p.parts[0].endswith('.dist-info') for p in files):\\n        return 'missing'\\n    for entry in files:\")
+s=s.replace('    from packaging.utils import canonicalize_name\\n    installed', '    from packaging.utils import canonicalize_name, parse_wheel_filename\\n    installed').replace('        from packaging.utils import parse_wheel_filename\\n        name, version', '        name, version')
+open(p,'w').write(s)
+p='eval/tests/test_agent_timing.py'
+s=open(p).read()+'''
+
+def test_diagnostic_step_exception_is_nonfatal():
+    current = dict(started=timing.time.perf_counter(), setup_calls=[], setup_failed=False)
+    def fail():
+        raise TimeoutError('private output')
+    timing.setup_step(current, 'pip_check', fail, fatal=False)
+    assert not current['setup_failed']
+    assert current['setup_calls'][0]['rc'] == -1
+    assert current['setup_calls'][0]['stderr'] == 'TimeoutError'
+'''
+open(p,'w').write(s)
+PY" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+exec
+/bin/bash -lc "cat /proc/self/oom_score_adj && sed -n '1,120p' eval/tests/test_memguard.py && git diff --check" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+1000
+"""bin/memguard end-to-end test (dec 021 item 1d). Run only under bin/job (allocates ~2.5G peak).
+
+A synthetic job (bash wrapper -> python child -> python grandchild that allocates in 200M steps)
+must be killed with no survivors, and the wrapper must record exit 137. A dummy non-target process
+at the same RSS (no marker, cwd outside --roots) must survive with its oom_score_adj untouched.
+Uses a private marker so neither this test's own bin/job nor the real memguard is involved.
+"""
+import os, subprocess, sys, time, uuid
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+MG = REPO / "bin" / "memguard"
+STEP = 200 * 1024 * 1024
+
+ALLOC = f"""
+import time
+held = []
+for _ in range(6):            # up to 1.2G, touched (non-zero) so it is resident
+    held.append(b"\\x01" * {STEP})
+    time.sleep(0.4)
+time.sleep(120)
+"""
+
+CHILD = f"""
+import subprocess, sys, time
+subprocess.Popen([sys.executable, "-c", {ALLOC!r}])
+time.sleep(120)
+"""
+
+
+def alive(pid):
+    try:
+        st = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return st.rsplit(") ", 1)[-1][:1] != "Z"
+
+
+def tree(pid):
+    out, stack = [], [pid]
+    while stack:
+        p = stack.pop()
+        try:
+            kids = Path(f"/proc/{p}/task/{p}/children").read_text().split()
+        except OSError:
+            kids = []
+        for k in map(int, kids):
+            out.append(k); stack.append(k)
+    return out
+
+
+def test_memguard_kills_job_tree_and_spares_dummy(tmp_path):
+    marker = "GEMMA_MGTEST_" + uuid.uuid4().hex[:8]
+    root = tmp_path / "jobcwd"; root.mkdir()
+    rcfile = tmp_path / "rc"; log = tmp_path / "memguard.log"
+    env_clean = {k: v for k, v in os.environ.items() if not k.startswith("GEMMA_MGTEST_")}
+
+    dummy = subprocess.Popen([sys.executable, "-c", ALLOC], cwd="/", env=env_clean)
+    job = subprocess.Popen(
+        ["bash", "-c", f'{sys.executable} -c "$CHILD_SRC"; echo $? > {rcfile}'],
+        cwd=root, env={**env_clean, marker: "test", "CHILD_SRC": CHILD})
+    mg = None
+    try:
+        time.sleep(3.0)  # dummy reaches ~1.2G; job grandchild is ramping
+        pids = [job.pid] + tree(job.pid)
+        assert len(pids) >= 3, f"synthetic tree not built: {pids}"
+        mg = subprocess.Popen(
+            [sys.executable, str(MG), "--marker", marker, "--max-total", "0.8", "--min-available", "0",
+             "--unmarked-rss", "0.5", "--interval", "0.5", "--roots", str(tmp_path),
+             "--log", str(log), "--no-mail"], env=env_clean,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + 30
+        while time.time() < deadline and "survivors=" not in (log.read_text() if log.exists() else ""):
+            time.sleep(0.5)
+        text = log.read_text()
+        assert "KILL" in text and "survivors=[]" in text, text
+        job.wait(timeout=10)
+        for p in pids:
+            assert not alive(p), f"survivor {p}"
+        assert rcfile.read_text().strip() == "137"
+        assert alive(dummy.pid), "dummy non-target was killed"
+        assert Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip() == "0"
+        assert text.count("KILL") == 1, text
+    finally:
+        for p in ([mg] if mg else []) + [dummy, job]:
+            if p.poll() is None:
+                p.kill()
+        for p in [job.pid] + tree(job.pid):
+            try:
+                os.kill(p, 9)
+            except OSError:
+                pass
+
+
+def test_job_name_parses_bin_job_wrapper():
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("memguard", str(MG))
+    spec = importlib.util.spec_from_loader("memguard", loader)
+    mg = importlib.util.module_from_spec(spec); loader.exec_module(mg)
+    p = subprocess.Popen(["bash", "-c", "sleep 5; true # ops/jobs/", "_", "myjob", "x"])
+    try:
+        time.sleep(0.3)
+        assert mg.job_name(p.pid) == "myjob"
+        assert mg.job_name(os.getpid()) is None
+    finally:
+        p.kill()
+
+exec
+/bin/bash -lc "/home/ubuntu/gemma-local/venv/bin/python -c 'import sys; sys.path.append(\"/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages\"); import pytest; raise SystemExit(pytest.main([\"-q\", \"eval/tests/test_agent_timing.py\"]))'" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 303ms:
+....................                                                     [100%]
+20 passed in 0.22s
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+p='eval/kaggle/agent_timing.py'
+s=open(p).read().replace('    from packaging.utils import parse_wheel_filename\\n    rank', '    from packaging.utils import canonicalize_name, parse_wheel_filename\\n    rank').replace('(name "'!= requirement.name or version not in requirement.specifier)'"', '(name "'!= canonicalize_name(requirement.name) or version not in requirement.specifier)'"').replace('            req.name = name\\n', '')
+open(p,'w').write(s)
+p='eval/tests/test_agent_timing.py'
+s=open(p).read()+'''
+
+def test_dependency_closure_expands_already_installed_base_wheel(tmp_path):
+    import zipfile
+    root = make_wheel(tmp_path, 'root', requires=['base-package>=1'])
+    base = make_wheel(tmp_path, 'base-package', requires=['missing-child'])
+    site = tmp_path / 'site'
+    with zipfile.ZipFile(base) as archive:
+        archive.extractall(site)
+    entries, missing = timing.close_tool_dependencies(
+        [timing.wheel_metadata(root)], tmp_path, ['py3-none-any'], sandbox_markers(), site,
+        lambda path: pytest.fail('satisfied base wheel should not be installed again'))
+    assert entries[0]['source'] == str(base)
+    assert entries[0]['version_installed'] == '1.0'
+    assert missing == ['missing-child']
+'''
+open(p,'w').write(s)
+PY
+/home/ubuntu/gemma-local/venv/bin/python -c 'import sys; sys.path.append(\"/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages\"); import pytest; raise SystemExit(pytest.main([\"-q\", \"eval/tests\", \"-k\", \"not test_memguard_kills_job_tree_and_spares_dummy\"]))'" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 10406ms:
+..............................s............................................................................................................. [ 30%]
+........................................................................ [ 46%]
+........................................................................ [ 62%]
+........................................................................ [ 78%]
+............................................................s........... [ 94%]
+..............ss...........                                              [100%]
+451 passed, 4 skipped, 1 deselected, 4 subtests passed in 8.66s
+
+codex
+The full suite had one unrelated failure: the memguard test expects inherited `oom_score_adj=0`, but this sandbox starts processes at `1000`. It otherwise reported 449 passed and 4 skipped.
+
+I also made `pip_check` exceptions non-fatal and added coverage for dependencies already installed by the base extraction. I’m rerunning the suite with only the environment-dependent memguard test excluded.
+exec
+/bin/bash -lc "git diff --check && git status --short && sed -n '95,260p' eval/kaggle/agent_timing.py" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+ M eval/kaggle/agent_timing.py
+ M eval/tests/test_agent_timing.py
+ M results/plan003_kernel_setup_acceptance.json
+def compatible_wheels(wheels, tags, requirement=None):
+    """Highest version per distribution, with sandbox PEP 425 tags (never host tags)."""
+    from packaging.utils import canonicalize_name, parse_wheel_filename
+    rank = {tag: i for i, tag in enumerate(tags)}
+    selected = {}
+    for path in sorted(Path(wheels).glob('*.whl')):
+        name, version, build, wheel_tags = parse_wheel_filename(path.name)
+        if requirement is not None and (name != canonicalize_name(requirement.name) or version not in requirement.specifier):
+            continue
+        matches = [rank[str(tag)] for tag in wheel_tags if str(tag) in rank]
+        if not matches:
+            continue
+        score = (version, -min(matches), build)
+        if name not in selected or score > selected[name][0]:
+            selected[name] = (score, path)
+    return {name: item[1] for name, item in selected.items()}
+
+
+def setup_step(current, name, action, *, fatal=True):
+    """Time setup steps and retain bounded output plus retry counts."""
+    start = time.perf_counter()
+    row = dict(step=name, start_offset_s=round(start-current['started'], 6),
+               duration_s=0.0, rc=None, stdout='', stderr='', retrying_lines=0)
+    current['setup_calls'].append(row)
+    try:
+        result = action()
+        row['rc'] = getattr(result, 'exit_code', getattr(result, 'returncode', 0))
+        for field in ('stdout', 'stderr'):
+            value = getattr(result, field, '') or ''
+            row['retrying_lines'] += sum('Retrying' in line for line in value.splitlines())
+            row[field] = value.encode('utf-8', errors='replace')[-2048:].decode('utf-8', errors='ignore')
+        return result
+    except Exception as exc:
+        row.update(rc=-1, stderr=type(exc).__name__)
+        if fatal:
+            current['setup_failed'] = True
+            raise
+    finally:
+        row['duration_s'] = round(time.perf_counter()-start, 6)
+        if fatal and row['rc'] != 0:
+            current['setup_failed'] = True
+
+
+def fallback_wheel(wheels, package):
+    """Prefer the wheelhouse, then the running interpreter's ensurepip bundle."""
+    from packaging.utils import parse_wheel_filename
+    found = list(Path(wheels).glob(package + '-*-py3-none-any.whl'))
+    if not found and package == 'pip':
+        try:
+            import ensurepip
+            found = list((Path(ensurepip.__file__).parent / '_bundled').glob('pip-*.whl'))
+        except ImportError:
+            pass
+    return max(found, key=lambda p: parse_wheel_filename(p.name)[1]) if found else None
+
+
+def copy_runtime_package(name, destination):
+    """Copy only the pure Python image package and metadata; no host path injection."""
+    from importlib.metadata import distribution, PackageNotFoundError
+    try:
+        dist = distribution(name)
+    except PackageNotFoundError:
+        return 'missing'
+    if name == 'pytest-timeout' and dist.version != '2.1.0':
+        return 'missing'
+    # Distribution names need not match import names (trove-classifiers, PyYAML).
+    files = list(dist.files or [])
+    if not files or any(str(p).endswith(('.so', '.pyd', '.dll', '.dylib')) for p in files):
+        return 'missing'
+    files = [p for p in files if '..' not in p.parts and not p.is_absolute()
+             and not p.parts[0].endswith('.data')]
+    if not any(str(p).endswith('.py') and not p.parts[0].endswith('.dist-info') for p in files):
+        return 'missing'
+    for entry in files:
+        target = destination / entry
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(dist.locate_file(entry), target)
+    return 'runtime-site-packages:' + str(dist.locate_file(''))
+
+
+def wheel_metadata(path):
+    from email.parser import BytesParser
+    import zipfile
+    with zipfile.ZipFile(path) as archive:
+        name = next(n for n in archive.namelist() if n.endswith('.dist-info/METADATA'))
+        return BytesParser().parsebytes(archive.read(name))
+
+
+def close_tool_dependencies(roots, wheels, tags, environment, destination, install_wheel):
+    """Walk runtime requirements only, using sandbox markers and no pip resolver.
+
+    Existing sandbox metadata describes base wheels and copied tools. Each requirement
+    edge is checked, while each installed distribution/version is expanded only once.
+    Missing edges remain diagnostic and never prevent installing the tools themselves.
+    """
+    from importlib.metadata import distributions, distribution, PackageNotFoundError
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name, parse_wheel_filename
+    installed = {canonicalize_name(d.metadata['Name']): d.metadata
+                 for d in distributions(path=[str(destination)])}
+    queue = list(roots)
+    installed.update({canonicalize_name(m['Name']): m for m in queue})
+    sources = {name: 'runtime-site-packages:' + str(destination) for name in installed}
+    for path in compatible_wheels(wheels, tags).values():
+        name, version, _, _ = parse_wheel_filename(path.name)
+        if name in installed and installed[name]['Version'] == str(version):
+            sources[name] = str(path)
+    visited, entries, missing = set(), [], []
+    while queue:
+        metadata = queue.pop(0)
+        key = (canonicalize_name(metadata['Name']), metadata['Version'])
+        if key in visited:
+            continue
+        visited.add(key)
+        for raw in metadata.get_all('Requires-Dist', []):
+            req = Requirement(raw)
+            if req.marker and not req.marker.evaluate(dict(environment, extra='')):
+                continue
+            name = canonicalize_name(req.name)
+            current = installed.get(name)
+            row = dict(name=name, required_spec=str(req.specifier), requirement=raw,
+                       source='missing', version_installed=None)
+            if current is not None and current['Version'] in req.specifier:
+                row.update(source=sources.get(name, 'sandbox metadata'),
+                           version_installed=current['Version'])
+            else:
+                candidate = compatible_wheels(wheels, tags, req).get(name)
+                current = None
+                if candidate:
+                    result = install_wheel(candidate)
+                    row['rc'] = result.exit_code
+                    for field in ('stdout', 'stderr'):
+                        row[field] = (getattr(result, field, '') or '').encode()[-2048:].decode(errors='ignore')
+                    if result.exit_code == 0:
+                        current = wheel_metadata(candidate)
+                        row['source'] = str(candidate)
+                else:
+                    try:
+                        runtime = distribution(name)
+                    except PackageNotFoundError:
+                        runtime = None
+                    if runtime is not None and runtime.version in req.specifier:
+                        source = copy_runtime_package(name, destination)
+                        if source != 'missing':
+                            current = runtime.metadata
+                            row['source'] = source
+                if current is not None:
+                    installed[name] = current
+                    sources[name] = row['source']
+                    row['version_installed'] = current['Version']
+            entries.append(row)
+            if current is not None:
+                queue.append(current)
+            elif name not in missing:
+                missing.append(name)
+    return entries, missing
+
+
+# Capture setup.py's otherwise discarded subprocess output without changing setup.py.
+# Write after EVERY call so an outer timeout still leaves completed calls visible.
+SETUP_OBSERVER = r'''import json, runpy, subprocess, sys, time
+from pathlib import Path
+original = subprocess.run
+calls = []
+log = Path(__file__).with_name('setup_subprocesses.json')
+log.write_text('[]')
+
+codex
+Implemented Round 3:
+
+- Added offline `--no-deps` installs, recursive dependency closure using sandbox markers, runtime copy fallback, and `missing_tool_deps` logging.
+- Added non-fatal `pip_check` with bounded output.
+- Preserved `SETUP_FIX=0`, single-file staging, and image pin.
+
+Tests: 451 passed, 4 skipped, 1 deselected. The excluded memguard test failed because this sandbox inherits `oom_score_adj=1000`; it expects `0`.
+
+Acceptance remains unverified: `bwrap` was blocked creating the network namespace. Existing acceptance results were preserved. No commit created.
+tokens used
+50,623

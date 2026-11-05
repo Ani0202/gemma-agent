@@ -13,6 +13,9 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
+
+from eval import proctree
 
 command_metrics = ContextVar('command_metrics', default=None)
 gold_artifact_dir = ContextVar('gold_artifact_dir', default=None)
@@ -89,6 +92,39 @@ def runtime_ro_paths(workspace, ro_paths):
     return paths
 
 
+def execute_limited(command, cwd, env, timeout=300, *, shell=None,
+                    max_output_chars=10 * 1024 * 1024):
+    """Installed executor contract, with host process-tree limits and cleanup."""
+    from adk_eval_core.errors import EvalCoreError
+    from adk_eval_core.sandbox.base import ExecutionResult
+
+    start = time.perf_counter()
+    try:
+        # Fresh interpreters give threaded GOLD_CONCURRENCY workers separate
+        # subreaper/adoption domains, without forking a multithreaded process.
+        worker = subprocess.run(
+            [sys.executable, '-c', proctree.supervisor_source() + '\nsupervisor_main()\n'],
+            input=json.dumps(dict(command=command, cwd=str(cwd), env=dict(env),
+                                 timeout=timeout, shell=shell,
+                                 max_output_chars=max_output_chars)),
+            capture_output=True, text=True)
+        if worker.returncode:
+            raise RuntimeError('Sandbox supervisor failed: ' + worker.stderr)
+        result = json.loads(worker.stdout)
+        observed = result.pop('metrics')
+        metrics = command_metrics.get()
+        if metrics is not None:
+            metrics['peak_rss_bytes'] = max(metrics.get('peak_rss_bytes', 0),
+                                            observed.get('peak_rss_bytes', 0))
+            for key in ('mem_kills', 'orphan_kills'):
+                metrics[key] = metrics.get(key, 0) + observed.get(key, 0)
+        result['duration_seconds'] = round(time.perf_counter() - start, 3)
+        return ExecutionResult(**result)
+    except (RuntimeError, OSError, ValueError, EvalCoreError) as exc:
+        return ExecutionResult(status='error', stdout='', stderr=str(exc), exit_code=-1,
+                               duration_seconds=round(time.perf_counter() - start, 3))
+
+
 def apply_isolation(hidden_paths, ro_paths):
     """Wrap the module executor, retaining the installed manager's translation/env.
 
@@ -108,7 +144,7 @@ def apply_isolation(hidden_paths, ro_paths):
                 raise RuntimeError('Unsupported harness subprocess command')
             # The harness's fallback wheel search doesn't include custom data dirs.
             command = bwrap_argv(command, cwd, hidden_paths, runtime_ro_paths(cwd, ro_paths))
-        result = original(command=command, cwd=cwd, env=env, **kwargs)
+        result = execute_limited(command=command, cwd=cwd, env=env, **kwargs)
         metrics = command_metrics.get()
         if metrics is not None and (result.status == 'timeout' or result.exit_code == 124):
             metrics['cmd_timeouts'] = metrics.get('cmd_timeouts', 0) + 1

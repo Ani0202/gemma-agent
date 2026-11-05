@@ -136,7 +136,7 @@ def test_executor_wraps_translated_commands_and_counts_timeouts(tmp_path, monkey
     def execute(**kwargs):
         seen.append(kwargs)
         return SimpleNamespace(status='timeout', exit_code=124)
-    monkeypatch.setattr(sb, 'execute_subprocess_command', execute)
+    monkeypatch.setattr(env, 'execute_limited', execute)
     monkeypatch.setattr(env, 'runtime_ro_paths', lambda *args: [Path('/opt/python')])
     env.apply_isolation(['/home/ubuntu'], [])
     state = {}
@@ -233,7 +233,14 @@ def test_shared_module_embedded_in_kernel(tmp_path):
     result = subprocess.run([sys.executable, '-I', '-c',
         "import runpy, sys; m=runpy.run_path(sys.argv[1]); "
         "assert m['setup_scorer_env'].__module__ == 'sandbox_env'; "
-        "assert m['patch_subprocess_deps'].__globals__ is m['setup_scorer_env'].__globals__",
+        "assert m['patch_subprocess_deps'].__globals__ is m['setup_scorer_env'].__globals__; "
+        "import _gemma_proctree as p, subprocess, json; "
+        "r=subprocess.run([sys.executable, '-I', '-c', p.supervisor_source() + '\\nsupervisor_main()'], "
+        "input=json.dumps(dict(command=['/bin/echo', 'staged'], cwd='/', env={})), "
+        "capture_output=True, text=True); "
+        "assert r.returncode == 0, r.stderr; "
+        "result=json.loads(r.stdout); "
+        "assert result['status'] == 'ok' and result['stdout'] == 'staged\\n', result",
         str(staged)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 

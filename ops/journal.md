@@ -129,3 +129,6 @@
 2026-11-05T18:34Z | kernel-setup-accept failed: SETUP_FIX=1 tool_install misses line-9 dep closure (pathspec/trove-classifiers/shellingham) in wheelhouse; SETUP_FIX=0 setup 3-6 s locally | worktree codex-kernel-setup-fix results/plan003_kernel_setup_acceptance.json
 2026-11-05T18:33Z | codex-kernel-setup-fix3 launched (--no-deps + dep closure, tool_deps/pip_check logging) | ops/codex/build-kernel-setup-fix3.spec
 2026-11-05T18:32Z | codex-memguard-fix3 done (b299167, 62/1 offline, 63 live per Codex); host livetest job memguard-fix3-livetest started | ops/codex/build-memguard-fix3.md
+2026-11-05T18:37Z | codex-kernel-setup-fix3 done (6cee0a1, 451 pass/4 skip; bwrap netns blocked in Codex) -> local acceptance job kernel-setup-accept3 | ops/codex/build-kernel-setup-fix3.md
+2026-11-05T18:38Z | review-sandbox-limits3: only BLOCKING = docs/ hunk out of scope -> merged eval/ only (02a883d..9d610b5) to main | ops/codex/review-20261105T182913.md
+2026-11-05T18:38Z | memguard-fix3-livetest green (63 passed live) -> review-memguard-fix3-light | ops/jobs/memguard-fix3-livetest.log

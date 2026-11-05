@@ -151,6 +151,17 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(row['exit_code'], 0)
         self.assertNotIn('SECRET', json.dumps(row))
         self.assertGreaterEqual(row['duration_seconds'], 0)
+        for key in ('peak_rss_bytes', 'mem_kills', 'orphan_kills'):
+            self.assertIs(type(row[key]), int)
+
+    def test_metrics_propagate_from_async_verifier(self):
+        async def verify(*args, **kwargs):
+            gold.command_metrics.get().update(peak_rss_bytes=123456, mem_kills=1, orphan_kills=2)
+            return dict(resolved=False, test_exit_code=137)
+        row = self.run_worker(verify)
+        self.assertEqual([row[k] for k in ('peak_rss_bytes', 'mem_kills', 'orphan_kills')],
+                         [123456, 1, 2])
+        self.assertIsNone(gold.command_metrics.get())
 
     def test_exception_text_never_copied_into_result(self):
         async def verify(*args, **kwargs):

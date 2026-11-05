@@ -20,7 +20,9 @@ os.environ['PYTEST_ADDOPTS'] = (os.environ.get('PYTEST_ADDOPTS', '') + ' -p no:l
 DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
 WORKING_DIR = Path('/kaggle/working')
 WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
-CONCURRENCY = 2
+CONCURRENCY = int(os.environ.get('GOLD_CONCURRENCY', '2'))
+if CONCURRENCY < 1:
+    raise ValueError('GOLD_CONCURRENCY must be positive')
 ONLY_IDS = None  # all tasks (diag ids list removed after local repro, cycle 37)
 
 
@@ -178,10 +180,10 @@ def choose_sandbox():
 # push.sh embeds this module here when staging the single-file Kaggle kernel.
 # BEGIN SHARED ENV IMPORT
 try:
-    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
+    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
+    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
 # END SHARED ENV IMPORT
 
 
@@ -239,6 +241,8 @@ async def verify_gold(task, patch, data_dir, sandbox, out_dir=None):
 def worker(args):
     """No stdout/stderr from this process is exposed by the coordinator."""
     logging.disable(logging.CRITICAL)
+    metrics = dict(peak_rss_bytes=0, mem_kills=0, orphan_kills=0)
+    metrics_token = command_metrics.set(metrics)
     start = time.monotonic()
     raw = next(t for t in load_inventory(args.data_dir) if t['instance_id'] == args.worker)
     row = dict(instance_id=raw['instance_id'], repo=raw['repo'], resolved=False,
@@ -282,6 +286,8 @@ def worker(args):
         # Location only (file:line:function), never messages or values.
         row['where'] = ' <- '.join(f'{Path(f.filename).name}:{f.lineno}:{f.name}'
                                    for f in reversed(traceback.extract_tb(exc.__traceback__)[-4:]))
+    command_metrics.reset(metrics_token)
+    row.update({key: int(metrics[key]) for key in ('peak_rss_bytes', 'mem_kills', 'orphan_kills')})
     row['duration_seconds'] = round(time.monotonic() - start, 3)
     args.result.write_text(json.dumps(row) + '\n', encoding='utf-8')
 
@@ -308,7 +314,8 @@ def run_one(task, data_dir, sandbox, allow_unsandboxed=False):
         except Exception as exc:
             error = f'Worker failure ({type(exc).__name__})'
     return dict(instance_id=task['instance_id'], repo=task['repo'], resolved=False,
-                exit_code=None, duration_seconds=round(time.monotonic() - start, 3),
+                exit_code=None, peak_rss_bytes=0, mem_kills=0, orphan_kills=0,
+                duration_seconds=round(time.monotonic() - start, 3),
                 error=error, sandbox=sandbox)
 
 
@@ -356,6 +363,7 @@ def main():
                 os.fsync(stream.fileno())
                 results[row['instance_id']] = row
                 print(f"Finished {len(results)}/{len(tasks)}: {row['instance_id']} "
+                      f"peak_rss_bytes={row.get('peak_rss_bytes', 0)} mem_kills={row.get('mem_kills', 0)} orphan_kills={row.get('orphan_kills', 0)} "
                       f"resolved={row['resolved']} exit_code={row['exit_code']} err={row.get('error')} where={row.get('where')} shape={row.get('shape')}", flush=True)
     summary = summarize(tasks, results)
     encoded = json.dumps(summary, indent=2, sort_keys=True) + '\n'
