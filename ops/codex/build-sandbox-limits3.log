@@ -865,3 +865,1909 @@ def test_threaded_supervisors_are_independent(tmp_path):
     assert fast_result.status == 'timeout'
     assert slow_result.status == 'ok' and slow_result.stdout == 'survived\n'
 
+exec
+/bin/bash -lc "ls -d .venv /tmp/*venv* 2>/dev/null; rg --files -g '*requirements*' -g '*pytest*' -g '*conftest*' -g '*lock*' -g 'AGENTS.md' eval; df -h . /tmp; command -v python pytest uv" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1       145G   57G   88G  40% /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+/dev/sda1       145G   57G   88G  40% /tmp
+/home/ubuntu/.local/bin/uv
+
+exec
+/bin/bash -lc "ls /usr/bin/python* /home/ubuntu/gemma-local/pyimg/bin/python*; rg -n 'def _internal_poll|def _try_wait|def _wait' /usr/lib/python3.*/subprocess.py; ls -a | head -25; rg -n 'peak_rss|RSS' docs/GOLD_CALIBRATION.md docs/EVAL_RUNNER_SPEC.md eval/*.py" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+ls: cannot access '/home/ubuntu/gemma-local/pyimg/bin/python*': No such file or directory
+/usr/bin/python3
+/usr/bin/python3-config
+/usr/bin/python3.12
+/usr/bin/python3.12-config
+1563:        def _internal_poll(self, _deadstate=None,
+1580:        def _wait(self, timeout):
+1973:        def _internal_poll(self, _deadstate=None, _waitpid=_waitpid,
+2008:        def _try_wait(self, wait_flags):
+2021:        def _wait(self, timeout):
+.
+..
+.agents
+.aws
+.claude
+.codex
+.git
+.gitignore
+.pytest_cache
+AGENTS.md
+CLAUDE.md
+DIRECTOR.md
+README.md
+SETUP.md
+bin
+bundles
+config
+config.env
+docs
+eval
+ops
+paper
+results
+setup_vm.sh
+eval/proctree.py:1:"""Linux process identities and RSS, restricted to our uid (stdlib only)."""
+eval/proctree.py:112:    metrics = dict(peak_rss_bytes=0, mem_kills=0, orphan_kills=0)
+eval/proctree.py:127:            # RLIMIT_AS is a backstop only: virtual space differs from RSS, and
+eval/proctree.py:228:        metrics['peak_rss_bytes'] = peak
+eval/sandbox_env.py:117:            metrics['peak_rss_bytes'] = max(metrics.get('peak_rss_bytes', 0),
+eval/sandbox_env.py:118:                                            observed.get('peak_rss_bytes', 0))
+
+codex
+The direct child is currently reaped inside `Popen.poll()` or `communicate()`, so changing only the orphan cleanup loop would still miss its rusage. I’ll capture rusage in both paths and add a test that forces polled RSS to zero. The memory kill threshold will continue to use only polled tree RSS.
+exec
+/bin/bash -lc "sed -n '1970,2075p' /usr/lib/python3.12/subprocess.py; ls /tmp; /usr/bin/python3 -m pytest --version; rg -n 'pytest|venv' SETUP.md bin/codex-build .gitignore" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+            else:
+                self.returncode = _waitstatus_to_exitcode(sts)
+
+        def _internal_poll(self, _deadstate=None, _waitpid=_waitpid,
+                _WNOHANG=_WNOHANG, _ECHILD=errno.ECHILD):
+            """Check if child process has terminated.  Returns returncode
+            attribute.
+
+            This method is called by __del__, so it cannot reference anything
+            outside of the local scope (nor can any methods it calls).
+
+            """
+            if self.returncode is None:
+                if not self._waitpid_lock.acquire(False):
+                    # Something else is busy calling waitpid.  Don't allow two
+                    # at once.  We know nothing yet.
+                    return None
+                try:
+                    if self.returncode is not None:
+                        return self.returncode  # Another thread waited.
+                    pid, sts = _waitpid(self.pid, _WNOHANG)
+                    if pid == self.pid:
+                        self._handle_exitstatus(sts)
+                except OSError as e:
+                    if _deadstate is not None:
+                        self.returncode = _deadstate
+                    elif e.errno == _ECHILD:
+                        # This happens if SIGCLD is set to be ignored or
+                        # waiting for child processes has otherwise been
+                        # disabled for our process.  This child is dead, we
+                        # can't get the status.
+                        # http://bugs.python.org/issue15756
+                        self.returncode = 0
+                finally:
+                    self._waitpid_lock.release()
+            return self.returncode
+
+
+        def _try_wait(self, wait_flags):
+            """All callers to this function MUST hold self._waitpid_lock."""
+            try:
+                (pid, sts) = os.waitpid(self.pid, wait_flags)
+            except ChildProcessError:
+                # This happens if SIGCLD is set to be ignored or waiting
+                # for child processes has otherwise been disabled for our
+                # process.  This child is dead, we can't get the status.
+                pid = self.pid
+                sts = 0
+            return (pid, sts)
+
+
+        def _wait(self, timeout):
+            """Internal implementation of wait() on POSIX."""
+            if self.returncode is not None:
+                return self.returncode
+
+            if timeout is not None:
+                endtime = _time() + timeout
+                # Enter a busy loop if we have a timeout.  This busy loop was
+                # cribbed from Lib/threading.py in Thread.wait() at r71065.
+                delay = 0.0005 # 500 us -> initial delay of 1 ms
+                while True:
+                    if self._waitpid_lock.acquire(False):
+                        try:
+                            if self.returncode is not None:
+                                break  # Another thread waited.
+                            (pid, sts) = self._try_wait(os.WNOHANG)
+                            assert pid == self.pid or pid == 0
+                            if pid == self.pid:
+                                self._handle_exitstatus(sts)
+                                break
+                        finally:
+                            self._waitpid_lock.release()
+                    remaining = self._remaining_time(endtime)
+                    if remaining <= 0:
+                        raise TimeoutExpired(self.args, timeout)
+                    delay = min(delay * 2, remaining, .05)
+                    time.sleep(delay)
+            else:
+                while self.returncode is None:
+                    with self._waitpid_lock:
+                        if self.returncode is not None:
+                            break  # Another thread waited.
+                        (pid, sts) = self._try_wait(0)
+                        # Check the pid and loop as waitpid has been known to
+                        # return 0 even without WNOHANG in odd situations.
+                        # http://bugs.python.org/issue14396.
+                        if pid == self.pid:
+                            self._handle_exitstatus(sts)
+            return self.returncode
+
+
+        def _communicate(self, input, endtime, orig_timeout):
+            if self.stdin and not self._communication_started:
+                # Flush stdio buffer.  This might block, if the user has
+                # been writing to .stdin in an uncontrolled fashion.
+                try:
+                    self.stdin.flush()
+                except BrokenPipeError:
+                    pass  # communicate() must ignore BrokenPipeError.
+                if not input:
+                    try:
+                        self.stdin.close()
+                    except BrokenPipeError:
+                        pass  # communicate() must ignore BrokenPipeError.
+
+cc-socks
+claude-1001
+codex-bwrap-synthetic-mount-targets-1001
+codex-daemon-1001
+gemma-sandbox-limits-tests.py
+memguard-fix-dry-run.log
+memguard-live-final-wnws0xkt
+memguard-live-rciumryo
+plan003-kernel-acceptance.json
+pytest-of-ubuntu
+rewrite_memguard.py
+rewrite_timing.py
+round2.py
+snap-private-tmp
+swegemma_sp_cache_v8
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-ModemManager.service-OEFLzB
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-etho-app.service-fGwNc1
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-polkit.service-Ig2nLs
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-systemd-logind.service-P50ZmG
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-systemd-resolved.service-V9cidO
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-systemd-timesyncd.service-udSMTt
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-unified-monitoring-agent.service-8eiWLF
+tmux-1001
+uv-8cd53785d5c5e8be.lock
+/usr/bin/python3: No module named pytest
+.gitignore:14:.venv/
+
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/proctree.py
+diff --git a/eval/proctree.py b/eval/proctree.py
+index 66e579a180e4776e9051274d2cfc191d98e4aa41..5ef190b350a13e81d335b2eac69b8cb91e96cc0c
+--- a/eval/proctree.py
++++ b/eval/proctree.py
+@@ -103,9 +103,38 @@
+     return survivors(tracked, processes)
+ 
+ 
++class RusagePopen(subprocess.Popen):
++    """Keep Popen's status/pipe handling while collecting the child's rusage.
++
++    POSIX Popen reaps through both _internal_poll and _try_wait (wait and
++    communicate). Both must use wait4 before the kernel discards the rusage.
++    """
++    peak_rss_bytes = 0
++
++    def _waitpid(self, pid, flags):
++        pid, status, usage = os.wait4(pid, flags)
++        if pid:
++            self.peak_rss_bytes = max(self.peak_rss_bytes, usage.ru_maxrss * 1024)
++        return pid, status
++
++    def _internal_poll(self, _deadstate=None):
++        return super()._internal_poll(_deadstate, _waitpid=self._waitpid)
++
++    def _try_wait(self, wait_flags):
++        try:
++            return self._waitpid(self.pid, wait_flags)
++        except ChildProcessError:
++            return self.pid, 0  # Match Popen's already-reaped child behavior.
++
++
+ def run_limited(command, cwd, env, timeout=300, *, shell=None,
+                 max_output_chars=10 * 1024 * 1024):
+-    """Installed executor contract, with host process-tree limits and cleanup."""
++    """Installed executor contract, with host process-tree limits and cleanup.
++
++    peak_rss_bytes is the maximum of sampled tree RSS and reaped ru_maxrss
++    (KiB on Linux, converted to bytes). The reaped value is a per-process
++    peak, not a simultaneous tree sum. Only sampled tree RSS triggers kills.
++    """
+     enable_subreaper()
+     runner = snapshot()[os.getpid()]
+     start = time.perf_counter()
+@@ -132,7 +161,7 @@
+                 command = [command]
+             command = [prlimit, f'--as={as_limit}', '--', *command]
+             shell = False
+-        proc = subprocess.Popen(command, shell=shell, cwd=str(cwd), env=env,
++        proc = RusagePopen(command, shell=shell, cwd=str(cwd), env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, encoding='utf-8', errors='replace',
+                                 start_new_session=True)
+@@ -157,18 +186,21 @@
+         return live
+ 
+     def reap():
++        nonlocal peak
+         if proc.poll() is None:
+             return False  # Popen owns the direct child's status.
++        peak = max(peak, proc.peak_rss_bytes)
+         # Once Popen has reaped its child, all remaining children are task
+         # orphans. ECHILD confirms cleanup even if a /proc snapshot missed a
+-        # fork/reparent race; waitpid(0) means another scan is still necessary.
++        # fork/reparent race; wait4 returning pid 0 requires another scan.
+         while True:
+             try:
+-                pid, _ = os.waitpid(-1, os.WNOHANG)
++                pid, _, usage = os.wait4(-1, os.WNOHANG)
+             except ChildProcessError:
+                 return True
+             if pid == 0:
+                 return False
++            peak = max(peak, usage.ru_maxrss * 1024)
+ 
+     def cleanup():
+         seen = set()
+
+exec
+/bin/bash -lc "ls /home/ubuntu/gemma-local/pyimg /home/ubuntu/gemma-local/venv/bin/python*; rg -n 'def _internal_poll' /home/ubuntu/gemma-local/pyimg/cpython-*/lib/python3.13/subprocess.py" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/venv/bin/python
+/home/ubuntu/gemma-local/venv/bin/python3
+/home/ubuntu/gemma-local/venv/bin/python3.13
+
+/home/ubuntu/gemma-local/pyimg:
+cpython-3.13-linux-x86_64-gnu
+cpython-3.13.18-linux-x86_64-gnu
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/subprocess.py:1580:        def _internal_poll(self, _deadstate=None,
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/subprocess.py:2007:        def _internal_poll(self, _deadstate=None, _del_safe=_del_safe):
+/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/subprocess.py:1580:        def _internal_poll(self, _deadstate=None,
+/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/subprocess.py:2007:        def _internal_poll(self, _deadstate=None, _del_safe=_del_safe):
+
+exec
+/bin/bash -lc "sed -n '2000,2065p' /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/subprocess.py; /home/ubuntu/gemma-local/venv/bin/python -m pytest --version" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ exited 1 in 0ms:
+            # This method is called (indirectly) by __del__, so it cannot
+            # refer to anything outside of its local scope.
+            if _del_safe.WIFSTOPPED(sts):
+                self.returncode = -_del_safe.WSTOPSIG(sts)
+            else:
+                self.returncode = _del_safe.waitstatus_to_exitcode(sts)
+
+        def _internal_poll(self, _deadstate=None, _del_safe=_del_safe):
+            """Check if child process has terminated.  Returns returncode
+            attribute.
+
+            This method is called by __del__, so it cannot reference anything
+            outside of the local scope (nor can any methods it calls).
+
+            """
+            if self.returncode is None:
+                if not self._waitpid_lock.acquire(False):
+                    # Something else is busy calling waitpid.  Don't allow two
+                    # at once.  We know nothing yet.
+                    return None
+                try:
+                    if self.returncode is not None:
+                        return self.returncode  # Another thread waited.
+                    pid, sts = _del_safe.waitpid(self.pid, _del_safe.WNOHANG)
+                    if pid == self.pid:
+                        self._handle_exitstatus(sts)
+                except OSError as e:
+                    if _deadstate is not None:
+                        self.returncode = _deadstate
+                    elif e.errno == _del_safe.ECHILD:
+                        # This happens if SIGCLD is set to be ignored or
+                        # waiting for child processes has otherwise been
+                        # disabled for our process.  This child is dead, we
+                        # can't get the status.
+                        # http://bugs.python.org/issue15756
+                        self.returncode = 0
+                finally:
+                    self._waitpid_lock.release()
+            return self.returncode
+
+
+        def _try_wait(self, wait_flags):
+            """All callers to this function MUST hold self._waitpid_lock."""
+            try:
+                (pid, sts) = os.waitpid(self.pid, wait_flags)
+            except ChildProcessError:
+                # This happens if SIGCLD is set to be ignored or waiting
+                # for child processes has otherwise been disabled for our
+                # process.  This child is dead, we can't get the status.
+                pid = self.pid
+                sts = 0
+            return (pid, sts)
+
+
+        def _wait(self, timeout):
+            """Internal implementation of wait() on POSIX."""
+            if self.returncode is not None:
+                return self.returncode
+
+            if timeout is not None:
+                endtime = _time() + timeout
+                # Enter a busy loop if we have a timeout.  This busy loop was
+                # cribbed from Lib/threading.py in Thread.wait() at r71065.
+                delay = 0.0005 # 500 us -> initial delay of 1 ms
+                while True:
+                    if self._waitpid_lock.acquire(False):
+/home/ubuntu/gemma-local/venv/bin/python: No module named pytest
+
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/proctree.py
+diff --git a/eval/proctree.py b/eval/proctree.py
+index 66e579a180e4776e9051274d2cfc191d98e4aa41..f4e357f03483b9cdd037ec603e24d66f9bb9632b
+--- a/eval/proctree.py
++++ b/eval/proctree.py
+@@ -1,6 +1,7 @@
+ """Linux process identities and RSS, restricted to our uid (stdlib only)."""
+ from dataclasses import dataclass
+ import ctypes
++import errno
+ import json
+ import os
+ import resource
+@@ -103,9 +104,53 @@
+     return survivors(tracked, processes)
+ 
+ 
++class RusagePopen(subprocess.Popen):
++    """Keep Popen's status/pipe handling while collecting the child's rusage.
++
++    POSIX Popen reaps through both _internal_poll and _try_wait (wait and
++    communicate). Both must use wait4 before the kernel discards the rusage.
++    """
++    peak_rss_bytes = 0
++
++    def _waitpid(self, pid, flags):
++        pid, status, usage = os.wait4(pid, flags)
++        if pid:
++            self.peak_rss_bytes = max(self.peak_rss_bytes, usage.ru_maxrss * 1024)
++        return pid, status
++
++    def _internal_poll(self, _deadstate=None):
++        # Popen's private poll callback signature differs between Python 3.12
++        # and 3.13. Keep its locking/status semantics with our wait4 callback.
++        if self.returncode is None and self._waitpid_lock.acquire(False):
++            try:
++                if self.returncode is None:
++                    pid, status = self._waitpid(self.pid, os.WNOHANG)
++                    if pid == self.pid:
++                        self._handle_exitstatus(status)
++            except OSError as exc:
++                if _deadstate is not None:
++                    self.returncode = _deadstate
++                elif exc.errno == errno.ECHILD:
++                    self.returncode = 0
++            finally:
++                self._waitpid_lock.release()
++        return self.returncode
++
++    def _try_wait(self, wait_flags):
++        try:
++            return self._waitpid(self.pid, wait_flags)
++        except ChildProcessError:
++            return self.pid, 0  # Match Popen's already-reaped child behavior.
++
++
+ def run_limited(command, cwd, env, timeout=300, *, shell=None,
+                 max_output_chars=10 * 1024 * 1024):
+-    """Installed executor contract, with host process-tree limits and cleanup."""
++    """Installed executor contract, with host process-tree limits and cleanup.
++
++    peak_rss_bytes is the maximum of sampled tree RSS and reaped ru_maxrss
++    (KiB on Linux, converted to bytes). The reaped value is a per-process
++    peak, not a simultaneous tree sum. Only sampled tree RSS triggers kills.
++    """
+     enable_subreaper()
+     runner = snapshot()[os.getpid()]
+     start = time.perf_counter()
+@@ -132,7 +177,7 @@
+                 command = [command]
+             command = [prlimit, f'--as={as_limit}', '--', *command]
+             shell = False
+-        proc = subprocess.Popen(command, shell=shell, cwd=str(cwd), env=env,
++        proc = RusagePopen(command, shell=shell, cwd=str(cwd), env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, encoding='utf-8', errors='replace',
+                                 start_new_session=True)
+@@ -157,18 +202,21 @@
+         return live
+ 
+     def reap():
++        nonlocal peak
+         if proc.poll() is None:
+             return False  # Popen owns the direct child's status.
++        peak = max(peak, proc.peak_rss_bytes)
+         # Once Popen has reaped its child, all remaining children are task
+         # orphans. ECHILD confirms cleanup even if a /proc snapshot missed a
+-        # fork/reparent race; waitpid(0) means another scan is still necessary.
++        # fork/reparent race; wait4 returning pid 0 requires another scan.
+         while True:
+             try:
+-                pid, _ = os.waitpid(-1, os.WNOHANG)
++                pid, _, usage = os.wait4(-1, os.WNOHANG)
+             except ChildProcessError:
+                 return True
+             if pid == 0:
+                 return False
++            peak = max(peak, usage.ru_maxrss * 1024)
+ 
+     def cleanup():
+         seen = set()
+
+exec
+/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages /home/ubuntu/gemma-local/venv/bin/python -m pytest --version; PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages /usr/bin/python3 -m pytest --version' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 91ms:
+pytest 9.2.0
+pytest 9.2.0
+
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/tests/test_sandbox_limits.py
+diff --git a/eval/proctree.py b/eval/proctree.py
+index 66e579a180e4776e9051274d2cfc191d98e4aa41..f4e357f03483b9cdd037ec603e24d66f9bb9632b
+--- a/eval/proctree.py
++++ b/eval/proctree.py
+@@ -1,6 +1,7 @@
+ """Linux process identities and RSS, restricted to our uid (stdlib only)."""
+ from dataclasses import dataclass
+ import ctypes
++import errno
+ import json
+ import os
+ import resource
+@@ -103,9 +104,53 @@
+     return survivors(tracked, processes)
+ 
+ 
++class RusagePopen(subprocess.Popen):
++    """Keep Popen's status/pipe handling while collecting the child's rusage.
++
++    POSIX Popen reaps through both _internal_poll and _try_wait (wait and
++    communicate). Both must use wait4 before the kernel discards the rusage.
++    """
++    peak_rss_bytes = 0
++
++    def _waitpid(self, pid, flags):
++        pid, status, usage = os.wait4(pid, flags)
++        if pid:
++            self.peak_rss_bytes = max(self.peak_rss_bytes, usage.ru_maxrss * 1024)
++        return pid, status
++
++    def _internal_poll(self, _deadstate=None):
++        # Popen's private poll callback signature differs between Python 3.12
++        # and 3.13. Keep its locking/status semantics with our wait4 callback.
++        if self.returncode is None and self._waitpid_lock.acquire(False):
++            try:
++                if self.returncode is None:
++                    pid, status = self._waitpid(self.pid, os.WNOHANG)
++                    if pid == self.pid:
++                        self._handle_exitstatus(status)
++            except OSError as exc:
++                if _deadstate is not None:
++                    self.returncode = _deadstate
++                elif exc.errno == errno.ECHILD:
++                    self.returncode = 0
++            finally:
++                self._waitpid_lock.release()
++        return self.returncode
++
++    def _try_wait(self, wait_flags):
++        try:
++            return self._waitpid(self.pid, wait_flags)
++        except ChildProcessError:
++            return self.pid, 0  # Match Popen's already-reaped child behavior.
++
++
+ def run_limited(command, cwd, env, timeout=300, *, shell=None,
+                 max_output_chars=10 * 1024 * 1024):
+-    """Installed executor contract, with host process-tree limits and cleanup."""
++    """Installed executor contract, with host process-tree limits and cleanup.
++
++    peak_rss_bytes is the maximum of sampled tree RSS and reaped ru_maxrss
++    (KiB on Linux, converted to bytes). The reaped value is a per-process
++    peak, not a simultaneous tree sum. Only sampled tree RSS triggers kills.
++    """
+     enable_subreaper()
+     runner = snapshot()[os.getpid()]
+     start = time.perf_counter()
+@@ -132,7 +177,7 @@
+                 command = [command]
+             command = [prlimit, f'--as={as_limit}', '--', *command]
+             shell = False
+-        proc = subprocess.Popen(command, shell=shell, cwd=str(cwd), env=env,
++        proc = RusagePopen(command, shell=shell, cwd=str(cwd), env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, encoding='utf-8', errors='replace',
+                                 start_new_session=True)
+@@ -157,18 +202,21 @@
+         return live
+ 
+     def reap():
++        nonlocal peak
+         if proc.poll() is None:
+             return False  # Popen owns the direct child's status.
++        peak = max(peak, proc.peak_rss_bytes)
+         # Once Popen has reaped its child, all remaining children are task
+         # orphans. ECHILD confirms cleanup even if a /proc snapshot missed a
+-        # fork/reparent race; waitpid(0) means another scan is still necessary.
++        # fork/reparent race; wait4 returning pid 0 requires another scan.
+         while True:
+             try:
+-                pid, _ = os.waitpid(-1, os.WNOHANG)
++                pid, _, usage = os.wait4(-1, os.WNOHANG)
+             except ChildProcessError:
+                 return True
+             if pid == 0:
+                 return False
++            peak = max(peak, usage.ru_maxrss * 1024)
+ 
+     def cleanup():
+         seen = set()
+diff --git a/eval/tests/test_sandbox_limits.py b/eval/tests/test_sandbox_limits.py
+index 24c7bc2dc0c359ac25324a4255e0208a1d850fa4..b0249705c4ed0fd1d4d21fdcd168a6a3bb077474
+--- a/eval/tests/test_sandbox_limits.py
++++ b/eval/tests/test_sandbox_limits.py
+@@ -5,6 +5,7 @@
+ import sys
+ import time
+ from dataclasses import replace
++from types import SimpleNamespace
+ 
+ import pytest
+ 
+@@ -114,6 +115,42 @@
+     assert metrics['peak_rss_bytes'] > 0
+ 
+ 
++@pytest.mark.parametrize('without_prlimit', [False, True])
++def test_submillisecond_command_rss_without_polling(execute, monkeypatch, without_prlimit):
++    run, metrics = execute
++    # /bin/true does sub-millisecond work. Force all tree RSS samples to miss
++    # it, regardless of host scheduling or the overhead of starting a process.
++    source = proctree.supervisor_source().replace(
++        'rss = tree_rss(live, processes)', 'rss = 0')
++    if without_prlimit:
++        source = source.replace("prlimit = shutil.which('prlimit')", 'prlimit = None')
++    monkeypatch.setattr(proctree, 'supervisor_source', lambda: source)
++    result = run(['/bin/true'])
++    assert result.status == 'ok' and result.exit_code == 0
++    assert metrics['peak_rss_bytes'] > 0
++    assert metrics['mem_kills'] == 0
++
++
++@pytest.mark.parametrize('method', ['poll', 'wait', 'communicate'])
++def test_direct_child_wait4_rss(method):
++    # Verify all Popen reaping paths, including communicate's internal wait.
++    proc = proctree.RusagePopen(['/bin/true'])
++    try:
++        if method == 'poll':
++            deadline = time.monotonic() + 5
++            while proc.poll() is None:
++                assert time.monotonic() < deadline
++                time.sleep(.001)
++        else:
++            getattr(proc, method)(timeout=5)
++        assert proc.returncode == 0
++        assert proc.peak_rss_bytes > 0
++    finally:
++        if proc.poll() is None:
++            proc.kill()
++        proc.wait()
++
++
+ def test_envless_double_fork_is_reaped(execute, tmp_path):
+     run, metrics = execute
+     code = """
+@@ -208,6 +245,7 @@
+     class ExitingParent:
+         pid = parent.pid
+         returncode = None
++        peak_rss_bytes = 4096
+         stdout, stderr = io.StringIO(), io.StringIO()
+ 
+         def poll(self):
+@@ -231,7 +269,7 @@
+     monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(300 * 1024**2))
+     monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
+     monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
+-    monkeypatch.setattr(proctree.subprocess, 'Popen', lambda *a, **kw: ExitingParent())
++    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
+     monkeypatch.setattr(proctree, 'kill_tree', kill)
+     waits = 0
+ 
+@@ -241,12 +279,12 @@
+         waits += 1
+         if waits == 1:
+             # Simulate /proc missing a child during a fork/reparent race.
+-            # waitpid still sees it, so cleanup must scan again before success.
++            # wait4 still sees it, so cleanup must scan again before success.
+             processes[child.pid] = child
+-            return 0, 0
++            return 0, 0, None
+         raise ChildProcessError()
+ 
+-    monkeypatch.setattr(proctree.os, 'waitpid', wait_children)
++    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
+     result = proctree.run_limited(['fake'], tmp_path, {})
+     assert result['status'] == 'error' and result['exit_code'] == 137
+     assert 'killed: sandbox memory limit' in result['stderr']
+
+exec
+/bin/bash -lc "sed -n '55,95p' docs/GOLD_CALIBRATION.md; PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 UV_OFFLINE=1 /home/ubuntu/gemma-local/venv/bin/python -m pytest -q eval/tests/test_sandbox_limits.py" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 9081ms:
+and pending ids. There is no task selection or silent exclusion of setup errors.
+A killed session may have only the journal; rerun with it to regenerate the summary.
+
+Kaggle kernel pushes start new working directories: they do **not** automatically
+resume prior output. To resume across sessions, fetch the journal, attach it as a
+private input, and copy it into `/kaggle/working/gold_results.jsonl` before starting
+this script in an interactive session. Preserve the original `tasks.jsonl` and
+harness versions. The same working directory resumes automatically. Do not run
+two coordinators against the same journal. To retry failures, use a separate run
+or explicitly prepare a journal excluding those rows; ordinary restarts preserve
+all completed attempts.
+
+## Harness API assumptions requiring a Kaggle smoke check
+
+References: the competition's `HARNESS_README.md` sections 4, 8, 9 and
+[`starter_notebook.ipynb`](starter_notebook.ipynb). The README was read from the
+main checkout because `data/` is absent from this worktree. Neither reference
+provides the complete `verify_task` Python signature, and harness wheels are not
+available locally. The only harness call adapter is `verify_gold`:
+
+- Assumes `swegemma.harness.verification.verify_task` accepts named `task` and
+  `agent_patch` parameters and owns the entire fresh Phase 2 setup/cleanup.
+- Constructs `EvalConfig`/`Evaluator` following the starter, with `models={}`
+  because no Phase 1 or inference is run. Assumes construction needs no model.
+- Binds explicit verification parameters from the evaluator's instance resources
+  (including private attributes with their leading underscore removed), plus
+  `config`, snapshot/wheel paths, and the 300-second timeout. Unknown required
+  arguments fail rather than guessing a positional order. If the installed API
+  differs, adjust this one function after inspecting its signature.
+- Accepts a sync or async result, as a mapping or object with `resolved`,
+  `test_exit_code` (or `exit_code`), and optional `error`. Resolution is never
+  inferred from exit code alone. Unsupported signatures/results and setup errors
+  become recorded task failures. Only exception class names are exposed, since
+  arbitrary harness errors can contain task code or patch hunks.
+
+Offline verification (no Kaggle credentials, network, or harness required):
+
+```bash
+python3 -m py_compile eval/kaggle/gold_calibration.py
+python3 -m unittest discover -s eval/tests -p test_gold_calibration.py -v
+bash -n eval/kaggle/push.sh
+.........................                                                [100%]
+25 passed in 7.76s
+
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/tests/test_sandbox_limits.py
+diff --git a/eval/proctree.py b/eval/proctree.py
+index 66e579a180e4776e9051274d2cfc191d98e4aa41..f4e357f03483b9cdd037ec603e24d66f9bb9632b
+--- a/eval/proctree.py
++++ b/eval/proctree.py
+@@ -1,6 +1,7 @@
+ """Linux process identities and RSS, restricted to our uid (stdlib only)."""
+ from dataclasses import dataclass
+ import ctypes
++import errno
+ import json
+ import os
+ import resource
+@@ -103,9 +104,53 @@
+     return survivors(tracked, processes)
+ 
+ 
++class RusagePopen(subprocess.Popen):
++    """Keep Popen's status/pipe handling while collecting the child's rusage.
++
++    POSIX Popen reaps through both _internal_poll and _try_wait (wait and
++    communicate). Both must use wait4 before the kernel discards the rusage.
++    """
++    peak_rss_bytes = 0
++
++    def _waitpid(self, pid, flags):
++        pid, status, usage = os.wait4(pid, flags)
++        if pid:
++            self.peak_rss_bytes = max(self.peak_rss_bytes, usage.ru_maxrss * 1024)
++        return pid, status
++
++    def _internal_poll(self, _deadstate=None):
++        # Popen's private poll callback signature differs between Python 3.12
++        # and 3.13. Keep its locking/status semantics with our wait4 callback.
++        if self.returncode is None and self._waitpid_lock.acquire(False):
++            try:
++                if self.returncode is None:
++                    pid, status = self._waitpid(self.pid, os.WNOHANG)
++                    if pid == self.pid:
++                        self._handle_exitstatus(status)
++            except OSError as exc:
++                if _deadstate is not None:
++                    self.returncode = _deadstate
++                elif exc.errno == errno.ECHILD:
++                    self.returncode = 0
++            finally:
++                self._waitpid_lock.release()
++        return self.returncode
++
++    def _try_wait(self, wait_flags):
++        try:
++            return self._waitpid(self.pid, wait_flags)
++        except ChildProcessError:
++            return self.pid, 0  # Match Popen's already-reaped child behavior.
++
++
+ def run_limited(command, cwd, env, timeout=300, *, shell=None,
+                 max_output_chars=10 * 1024 * 1024):
+-    """Installed executor contract, with host process-tree limits and cleanup."""
++    """Installed executor contract, with host process-tree limits and cleanup.
++
++    peak_rss_bytes is the maximum of sampled tree RSS and reaped ru_maxrss
++    (KiB on Linux, converted to bytes). The reaped value is a per-process
++    peak, not a simultaneous tree sum. Only sampled tree RSS triggers kills.
++    """
+     enable_subreaper()
+     runner = snapshot()[os.getpid()]
+     start = time.perf_counter()
+@@ -132,7 +177,7 @@
+                 command = [command]
+             command = [prlimit, f'--as={as_limit}', '--', *command]
+             shell = False
+-        proc = subprocess.Popen(command, shell=shell, cwd=str(cwd), env=env,
++        proc = RusagePopen(command, shell=shell, cwd=str(cwd), env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, encoding='utf-8', errors='replace',
+                                 start_new_session=True)
+@@ -157,18 +202,21 @@
+         return live
+ 
+     def reap():
++        nonlocal peak
+         if proc.poll() is None:
+             return False  # Popen owns the direct child's status.
++        peak = max(peak, proc.peak_rss_bytes)
+         # Once Popen has reaped its child, all remaining children are task
+         # orphans. ECHILD confirms cleanup even if a /proc snapshot missed a
+-        # fork/reparent race; waitpid(0) means another scan is still necessary.
++        # fork/reparent race; wait4 returning pid 0 requires another scan.
+         while True:
+             try:
+-                pid, _ = os.waitpid(-1, os.WNOHANG)
++                pid, _, usage = os.wait4(-1, os.WNOHANG)
+             except ChildProcessError:
+                 return True
+             if pid == 0:
+                 return False
++            peak = max(peak, usage.ru_maxrss * 1024)
+ 
+     def cleanup():
+         seen = set()
+diff --git a/eval/tests/test_sandbox_limits.py b/eval/tests/test_sandbox_limits.py
+index 24c7bc2dc0c359ac25324a4255e0208a1d850fa4..4cdac2b1718b67cc176bc29faf340d2b1648d7bd
+--- a/eval/tests/test_sandbox_limits.py
++++ b/eval/tests/test_sandbox_limits.py
+@@ -5,6 +5,7 @@
+ import sys
+ import time
+ from dataclasses import replace
++from types import SimpleNamespace
+ 
+ import pytest
+ 
+@@ -114,6 +115,87 @@
+     assert metrics['peak_rss_bytes'] > 0
+ 
+ 
++@pytest.mark.parametrize('without_prlimit', [False, True])
++def test_submillisecond_command_rss_without_polling(execute, monkeypatch, without_prlimit):
++    run, metrics = execute
++    # /bin/true does sub-millisecond work. Force all tree RSS samples to miss
++    # it, regardless of host scheduling or the overhead of starting a process.
++    source = proctree.supervisor_source().replace(
++        'rss = tree_rss(live, processes)', 'rss = 0')
++    if without_prlimit:
++        source = source.replace("prlimit = shutil.which('prlimit')", 'prlimit = None')
++    monkeypatch.setattr(proctree, 'supervisor_source', lambda: source)
++    result = run(['/bin/true'])
++    assert result.status == 'ok' and result.exit_code == 0
++    assert metrics['peak_rss_bytes'] > 0
++    assert metrics['mem_kills'] == 0
++
++
++@pytest.mark.parametrize('method', ['poll', 'wait', 'communicate'])
++def test_direct_child_wait4_rss(method):
++    # Verify all Popen reaping paths, including communicate's internal wait.
++    proc = proctree.RusagePopen(['/bin/true'])
++    try:
++        if method == 'poll':
++            deadline = time.monotonic() + 5
++            while proc.poll() is None:
++                assert time.monotonic() < deadline
++                time.sleep(.001)
++        else:
++            getattr(proc, method)(timeout=5)
++        assert proc.returncode == 0
++        assert proc.peak_rss_bytes > 0
++    finally:
++        if proc.poll() is None:
++            proc.kill()
++        proc.wait()
++
++
++@pytest.mark.parametrize('polled_rss', [0, 5 * 1024**2])
++def test_reaped_rss_is_maximum_not_sum_or_kill_trigger(monkeypatch, tmp_path, polled_rss):
++    import io
++    runner = proctree.snapshot()[os.getpid()]
++    parent = replace(runner, pid=runner.pid + 100000, ppid=runner.pid, rss=polled_rss)
++    processes = {runner.pid: runner, parent.pid: parent}
++
++    class ExitingParent:
++        pid = parent.pid
++        returncode = None
++        peak_rss_bytes = 3 * 1024**2
++        stdout, stderr = io.StringIO(), io.StringIO()
++
++        def poll(self):
++            return self.returncode
++
++        def communicate(self, timeout=None):
++            processes.pop(parent.pid, None)
++            self.returncode = 0
++            return '', ''
++
++    # Two adopted children with peaks of 4 and 2 MiB. Their peaks must be
++    # converted from Linux KiB and maximized with the direct child's 3 MiB.
++    reaped = iter([(parent.pid + 1, 0, SimpleNamespace(ru_maxrss=4096)),
++                   (parent.pid + 2, 0, SimpleNamespace(ru_maxrss=2048))])
++
++    def wait_children(pid, flags):
++        assert (pid, flags) == (-1, os.WNOHANG)
++        try:
++            return next(reaped)
++        except StopIteration:
++            raise ChildProcessError() from None
++
++    monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(polled_rss + 1))
++    monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
++    monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
++    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
++    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
++    monkeypatch.setattr(proctree, 'kill_tree', lambda live: pytest.fail('unexpected kill'))
++    result = proctree.run_limited(['fake'], tmp_path, {})
++    assert result['status'] == 'ok' and result['exit_code'] == 0
++    assert result['metrics']['peak_rss_bytes'] == max(polled_rss, 4 * 1024**2)
++    assert result['metrics']['mem_kills'] == 0
++
++
+ def test_envless_double_fork_is_reaped(execute, tmp_path):
+     run, metrics = execute
+     code = """
+@@ -208,6 +290,7 @@
+     class ExitingParent:
+         pid = parent.pid
+         returncode = None
++        peak_rss_bytes = 4096
+         stdout, stderr = io.StringIO(), io.StringIO()
+ 
+         def poll(self):
+@@ -231,7 +314,7 @@
+     monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(300 * 1024**2))
+     monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
+     monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
+-    monkeypatch.setattr(proctree.subprocess, 'Popen', lambda *a, **kw: ExitingParent())
++    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
+     monkeypatch.setattr(proctree, 'kill_tree', kill)
+     waits = 0
+ 
+@@ -241,12 +324,12 @@
+         waits += 1
+         if waits == 1:
+             # Simulate /proc missing a child during a fork/reparent race.
+-            # waitpid still sees it, so cleanup must scan again before success.
++            # wait4 still sees it, so cleanup must scan again before success.
+             processes[child.pid] = child
+-            return 0, 0
++            return 0, 0, None
+         raise ChildProcessError()
+ 
+-    monkeypatch.setattr(proctree.os, 'waitpid', wait_children)
++    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
+     result = proctree.run_limited(['fake'], tmp_path, {})
+     assert result['status'] == 'error' and result['exit_code'] == 137
+     assert 'killed: sandbox memory limit' in result['stderr']
+
+exec
+/bin/bash -lc "rg -n -i 'memory|rss|metrics|limit' docs/EVAL_RUNNER_SPEC.md docs/GOLD_CALIBRATION.md; ls eval/tests; git diff --stat" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+docs/GOLD_CALIBRATION.md:42:has the official 300-second limit; a worker has an additional 3600-second outer
+docs/GOLD_CALIBRATION.md:43:limit including setup. Durations include setup and are **not** concurrency-1
+__pycache__
+test_agent_timing.py
+test_eval_fixes.py
+test_gold_calibration.py
+test_pack.py
+test_run_agent_eval.py
+test_sandbox_limits.py
+ eval/proctree.py                  | 56 ++++++++++++++++++++++--
+ eval/tests/test_sandbox_limits.py | 91 +++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 139 insertions(+), 8 deletions(-)
+
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-sandbox-limits/eval/tests/test_sandbox_limits.py
+diff --git a/eval/proctree.py b/eval/proctree.py
+index 66e579a180e4776e9051274d2cfc191d98e4aa41..f4e357f03483b9cdd037ec603e24d66f9bb9632b
+--- a/eval/proctree.py
++++ b/eval/proctree.py
+@@ -1,6 +1,7 @@
+ """Linux process identities and RSS, restricted to our uid (stdlib only)."""
+ from dataclasses import dataclass
+ import ctypes
++import errno
+ import json
+ import os
+ import resource
+@@ -103,9 +104,53 @@
+     return survivors(tracked, processes)
+ 
+ 
++class RusagePopen(subprocess.Popen):
++    """Keep Popen's status/pipe handling while collecting the child's rusage.
++
++    POSIX Popen reaps through both _internal_poll and _try_wait (wait and
++    communicate). Both must use wait4 before the kernel discards the rusage.
++    """
++    peak_rss_bytes = 0
++
++    def _waitpid(self, pid, flags):
++        pid, status, usage = os.wait4(pid, flags)
++        if pid:
++            self.peak_rss_bytes = max(self.peak_rss_bytes, usage.ru_maxrss * 1024)
++        return pid, status
++
++    def _internal_poll(self, _deadstate=None):
++        # Popen's private poll callback signature differs between Python 3.12
++        # and 3.13. Keep its locking/status semantics with our wait4 callback.
++        if self.returncode is None and self._waitpid_lock.acquire(False):
++            try:
++                if self.returncode is None:
++                    pid, status = self._waitpid(self.pid, os.WNOHANG)
++                    if pid == self.pid:
++                        self._handle_exitstatus(status)
++            except OSError as exc:
++                if _deadstate is not None:
++                    self.returncode = _deadstate
++                elif exc.errno == errno.ECHILD:
++                    self.returncode = 0
++            finally:
++                self._waitpid_lock.release()
++        return self.returncode
++
++    def _try_wait(self, wait_flags):
++        try:
++            return self._waitpid(self.pid, wait_flags)
++        except ChildProcessError:
++            return self.pid, 0  # Match Popen's already-reaped child behavior.
++
++
+ def run_limited(command, cwd, env, timeout=300, *, shell=None,
+                 max_output_chars=10 * 1024 * 1024):
+-    """Installed executor contract, with host process-tree limits and cleanup."""
++    """Installed executor contract, with host process-tree limits and cleanup.
++
++    peak_rss_bytes is the maximum of sampled tree RSS and reaped ru_maxrss
++    (KiB on Linux, converted to bytes). The reaped value is a per-process
++    peak, not a simultaneous tree sum. Only sampled tree RSS triggers kills.
++    """
+     enable_subreaper()
+     runner = snapshot()[os.getpid()]
+     start = time.perf_counter()
+@@ -132,7 +177,7 @@
+                 command = [command]
+             command = [prlimit, f'--as={as_limit}', '--', *command]
+             shell = False
+-        proc = subprocess.Popen(command, shell=shell, cwd=str(cwd), env=env,
++        proc = RusagePopen(command, shell=shell, cwd=str(cwd), env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, encoding='utf-8', errors='replace',
+                                 start_new_session=True)
+@@ -157,18 +202,21 @@
+         return live
+ 
+     def reap():
++        nonlocal peak
+         if proc.poll() is None:
+             return False  # Popen owns the direct child's status.
++        peak = max(peak, proc.peak_rss_bytes)
+         # Once Popen has reaped its child, all remaining children are task
+         # orphans. ECHILD confirms cleanup even if a /proc snapshot missed a
+-        # fork/reparent race; waitpid(0) means another scan is still necessary.
++        # fork/reparent race; wait4 returning pid 0 requires another scan.
+         while True:
+             try:
+-                pid, _ = os.waitpid(-1, os.WNOHANG)
++                pid, _, usage = os.wait4(-1, os.WNOHANG)
+             except ChildProcessError:
+                 return True
+             if pid == 0:
+                 return False
++            peak = max(peak, usage.ru_maxrss * 1024)
+ 
+     def cleanup():
+         seen = set()
+diff --git a/eval/tests/test_sandbox_limits.py b/eval/tests/test_sandbox_limits.py
+index 24c7bc2dc0c359ac25324a4255e0208a1d850fa4..94f6fa9c46db7b7916bfe34bb9286aacb4590793
+--- a/eval/tests/test_sandbox_limits.py
++++ b/eval/tests/test_sandbox_limits.py
+@@ -5,6 +5,7 @@
+ import sys
+ import time
+ from dataclasses import replace
++from types import SimpleNamespace
+ 
+ import pytest
+ 
+@@ -114,6 +115,91 @@
+     assert metrics['peak_rss_bytes'] > 0
+ 
+ 
++@pytest.mark.parametrize('without_prlimit', [False, True])
++def test_submillisecond_command_rss_without_polling(execute, monkeypatch, without_prlimit):
++    run, metrics = execute
++    # /bin/true does sub-millisecond work. Force all tree RSS samples to miss
++    # it, regardless of host scheduling or the overhead of starting a process.
++    source = proctree.supervisor_source().replace(
++        'rss = tree_rss(live, processes)', 'rss = 0')
++    if without_prlimit:
++        source = source.replace("prlimit = shutil.which('prlimit')", 'prlimit = None')
++    monkeypatch.setattr(proctree, 'supervisor_source', lambda: source)
++    result = run(['/bin/true'])
++    assert result.status == 'ok' and result.exit_code == 0
++    assert metrics['peak_rss_bytes'] > 0
++    assert metrics['mem_kills'] == 0
++
++
++@pytest.mark.parametrize('method', ['poll', 'wait', 'communicate'])
++def test_direct_child_wait4_rss(method):
++    # Verify all Popen reaping paths, including communicate's internal wait.
++    proc = proctree.RusagePopen(['/bin/true'])
++    try:
++        if method == 'poll':
++            deadline = time.monotonic() + 5
++            while proc.poll() is None:
++                assert time.monotonic() < deadline
++                time.sleep(.001)
++        else:
++            getattr(proc, method)(timeout=5)
++        assert proc.returncode == 0
++        assert proc.peak_rss_bytes > 0
++    finally:
++        if proc.poll() is None:
++            proc.kill()
++        proc.wait()
++
++
++@pytest.mark.parametrize('polled_rss', [0, 5 * 1024**2])
++def test_reaped_rss_is_maximum_not_sum_or_kill_trigger(monkeypatch, tmp_path, polled_rss):
++    import io
++    runner = proctree.snapshot()[os.getpid()]
++    parent = replace(runner, pid=runner.pid + 100000, ppid=runner.pid, rss=polled_rss)
++    processes = {runner.pid: runner, parent.pid: parent}
++
++    class ExitingParent:
++        pid = parent.pid
++        returncode = None
++        peak_rss_bytes = 3 * 1024**2
++        stdout, stderr = io.StringIO(), io.StringIO()
++
++        def poll(self):
++            return self.returncode
++
++        def communicate(self, timeout=None):
++            processes.pop(parent.pid, None)
++            self.returncode = 0
++            return '', ''
++
++    # Two adopted children with peaks of 4 and 2 MiB. Their peaks must be
++    # converted from Linux KiB and maximized with the direct child's 3 MiB.
++    reaped = iter([(parent.pid + 1, 0, SimpleNamespace(ru_maxrss=4096)),
++                   (parent.pid + 2, 0, SimpleNamespace(ru_maxrss=2048))])
++
++    def wait_children(pid, flags):
++        assert (pid, flags) == (-1, os.WNOHANG)
++        try:
++            return next(reaped)
++        except StopIteration:
++            raise ChildProcessError() from None
++
++    monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(polled_rss + 1))
++    monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
++    monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
++    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
++    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
++    def kill(live):
++        assert live == {}
++        return 0
++
++    monkeypatch.setattr(proctree, 'kill_tree', kill)
++    result = proctree.run_limited(['fake'], tmp_path, {})
++    assert result['status'] == 'ok' and result['exit_code'] == 0
++    assert result['metrics']['peak_rss_bytes'] == max(polled_rss, 4 * 1024**2)
++    assert result['metrics']['mem_kills'] == 0
++
++
+ def test_envless_double_fork_is_reaped(execute, tmp_path):
+     run, metrics = execute
+     code = """
+@@ -208,6 +294,7 @@
+     class ExitingParent:
+         pid = parent.pid
+         returncode = None
++        peak_rss_bytes = 4096
+         stdout, stderr = io.StringIO(), io.StringIO()
+ 
+         def poll(self):
+@@ -231,7 +318,7 @@
+     monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(300 * 1024**2))
+     monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
+     monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
+-    monkeypatch.setattr(proctree.subprocess, 'Popen', lambda *a, **kw: ExitingParent())
++    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
+     monkeypatch.setattr(proctree, 'kill_tree', kill)
+     waits = 0
+ 
+@@ -241,12 +328,12 @@
+         waits += 1
+         if waits == 1:
+             # Simulate /proc missing a child during a fork/reparent race.
+-            # waitpid still sees it, so cleanup must scan again before success.
++            # wait4 still sees it, so cleanup must scan again before success.
+             processes[child.pid] = child
+-            return 0, 0
++            return 0, 0, None
+         raise ChildProcessError()
+ 
+-    monkeypatch.setattr(proctree.os, 'waitpid', wait_children)
++    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
+     result = proctree.run_limited(['fake'], tmp_path, {})
+     assert result['status'] == 'error' and result['exit_code'] == 137
+     assert 'killed: sandbox memory limit' in result['stderr']
+
+codex
+The first focused run passed all 25 tests, including the short command with polled RSS forced to zero. I’ve also added checks for KiB-to-byte conversion, maximum-versus-sum accounting, and keeping rusage out of the kill decision. I’ll now run the full eval suite offline.
+exec
+/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 UV_OFFLINE=1 /home/ubuntu/gemma-local/venv/bin/python -m pytest -q eval/tests' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+exec
+/bin/bash -lc 'cat docs/EVAL_RUNNER_SPEC.md; git diff --check' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+# Agent eval runner spec (draft, dec 011 item 6)
+Goal: run a bundle on dev tasks locally (stub or real vLLM endpoint), producing patches + verification results.
+
+## Environment requirement (MANDATORY)
+The agent's in-task pytest (Container A) and verification (Container B) must see the SAME environment as
+gold-local, i.e. the scorer docker image as emulated in `eval/kaggle/gold_calibration.py::patch_subprocess_deps`:
+1. Host python = `/home/ubuntu/gemma-local/pyimg` (Dockerfile.public mirror: pytest, pytest-timeout==2.1.0,
+   typer, build backends, imp.py/telnetlib.py; nothing else). SubprocessManager venvs use
+   system_site_packages=True, so ANY extra host package leaks into the sandbox. Harness itself lives in
+   `/home/ubuntu/gemma-local/venv` but sandbox venvs must be created from pyimg.
+2. `install_test_dependencies` is imported **by name** in `swegemma.evaluate`, `swegemma.harness.verification`,
+   `swegemma.harness.sample_verification` and `container_setup` (internal call). The runner must patch EVERY
+   such binding (module attribute in each importing module), not just `container_setup`. Acceptance test:
+   assert all four names resolve to the patched function before the first task.
+3. Same wheel selection as gold (highest-version base wheels <20MB, skip_base_pkgs), then
+   `setup.py --fast-path <repo>`. Reuse patch_subprocess_deps; do not fork the logic.
+4. Self-check at startup: run the gold patch on 2 known-clean dev tasks through the runner's own env; abort if
+   either fails (guards against env drift).
+## Other requirements
+- Concurrency N against one endpoint; per-task wall time, tokens, tool-call counts logged to runs/<name>/.
+- Results file results/<run>.jsonl with schema header line; resumable (skip finished ids).
+- Scratch in /tmp only; record any /workspace stray files and test-file edits per task.
+
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-sandbox-limits/docs/EVAL_RUNNER_SPEC.md
+diff --git a/docs/EVAL_RUNNER_SPEC.md b/docs/EVAL_RUNNER_SPEC.md
+index 6ed5a9a06a86036797ee4fc47284385bc19eaeb7..c5e93161460aef9d1e633fbda7964c0e91344f57
+--- a/docs/EVAL_RUNNER_SPEC.md
++++ b/docs/EVAL_RUNNER_SPEC.md
+@@ -20,3 +20,10 @@
+ - Concurrency N against one endpoint; per-task wall time, tokens, tool-call counts logged to runs/<name>/.
+ - Results file results/<run>.jsonl with schema header line; resumable (skip finished ids).
+ - Scratch in /tmp only; record any /workspace stray files and test-file edits per task.
++
++## Sandbox memory metrics
++`peak_rss_bytes` is the maximum of polled process-tree RSS and the largest
++`wait4().rusage.ru_maxrss` from reaped processes, converted from Linux KiB to
++bytes. Reaped RSS is a per-process peak, not a simultaneous tree sum; it also
++captures commands that exit before the first RSS poll. The 4 GiB tree-RSS kill
++decision uses only polled tree RSS.
+diff --git a/eval/proctree.py b/eval/proctree.py
+index 66e579a180e4776e9051274d2cfc191d98e4aa41..f4e357f03483b9cdd037ec603e24d66f9bb9632b
+--- a/eval/proctree.py
++++ b/eval/proctree.py
+@@ -1,6 +1,7 @@
+ """Linux process identities and RSS, restricted to our uid (stdlib only)."""
+ from dataclasses import dataclass
+ import ctypes
++import errno
+ import json
+ import os
+ import resource
+@@ -103,9 +104,53 @@
+     return survivors(tracked, processes)
+ 
+ 
++class RusagePopen(subprocess.Popen):
++    """Keep Popen's status/pipe handling while collecting the child's rusage.
++
++    POSIX Popen reaps through both _internal_poll and _try_wait (wait and
++    communicate). Both must use wait4 before the kernel discards the rusage.
++    """
++    peak_rss_bytes = 0
++
++    def _waitpid(self, pid, flags):
++        pid, status, usage = os.wait4(pid, flags)
++        if pid:
++            self.peak_rss_bytes = max(self.peak_rss_bytes, usage.ru_maxrss * 1024)
++        return pid, status
++
++    def _internal_poll(self, _deadstate=None):
++        # Popen's private poll callback signature differs between Python 3.12
++        # and 3.13. Keep its locking/status semantics with our wait4 callback.
++        if self.returncode is None and self._waitpid_lock.acquire(False):
++            try:
++                if self.returncode is None:
++                    pid, status = self._waitpid(self.pid, os.WNOHANG)
++                    if pid == self.pid:
++                        self._handle_exitstatus(status)
++            except OSError as exc:
++                if _deadstate is not None:
++                    self.returncode = _deadstate
++                elif exc.errno == errno.ECHILD:
++                    self.returncode = 0
++            finally:
++                self._waitpid_lock.release()
++        return self.returncode
++
++    def _try_wait(self, wait_flags):
++        try:
++            return self._waitpid(self.pid, wait_flags)
++        except ChildProcessError:
++            return self.pid, 0  # Match Popen's already-reaped child behavior.
++
++
+ def run_limited(command, cwd, env, timeout=300, *, shell=None,
+                 max_output_chars=10 * 1024 * 1024):
+-    """Installed executor contract, with host process-tree limits and cleanup."""
++    """Installed executor contract, with host process-tree limits and cleanup.
++
++    peak_rss_bytes is the maximum of sampled tree RSS and reaped ru_maxrss
++    (KiB on Linux, converted to bytes). The reaped value is a per-process
++    peak, not a simultaneous tree sum. Only sampled tree RSS triggers kills.
++    """
+     enable_subreaper()
+     runner = snapshot()[os.getpid()]
+     start = time.perf_counter()
+@@ -132,7 +177,7 @@
+                 command = [command]
+             command = [prlimit, f'--as={as_limit}', '--', *command]
+             shell = False
+-        proc = subprocess.Popen(command, shell=shell, cwd=str(cwd), env=env,
++        proc = RusagePopen(command, shell=shell, cwd=str(cwd), env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, encoding='utf-8', errors='replace',
+                                 start_new_session=True)
+@@ -157,18 +202,21 @@
+         return live
+ 
+     def reap():
++        nonlocal peak
+         if proc.poll() is None:
+             return False  # Popen owns the direct child's status.
++        peak = max(peak, proc.peak_rss_bytes)
+         # Once Popen has reaped its child, all remaining children are task
+         # orphans. ECHILD confirms cleanup even if a /proc snapshot missed a
+-        # fork/reparent race; waitpid(0) means another scan is still necessary.
++        # fork/reparent race; wait4 returning pid 0 requires another scan.
+         while True:
+             try:
+-                pid, _ = os.waitpid(-1, os.WNOHANG)
++                pid, _, usage = os.wait4(-1, os.WNOHANG)
+             except ChildProcessError:
+                 return True
+             if pid == 0:
+                 return False
++            peak = max(peak, usage.ru_maxrss * 1024)
+ 
+     def cleanup():
+         seen = set()
+diff --git a/eval/tests/test_sandbox_limits.py b/eval/tests/test_sandbox_limits.py
+index 24c7bc2dc0c359ac25324a4255e0208a1d850fa4..94f6fa9c46db7b7916bfe34bb9286aacb4590793
+--- a/eval/tests/test_sandbox_limits.py
++++ b/eval/tests/test_sandbox_limits.py
+@@ -5,6 +5,7 @@
+ import sys
+ import time
+ from dataclasses import replace
++from types import SimpleNamespace
+ 
+ import pytest
+ 
+@@ -114,6 +115,91 @@
+     assert metrics['peak_rss_bytes'] > 0
+ 
+ 
++@pytest.mark.parametrize('without_prlimit', [False, True])
++def test_submillisecond_command_rss_without_polling(execute, monkeypatch, without_prlimit):
++    run, metrics = execute
++    # /bin/true does sub-millisecond work. Force all tree RSS samples to miss
++    # it, regardless of host scheduling or the overhead of starting a process.
++    source = proctree.supervisor_source().replace(
++        'rss = tree_rss(live, processes)', 'rss = 0')
++    if without_prlimit:
++        source = source.replace("prlimit = shutil.which('prlimit')", 'prlimit = None')
++    monkeypatch.setattr(proctree, 'supervisor_source', lambda: source)
++    result = run(['/bin/true'])
++    assert result.status == 'ok' and result.exit_code == 0
++    assert metrics['peak_rss_bytes'] > 0
++    assert metrics['mem_kills'] == 0
++
++
++@pytest.mark.parametrize('method', ['poll', 'wait', 'communicate'])
++def test_direct_child_wait4_rss(method):
++    # Verify all Popen reaping paths, including communicate's internal wait.
++    proc = proctree.RusagePopen(['/bin/true'])
++    try:
++        if method == 'poll':
++            deadline = time.monotonic() + 5
++            while proc.poll() is None:
++                assert time.monotonic() < deadline
++                time.sleep(.001)
++        else:
++            getattr(proc, method)(timeout=5)
++        assert proc.returncode == 0
++        assert proc.peak_rss_bytes > 0
++    finally:
++        if proc.poll() is None:
++            proc.kill()
++        proc.wait()
++
++
++@pytest.mark.parametrize('polled_rss', [0, 5 * 1024**2])
++def test_reaped_rss_is_maximum_not_sum_or_kill_trigger(monkeypatch, tmp_path, polled_rss):
++    import io
++    runner = proctree.snapshot()[os.getpid()]
++    parent = replace(runner, pid=runner.pid + 100000, ppid=runner.pid, rss=polled_rss)
++    processes = {runner.pid: runner, parent.pid: parent}
++
++    class ExitingParent:
++        pid = parent.pid
++        returncode = None
++        peak_rss_bytes = 3 * 1024**2
++        stdout, stderr = io.StringIO(), io.StringIO()
++
++        def poll(self):
++            return self.returncode
++
++        def communicate(self, timeout=None):
++            processes.pop(parent.pid, None)
++            self.returncode = 0
++            return '', ''
++
++    # Two adopted children with peaks of 4 and 2 MiB. Their peaks must be
++    # converted from Linux KiB and maximized with the direct child's 3 MiB.
++    reaped = iter([(parent.pid + 1, 0, SimpleNamespace(ru_maxrss=4096)),
++                   (parent.pid + 2, 0, SimpleNamespace(ru_maxrss=2048))])
++
++    def wait_children(pid, flags):
++        assert (pid, flags) == (-1, os.WNOHANG)
++        try:
++            return next(reaped)
++        except StopIteration:
++            raise ChildProcessError() from None
++
++    monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(polled_rss + 1))
++    monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
++    monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
++    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
++    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
++    def kill(live):
++        assert live == {}
++        return 0
++
++    monkeypatch.setattr(proctree, 'kill_tree', kill)
++    result = proctree.run_limited(['fake'], tmp_path, {})
++    assert result['status'] == 'ok' and result['exit_code'] == 0
++    assert result['metrics']['peak_rss_bytes'] == max(polled_rss, 4 * 1024**2)
++    assert result['metrics']['mem_kills'] == 0
++
++
+ def test_envless_double_fork_is_reaped(execute, tmp_path):
+     run, metrics = execute
+     code = """
+@@ -208,6 +294,7 @@
+     class ExitingParent:
+         pid = parent.pid
+         returncode = None
++        peak_rss_bytes = 4096
+         stdout, stderr = io.StringIO(), io.StringIO()
+ 
+         def poll(self):
+@@ -231,7 +318,7 @@
+     monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(300 * 1024**2))
+     monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
+     monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
+-    monkeypatch.setattr(proctree.subprocess, 'Popen', lambda *a, **kw: ExitingParent())
++    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
+     monkeypatch.setattr(proctree, 'kill_tree', kill)
+     waits = 0
+ 
+@@ -241,12 +328,12 @@
+         waits += 1
+         if waits == 1:
+             # Simulate /proc missing a child during a fork/reparent race.
+-            # waitpid still sees it, so cleanup must scan again before success.
++            # wait4 still sees it, so cleanup must scan again before success.
+             processes[child.pid] = child
+-            return 0, 0
++            return 0, 0, None
+         raise ChildProcessError()
+ 
+-    monkeypatch.setattr(proctree.os, 'waitpid', wait_children)
++    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
+     result = proctree.run_limited(['fake'], tmp_path, {})
+     assert result['status'] == 'error' and result['exit_code'] == 137
+     assert 'killed: sandbox memory limit' in result['stderr']
+
+ succeeded in 15240ms:
+....................s............................................... [ 14%]
+........................................................................ [ 30%]
+........................................................................ [ 45%]
+........................................................................ [ 61%]
+........................................................................ [ 76%]
+..................................................s..................... [ 92%]
+....ss.............................                                      [100%]
+459 passed, 4 skipped, 4 subtests passed in 13.75s
+
+exec
+/bin/bash -lc "rg -n 'skip|skipif' eval/tests && git diff -- eval/proctree.py eval/tests/test_sandbox_limits.py docs/EVAL_RUNNER_SPEC.md && git status --short" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+eval/tests/test_eval_fixes.py:26:    pytest.importorskip('swegemma')
+eval/tests/test_eval_fixes.py:158:        pytest.skip('bubblewrap not installed')
+eval/tests/test_eval_fixes.py:161:        pytest.skip('bubblewrap blocked by sandbox: ' + preflight.stderr.strip())
+eval/tests/test_run_agent_eval.py:193:@pytest.mark.skipif(os.environ.get('RUN_AGENT_EVAL_E2E') != '1', reason='opt-in real harness smoke test')
+eval/tests/test_run_agent_eval.py:233:            '--concurrency', '1', '--skip-selfcheck', '--max-turns', '4', '--session-minutes', '1']
+eval/tests/test_run_agent_eval.py:295:            pytest.skip('Sandbox denied localhost socket creation')
+eval/tests/test_pack.py:27:        pytest.skip('PyYAML not installed')
+eval/tests/test_pack.py:122:    add(bundle, 'agent.yaml', f'name: main\nmodel: {MODEL}\ninstruction: !include prompts/system.md\ngenerate_content_config: !include configs/sampling.yaml\ntools:\n  - agent_tool:\n      config_path: sub_agents/child.yaml\n      skip_summarization: true\n')
+eval/tests/test_pack.py:562:        pytest.skip('v000 uses multiline quoted YAML, which requires PyYAML')
+eval/tests/test_pack.py:578:        pytest.skip('aliases require PyYAML')
+diff --git a/docs/EVAL_RUNNER_SPEC.md b/docs/EVAL_RUNNER_SPEC.md
+index 6ed5a9a..c5e9316 100644
+--- a/docs/EVAL_RUNNER_SPEC.md
++++ b/docs/EVAL_RUNNER_SPEC.md
+@@ -20,3 +20,10 @@ gold-local, i.e. the scorer docker image as emulated in `eval/kaggle/gold_calibr
+ - Concurrency N against one endpoint; per-task wall time, tokens, tool-call counts logged to runs/<name>/.
+ - Results file results/<run>.jsonl with schema header line; resumable (skip finished ids).
+ - Scratch in /tmp only; record any /workspace stray files and test-file edits per task.
++
++## Sandbox memory metrics
++`peak_rss_bytes` is the maximum of polled process-tree RSS and the largest
++`wait4().rusage.ru_maxrss` from reaped processes, converted from Linux KiB to
++bytes. Reaped RSS is a per-process peak, not a simultaneous tree sum; it also
++captures commands that exit before the first RSS poll. The 4 GiB tree-RSS kill
++decision uses only polled tree RSS.
+diff --git a/eval/proctree.py b/eval/proctree.py
+index 66e579a..f4e357f 100644
+--- a/eval/proctree.py
++++ b/eval/proctree.py
+@@ -1,6 +1,7 @@
+ """Linux process identities and RSS, restricted to our uid (stdlib only)."""
+ from dataclasses import dataclass
+ import ctypes
++import errno
+ import json
+ import os
+ import resource
+@@ -103,9 +104,53 @@ def track_descendants(tracked, runner, processes):
+     return survivors(tracked, processes)
+ 
+ 
++class RusagePopen(subprocess.Popen):
++    """Keep Popen's status/pipe handling while collecting the child's rusage.
++
++    POSIX Popen reaps through both _internal_poll and _try_wait (wait and
++    communicate). Both must use wait4 before the kernel discards the rusage.
++    """
++    peak_rss_bytes = 0
++
++    def _waitpid(self, pid, flags):
++        pid, status, usage = os.wait4(pid, flags)
++        if pid:
++            self.peak_rss_bytes = max(self.peak_rss_bytes, usage.ru_maxrss * 1024)
++        return pid, status
++
++    def _internal_poll(self, _deadstate=None):
++        # Popen's private poll callback signature differs between Python 3.12
++        # and 3.13. Keep its locking/status semantics with our wait4 callback.
++        if self.returncode is None and self._waitpid_lock.acquire(False):
++            try:
++                if self.returncode is None:
++                    pid, status = self._waitpid(self.pid, os.WNOHANG)
++                    if pid == self.pid:
++                        self._handle_exitstatus(status)
++            except OSError as exc:
++                if _deadstate is not None:
++                    self.returncode = _deadstate
++                elif exc.errno == errno.ECHILD:
++                    self.returncode = 0
++            finally:
++                self._waitpid_lock.release()
++        return self.returncode
++
++    def _try_wait(self, wait_flags):
++        try:
++            return self._waitpid(self.pid, wait_flags)
++        except ChildProcessError:
++            return self.pid, 0  # Match Popen's already-reaped child behavior.
++
++
+ def run_limited(command, cwd, env, timeout=300, *, shell=None,
+                 max_output_chars=10 * 1024 * 1024):
+-    """Installed executor contract, with host process-tree limits and cleanup."""
++    """Installed executor contract, with host process-tree limits and cleanup.
++
++    peak_rss_bytes is the maximum of sampled tree RSS and reaped ru_maxrss
++    (KiB on Linux, converted to bytes). The reaped value is a per-process
++    peak, not a simultaneous tree sum. Only sampled tree RSS triggers kills.
++    """
+     enable_subreaper()
+     runner = snapshot()[os.getpid()]
+     start = time.perf_counter()
+@@ -132,7 +177,7 @@ def run_limited(command, cwd, env, timeout=300, *, shell=None,
+                 command = [command]
+             command = [prlimit, f'--as={as_limit}', '--', *command]
+             shell = False
+-        proc = subprocess.Popen(command, shell=shell, cwd=str(cwd), env=env,
++        proc = RusagePopen(command, shell=shell, cwd=str(cwd), env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, encoding='utf-8', errors='replace',
+                                 start_new_session=True)
+@@ -157,18 +202,21 @@ def run_limited(command, cwd, env, timeout=300, *, shell=None,
+         return live
+ 
+     def reap():
++        nonlocal peak
+         if proc.poll() is None:
+             return False  # Popen owns the direct child's status.
++        peak = max(peak, proc.peak_rss_bytes)
+         # Once Popen has reaped its child, all remaining children are task
+         # orphans. ECHILD confirms cleanup even if a /proc snapshot missed a
+-        # fork/reparent race; waitpid(0) means another scan is still necessary.
++        # fork/reparent race; wait4 returning pid 0 requires another scan.
+         while True:
+             try:
+-                pid, _ = os.waitpid(-1, os.WNOHANG)
++                pid, _, usage = os.wait4(-1, os.WNOHANG)
+             except ChildProcessError:
+                 return True
+             if pid == 0:
+                 return False
++            peak = max(peak, usage.ru_maxrss * 1024)
+ 
+     def cleanup():
+         seen = set()
+diff --git a/eval/tests/test_sandbox_limits.py b/eval/tests/test_sandbox_limits.py
+index 24c7bc2..94f6fa9 100644
+--- a/eval/tests/test_sandbox_limits.py
++++ b/eval/tests/test_sandbox_limits.py
+@@ -5,6 +5,7 @@ import shlex
+ import sys
+ import time
+ from dataclasses import replace
++from types import SimpleNamespace
+ 
+ import pytest
+ 
+@@ -114,6 +115,91 @@ def test_without_prlimit(execute, monkeypatch):
+     assert metrics['peak_rss_bytes'] > 0
+ 
+ 
++@pytest.mark.parametrize('without_prlimit', [False, True])
++def test_submillisecond_command_rss_without_polling(execute, monkeypatch, without_prlimit):
++    run, metrics = execute
++    # /bin/true does sub-millisecond work. Force all tree RSS samples to miss
++    # it, regardless of host scheduling or the overhead of starting a process.
++    source = proctree.supervisor_source().replace(
++        'rss = tree_rss(live, processes)', 'rss = 0')
++    if without_prlimit:
++        source = source.replace("prlimit = shutil.which('prlimit')", 'prlimit = None')
++    monkeypatch.setattr(proctree, 'supervisor_source', lambda: source)
++    result = run(['/bin/true'])
++    assert result.status == 'ok' and result.exit_code == 0
++    assert metrics['peak_rss_bytes'] > 0
++    assert metrics['mem_kills'] == 0
++
++
++@pytest.mark.parametrize('method', ['poll', 'wait', 'communicate'])
++def test_direct_child_wait4_rss(method):
++    # Verify all Popen reaping paths, including communicate's internal wait.
++    proc = proctree.RusagePopen(['/bin/true'])
++    try:
++        if method == 'poll':
++            deadline = time.monotonic() + 5
++            while proc.poll() is None:
++                assert time.monotonic() < deadline
++                time.sleep(.001)
++        else:
++            getattr(proc, method)(timeout=5)
++        assert proc.returncode == 0
++        assert proc.peak_rss_bytes > 0
++    finally:
++        if proc.poll() is None:
++            proc.kill()
++        proc.wait()
++
++
++@pytest.mark.parametrize('polled_rss', [0, 5 * 1024**2])
++def test_reaped_rss_is_maximum_not_sum_or_kill_trigger(monkeypatch, tmp_path, polled_rss):
++    import io
++    runner = proctree.snapshot()[os.getpid()]
++    parent = replace(runner, pid=runner.pid + 100000, ppid=runner.pid, rss=polled_rss)
++    processes = {runner.pid: runner, parent.pid: parent}
++
++    class ExitingParent:
++        pid = parent.pid
++        returncode = None
++        peak_rss_bytes = 3 * 1024**2
++        stdout, stderr = io.StringIO(), io.StringIO()
++
++        def poll(self):
++            return self.returncode
++
++        def communicate(self, timeout=None):
++            processes.pop(parent.pid, None)
++            self.returncode = 0
++            return '', ''
++
++    # Two adopted children with peaks of 4 and 2 MiB. Their peaks must be
++    # converted from Linux KiB and maximized with the direct child's 3 MiB.
++    reaped = iter([(parent.pid + 1, 0, SimpleNamespace(ru_maxrss=4096)),
++                   (parent.pid + 2, 0, SimpleNamespace(ru_maxrss=2048))])
++
++    def wait_children(pid, flags):
++        assert (pid, flags) == (-1, os.WNOHANG)
++        try:
++            return next(reaped)
++        except StopIteration:
++            raise ChildProcessError() from None
++
++    monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(polled_rss + 1))
++    monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
++    monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
++    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
++    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
++    def kill(live):
++        assert live == {}
++        return 0
++
++    monkeypatch.setattr(proctree, 'kill_tree', kill)
++    result = proctree.run_limited(['fake'], tmp_path, {})
++    assert result['status'] == 'ok' and result['exit_code'] == 0
++    assert result['metrics']['peak_rss_bytes'] == max(polled_rss, 4 * 1024**2)
++    assert result['metrics']['mem_kills'] == 0
++
++
+ def test_envless_double_fork_is_reaped(execute, tmp_path):
+     run, metrics = execute
+     code = """
+@@ -208,6 +294,7 @@ def test_memory_excess_first_seen_in_cleanup(monkeypatch, tmp_path):
+     class ExitingParent:
+         pid = parent.pid
+         returncode = None
++        peak_rss_bytes = 4096
+         stdout, stderr = io.StringIO(), io.StringIO()
+ 
+         def poll(self):
+@@ -231,7 +318,7 @@ def test_memory_excess_first_seen_in_cleanup(monkeypatch, tmp_path):
+     monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(300 * 1024**2))
+     monkeypatch.setattr(proctree, 'enable_subreaper', lambda: None)
+     monkeypatch.setattr(proctree, 'snapshot', lambda: processes.copy())
+-    monkeypatch.setattr(proctree.subprocess, 'Popen', lambda *a, **kw: ExitingParent())
++    monkeypatch.setattr(proctree, 'RusagePopen', lambda *a, **kw: ExitingParent())
+     monkeypatch.setattr(proctree, 'kill_tree', kill)
+     waits = 0
+ 
+@@ -241,12 +328,12 @@ def test_memory_excess_first_seen_in_cleanup(monkeypatch, tmp_path):
+         waits += 1
+         if waits == 1:
+             # Simulate /proc missing a child during a fork/reparent race.
+-            # waitpid still sees it, so cleanup must scan again before success.
++            # wait4 still sees it, so cleanup must scan again before success.
+             processes[child.pid] = child
+-            return 0, 0
++            return 0, 0, None
+         raise ChildProcessError()
+ 
+-    monkeypatch.setattr(proctree.os, 'waitpid', wait_children)
++    monkeypatch.setattr(proctree.os, 'wait4', wait_children)
+     result = proctree.run_limited(['fake'], tmp_path, {})
+     assert result['status'] == 'error' and result['exit_code'] == 137
+     assert 'killed: sandbox memory limit' in result['stderr']
+ M docs/EVAL_RUNNER_SPEC.md
+ M eval/proctree.py
+ M eval/tests/test_sandbox_limits.py
+
+exec
+/bin/bash -lc "sed -n '145,175p' eval/tests/test_eval_fixes.py; sed -n '180,210p' eval/tests/test_run_agent_eval.py; sed -n '270,305p' eval/tests/test_run_agent_eval.py; git diff --check" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+        for _ in range(2):
+            sb.execute_subprocess_command(command=['/bin/bash', '-c', 'translated'],
+                                          cwd=tmp_path / 'workspace', env={}, timeout=3, shell=False)
+        assert state['cmd_timeouts'] == 2
+        assert seen[0]['command'][0] == 'bwrap'
+        assert seen[0]['command'][-1] == 'translated'
+        assert seen[0]['timeout'] == 3 and seen[0]['shell'] is False
+    finally:
+        env.command_metrics.reset(token)
+
+
+def test_real_bwrap_probe(tmp_path, monkeypatch, harness):
+    if not shutil.which('bwrap'):
+        pytest.skip('bubblewrap not installed')
+    preflight = subprocess.run(env.BWRAP_TEMPLATE[:11] + ['/bin/true'], capture_output=True, text=True)
+    if preflight.returncode:
+        pytest.skip('bubblewrap blocked by sandbox: ' + preflight.stderr.strip())
+    import swegemma.sandbox.subprocess as sb
+    monkeypatch.setattr(sb, 'execute_subprocess_command', sb.execute_subprocess_command)
+    (tmp_path / 'tasks.jsonl').write_text('hidden inventory')
+    env.isolate_host_packages()
+    env.apply_isolation([Path.home(), ROOT, tmp_path], [])
+    env.probe_isolation(sb.SubprocessManager(), tmp_path / 'tasks.jsonl', tmp_path)
+
+
+def test_config_forwards_fields_and_resolves_graph_paths(tmp_path, caplog, harness):
+    from swegemma.context import SwegemmaContext
+    args = SimpleNamespace(data_dir=tmp_path / 'other-data', bundle=tmp_path / 'bundle', concurrency=1)
+    config = runner.build_config(dict(verification_timeout_seconds=17, max_llm_calls=9,
+                                      enable_sandbox_testing=False, graph_dir='mygraphs',
+                                      embeddings_dir='myembeddings', future_option=42),
+    for expected in ('tool_calls', 'stop'):
+        body = b'{"model":"stub"}'
+        handler.path = '/v1/chat/completions'
+        handler.headers = {'Content-Length': str(len(body))}
+        handler.rfile, handler.wfile = io.BytesIO(body), io.BytesIO()
+        handler.do_POST()
+        payload = json.loads(handler.wfile.getvalue())
+        assert payload['choices'][0]['finish_reason'] == expected
+        if expected == 'tool_calls':
+            assert payload['choices'][0]['message']['tool_calls'] == [call]
+        assert 'usage' not in payload  # Never invent token counts.
+
+
+@pytest.mark.skipif(os.environ.get('RUN_AGENT_EVAL_E2E') != '1', reason='opt-in real harness smoke test')
+@pytest.mark.parametrize('transport', ['http', 'in_memory'])
+def test_e2e(tmp_path, monkeypatch, transport):
+    iid = sorted(runner.read_ids(ROOT / 'eval/splits/dev.txt'))[0]
+    name = 'stub-eval'
+    data = tmp_path / 'inventory'
+    (data / 'snapshots').mkdir(parents=True)
+    (data / 'wheels').mkdir()
+    (data / 'sandbox').mkdir()
+    (data / 'sandbox/setup.py').write_text('# Synthetic offline setup needs no dependencies.\n')
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'module.py').write_text('VALUE = 0\n')
+    subprocess.run(['git', 'init', '-q', str(source)], check=True)
+    subprocess.run(['git', '-C', str(source), 'config', 'user.name', 'Offline Test'], check=True)
+    subprocess.run(['git', '-C', str(source), 'config', 'user.email', 'offline@example.invalid'], check=True)
+    with tarfile.open(data / 'snapshots' / (iid + '.tgz'), 'w:gz') as archive:
+        archive.add(source, arcname='.')
+        gold_files = []
+        def gold_file(*args, **kwargs):
+            stream = original_tempfile(*args, **kwargs)
+            gold_files.append(Path(stream.name))
+            return stream
+        monkeypatch.setattr(vf.tempfile, 'NamedTemporaryFile', gold_file)
+        task = load_tasks(data / 'tasks.jsonl')[0]
+        gold = asyncio.run(verify_gold(task, task.patch, data, 'subprocess', out_dir=out))
+        assert gold.resolved and gold_files
+        assert all(p.is_relative_to(out) for p in gold_files)
+        revision = runner.runner_revision()
+        monkeypatch.setattr(runner, 'runner_revision', lambda: dict(revision, runner_source_sha256='changed'))
+        with pytest.raises(ValueError, match='runner_source_sha256'):
+            runner.main(argv)
+        handler_class = make_server(script)
+        monkeypatch.setattr(runner, 'classify_patch', lambda *args: 1 / 0)
+        runner.main([*argv, '--force-new-out'])
+        replacement = [json.loads(line) for line in (out / f'{name}.jsonl').read_text().splitlines()]
+        assert replacement[1]['diag_error'] == 'ZeroDivisionError'
+        assert replacement[1]['resolved'] is True
+        assert len(list(out.glob(name + '-*.jsonl'))) == 1
+    else:
+        try:
+            server = make_server(script)
+        except PermissionError:
+            pytest.skip('Sandbox denied localhost socket creation')
+        with server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with (tmp_path / 'runner.log').open('w') as log:
+                    proc = subprocess.run([sys.executable, str(ROOT / 'eval/run_agent_eval.py'), *argv,
+                        '--endpoint', f'http://127.0.0.1:{server.server_port}/v1'],
+                        cwd=ROOT, stdout=log, stderr=log, timeout=240)
+                assert proc.returncode == 0, (tmp_path / 'runner.log').read_text()[-2000:]
+            finally:
+
+exec
+/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 UV_OFFLINE=1 /home/ubuntu/gemma-local/venv/bin/python -m pytest -q -rs --junitxml=/tmp/sandbox-limits-round3-eval.xml eval/tests' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+codex
+The full suite passed: **459 passed, 4 skipped**, plus 4 passing subtests. I’m recording a JUnit report and checking the skip reasons for the handoff. All sandbox-limit tests passed; the new `/bin/true` regression forces polled RSS to zero and covers both normal execution and the fallback without `prlimit`.
+exec
+/bin/bash -lc 'git diff --check && git status --short' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+ M docs/EVAL_RUNNER_SPEC.md
+ M eval/proctree.py
+ M eval/tests/test_sandbox_limits.py
+
+ succeeded in 15107ms:
+....................s............................................... [ 14%]
+........................................................................ [ 30%]
+........................................................................ [ 45%]
+........................................................................ [ 61%]
+........................................................................ [ 76%]
+..................................................s..................... [ 92%]
+....ss.............................                                      [100%]
+=========================== short test summary info ============================
+SKIPPED [1] eval/tests/test_eval_fixes.py:161: bubblewrap blocked by sandbox: bwrap: loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted
+SKIPPED [1] eval/tests/test_pack.py:578: aliases require PyYAML
+SKIPPED [2] eval/tests/test_run_agent_eval.py:193: opt-in real harness smoke test
+459 passed, 4 skipped, 4 subtests passed in 13.66s
+
+codex
+Implemented Round 3 on `codex/sandbox-limits`.
+
+- Captures `wait4()` rusage for direct children and adopted descendants. Reports the maximum of polled tree RSS and reaped per-process peaks, converting Linux KiB to bytes.
+- Documents the metric; keeps the 4 GiB kill logic poll-based.
+- Adds timing-independent `/bin/true` regression tests.
+
+Offline full suite: **459 passed, 4 skipped, 4 subtests passed**. [JUnit report](/tmp/sandbox-limits-round3-eval.xml).
+
+Open issues: none identified. Sandbox blocked the bubblewrap probe; other skips were missing PyYAML alias support and two opt-in smoke tests. Normal-host execution remains unverified here.
+
+No `ops/` edits or commits.
+tokens used
+38,154

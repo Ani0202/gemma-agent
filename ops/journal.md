@@ -119,3 +119,6 @@
 2026-11-05T18:14Z | review owner patch v2: 3 BLOCKING (regex marker, pid reuse, legacy records); v3 deferred (low urgency, dec 026) | ops/codex/review-20261105T180811.md
 2026-11-05T18:14Z | review memguard-fix: 2 BLOCKING (GEMMA_JOB_ID grouping, eligibility revalidation); round 2 launched | ops/codex/review-20261105T180810.md, ops/codex/build-memguard-fix2.spec
 2026-11-05T18:15Z | sandbox-limits round 2: Codex 453 pass, but on this host 7 FAIL (peak_rss 0 for short cmds); round 3 launched | ops/codex/build-sandbox-limits2.md, ops/codex/build-sandbox-limits3.spec
+2026-11-05T18:19Z | kernel-setup-fix round 1 (c57bd65); follow-up setup-check build launched (fidelity: prefix removed, pip sourcing, CPU mode) | ops/codex/build-kernel-setup-fix.md, ops/codex/build-kernel-setup-check.spec
+2026-11-05T18:20Z | memguard-fix round 2: host 41+1skip offline, 42 live pass; review launched | ops/jobs/memguard-fix-livetest.log
+2026-11-05T18:24Z | item 4 scoped: submit_patch freezes the patch; fallback diff otherwise; no trimming knobs; compaction faithful to starter. Draft prompt + plan 005 | ops/codex/ask-20261105T181222.md, bundles/drafts/item4-system.md, eval/plans/005.md

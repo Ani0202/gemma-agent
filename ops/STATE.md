@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 18:17Z (cycle 69, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 18:25Z (cycle 70, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -20,22 +20,22 @@ Builder on Opus (dec 010: local-first, two-strike).
 
 ## Running jobs (18:12Z)
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
-- codex-kernel-setup-fix, ask-item4-light, codex-sandbox-limits3, codex-memguard-fix2.
+- codex-kernel-setup-check, codex-sandbox-limits3, review-memguard-fix2-light.
 - Done this cycle: pipfb2-light (plan 003), scout (ops/scout/2026-11-05-timing-caps.md; RULES_FINDINGS C1-C3).
 
 ## bin/job, memguard, owner patch (cycles 62-66)
 - Linger=yes since ~18:05Z (dec 025): the scope path (MemoryMax=5G) is normal; Codex works under it.
 - Owner patch v2 = ONE diff (dec 024 item 3; dec 026: HOLD for Aniket, low urgency, after the critical path; keep the RLIMIT_DATA comment): ops/patches/bin-job-fallback.diff. v2 review ops/codex/review-20261105T180811.md: 3 BLOCKING (grep regex marker -> use grep -F; PID reuse between scan and signal plus cached group_ok -> bind identities (pidfd); legacy 3/4-field records -> refuse destructive signalling without identity evidence). Plan v3: a small Python helper using pidfds (like memguard) called from bin/job kill. NOT started (low urgency).
-- memguard-fix: branch codex/memguard-fix. Review ops/codex/review-20261105T180810.md: 2 BLOCKING (group by GEMMA_JOB_ID; revalidate eligibility before acting). Round 2 job codex-memguard-fix2 (ops/codex/build-memguard-fix2.sh). Merge only with no BLOCKING; deploy as memguard-light, new one BEFORE stopping pid 7933.
+- memguard-fix: round 2 adae3eb; host tests offline 41 pass/1 skip, live 42 pass (job memguard-fix-livetest, ops/codex/memguard-fix-livetest.sh). Review job review-memguard-fix2-light. Merge only with no BLOCKING; deploy as memguard-light, new one BEFORE stopping pid 7933.
 
 ## Dec 027 (report 004 approved, option B with fidelity changes): plan 004 pre-registered (eval/plans/004.md)
 - FIDELITY: the timing kernel may only reproduce Dockerfile.public (pip + the line-9 tool set, offline). NO PIP_NO_INDEX/retry prefixes. setup_calls logging is mandatory.
-- Build chain on branch codex/kernel-setup-fix: (1) codex-kernel-setup-fix RUNNING (its spec still had the PIP prefix item); (2) NEXT, run the follow-up ops/codex/build-kernel-setup-check.spec in the same worktree (remove the prefix, SETUP_FIX toggle, SETUP_ONLY CPU mode, CPU push variant, summarizer). Launch it like ops/codex/build-sandbox-limits2.sh (codex-build would reset the branch). Then my review + codex-review.
+- Build chain on branch codex/kernel-setup-fix: round 1 c57bd65 (437 pass; still has the PIP prefix; bwrap acceptance blocked in Codex's sandbox; local wheelhouse lacks pip/pytest-timeout wheels). Round 2 job codex-kernel-setup-check (spec ops/codex/build-kernel-setup-check.spec items 1-9: remove the prefix, SETUP_FIX toggle, SETUP_ONLY CPU mode, CPU push, summarizer, pip sourcing, Builder-runnable acceptance). Then I run eval/repro/plan003_kernel_setup.py locally (both modes) + codex-review, then push CPU stage 2a.
 - Kaggle CPU session (no GPU quota): 2a UNFIXED on rich_3006 + fastapi_14986 -> WHY. If the cause is the competition's own harness/wheel ABI, STOP and report. 2b FIXED on 16 ids (eval/plans/004-setup-check-ids.txt). Gate: setup <= 30 s, editable rc 0 16/16, 0 Retrying. -> results/kaggle_setup_cpu_check.json; log in ops/budget/kaggle.md.
 - Only if 2b passes: ONE GPU re-time of v000 cap 5 on eval/plans/004-gpu-retime-ids.txt (not a ship candidate). If 2b fails: re-time v001 instead.
 - Ship cap = both (i) (cap+S)x125+30 <= 660 and (ii) (cap + 0.875 + 0.75S)x125+30 <= 660 -> ~4.0 min at S~10 s -> e4b-v002 after the re-time.
 - Report 005: the 2a cause, the CPU gate, the GPU re-time, and the first-submission bundle with its cap derivation (the Director will run a codex-ask adversarial check).
-- Item 6 / dec 022 item 4 levers (CPU): scoping ask job ask-item4-light (harness diff-on-timeout, patch contents, tool-output trimming knobs, compaction).
+- Item 6 / dec 022 item 4: scoped (ops/codex/ask-20261105T181222.md). The harness's fallback diff already covers caps/overflow when submit_patch was NOT called; submit_patch freezes the patch (an empty submit loses everything). No bundle-level output trimming or compaction knob exists; the timing kernel compaction = starter cell 10 (faithful). Draft prompt bundles/drafts/item4-system.md; plan 005 pre-registered (paired A/B at the v002 cap, needs GPU: ask in report 005).
 - Background (plan 003): hung-index fallback 103.4 s/call; 2 calls = 206.8 s vs Kaggle 207-211 s. results/plan003_pip_fallback_repro.json.
 
 ## OOM incident (dec 020/021)
