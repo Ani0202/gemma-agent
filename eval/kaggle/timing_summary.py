@@ -40,10 +40,11 @@ def setup_evidence(call):
 
 def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
               gate_vllm_seconds=600, gate_min_nonempty=1, gate_mode='total'):
-    """gate_mode 'total' = dec 028 item 4 (a)-(e) on TOTAL Phase-1. gate_mode 'minus-image' = dec 034 item 2:
-    (b) max(Phase-1 minus image emulation) <= cap x 60 + 37 s (cap from the header), (c) not gated."""
-    if gate_mode not in ('total', 'minus-image'):
-        raise ValueError('gate_mode must be total or minus-image')
+    """gate_mode 'total' = dec 028 item 4 (a)-(e) on TOTAL Phase-1. gate_mode 'stock-path' = dec 034 item 2 as
+    corrected by dec 036 item 1: (b) max(stockpath_phase1) <= cap x 60 + 37 s (cap from the header), where
+    stockpath_phase1 = phase1_wall - image_emulation_seconds - setup_py_emulation_seconds; (c) not gated."""
+    if gate_mode not in ('total', 'stock-path'):
+        raise ValueError('gate_mode must be total or stock-path')
     records = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
     if not records or records[0].get('_schema') != 'kaggle_timing_v1':
         raise ValueError('Expected kaggle_timing_v1 header')
@@ -79,8 +80,19 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
     numbers([v for v in (startup, cap) if v is not None])
     timing_minutes = totals['p90'] * 125 / 60 + startup / 60 if totals['p90'] is not None and startup is not None else None
     cap_minutes = cap * 125 + 30 if cap is not None else None
+    def setup_py_seconds(row):
+        # Dec 036 item 1: the Dockerfile.public setup.py emulation step(s) in setup_calls (install_editable_package +
+        # install_test_dependencies), which the stock subprocess path replaces with P1 stock_setup. Missing -> None.
+        steps = [c.get('duration_s') for c in row.get('setup_calls', []) if c.get('step') == 'setup.py']
+        return sum(steps) if steps and all(type(v) in (int, float) for v in steps) else None
+    def stock_total(row):
+        st = row.get('stock_setup') or {}
+        return st.get('total_s') if type(st.get('total_s')) in (int, float) and not st.get('error') else None
     tasks = []
     for row in rows:
+        setup_py = setup_py_seconds(row)
+        stock_s = stock_total(row)
+        parts = [row.get('agent_clock_seconds'), row.get('finalization_seconds'), stock_s]
         source_files = set(row.get('patch_files', [])) - set(row.get('test_files_edited', [])) - set(row.get('stray_files', []))
         tasks.append(dict(instance_id=row['instance_id'], repo=row.get('repo'),
             setup_calls=[{key: call.get(key) for key in ('step', 'duration_s', 'rc', 'retrying_lines')}
@@ -91,6 +103,12 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                 'image_emulation_seconds', 'setup_failed', 'editable_failed')},
             phase1_minus_image_seconds=(row['phase1_wall_seconds'] - row['image_emulation_seconds']
                 if row.get('phase1_wall_seconds') is not None and row.get('image_emulation_seconds') is not None else None),
+            setup_py_emulation_seconds=setup_py,
+            stockpath_phase1_seconds=(row['phase1_wall_seconds'] - row['image_emulation_seconds'] - setup_py
+                if row.get('phase1_wall_seconds') is not None and row.get('image_emulation_seconds') is not None
+                and setup_py is not None else None),
+            stock_setup_seconds=stock_s,
+            h1_composite_seconds=sum(parts) if all(type(v) in (int, float) for v in parts) else None,
             total=row['wall_seconds']['total'],
             nonempty_source_diff=not row.get('empty_patch', True) and bool(source_files)))
     def measured(key):
@@ -117,11 +135,11 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
         gate.update(b_max_phase1=check(all_phase1 and phase1['max'] <= gate_max_phase1, phase1['max'], gate_max_phase1),
                     c_mean_phase1=check(all_phase1 and phase1['mean'] <= gate_mean_phase1, phase1['mean'], gate_mean_phase1))
     else:
-        minus = [t['phase1_minus_image_seconds'] for t in tasks]
+        stock_path = [t['stockpath_phase1_seconds'] for t in tasks]
         bound = cap * 60 + 37 if cap is not None else None
-        ok = all_phase1 and bound is not None and all(v is not None for v in minus)
-        worst = max(minus) if ok and minus else None
-        gate.update(b_max_phase1_minus_image=check(ok and worst <= bound, worst, bound),
+        ok = all_phase1 and bound is not None and all(v is not None for v in stock_path)
+        worst = max(stock_path) if ok and stock_path else None
+        gate.update(b_max_stockpath_phase1=check(ok and worst <= bound, worst, bound),
                     c_mean_phase1='NOT_GATED (dec 034 item 2)')
     gate.update(
         d_vllm_seconds=check(startup is not None and startup <= gate_vllm_seconds, startup, gate_vllm_seconds),
@@ -138,7 +156,12 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
         return dict(instance_id=r['instance_id'], n_calls=len(calls), completion_tokens=sum(comp) if comp else None,
                     calls_per_minute=len(calls) / agent * 60 if agent else None, mean_gap_s=sum(gaps) / len(gaps) if gaps else None,
                     gap_tokens_per_second=sum(comp) / sum(gaps) if comp and gaps else None)
+    h1 = [t['h1_composite_seconds'] for t in tasks]
     probes = dict(platform_probe=header.get('platform_probe'),
+                  h1_composite=dict(not_gated='agent_clock + finalization + P1 stock_setup total_s (dec 036 item 1); G1 rests on it',
+                                    tasks={t['instance_id']: t['h1_composite_seconds'] for t in tasks},
+                                    max_s=max(h1) if h1 and all(v is not None for v in h1) else None,
+                                    n_missing=sum(v is None for v in h1)),
                   stock_setup=dict(tasks=stock, n_ok=len(stock_totals), max_s=max(stock_totals) if stock_totals else None,
                                    all_le_30s=bool(stock) and len(stock_totals) == len(stock) and max(stock_totals) <= 30),
                   llm=[llm_stats(r) for r in rows if 'llm_calls' in r],
@@ -152,9 +175,12 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                     editable_failed_count='Rows whose editable install returned rc!=0 (diagnostic, not gated)',
                     image_emulation_seconds='Distribution of in-Phase-1 seconds emulating image layers the scorer image already has',
                     phase1_minus_image_seconds='Distribution of phase1_wall_seconds minus image_emulation_seconds (not gated; reported for the Director)',
+                    setup_py_emulation_seconds='Distribution of per-task seconds in setup_calls step setup.py (Dockerfile.public setup.py emulation: install_editable_package + install_test_dependencies)',
+                    stockpath_phase1_seconds='Distribution of phase1_wall - image_emulation - setup_py_emulation (gate b in stock-path mode)',
+                    h1_composite_seconds='Distribution of agent_clock + finalization + P1 stock_setup total_s (not gated)',
                     fallback_invocations='Index-enabled editable fallback invocations across setup calls',
                     retrying_lines_total='pip Retrying lines across setup calls, nested output counted once',
-                    tasks='Per-task instance_id, repo, setup_calls [{step,duration_s,rc,retrying_lines}], sandbox_setup_seconds, agent_clock_seconds, agent_timeout_fired, finalization_seconds, teardown_seconds, phase1_wall_seconds, total, error, nonempty_source_diff, fallback_patch_used; unavailable measurements are null',
+                    tasks='Per-task instance_id, repo, setup_calls [{step,duration_s,rc,retrying_lines}], sandbox_setup_seconds, agent_clock_seconds, agent_timeout_fired, finalization_seconds, teardown_seconds, phase1_wall_seconds, setup_py_emulation_seconds, stockpath_phase1_seconds, stock_setup_seconds, h1_composite_seconds, total, error, nonempty_source_diff, fallback_patch_used; unavailable measurements are null',
                     nonempty_source_diff='Nonblank classified patch with a path outside protected/test and stray files',
                     phase1_seconds='Phase-1 wall seconds: mean/p50/p90/max of available measurements',
                     setup_seconds='Setup S seconds: mean/p50/p90/max of available measurements',
@@ -164,8 +190,8 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                     timeout_fired_count='Tasks whose observed agent timeout fired',
                     fallback_patch_count='Tasks using a non-empty fallback patch',
                     vllm_startup_seconds='Measured vLLM startup seconds',
-                    gate='a-e checks: PASS/FAIL, observed value, CLI threshold; overall status requires all checks; mode total (dec 028) or minus-image (dec 034 item 2)',
-                    probes='Plan 006 addendum P1-P3: platform_probe (header), stock_setup per task (+max_s, all_le_30s = G1 P1 leg), llm per-task call stats, mean_agent_seconds',
+                    gate='a-e checks: PASS/FAIL, observed value, CLI threshold; overall status requires all checks; mode total (dec 028) or stock-path (dec 034 item 2 / dec 036 item 1: b = max stockpath_phase1 <= cap*60+37)',
+                    probes='Plan 006 addendum P1-P3: platform_probe (header), h1_composite (not gated; per task + max_s, null if any part missing), stock_setup per task (+max_s, all_le_30s = G1 P1 leg), llm per-task call stats, mean_agent_seconds',
                     decision_note='decision is the legacy total-wall/cap projection, NOT the gate (dec 032 item 5)',
                     total_seconds='Total task wall seconds distribution',
                     test_run_share='Agent test time share distribution', test_runs_per_task='Test request count distribution',
@@ -185,6 +211,9 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                 editable_failed_count=sum(bool(t['editable_failed']) for t in tasks),
                 image_emulation_seconds=distribution(measured('image_emulation_seconds')),
                 phase1_minus_image_seconds=distribution(measured('phase1_minus_image_seconds')),
+                setup_py_emulation_seconds=distribution(measured('setup_py_emulation_seconds')),
+                stockpath_phase1_seconds=distribution(measured('stockpath_phase1_seconds')),
+                h1_composite_seconds=distribution(measured('h1_composite_seconds')),
                 fallback_invocations=sum(fallback_invocations(c) for r in rows for c in r.get('setup_calls', [])),
                 retrying_lines_total=sum(retrying_lines(c) for r in rows for c in r.get('setup_calls', [])),
                 phase1_seconds=phase1, setup_seconds=setup, finalization_max_seconds=finalization['max'],
@@ -215,7 +244,7 @@ def main():
     parser.add_argument('--gate-mean-phase1', type=float, default=270)
     parser.add_argument('--gate-vllm-seconds', type=float, default=600)
     parser.add_argument('--gate-min-nonempty', type=int, default=1)
-    parser.add_argument('--gate-mode', choices=('total', 'minus-image'), default='total')
+    parser.add_argument('--gate-mode', choices=('total', 'stock-path'), default='total')
     args = parser.parse_args()
     summary = summarize(args.timing_jsonl, gate_max_phase1=args.gate_max_phase1,
                         gate_mean_phase1=args.gate_mean_phase1,
