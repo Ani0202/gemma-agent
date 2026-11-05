@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 18:48Z (cycle 75, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 18:56Z (cycle 76, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -18,13 +18,14 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
-## Running jobs (18:48Z)
+## Running jobs (18:56Z)
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
-- codex-memguard-fix4: round 4 (spec ops/codex/build-memguard-fix4.spec) for the 2 BLOCKING findings in ops/codex/review-20261105T183755.md: (1) action_eligible overwrites the fresh recipient with a stale record; (2) unmarked RSS+cwd admission (roots incl. /tmp) can kill non-job processes: Etho exclusion NOT guaranteed -> require positive bin/job provenance. Then host livetest + re-review.
-- review-kernel-setup3-light: codex review of 6cee0a1 + an independent check of the 2a DIAGNOSIS below. Report 005-prelim waits on it.
+- review-memguard-fix4-light: codex review of 5cb49c2 (round 4; host livetest 78 passed live, ops/jobs/memguard-fix4-livetest.log). Merge+deploy only with no BLOCKING.
+- codex-kernel-setup-fix4: round 4 in worktree codex-kernel-setup-fix (on 6cee0a1), spec ops/codex/build-kernel-setup-fix4.spec: B1 Docker order (tools -> pre-injection editable -> base tar -> setup.py) + per-step dist/RECORD state; B2 content-derived base-tar cache key + member check; B3 missing tool deps FAIL; N4-N6. Then local acceptance (PYTHONPATH=imgrt-stub) + review.
 - sandbox-limits r3 on main: full eval/tests on main NOT yet run (one heavy at a time). Caveats: 8 GiB AS backstop; gold_calibration worker timeout lacks descendant cleanup.
 
-## 2a DIAGNOSIS (cycle 75, local, pending codex check): results/plan003_kernel_setup_acceptance_r3local.json
+## 2a DIAGNOSIS (cycle 75, local): results/plan003_kernel_setup_acceptance_r3local.json
+- CODEX CHECK (ops/codex/review-20261105T184723.md, cycle 76): RECORD-less injection -> uninstall-no-record-file -> index fallback is SUPPORTED as a harness hazard, but NOT shown for the Docker order (Docker runs an editable install BEFORE injection; existing RECORDs survive tar extraction). One fallback per setup.py call, not two. SETUP_FIX=0 'success' = contaminated control (empty cached base tar sp_base_local). -> 2a STOP not yet justified; round 4 fixes fidelity first. Report 005-prelim deferred until round-4 acceptance.
 - accept3 failed only because the bwrap re-exec loses sys.path (pytest-timeout 2.1.0 lives in pyimg). Fixed locally with PYTHONPATH=/home/ubuntu/gemma-local/imgrt-stub (pytest-timeout 2.1.0 + pathspec/trove-classifiers/shellingham copied from pyimg = local stand-in for the image runtime). accept8: tool deps closed (missing []).
 - SETUP_FIX=1 still fails on both tasks: the competition setup.py's offline editable install -> "uninstall-no-record-file" for rich 15.0.0 / fastapi 0.141.1. Cause: the harness's base tar (container_setup skip_base_pkgs) injects the task's OWN package without RECORD; pip then falls back to an index install (5 Retrying lines; on Kaggle ~103 s/call x2 = ~207 s). SETUP_FIX=0: editable rc 0 in ~3 s (why unclear).
 - If confirmed, this is the competition's own harness -> dec 027 item 2a STOP rule: the artifact conclusion is void, 2b is moot, S~210 s is likely a scorer property. Do NOT push Kaggle 2a/2b until the Director decides.
@@ -75,6 +76,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
 ## Next 3
-1. review-kernel-setup3-light done -> write report 005-prelim (2a diagnosis + STOP per dec 027; options: confirm 2a UNFIXED on Kaggle CPU (free) vs adopt S=210 s -> cap<=1.54 (v001 territory)) -> NEEDS_DECISION.
-2. codex-memguard-fix4 done -> host livetest (ops/codex/memguard-fix-livetest.sh) -> re-review; merge+deploy only with no BLOCKING (no overlap: stop 7933, start memguard-light).
+1. codex-kernel-setup-fix4 done -> local acceptance (both modes, fresh cache) -> codex-review -> report 005-prelim (does the fallback occur under the Docker order? STOP per dec 027 2a or push Kaggle CPU 2a/2b) -> NEEDS_DECISION.
+2. review-memguard-fix4-light: no BLOCKING -> merge, deploy (stop 7933, start memguard-light at once); else round 5.
 3. Full eval/tests on main; then EV-1 + cpu8 gold/null run.

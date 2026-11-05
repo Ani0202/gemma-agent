@@ -135,3 +135,6 @@
 2026-11-05T18:41Z | review-memguard-fix3: 2 BLOCKING (stale recipient overwrite; unmarked RSS+cwd admission can kill non-job procs) -> codex-memguard-fix4 launched | ops/codex/review-20261105T183755.md ops/codex/build-memguard-fix4.spec
 2026-11-05T18:45Z | kernel-setup-accept3 failure = local sys.path loss in bwrap re-exec; accept4-8 with imgrt-stub PYTHONPATH: fix-mode editable fails uninstall-no-record-file (harness base tar injects task pkg w/o RECORD) -> index fallback; likely harness property, dec 027 STOP rule | results/plan003_kernel_setup_acceptance_r3local.json
 2026-11-05T18:47Z | review-kernel-setup3-light launched (6cee0a1 + independent diagnosis check); report 005-prelim after it | ops/STATE.md
+2026-11-05T18:54Z | review-kernel-setup3: 3 BLOCKING (Docker order not reproduced; unfixed control reused empty base tar; missing tool deps can PASS); diagnosis mechanism supported but Docker-order attribution unproven -> 2a STOP deferred | ops/codex/review-20261105T184723.md
+2026-11-05T18:55Z | codex-kernel-setup-fix4 launched in worktree codex-kernel-setup-fix (first launch via bin/codex-build created a branch off main; killed, worktree removed) | ops/codex/build-kernel-setup-fix4.spec
+2026-11-05T18:55Z | memguard-fix4-livetest green (78 passed live) -> review-memguard-fix4-light | ops/jobs/memguard-fix4-livetest.log
