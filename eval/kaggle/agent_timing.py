@@ -25,6 +25,8 @@ import time
 
 BUNDLE_B64 = ""  # embedded by timing_push.sh
 TASK_IDS = []
+SETUP_ONLY = False
+SETUP_FIX = 1
 GIT_SHA = ""
 KERNEL_BUDGET_SECONDS = 3 * 3600
 DATA = Path('/kaggle/input/competitions/gemma-4-developer-agent')
@@ -39,7 +41,7 @@ def install():
                VLLM_ENGINE_READY_TIMEOUT_S='1200', VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS='1',
                NCCL_DEBUG='WARN', LITELLM_LOCAL_MODEL_COST_MAP='True', LITELLM_TELEMETRY='False',
                LITELLM_LOG='WARNING', PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True',
-               OTEL_SDK_DISABLED='true', OTEL_PYTHON_DISABLED='true', PIP_NO_INDEX='1')
+               OTEL_SDK_DISABLED='true', OTEL_PYTHON_DISABLED='true')
     os.environ.update(env)
     for key in ('OPENAI_API_KEY', 'LOCAL_API_KEY'):
         os.environ.setdefault(key, 'EMPTY')
@@ -53,7 +55,8 @@ def install():
     staged = Path('/tmp/wheelhouse')
     staged.mkdir(exist_ok=True)
     for w in WHEELHOUSE.glob('*.whl'):
-        if 'cutlass' in w.name.lower():
+        gpu_wheel = w.name.lower().startswith(('vllm-', 'torch-', 'triton-', 'nvidia_'))
+        if 'cutlass' in w.name.lower() or (os.environ.get('SETUP_ONLY') == '1' and gpu_wheel):
             continue
         name = w.name.replace('cu128', '+cu128') if 'cu128' in w.name and '+' not in w.name else w.name
         target = staged / name
@@ -66,7 +69,7 @@ def install():
     if not wheels:
         raise RuntimeError('No wheelhouse wheels')
     subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '--no-deps',
-                    '--force-reinstall', *wheels], check=True)
+                    '--no-index', '--force-reinstall', *wheels], check=True)
     importlib.invalidate_caches()
     os.environ['PYTEST_ADDOPTS'] = (os.environ.get('PYTEST_ADDOPTS', '') + ' -p no:langsmith_plugin').strip()
     result = subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 'langsmith'], capture_output=True)
@@ -78,7 +81,6 @@ def install():
             lg.propagate = False
             lg.handlers.clear()
 
-PIP_PREFIX = 'PIP_NO_INDEX=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_RETRIES=0 PIP_TIMEOUT=5'
 SCORER_TOOLS = ('pip', 'pdm-backend', 'setuptools', 'wheel', 'poetry-core',
                 'hatchling', 'flit-core', 'editables', 'pytest', 'pytest-timeout', 'typer')
 BASE_SKIP = {'pytest', 'pytest-timeout', 'pytest-asyncio', 'pytest-httpbin',
@@ -86,7 +88,7 @@ BASE_SKIP = {'pytest', 'pytest-timeout', 'pytest-asyncio', 'pytest-httpbin',
 
 
 def setup_command(repo, fast_path=True):
-    return (PIP_PREFIX + ' python3 /tmp/setup.py ' +
+    return ('python3 /tmp/setup_observer.py /tmp/setup.py ' +
             ('--fast-path ' if fast_path else '') + shlex.quote(repo))
 
 
@@ -107,16 +109,17 @@ def compatible_wheels(wheels, tags):
 
 
 def setup_step(current, name, action):
-    """Bound output in the journal; never serialize commands, task objects or exceptions."""
+    """Time setup steps and retain bounded output plus retry counts."""
     start = time.perf_counter()
     row = dict(step=name, start_offset_s=round(start-current['started'], 6),
-               duration_s=0.0, rc=None, stdout='', stderr='')
+               duration_s=0.0, rc=None, stdout='', stderr='', retrying_lines=0)
     current['setup_calls'].append(row)
     try:
         result = action()
-        row['rc'] = getattr(result, 'exit_code', 0)
+        row['rc'] = getattr(result, 'exit_code', getattr(result, 'returncode', 0))
         for field in ('stdout', 'stderr'):
             value = getattr(result, field, '') or ''
+            row['retrying_lines'] += sum('Retrying' in line for line in value.splitlines())
             row[field] = value.encode('utf-8', errors='replace')[-2048:].decode('utf-8', errors='ignore')
         return result
     except Exception as exc:
@@ -127,6 +130,76 @@ def setup_step(current, name, action):
         row['duration_s'] = round(time.perf_counter()-start, 6)
         if row['rc'] != 0:
             current['setup_failed'] = True
+
+
+def fallback_wheel(wheels, package):
+    """Prefer the wheelhouse, then the running interpreter's ensurepip bundle."""
+    from packaging.utils import parse_wheel_filename
+    found = list(Path(wheels).glob(package + '-*-py3-none-any.whl'))
+    if not found and package == 'pip':
+        try:
+            import ensurepip
+            found = list((Path(ensurepip.__file__).parent / '_bundled').glob('pip-*.whl'))
+        except ImportError:
+            pass
+    return max(found, key=lambda p: parse_wheel_filename(p.name)[1]) if found else None
+
+
+def copy_runtime_package(name, destination):
+    """Copy only the pure Python image package and metadata; no host path injection."""
+    from importlib.metadata import distribution, PackageNotFoundError
+    try:
+        dist = distribution(name)
+    except PackageNotFoundError:
+        return 'missing'
+    if name == 'pytest-timeout' and dist.version != '2.1.0':
+        return 'missing'
+    module = 'pytest_timeout' if name == 'pytest-timeout' else name
+    files = [p for p in dist.files or [] if p.parts[0] in (module, module + '.py')
+             or p.parts[0].endswith('.dist-info')]
+    if not files or any(str(p).endswith(('.so', '.pyd')) for p in files):
+        return 'missing'
+    for entry in files:
+        target = destination / entry
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(dist.locate_file(entry), target)
+    return 'runtime-site-packages:' + str(dist.locate_file(''))
+
+
+# Capture setup.py's otherwise discarded subprocess output without changing setup.py.
+# Write after EVERY call so an outer timeout still leaves completed calls visible.
+SETUP_OBSERVER = r'''import json, runpy, subprocess, sys, time
+from pathlib import Path
+original = subprocess.run
+calls = []
+log = Path(__file__).with_name('setup_subprocesses.json')
+log.write_text('[]')
+def run(*args, **kwargs):
+    start = time.perf_counter()
+    argv = args[0] if args else kwargs.get('args')
+    result = None
+    try:
+        result = original(*args, **kwargs)
+        return result
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        result = exc
+        raise
+    finally:
+        def decode(value):
+            return value.decode(errors='replace') if isinstance(value, bytes) else (value or '')
+        out, err = decode(getattr(result, 'stdout', '')), decode(getattr(result, 'stderr', ''))
+        calls.append(dict(argv=argv, duration_s=time.perf_counter()-start,
+            start_offset_s=start-origin, rc=getattr(result, 'returncode', None),
+            stdout=out.encode()[-2048:].decode(errors='ignore'),
+            stderr=err.encode()[-2048:].decode(errors='ignore'), stdout_full=out, stderr_full=err,
+            retrying_lines=sum('Retrying' in line for line in (out+'\n'+err).splitlines()),
+            interpreter_version=sys.version))
+        log.write_text(json.dumps(calls))
+origin = time.perf_counter()
+subprocess.run = run
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+'''
 
 
 def patch_subprocess_deps(data_dir, state=None):
@@ -146,72 +219,113 @@ def patch_subprocess_deps(data_dir, state=None):
             return orig(docker, container_id, repo, fast_path=fast_path, config=config)
         current = state.get() if state is not None else dict(
             started=time.perf_counter(), setup_calls=[], setup_failed=False)
-        sp = next(iter(sorted(docker.sandboxes[container_id]['venv'].glob('lib/python3*/site-packages'))))
-        # A universal pip wheel supplies vendored packaging even when ensurepip failed.
-        pip_wheels = [p for p in wheels.glob('pip-*.whl')
-                      if p.name.endswith('-py3-none-any.whl')]
-        if not pip_wheels:
-            print('Missing required universal pip wheel in', wheels, flush=True)
-            def missing_pip():
-                raise RuntimeError('Required compatible pip wheel missing')
-            setup_step(current, 'pip_bootstrap', missing_pip)
-        pip_wheel = max(pip_wheels, key=lambda p: parse_wheel_filename(p.name)[1])
-        probe = ("import sys,json;sys.path.insert(0,'/tmp/bootstrap-pip.whl');"
-                 "from pip._vendor.packaging.tags import sys_tags;"
-                 "print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()]}))")
-        def probe_interpreter():
-            docker.copy_to(container_id, pip_wheel, '/tmp/bootstrap-pip.whl')
-            return docker.exec(container_id, 'python3 -c ' + shlex.quote(probe), timeout=30)
-        result = setup_step(current, 'interpreter_probe', probe_interpreter)
-        if result.exit_code != 0:
-            raise RuntimeError('Sandbox interpreter probe failed')
-        identity = json.loads(result.stdout)
-        selected = compatible_wheels(wheels, identity['tags'])
-        timeout_wheel = selected.get('pytest-timeout')
-        if timeout_wheel and str(parse_wheel_filename(timeout_wheel.name)[1]) != '2.1.0':
-            selected.pop('pytest-timeout')
+        fixed = os.environ.get('SETUP_FIX', '1') == '1'
+        current['setup_fix'] = int(fixed)
+        venv = docker.sandboxes[container_id]['venv']
+        sp = next(iter(sorted(venv.glob('lib/python3*/site-packages'))))
+        if not fixed:
+            # Preserve the original injector's wheel selection and base tar exactly.
+            def original_base():
+                base, large, _modules, _requirements = cs._inspect_wheels_dir(wheels)
+                if large:
+                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+                current['wheel_tags_chosen'] = [p.name for p in base]
+                with tarfile.open(cs._build_unpacked_wheels_tar(
+                        base, 'sp_base_local', '.swegemma_base_injected')) as tf:
+                    tf.extractall(sp, filter='data')
+            setup_step(current, 'base_tar_extraction', original_base)
+        else:
+            # A subprocess venv otherwise exposes every kernel package via _host_env.pth.
+            # Only the scorer's image tools and public base wheels belong here.
+            def isolate_venv():
+                for pth in sp.glob('_host_env.pth'):
+                    pth.unlink()
+                cfg = venv / 'pyvenv.cfg'
+                if cfg.exists():
+                    cfg.write_text(cfg.read_text().replace(
+                        'include-system-site-packages = true', 'include-system-site-packages = false'))
+            setup_step(current, 'venv_fidelity', isolate_venv)
+            pip_wheel = fallback_wheel(wheels, 'pip')
+            def bootstrap_pip():
+                if pip_wheel:
+                    current['setup_calls'][-1]['source'] = str(pip_wheel)
+                    import zipfile
+                    with zipfile.ZipFile(pip_wheel) as zf:
+                        zf.extractall(sp)
+                else:
+                    current['setup_calls'][-1]['source'] = copy_runtime_package('pip', sp)
+                    if current['setup_calls'][-1]['source'] == 'missing':
+                        raise RuntimeError('No offline pip source available')
+                return docker.exec(container_id, 'python3 -m pip --version', timeout=30)
+            result = setup_step(current, 'pip_bootstrap', bootstrap_pip)
+            if result.exit_code != 0:
+                raise RuntimeError('Sandbox pip bootstrap failed')
+            probe = ("import sys,json;from pip._vendor.packaging.tags import sys_tags;"
+                     "print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()]}))")
+            result = setup_step(current, 'interpreter_probe', lambda: docker.exec(
+                container_id, 'python3 -c ' + shlex.quote(probe), timeout=30))
+            if result.exit_code != 0:
+                raise RuntimeError('Sandbox interpreter probe failed')
+            identity = json.loads(result.stdout)
+            current['interpreter_version'] = identity['version']
+            selected = compatible_wheels(wheels, identity['tags'])
+            # The image pins pytest-timeout, even if a newer wheel is present.
+            selected.pop('pytest-timeout', None)
             for path in wheels.glob('pytest_timeout-2.1.0-*.whl'):
                 if {str(t) for t in parse_wheel_filename(path.name)[3]} & set(identity['tags']):
                     selected['pytest-timeout'] = path
-        print('sandbox python', identity['version'], 'chosen wheels',
-              [p.name for p in selected.values()], flush=True)
-        # The cache key includes the selected files, so cp312 and cp313 never share a tar.
-        def extract_base():
-            missing = [name for name in SCORER_TOOLS if name not in selected]
-            if missing:
-                print('Missing compatible scorer wheels:', ', '.join(missing), flush=True)
-                raise RuntimeError('Required compatible tools missing: ' + ', '.join(missing))
-            base = [p for name, p in selected.items() if name not in BASE_SKIP]
-            if any(p.stat().st_size >= cs._LARGE_WHEEL_THRESHOLD_BYTES for p in base):
-                raise RuntimeError('large wheels present; workspace-import scan not emulated')
-            key = hashlib.sha256(json.dumps([(str(p.resolve()), p.stat().st_size,
-                    p.stat().st_mtime_ns) for p in base]).encode()).hexdigest()[:24]
-            with tarfile.open(cs._build_unpacked_wheels_tar(base, 'timing_' + key,
-                                                          '.swegemma_base_injected')) as tf:
-                tf.extractall(sp, filter='data')
-        setup_step(current, 'base_tar_extraction', extract_base)
-        bootstrap = ("import zipfile,sysconfig;zipfile.ZipFile('/tmp/bootstrap-pip.whl')"
-                     ".extractall(sysconfig.get_path('purelib'))")
-        result = setup_step(current, 'pip_bootstrap', lambda: docker.exec(container_id,
-            'python3 -c ' + shlex.quote(bootstrap) + ' && ' + PIP_PREFIX +
-            ' python3 -m pip --version', timeout=30))
-        if result.exit_code != 0:
-            raise RuntimeError('Sandbox pip bootstrap failed')
-        def install_tools():
-            # Copy to a sandbox-local wheelhouse; include copy time in this step.
-            for path in selected.values():
-                docker.copy_to(container_id, path, '/wheels/' + path.name)
-            tools = ['/wheels/' + selected[n].name for n in SCORER_TOOLS]
-            return docker.exec(container_id,
-                PIP_PREFIX + ' python3 -m pip install --ignore-installed --no-index --find-links=/wheels ' +
-                ' '.join(shlex.quote(n) for n in tools), timeout=60)
-        result = setup_step(current, 'tool_install', install_tools)
-        if result.exit_code != 0:
-            raise RuntimeError('Offline scorer tool installation failed')
+            current['wheel_tags_chosen'] = [p.name for p in selected.values()]
+            def extract_base():
+                missing = [n for n in SCORER_TOOLS if n not in selected and n not in ('pip', 'pytest-timeout')]
+                if missing:
+                    raise RuntimeError('Required compatible tools missing: ' + ', '.join(missing))
+                base = [p for name, p in selected.items() if name not in BASE_SKIP]
+                if any(p.stat().st_size >= cs._LARGE_WHEEL_THRESHOLD_BYTES for p in base):
+                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+                key = hashlib.sha256(json.dumps([(str(p.resolve()), p.stat().st_size,
+                        p.stat().st_mtime_ns) for p in base]).encode()).hexdigest()[:24]
+                with tarfile.open(cs._build_unpacked_wheels_tar(base, 'timing_' + key,
+                                                              '.swegemma_base_injected')) as tf:
+                    tf.extractall(sp, filter='data')
+            setup_step(current, 'base_tar_extraction', extract_base)
+            def timeout_source():
+                source = selected.get('pytest-timeout')
+                current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
+            setup_step(current, 'pytest_timeout_source', timeout_source)
+            def install_tools():
+                for path in selected.values():
+                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+                tools = ['/wheels/' + selected[n].name for n in SCORER_TOOLS
+                         if n in selected and n != 'pip']
+                return docker.exec(container_id,
+                    'python3 -m pip install --ignore-installed --no-index --find-links=/wheels ' +
+                    ' '.join(shlex.quote(n) for n in tools), timeout=60)
+            result = setup_step(current, 'tool_install', install_tools)
+            if result.exit_code != 0:
+                raise RuntimeError('Offline scorer tool installation failed')
         def run_setup():
             docker.copy_to(container_id, setup, '/tmp/setup.py')
+            # All observer files are scratch files, never workspace patch inputs.
+            observer = docker.sandboxes[container_id]['tmp'] / 'setup_observer.py'
+            observer.write_text(SETUP_OBSERVER)
             return docker.exec(container_id, setup_command(repo, fast_path), timeout=280)
-        setup_step(current, 'setup.py', run_setup)
+        try:
+            setup_step(current, 'setup.py', run_setup)
+        finally:
+            log = docker.sandboxes[container_id]['tmp'] / 'setup_subprocesses.json'
+            calls = json.loads(log.read_text()) if log.exists() else []
+            current['setup_subprocesses'] = calls
+            setup_row = next(c for c in reversed(current['setup_calls']) if c['step'] == 'setup.py')
+            setup_row['subprocesses'] = calls
+            setup_row['retrying_lines'] += sum(c['retrying_lines'] for c in calls)
+            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+            editable = [c for c in calls if isinstance(c['argv'], list) and '-e' in c['argv']]
+            current['editable_rc'] = editable[0]['rc'] if editable else None
+            current['editable_final_rc'] = editable[-1]['rc'] if editable else None
+            if calls:
+                current['interpreter_version'] = calls[0]['interpreter_version']
+            else:
+                current.setdefault('interpreter_version', None)
         return current
     install._timing_original = orig
     for name, module in list(sys.modules.items()):
@@ -405,6 +519,8 @@ async def evaluate(config, journal, started, caps, totals):
               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
                 wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
                 setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
                 llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
                 tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
                 completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
@@ -413,7 +529,9 @@ async def evaluate(config, journal, started, caps, totals):
             except Exception as exc:
                 append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
                                      wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
-                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'], error='Row build exception (' + type(exc).__name__ + ')'))
+                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
             raw = WORK / 'runs' / iid
             raw.mkdir(parents=True, exist_ok=True)
             (raw / 'agent.patch').write_text(patch)
@@ -464,7 +582,76 @@ class WrongAccelerator(RuntimeError):
     pass
 
 
+def setup_task(data_dir, wheels_dir, iid, repo, state):
+    """Real agent_runner setup path through dependency installation; no agent/verification."""
+    from types import SimpleNamespace
+    from swegemma.sandbox import SubprocessManager
+    from swegemma.deduplication import resolve_task_snapshot_paths
+    import swegemma.harness.container_setup as cs
+    current = dict(instance_id=iid, setup_fix=int(os.environ.get('SETUP_FIX', '1')),
+                   started=time.perf_counter(), setup_calls=[], setup_failed=False,
+                   editable_rc=None, retrying_lines=0, interpreter_version=None,
+                   wheel_tags_chosen=[], setup_subprocesses=[])
+    state.set(current)
+    manager = SubprocessManager(timeout_seconds=300)
+    try:
+        install_deps = patch_subprocess_deps(data_dir, state)
+        sid = setup_step(current, 'venv', manager.start)
+        config = SimpleNamespace(wheels_dir=wheels_dir, tasks_path=data_dir / 'tasks.jsonl',
+                                 snapshots_dir=data_dir / 'snapshots')
+        setup_step(current, 'setup_container_wheels', lambda: cs.setup_container_wheels(manager, sid, config))
+        snapshot, base, patch = resolve_task_snapshot_paths(data_dir / 'snapshots', iid, repo)
+        setup_step(current, 'extract_snapshot', lambda: cs.extract_snapshot(
+            manager, sid, snapshot, base_snapshot_path=base, patch_path=patch))
+        setup_step(current, 'setup_git_exclude', lambda: cs.setup_git_exclude(manager, sid))
+        setup_step(current, 'install_editable_package', lambda: cs.install_editable_package(manager, sid))
+        install_deps(manager, sid, repo)
+    except Exception as exc:
+        current.update(setup_failed=True, error=type(exc).__name__ + ': ' + str(exc)[:2048])
+    finally:
+        current['setup_s_total'] = round(time.perf_counter()-current['started'], 6)
+        try:
+            setup_step(current, 'teardown', manager.cleanup_all)
+        except Exception as exc:
+            current['teardown_error'] = type(exc).__name__
+        current.pop('started')
+    return current
+
+
+def setup_only_main():
+    from contextvars import ContextVar
+    WORK.mkdir(parents=True, exist_ok=True)
+    with (WORK / 'setup_check.jsonl').open('w') as journal:
+        append(journal, dict(_schema='kaggle_setup_cpu_check_v1', task_ids=TASK_IDS,
+                             setup_fix=int(os.environ.get('SETUP_FIX', '1')), git_sha=GIT_SHA,
+                             concurrency=1, interpreter_version=sys.version))
+        n = 0
+        try:
+            install()
+            from swegemma.models import load_tasks
+            inventory = {t.instance_id: t.repo for t in load_tasks(DATA / 'tasks.jsonl')}
+            if not TASK_IDS or len(set(TASK_IDS)) != len(TASK_IDS) or set(TASK_IDS)-inventory.keys():
+                raise ValueError('Nonempty unique known task IDs required')
+            state = ContextVar('setup_check')
+            for iid in TASK_IDS:
+                append(journal, setup_task(DATA, DATA / 'wheels' if (DATA / 'wheels').is_dir()
+                                          else WHEELHOUSE, iid, inventory[iid], state))
+                n += 1
+        except BaseException as exc:
+            append(journal, dict(_stopped=type(exc).__name__))
+            raise
+        finally:
+            append(journal, dict(_done=dict(n=n)))
+
+
 def main():
+    os.environ.setdefault('SETUP_FIX', str(SETUP_FIX))
+    if os.environ['SETUP_FIX'] not in ('0', '1'):
+        raise ValueError('SETUP_FIX must be 0 or 1')
+    if SETUP_ONLY:
+        os.environ.setdefault('SETUP_ONLY', '1')
+    if os.environ.get('SETUP_ONLY') == '1':
+        return setup_only_main()
     started, totals, servers, startup = time.monotonic(), [], [], None
     WORK.mkdir(exist_ok=True, parents=True)
     with (WORK / 'timing.jsonl').open('w') as journal:

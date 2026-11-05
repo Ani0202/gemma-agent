@@ -155,13 +155,6 @@ def test_kernel_exception_still_writes_header_and_done(tmp_path, monkeypatch):
     assert 'TASK_TEXT_SECRET' not in text
 
 
-def test_setup_command_offline_prefix():
-    import shlex
-    words = shlex.split(timing.setup_command('example/repo; echo unsafe'))
-    assert words[:4] == ['PIP_NO_INDEX=1', 'PIP_DISABLE_PIP_VERSION_CHECK=1',
-                         'PIP_RETRIES=0', 'PIP_TIMEOUT=5']
-    assert words[4:] == ['python3', '/tmp/setup.py', '--fast-path', 'example/repo; echo unsafe']
-
 
 def test_wheels_follow_sandbox_abi(tmp_path):
     for name in ['native-1-cp312-cp312-manylinux_2_17_x86_64.whl',
@@ -178,6 +171,7 @@ def test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch, 
     import contextvars
     import sys
     import tarfile
+    import zipfile
     from types import ModuleType, SimpleNamespace
     cs = ModuleType('swegemma.harness.container_setup')
     cs.install_test_dependencies = lambda *a, **k: None
@@ -198,14 +192,16 @@ def test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch, 
     wheels.mkdir()
     for tool in timing.SCORER_TOOLS:
         version = '2.1.0' if tool == 'pytest-timeout' else '1.0'
-        (wheels / f'{tool.replace("-", "_")}-{version}-py3-none-any.whl').touch()
+        with zipfile.ZipFile(wheels / f'{tool.replace("-", "_")}-{version}-py3-none-any.whl', 'w'):
+            pass
     (tmp_path / 'sandbox').mkdir()
     (tmp_path / 'sandbox/setup.py').touch()
     sp = tmp_path / 'venv/lib/python3.12/site-packages'
     sp.mkdir(parents=True)
     commands = []
+    (tmp_path / 'tmp').mkdir()
     class SubprocessManager:
-        sandboxes = {'id': {'venv': tmp_path / 'venv'}}
+        sandboxes = {'id': {'venv': tmp_path / 'venv', 'tmp': tmp_path / 'tmp'}}
         def copy_to(self, *args):
             pass
         def exec(self, sid, command, **kw):
@@ -222,11 +218,11 @@ def test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch, 
     assert current['setup_failed'] == bool(setup_rc)
     assert current['setup_calls'][-1]['rc'] == setup_rc
     assert [r['step'] for r in current['setup_calls']] == [
-        'interpreter_probe', 'base_tar_extraction', 'pip_bootstrap', 'tool_install', 'setup.py']
+        'venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'base_tar_extraction',
+        'pytest_timeout_source', 'tool_install', 'setup.py']
     assert all(len(r['stdout'].encode()) <= 2048 and len(r['stderr'].encode()) <= 2048
                and r['duration_s'] >= 0 and r['start_offset_s'] >= 0 for r in current['setup_calls'])
-    assert any('bootstrap-pip.whl' in c and 'extractall' in c for c in commands)
-    assert commands[-1].startswith(timing.PIP_PREFIX)
+    assert commands[-1].startswith('python3 /tmp/setup_observer.py /tmp/setup.py')
     assert any('--no-index --find-links=/wheels' in c for c in commands)
     assert 'pip' not in [p.name.split('-')[0] for p in selections]
     (wheels / 'hatchling-1.0-py3-none-any.whl').unlink()
