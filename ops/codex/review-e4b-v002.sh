@@ -1,0 +1,9 @@
+#!/bin/bash
+# Dec 032 item 2: light Codex review of bundles/e4b/v001 -> v002. Codex limit resets ~23:04Z; start 23:09Z
+# (1 min after the fix5c review; tiny diff, low effort, so it runs alongside it rather than after).
+set -e
+cd /home/ubuntu/work/gemma
+target=$(date -u -d 'today 23:09' +%s); now=$(date -u +%s)
+[ "$target" -gt "$now" ] && sleep $((target - now))
+export CODEX_EFFORT=low
+exec bin/codex-review 'Light bundle review (dec 032 items 1-2) of bundles/e4b/v002 vs its parent bundles/e4b/v001. Run: diff -r bundles/e4b/v001 bundles/e4b/v002. Required: the ONLY changes are (1) eval_config.yaml evaluation.max_time_minutes 1.4 -> 1.0 plus its header comment, and (2) max_output_tokens 16384 -> 8192 at EVERY occurrence in the bundle (configs/sampling.yaml included by agent.yaml generate_content_config, and sub_agents/code_analyzer.yaml); MANIFEST.md is excluded from the zip. Check: no other occurrence of 16384 / max_output_tokens / max_tokens remains anywhere in the bundle; no prompt or other edits; the comment arithmetic (60 + 1.32 + 221.6 = 282.9 s/task -> 282.9/60*125 + 30 = 619.4 min <= 660) is right; dist/e4b-v002.zip (sha256 60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad) contains exactly the bundle files minus MANIFEST.md, byte-identical; results/bundle_load_check_e4b_v002.json (made by eval/checks/bundle_load_check.py via adk_submission compile_submission + swegemma EvalConfig) shows both agents at 8192 and session timeout 60 s, and the script reads what the scorer runtime reads (harness: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py ~line 718, swegemma/config.py generation defaults 16384 only apply when unset?). Also: can max_output_tokens 8192 with thinking_budget 4096 cause a new failure mode (e.g. truncated tool-call JSON) vs 16384? Mark each finding BLOCKING or NON-BLOCKING. Do not edit files.'
