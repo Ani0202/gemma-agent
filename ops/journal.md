@@ -74,3 +74,7 @@
 2026-11-05T15:20Z | fix 178e273: machine_shape NvidiaL4 (starter's), fail-fast WrongAccelerator guard (needs 4x L4), post-push shape check; 11 timing tests pass; pushed v3, server shape NvidiaL4; job e4b-timing-wait3 | eval/kaggle/timing_push.sh, eval/kaggle/agent_timing.py
 2026-11-05T15:22Z | review-router BLOCKING (failed clear logged as success) fixed in bin/.router.new; owner activity keeps precedence over 2 h valve (commented). Swap + respawn DENIED by the permission system; escalated to Director | ops/codex/review-20261105T151510.md
 2026-11-05T15:23Z | dec 018 approve: router swap goes to Aniket (leave .router.new); 4xL4 guard check before counting timing; owner-activity precedence kept. v3 kernel RUNNING ~5 min (past cheap-abort window) | ops/decisions/018-20261105T152156-9823-from-builder.md
+2026-11-05T15:29Z | codex-eval-runner-fix done: B1-B5+N1-N3, 399 pass in codex sandbox (bwrap/socket tests skipped there) | ops/codex/implement-20261105-eval-runner-fix.md (worktree)
+2026-11-05T15:33Z | real bwrap probe FAILED locally: uv pyimg alias symlink under masked HOME -> venv python3 dangled, fell back to /usr/bin/python3 (no pytest). Fixed: ro-bind resolved prefix at alias path too + regression test; 401 pass incl real bwrap + HTTP E2E | worktree commit 5858d7d
+2026-11-05T15:34Z | repeated `bin/codex-review --help` mistake (ran tiny real review); deleted. Note: bin/codex-review has NO --help, read its header instead | bin/codex-review
+2026-11-05T15:35Z | codex-review job review-eval-runner-fix launched | ops/jobs/review-eval-runner-fix
