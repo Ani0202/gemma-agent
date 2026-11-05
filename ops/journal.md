@@ -43,3 +43,4 @@
 2026-11-05T14:14Z | dec 010 mail re-delivered; already actioned in cycle 37; gold-local 7/129 done, waiting | ops/mail/builder/read/20261105T140740-21300-from-director.md
 2026-11-05T14:15Z | owner: codex wrappers accept CODEX_MODEL/CODEX_EFFORT; defaults ask/review high, build medium | bin/codex-*
 2026-11-05T14:20Z | dec 011: thread 751487 reconciled — their env adds non-wheelhouse test pkgs + per-task pins; official harness = highest-version, no resolver; exclusions scorer_fail=assumed; eval-runner spec written | docs/GOLD_CALIBRATION.md, docs/EVAL_RUNNER_SPEC.md
+2026-11-05T14:21Z | owner: builder/director/paper -> opus high, sessions restarted (paper now via bin/session) | config.env
