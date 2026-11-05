@@ -1,0 +1,1 @@
+bash -c cd\ /home/ubuntu/work/gemma\;\ while\ \[\ \!\ -f\ ops/jobs/review-e4b-v002-light.status\ \]\ \|\|\ grep\ -q\ \"\^running\"\ ops/jobs/review-e4b-v002-light.status\;\ do\ sleep\ 60\;\ done\;\ exec\ bash\ ops/codex/relaunch-after-limit.sh\ review-memguard-fix6-light\ review-kernel-setup-fix5c-light 

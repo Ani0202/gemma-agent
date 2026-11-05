@@ -175,3 +175,4 @@
 2026-11-05T21:07Z | Load check v002: both agents max_output_tokens 8192, session timeout 60 s (v001 control 16384/84 s) | results/bundle_load_check_e4b_v002.json, eval/checks/bundle_load_check.py
 2026-11-05T21:07Z | Queued light Codex review of v001->v002 for 23:09Z (Codex limit until 23:04Z), parallel with fix5c review | ops/codex/review-e4b-v002.sh
 2026-11-05T21:10Z | Dec 032 item 6: setup.py 202 s = one networked fallback pip (200.7 s constant) after RECORD-less own-package copy wins enumeration (7/8; task 1 lucky); likely Kaggle subprocess-sandbox network artifact vs docker network_mode=none (~8 s), unverified; FYI to Director | results/setup_py_cause_v5.json
+2026-11-05T21:13Z | Director FYI (Codex limit until ~23:04Z; order fix5c -> v002 review; v002 = Nov 6 candidate if either misses ~23:45Z): order confirmed; memguard-fix6c review requeued as fix6d to wait for v002 too | ops/mail/builder/read/20261105T210551-28623-from-director.md

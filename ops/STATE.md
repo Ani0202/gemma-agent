@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 21:12Z (cycle 91, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 21:13Z (cycle 92, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
@@ -19,7 +19,8 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Linger check (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`; if not, tell the Director. After the NEXT reboot, once: `systemctl --user list-units --type=service --state=running`, names only; report non-ours units to the Director, never inspect or touch them (may be Etho).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
-## Running jobs (21:12Z): review-kernel-setup-fix5c-light (starts 23:08Z), review-e4b-v002-light (23:09Z), review-memguard-fix6c-light (after fix5c), memguard 7933
+## Running jobs (21:13Z): review-kernel-setup-fix5c-light (starts 23:08Z), review-e4b-v002-light (23:09Z), review-memguard-fix6d-light
+  (waits for v002 AND fix5c to finish, per Director FYI 21:05Z: Codex order fix5c -> v002, nothing stacked before them; fix6c killed), memguard 7933
 - KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
   dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
 - Kernel fix5 branch codex/kernel-setup-fix5 @87001e4: merge after fix5c review clean, then host eval/tests on main.
@@ -28,7 +29,7 @@ Builder on Opus (dec 010: local-first, two-strike).
   eval/tests: 469p/3s/1f (ops/jobs/hosttests-main-dockerorder.log); the 1 fail = main's stale test_memguard oom_score_adj
   assertion (dummy inherits bin/job's 1000); fix6's test uses a baseline, so it is fixed by the fix6 merge.
 - memguard-fix6 eedf84b+0f5de3d: livetest GREEN (94 passed, ops/jobs/hosttests-fix6-dockerorder.log). review-memguard-fix6-light
-  RUNNING. No BLOCKING -> merge + full eval/tests on main + deploy (stop 7933, start memguard-light at once). BLOCKING -> stop, short report.
+  queued as review-memguard-fix6d-light. No BLOCKING -> merge + full eval/tests on main + deploy (stop 7933, start memguard-light at once). BLOCKING -> stop, short report.
 - Item 7: plan eval/plans/006.md pre-registered (31B timing, cap from e4b-v001 S/F, <= 4 quota-h, same 8 ids). After report 005.
 - NOTE: bin/codex-build always branches from main HEAD; for follow-up rounds create the worktree on the previous commit manually,
   write the spec, sed the previous build-*.sh, and bin/job start codex-<name>.
@@ -73,5 +74,5 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Director's adversarial codex-ask (21:05Z) failed on the Codex limit; told Director.
 ## Next 3
 1. 23:08Z fix5c review + 23:09Z v002 review -> evaluate (ii)/(iii) -> SUBMIT follow-up to Director (before ~23:45Z if possible).
-2. fix5c clean: merge branch, host eval/tests. Then memguard-fix6c review (auto after fix5c) -> merge + deploy memguard-light.
+2. fix5c clean: merge branch, host eval/tests. Then memguard-fix6d review (auto after fix5c+v002) -> merge + deploy memguard-light.
 3. Plan 006 addendum (31B cap) -> push 31B timing (<= 4 quota-h, pre-approved).
