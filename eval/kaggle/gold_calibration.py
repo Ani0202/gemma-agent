@@ -173,6 +173,41 @@ def choose_sandbox():
     return 'subprocess'
 
 
+def patch_subprocess_deps(data_dir):
+    """Emulate docker-only dependency setup for the subprocess sandbox (swegemma skips it).
+
+    Symlink py313-compatible wheels into the sandbox /wheels dir, then run the
+    competition's own sandbox/setup.py (no fast path) inside the sandbox venv.
+    """
+    import swegemma.harness.container_setup as cs
+    import swegemma.harness.verification as vf
+    orig = cs.install_test_dependencies
+    wheels_src = Path(data_dir) / 'wheels'
+    if not wheels_src.is_dir():
+        wheels_src = WHEELHOUSE
+    setup_py = Path(data_dir) / 'sandbox' / 'setup.py'
+    if not setup_py.exists():
+        setup_py = next(iter(Path(data_dir).rglob('setup.py')), setup_py)  # competition sandbox/setup.py
+
+    def install(docker, container_id, repo='', *, fast_path=True, config=None):
+        if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
+            return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+        wdir = docker.sandboxes[container_id]['wheels']
+        wdir.mkdir(parents=True, exist_ok=True)
+        for w in wheels_src.glob('*.whl'):
+            if not cs._is_wheel_compatible_py313(w.name) or 'cutlass' in w.name.lower():
+                continue
+            name = w.name.replace('cu128', '+cu128') if 'cu128' in w.name and '+' not in w.name else w.name
+            try:
+                os.symlink(w, wdir / name)
+            except FileExistsError:
+                pass
+        docker.copy_to(container_id, setup_py, '/tmp/setup.py')
+        docker.exec(container_id, f'python3 /tmp/setup.py --no-fast-path {repo}'.strip(), timeout=280)
+    cs.install_test_dependencies = install
+    vf.install_test_dependencies = install
+
+
 async def verify_gold(task, patch, data_dir, sandbox):
     """The only swegemma API adapter; see docs/GOLD_CALIBRATION.md assumptions.
 
@@ -226,6 +261,8 @@ def worker(args):
     row = dict(instance_id=raw['instance_id'], repo=raw['repo'], resolved=False,
                exit_code=None, duration_seconds=0.0, error=None, sandbox=args.sandbox)
     try:
+        if args.sandbox == 'subprocess':
+            patch_subprocess_deps(args.data_dir)
         from swegemma.models import load_tasks
         task = next(t for t in load_tasks(args.data_dir / 'tasks.jsonl')
                     if t.instance_id == args.worker)

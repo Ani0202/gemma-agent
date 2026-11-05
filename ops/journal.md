@@ -36,3 +36,4 @@
 2026-11-05T00:58Z | smoke8 adapter works (1 pass/3 unresolved); pushed full gold kernel v4, job gold-full-wait | runs/gold-smoke8, ops/jobs/gold-full-wait
 2026-11-05T02:08:40Z | gold-full done: 52/129 clean, splits frozen (dev36/hold16) | eval/splits/MANIFEST.json, results/gold_calibration_per_task.jsonl
 2026-11-05T02:15Z | splits marked provisional; root cause: no wheel injection in subprocess sandbox; diag rerun launched | eval/kaggle/gold_calibration.py, ops/jobs/gold-diag-wait
+2026-11-05T02:57Z | gold-diag causes bucketed (all env; inline_snapshot/dirty_equals absent from wheelhouse); subprocess dep-setup patch, kernel v6, job gold-diag2-wait | results/gold_failure_causes.jsonl, eval/kaggle/gold_calibration.py
