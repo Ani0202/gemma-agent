@@ -318,9 +318,16 @@ def validate_caps(values):
 
 def validate_effective_caps(config):
     """Nested bundle caps bypass resolve_caps (None there), so validate the merged values."""
+    budget, harness = getattr(config, 'budget', None), getattr(config, 'harness', None)
     validate_caps([getattr(config, 'max_time_minutes', None), getattr(config, 'timeout_seconds', None),
-                   getattr(getattr(config, 'budget', None), 'time_minutes', None),
-                   getattr(getattr(config, 'harness', None), 'command_timeout_seconds', None)])
+                   getattr(budget, 'time_minutes', None), getattr(budget, 'cost_usd', None),
+                   getattr(harness, 'command_timeout_seconds', None)])
+    counts = [getattr(config, k, None) for k in ('max_tool_calls', 'max_turns', 'max_llm_calls')]
+    counts += [getattr(budget, k, None) for k in ('tool_calls', 'turns', 'total_tokens')]
+    validate_caps(counts)
+    for v in counts:
+        if v is not None and not isinstance(v, int):
+            raise ValueError(f'Count caps must be positive integers (got {v!r})')
 
 
 def build_config(defaults, args, models, raw_dir, caps):

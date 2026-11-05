@@ -477,7 +477,8 @@ def test_setup_script_fallback_is_recursive_and_hashed(tmp_path):
 
 @pytest.mark.parametrize('section,key,value', [('budget', 'time_minutes', 0),
     ('harness', 'command_timeout_seconds', -7), ('budget', 'time_minutes', float('inf')),
-    ('harness', 'command_timeout_seconds', 'abc')])
+    ('harness', 'command_timeout_seconds', 'abc'), ('budget', 'tool_calls', -7),
+    ('budget', 'turns', True), ('budget', 'turns', 2.5), ('budget', 'tool_calls', 'x')])
 def test_nested_caps_are_validated_after_merge(harness, section, key, value):
     defaults = {section: {key: value}}
     caps = runner.resolve_caps(defaults, _cap_args())
@@ -487,7 +488,7 @@ def test_nested_caps_are_validated_after_merge(harness, section, key, value):
         config = runner.build_config(defaults, args, None, Path('/r'), caps)
     except (TypeError, ValueError):
         return  # rejected at construction is also acceptable
-    with pytest.raises(ValueError, match='positive finite'):
+    with pytest.raises(ValueError, match='positive'):
         runner.validate_effective_caps(config)
 
 
@@ -498,3 +499,23 @@ def test_valid_nested_and_flat_caps_pass_validation(harness):
     runner.validate_effective_caps(runner.build_config(defaults, args, None, Path('/r'), caps))
     with pytest.raises(ValueError):
         runner.validate_caps([True])
+
+
+@pytest.mark.parametrize('value', ['abc', 0, -1, True, 3.5])
+def test_flat_max_llm_calls_is_validated(harness, value):
+    defaults = dict(max_llm_calls=value)
+    caps = runner.resolve_caps(defaults, _cap_args())
+    args = SimpleNamespace(data_dir=Path('/d'), bundle=Path('/b'), concurrency=1)
+    try:
+        config = runner.build_config(defaults, args, None, Path('/r'), caps)
+    except (TypeError, ValueError):
+        return
+    with pytest.raises(ValueError):
+        runner.validate_effective_caps(config)
+
+
+def test_valid_count_caps_pass(harness):
+    defaults = dict(max_llm_calls=40, budget=dict(tool_calls=100, turns=50))
+    caps = runner.resolve_caps(defaults, _cap_args())
+    args = SimpleNamespace(data_dir=Path('/d'), bundle=Path('/b'), concurrency=1)
+    runner.validate_effective_caps(runner.build_config(defaults, args, None, Path('/r'), caps))
