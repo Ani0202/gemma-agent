@@ -40,3 +40,4 @@
 2026-11-05T14:06Z | owner: BUILDER_MODEL sonnet->opus, config.env conflict resolved, builder restarted | config.env
 2026-11-05T14:15Z | correction: 14:06Z line — conflict markers were in ops/journal.md, not config.env (config.env never conflicted) | ops/decisions/010-owner-builder-opus-process.md
 2026-11-05T14:15Z | dec 010 read; local gold repro built (~10s/task); root cause = subprocess venv inherits host site-packages; docker-faithful wheel injection in patch_subprocess_deps; starlette/httpbin failures persist => genuine env exclusions; job gold-local | eval/kaggle/gold_calibration.py, runs/gold-local
+2026-11-05T14:14Z | dec 010 mail re-delivered; already actioned in cycle 37; gold-local 7/129 done, waiting | ops/mail/builder/read/20261105T140740-21300-from-director.md

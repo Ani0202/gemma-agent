@@ -195,7 +195,7 @@ unchanged large files. If a cycle is getting long, checkpoint and end with `CONT
 | `job` | Detached long jobs. |
 | `gpu` | Cloud VMs with budget enforcement. |
 | `kaggle-submit` | Guarded submission. |
-| `codex-review`, `codex-ask`, `codex-build` | Codex review, questions and builds. |
+| `codex-review`, `codex-ask`, `codex-build` | Codex review, questions and builds. Override per call: `CODEX_MODEL=<m> CODEX_EFFORT=<low\|medium\|high\|xhigh> bin/codex-…` (defaults in `config.env`: ask/review high, build medium). |
 | `status` | Overview of the current state. |
 
 Also: `send` (message another role), `router`/`session`/`start` (infrastructure; don't edit).
