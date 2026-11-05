@@ -167,3 +167,5 @@
 2026-11-05T20:11Z | 87001e4: preflight mirrors setup (runtime pip, exact closure), annotated-doc vendored; 111 tests; no-stub repro all deps from embedded wheels; re-review running | results/plan003_kernel_setup_nostub_vendored.json
 2026-11-05T20:13Z | Claude re-review of 87001e4: NO BLOCKING (Kaggle-like cp312 simulation resolves fully) | ops/reviews/claude-rereview-vendor-fix.md
 2026-11-05T20:14Z | Report 007 NEEDS_DECISION: re-push e4b-v001 re-time as kernel v5 from 87001e4; Codex fix5 cmd now targets main...87001e4 (no Claude findings) | ops/reports/007-v4-failed-repush.md
+2026-11-05T20:16Z | Dec 031 (approve w/ changes): kernel v5 pushed from clean worktree at 87001e4 (wheels verified); waiter e4b-v001-timing-v5-wait-light; two-strike in force | ops/budget/kaggle.md
+2026-11-05T20:17Z | Pre-registration addendum (dec 031 item 3: (b)/(c) on total Phase-1 incl. emulation), results notes for no-stub repro files (item 5), Codex prompt timing question (item 6) | eval/plans/004.md
