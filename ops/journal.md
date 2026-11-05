@@ -184,3 +184,4 @@
 2026-11-05T21:28Z | Kernel probes P1-P3 + timing_summary minus-image gate on codex/kernel-probes 63127c8; 117 tests pass; dry-run OK; local P1 rich_3063 2.14 s | eval/tests/test_kernel_probes.py
 2026-11-05T21:28Z | Queued review-kernel-probes-light (after fix5c+v002); fix6d killed while sleeping, requeued as fix6e after probes | ops/codex/review-kernel-probes.sh
 2026-11-05T21:30Z | Plan 006 dec-034 section appended (cap 4.0, gates a/b'/d/e, budget 6000, G1 legs) | eval/plans/006.md
+2026-11-05T21:31Z | dec 035 (E4 approved: Aniket posts forum question himself; owner approved dec 032-034; order = dec 034 item 7); no Builder action; jobs fix5c/v002/probes/fix6e reviews running, memguard 0 kills, linger yes | ops/decisions/035-E4.md
