@@ -132,3 +132,6 @@
 2026-11-05T18:37Z | codex-kernel-setup-fix3 done (6cee0a1, 451 pass/4 skip; bwrap netns blocked in Codex) -> local acceptance job kernel-setup-accept3 | ops/codex/build-kernel-setup-fix3.md
 2026-11-05T18:38Z | review-sandbox-limits3: only BLOCKING = docs/ hunk out of scope -> merged eval/ only (02a883d..9d610b5) to main | ops/codex/review-20261105T182913.md
 2026-11-05T18:38Z | memguard-fix3-livetest green (63 passed live) -> review-memguard-fix3-light | ops/jobs/memguard-fix3-livetest.log
+2026-11-05T18:41Z | review-memguard-fix3: 2 BLOCKING (stale recipient overwrite; unmarked RSS+cwd admission can kill non-job procs) -> codex-memguard-fix4 launched | ops/codex/review-20261105T183755.md ops/codex/build-memguard-fix4.spec
+2026-11-05T18:45Z | kernel-setup-accept3 failure = local sys.path loss in bwrap re-exec; accept4-8 with imgrt-stub PYTHONPATH: fix-mode editable fails uninstall-no-record-file (harness base tar injects task pkg w/o RECORD) -> index fallback; likely harness property, dec 027 STOP rule | results/plan003_kernel_setup_acceptance_r3local.json
+2026-11-05T18:47Z | review-kernel-setup3-light launched (6cee0a1 + independent diagnosis check); report 005-prelim after it | ops/STATE.md

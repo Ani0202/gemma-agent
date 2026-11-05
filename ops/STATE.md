@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 18:39Z (cycle 74, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 18:48Z (cycle 75, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -18,11 +18,16 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
-## Running jobs (18:39Z)
+## Running jobs (18:48Z)
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
-- kernel-setup-accept3: local acceptance of codex/kernel-setup-fix round 3 (6cee0a1; Codex 451 pass/4 skip, bwrap blocked there: netns). Expect both modes ok, editable rc 0, tool_install rc 0 or missing_tool_deps logged.
-- review-memguard-fix3-light: codex review of b299167 (host livetest 63 passed, ops/jobs/memguard-fix3-livetest.log).
-- sandbox-limits round 3 MERGED to main, eval/ only (cycle 74; review ops/codex/review-20261105T182913.md: sole BLOCKING = docs/EVAL_RUNNER_SPEC.md hunk, excluded). Branch host test 460/3; main-side full test NOT yet run (queued after accept3; one heavy at a time). Non-blocking caveats for calibration reports: 8 GiB per-process AS backstop can reject low-RSS reservations; gold_calibration worker timeout lacks immediate descendant cleanup.
+- codex-memguard-fix4: round 4 (spec ops/codex/build-memguard-fix4.spec) for the 2 BLOCKING findings in ops/codex/review-20261105T183755.md: (1) action_eligible overwrites the fresh recipient with a stale record; (2) unmarked RSS+cwd admission (roots incl. /tmp) can kill non-job processes: Etho exclusion NOT guaranteed -> require positive bin/job provenance. Then host livetest + re-review.
+- review-kernel-setup3-light: codex review of 6cee0a1 + an independent check of the 2a DIAGNOSIS below. Report 005-prelim waits on it.
+- sandbox-limits r3 on main: full eval/tests on main NOT yet run (one heavy at a time). Caveats: 8 GiB AS backstop; gold_calibration worker timeout lacks descendant cleanup.
+
+## 2a DIAGNOSIS (cycle 75, local, pending codex check): results/plan003_kernel_setup_acceptance_r3local.json
+- accept3 failed only because the bwrap re-exec loses sys.path (pytest-timeout 2.1.0 lives in pyimg). Fixed locally with PYTHONPATH=/home/ubuntu/gemma-local/imgrt-stub (pytest-timeout 2.1.0 + pathspec/trove-classifiers/shellingham copied from pyimg = local stand-in for the image runtime). accept8: tool deps closed (missing []).
+- SETUP_FIX=1 still fails on both tasks: the competition setup.py's offline editable install -> "uninstall-no-record-file" for rich 15.0.0 / fastapi 0.141.1. Cause: the harness's base tar (container_setup skip_base_pkgs) injects the task's OWN package without RECORD; pip then falls back to an index install (5 Retrying lines; on Kaggle ~103 s/call x2 = ~207 s). SETUP_FIX=0: editable rc 0 in ~3 s (why unclear).
+- If confirmed, this is the competition's own harness -> dec 027 item 2a STOP rule: the artifact conclusion is void, 2b is moot, S~210 s is likely a scorer property. Do NOT push Kaggle 2a/2b until the Director decides.
 
 ## bin/job, memguard, owner patch (cycles 62-66)
 - Linger=yes since ~18:05Z (dec 025): the scope path (MemoryMax=5G) is normal; Codex works under it.
@@ -73,6 +78,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
 ## Next 3
-1. kernel-setup-accept3 done -> if both modes ok: codex-review 6cee0a1 -> push CPU stage 2a (log in ops/budget/kaggle.md); else round 4.
-2. Run full eval/tests on main (post sandbox-limits merge). review-memguard-fix3-light: no BLOCKING -> merge + deploy (no overlap: stop 7933, start memguard-light).
-3. EV-1 + the cpu8 gold/null run (sandbox-limits now merged); plan 005 A/B needs GPU (ask in report 005).
+1. review-kernel-setup3-light done -> write report 005-prelim (2a diagnosis + STOP per dec 027; options: confirm 2a UNFIXED on Kaggle CPU (free) vs adopt S=210 s -> cap<=1.54 (v001 territory)) -> NEEDS_DECISION.
+2. codex-memguard-fix4 done -> host livetest (ops/codex/memguard-fix-livetest.sh) -> re-review; merge+deploy only with no BLOCKING (no overlap: stop 7933, start memguard-light).
+3. Full eval/tests on main; then EV-1 + cpu8 gold/null run.
