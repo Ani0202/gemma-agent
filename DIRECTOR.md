@@ -40,6 +40,7 @@ don't trace to files, the decision is `need-info`.
 - Approve holdout use (it's a scarce resource; count it).
 - Ask Codex for an adversarial second opinion with `bin/codex-ask "<question>"`. Do this before
   any submission authorization involving a new structure, and before final selection.
+  Override per call: `CODEX_MODEL=<m> CODEX_EFFORT=<low|medium|high|xhigh> bin/codex-ask "…"` (default effort: high).
 
 ## Submission Gate (all must hold)
 1. The bundle passed `bin/pack` validation, and the zip sha256 is recorded in its MANIFEST.
