@@ -22,7 +22,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - Heavy jobs one at a time (waiters/memguard/codex exempt); bin/job hardened b1eedd7. codex-build branches from main HEAD.
-## Running jobs (23:38Z): review-submit-guard5-light (FULL, v5), codex-probes-fix7 (on finfix e02666f; spec ops/codex/build-probes-fix7.spec), memguard-light.
+## Running jobs (23:39Z): review-submit-guard5-light (FULL, v5), codex-probes-fix7 -> review-probes-fix7-light (queued; dec 047), memguard-light.
 - KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
   dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
 - fix5c BLOCKING 1 (gate a ignored failed finalization git rc/exception) FIXED on codex/kernel-gate-finfix e02666f (on 92a74c7;
@@ -76,5 +76,5 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
    fail-closed (csv exact header, field count, ISO date; any doubt refuses; all pages, or refuse if rows == page size; re-read UTC day
    AFTER the query, refuse if changed). FULL adversarial review of the whole guard. BLOCKING only in the pre-check -> drop the pre-check,
    re-review that removal = last round. Clean -> bin/send aniket "apply ops/patches/kaggle-submit-kernel-v5.diff" -> commit -> dry checks -> submit.
-2. (dec 046 item 3: do NOT let guard starve this; parallel if Codex allows) probes + probes-gate reviews clean -> push codex/kernel-probes-gate (cap 4.0) -> timing_summary from finfix branch --gate-mode stock-path -> report 010.
+2. DEC 047: gate (b) formula kept (conservative; report 010 leads with h1_composite). fix7 review clean -> merge stack -> host eval/tests -> push codex/kernel-probes-gate (cap 4.0) -> timing_summary from finfix branch --gate-mode stock-path -> report 010.
 3. finfix + fix6e reviews -> merge stack / deploy memguard-light. Then plan 005 (dec 022 item 4) + plan 007 (dec 039) = first quality levers.

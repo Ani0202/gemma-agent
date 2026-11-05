@@ -575,3 +575,1913 @@ exec
  CLAUDE_CONFIG_DIR_GEMMA="$HOME/.claude-gemma"   # separate Claude login (university account); Etho's login untouched
  CODEX_MODEL=              # empty = Codex default; per-call override: CODEX_MODEL=... bin/codex-*
 
+exec
+/bin/bash -lc 'nl -ba eval/tests/guard_mock_test.sh' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	#!/bin/bash
+     2	# Offline test of a bin/kaggle-submit candidate against a MOCK kaggle CLI (dec 045 item 1).
+     3	# Usage: eval/tests/guard_mock_test.sh <candidate-kaggle-submit> <real-bundle.zip>
+     4	# The real kaggle CLI is made UNREACHABLE: every guard run is under `env -i` with PATH=<mock>:/usr/bin:/bin
+     5	# (no venv bins) and KAGGLE_CONFIG_DIR=<empty dir>, in a throwaway repo whose config.env names a fake competition.
+     6	# A preflight aborts unless `command -v kaggle` inside that environment resolves to the mock.
+     7	set -euo pipefail
+     8	cand=$(realpath "$1"); real=$(realpath "$2")
+     9	T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+    10	mkdir -p "$T/repo/bin" "$T/repo/ops/decisions" "$T/repo/dist" "$T/mock" "$T/kcfg"
+    11	cp "$cand" "$T/repo/bin/kaggle-submit"; chmod +x "$T/repo/bin/kaggle-submit"
+    12	printf '#!/bin/sh\nexit 0\n' > "$T/repo/bin/notify"; chmod +x "$T/repo/bin/notify"
+    13	printf 'COMP=mock-competition-not-real\nSUBMIT_MODE=kernel\nSUBMIT_KERNEL=mockowner/mock-kernel\n' > "$T/repo/config.env"
+    14	cp "$real" "$T/repo/dist/z.zip"
+    15	cat > "$T/mock/kaggle" <<EOF
+    16	#!/bin/bash
+    17	echo "\$*" >> "$T/calls.log"
+    18	if [ "\$1" = kernels ]; then d=\$5; cp "\${OUTZIP:-$T/repo/dist/z.zip}" "\$d/submission.zip"; exit 0; fi
+    19	if [ "\$2" = submissions ]; then case "\${SUBS:-none}" in
+    20	  none) echo "No submissions found";;
+    21	  today) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,%s 01:00:00,x,COMPLETE,0.1,\n' "\$(date -u +%F)";;
+    22	  sha) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,2026-11-01 01:00:00,e4b sha:%s y,COMPLETE,0.1,\n' "\$SHA12";;
+    23	  old) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,2026-11-01 01:00:00,other,COMPLETE,0.1,\n';;
+    24	  junk) echo "<html>oops";; fail) exit 1;;
+    25	  short) printf 'ref,fileName,date,description,status,publicScore,privateScore\n1\n';;
+    26	  baddate) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,junk,x,COMPLETE,0.1,\n';;
+    27	  quote) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,"2026-11-01 01:00:00,x,COMPLETE,0.1,\n';;
+    28	  header) printf 'ref,fileName,date,description,status,publicScore,privateScore\n';;
+    29	  full) printf 'ref,fileName,date,description,status,publicScore,privateScore\n'; for i in \$(seq 100); do printf '%s,submission.zip,2026-11-01 01:00:00,other,COMPLETE,0.1,\n' \$i; done;;
+    30	  esac; exit 0; fi
+    31	case "\${MODE:-ok}" in ok) echo "Submission ref: 123";; noref) echo "ERROR: submission rejected";;
+    32	  400) echo "400 Client Error: Bad Request" >&2; exit 1;; 408) echo "408 Client Error: Request Timeout" >&2; exit 1;;
+    33	  503) echo "HTTPError: 503 Server Error" >&2; exit 1;; killed) exit 137;; esac
+    34	EOF
+    35	chmod +x "$T/mock/kaggle"
+    36	G() { env -i HOME="$T" PATH="$T/mock:/usr/bin:/bin" KAGGLE_CONFIG_DIR="$T/kcfg" "$@"; }
+    37	[ "$(G bash -c 'command -v kaggle')" = "$T/mock/kaggle" ] || { echo "ABORT: kaggle does not resolve to the mock"; exit 2; }
+    38	cd "$T/repo"
+    39	sha=$(sha256sum dist/z.zip | cut -d' ' -f1); echo "SUBMIT: AUTHORIZE sha256=$sha track=e4b" > ops/decisions/z.md
+    40	fail=0
+    41	reset() { : > ops/submissions.jsonl; rm -f ops/submissions.pending; }
+    42	expect() {  # <name> <expected rc> <expected pending Y|N> <expected records> <kernel version> -- env...
+    43	  local name=$1 erc=$2 epend=$3 erec=$4 kv=$5; shift 6; reset
+    44	  set +e; out=$(G "$@" SHA12="${sha:0:12}" bin/kaggle-submit dist/z.zip e4b m "$kv" 2>&1); rc=$?; set -e
+    45	  pend=$([ -e ops/submissions.pending ] && echo Y || echo N); rec=$(wc -l < ops/submissions.jsonl)
+    46	  if [ "$rc" = "$erc" ] && [ "$pend" = "$epend" ] && [ "$rec" = "$erec" ]; then echo "PASS $name"; else
+    47	    echo "FAIL $name: rc=$rc pending=$pend records=$rec :: $(printf '%s' "$out" | tail -1)"; fail=1; fi
+    48	}
+    49	expect ok 0 N 1 1 -- MODE=ok
+    50	expect reject400 4 N 0 1 -- MODE=400
+    51	expect amb408 5 Y 0 1 -- MODE=408
+    52	expect amb503 5 Y 0 1 -- MODE=503
+    53	expect killed 5 Y 0 1 -- MODE=killed
+    54	expect noref 5 Y 0 1 -- MODE=noref
+    55	expect subs_today 3 N 0 1 -- SUBS=today
+    56	expect subs_sha 3 N 0 1 -- SUBS=sha
+    57	expect subs_junk 3 N 0 1 -- SUBS=junk
+    58	expect subs_fail 3 N 0 1 -- SUBS=fail
+    59	expect subs_old 0 N 1 1 -- SUBS=old
+    60	expect subs_short 3 N 0 1 -- SUBS=short
+    61	expect subs_baddate 3 N 0 1 -- SUBS=baddate
+    62	expect subs_quote 3 N 0 1 -- SUBS=quote
+    63	expect subs_header_only 3 N 0 1 -- SUBS=header
+    64	expect subs_full_page 3 N 0 1 -- SUBS=full
+    65	expect no_version 3 N 0 x -- MODE=ok
+    66	expect bad_output 3 N 0 1 -- OUTZIP=/etc/hostname
+    67	# pending blocks the next call
+    68	reset; echo '{}' > ops/submissions.pending; set +e; G bin/kaggle-submit dist/z.zip e4b m 1 >/dev/null 2>&1; rc=$?; set -e
+    69	[ $rc = 3 ] && echo "PASS pending_blocks" || { echo "FAIL pending_blocks rc=$rc"; fail=1; }
+    70	# single use
+    71	reset; G MODE=ok bin/kaggle-submit dist/z.zip e4b m 1 >/dev/null 2>&1; set +e; G MODE=ok bin/kaggle-submit dist/z.zip e4b m 1 >/dev/null 2>&1; rc=$?; set -e
+    72	[ $rc = 3 ] && echo "PASS single_use" || { echo "FAIL single_use rc=$rc"; fail=1; }
+    73	# unauthorized sha
+    74	reset; cp dist/z.zip dist/z2.zip; echo >> dist/z2.zip; set +e; G MODE=ok bin/kaggle-submit dist/z2.zip e4b m 1 >/dev/null 2>&1; rc=$?; set -e
+    75	[ $rc = 3 ] && echo "PASS unauthorized" || { echo "FAIL unauthorized rc=$rc"; fail=1; }
+    76	# malformed root members (byte-level NUL, dir mode, symlink)
+    77	python3 -I - <<'PY'
+    78	import stat, zipfile
+    79	def mk(n, name, mode):
+    80	    z = zipfile.ZipFile(f'dist/{n}.zip', 'w'); zi = zipfile.ZipInfo(name); zi.external_attr = mode << 16; z.writestr(zi, 'x'); z.close()
+    81	mk('dirmode', 'agent.yaml', stat.S_IFDIR | 0o755); mk('link', 'agent.yaml', stat.S_IFLNK | 0o777)
+    82	z = zipfile.ZipFile('dist/nul.zip', 'w'); z.writestr('agent.yaml_extra', 'x'); z.close()
+    83	b = open('dist/nul.zip', 'rb').read().replace(b'agent.yaml_extra', b'agent.yaml\x00extra'); open('dist/nul.zip', 'wb').write(b)
+    84	PY
+    85	for b in dirmode link nul; do
+    86	  s2=$(sha256sum dist/$b.zip | cut -d' ' -f1); echo "SUBMIT: AUTHORIZE sha256=$s2 track=e4b" > ops/decisions/$b.md; reset
+    87	  set +e; out=$(G MODE=ok bin/kaggle-submit dist/$b.zip e4b m 1 2>&1); rc=$?; set -e
+    88	  [ $rc = 3 ] && printf '%s' "$out" | grep -q 'agent.yaml' && echo "PASS zip_$b" || { echo "FAIL zip_$b rc=$rc"; fail=1; }
+    89	done
+    90	grep -qv '^competitions submit mock-competition-not-real \|^competitions submissions mock-competition-not-real \|^kernels output mockowner/mock-kernel/' "$T/calls.log" && { echo "FAIL unexpected mock calls"; fail=1; } || true
+    91	echo "mock calls: $(wc -l < "$T/calls.log")"; [ $fail = 0 ] && echo "ALL PASS" || { echo "SOME FAILED"; exit 1; }
+
+exec
+/bin/bash -lc 'cat config.env && cat ops/patches/kaggle-submit-kernel-v5.diff' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+# Settings (safe to commit; no secrets)
+COMP=gemma-4-developer-agent
+BUILDER_MODEL=opus            # long working turns (alias resolves to Opus 5.5)
+BUILDER_EFFORT=high           # claude --effort: low|medium|high|xhigh|max
+DIRECTOR_MODEL=opus           # short decisions; switch to sonnet if usage limits bite
+DIRECTOR_EFFORT=high
+PAPER_MODEL=opus              # paper writer (bin/session paper)
+PAPER_EFFORT=high
+TMUX_SESSION=gemma            # windows: builder, director, router (Etho's tmux session is never touched)
+RL_SLEEP_MIN=30               # back off a role this long after it reports a usage limit
+MIN_GAP_MIN=5                 # nudge an idle Builder whose status is CONTINUE after this long
+WAKE_MAX_MIN=180              # nudge an idle Builder at least this often while waiting on jobs
+HUMAN_QUIET_MIN=30            # don't /clear a session within this many minutes of Aniket typing in it
+HUMAN_HOLD_SEC=120            # don't inject mail within this many seconds of Aniket typing
+GPU_HARD_CAP_USD=150
+DIGEST_HOUR_UTC=14            # 8am Chicago (CST)
+SUBMIT_MODE=file              # file | kernel  (Builder verifies in Phase 0)
+SUBMIT_KERNEL=
+FINAL_DEADLINE=2026-12-02T23:59:00Z
+CLAUDE_CONFIG_DIR_GEMMA="$HOME/.claude-gemma"   # separate Claude login (university account); Etho's login untouched
+CODEX_MODEL=              # empty = Codex default; per-call override: CODEX_MODEL=... bin/codex-*
+CODEX_EFFORT_ASK=high
+CODEX_EFFORT_REVIEW=high
+CODEX_EFFORT_BUILD=medium
+--- a/bin/kaggle-submit
++++ b/bin/kaggle-submit
+@@ -1,31 +1,127 @@
+ #!/usr/bin/env bash
+-# Guarded Kaggle submission. Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>"
++# Guarded Kaggle submission. Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>" [kernel_version]
+ # Refuses unless: a Director decision contains "SUBMIT: AUTHORIZE sha256=<this zip's sha256> track=<track>",
+ # that authorization is unused, and no submission was made yet today (UTC).
++# Kernel mode (SUBMIT_MODE=kernel, dec 041/042): the 4th arg is required; the OUTPUT submission.zip of that exact kernel
++# version is downloaded and must be byte-identical (sha256) to the authorized zip, and pass the same root/size checks.
++# Safety (review ops/codex/review-20261105T231632.md): one exclusive lock from ledger checks through recording; success is
++# recorded only on a positive "Submission ref: N"; an ambiguous outcome leaves ops/submissions.pending, which blocks
++# every later call until a human reconciles it against `kaggle competitions submissions`. Only a server 4xx
++# (requests 'NNN Client Error', not 408) counts as a definite rejection (review ops/codex/review-20261105T231919.md).
++# v4/v5 (dec 044/046): strict server-side list pre-check; -m always carries sha:<first 12 hex>.
+ set -euo pipefail
+ cd "$(dirname "$0")/.."
+ source ./config.env
+ zip=$1; track=$2; msg=${3:-"$track $(basename "$zip")"}
+ [ -f "$zip" ] || { echo "no such zip: $zip"; exit 1; }
+ [[ "$track" =~ ^(31b|e4b)$ ]] || { echo "track must be 31b or e4b"; exit 1; }
++exec 9>>ops/.submit.lock
++flock -n 9 || { echo "REFUSED: another bin/kaggle-submit is running"; exit 3; }
++[ ! -e ops/submissions.pending ] || { echo "REFUSED: ops/submissions.pending exists (ambiguous earlier attempt); reconcile with 'kaggle competitions submissions' first"; exit 3; }
+ sha=$(sha256sum "$zip" | cut -d' ' -f1)
+ auth=$(grep -l "^SUBMIT: AUTHORIZE sha256=$sha track=$track" ops/decisions/*.md 2>/dev/null | tail -1 || true)
+ [ -n "$auth" ] || { echo "REFUSED: no Director authorization for sha256=$sha track=$track"; exit 3; }
+ touch ops/submissions.jsonl
+ grep -q "\"sha256\": \"$sha\"" ops/submissions.jsonl && { echo "REFUSED: this zip was already submitted"; exit 3; }
++day_used() { grep -q "\"day\": \"$1\"\|\"day_checked\": \"$1\"" ops/submissions.jsonl; }
+ today=$(date -u +%F)
+-grep -q "\"day\": \"$today\"" ops/submissions.jsonl && { echo "REFUSED: already submitted today (UTC $today)"; exit 3; }
+-unzip -l "$zip" | awk '{print $4}' | grep -qx 'agent.yaml' || { echo "REFUSED: agent.yaml not at zip root"; exit 3; }
+-size=$(stat -c %s "$zip"); [ "$size" -lt 3221225472 ] || { echo "REFUSED: zip >= 3 GiB"; exit 3; }
+-echo "Submitting $zip ($track, sha256=$sha) authorized by $auth"
++day_used "$today" && { echo "REFUSED: already submitted today (UTC $today)"; exit 3; }
++check_zip() {  # <path> <label>
++  python3 -I -c 'import stat,sys,zipfile
++z=zipfile.ZipFile(sys.argv[1]); ms=z.infolist()
++# exact ORIGINAL name (Python truncates filename at NUL), no NUL anywhere, regular file or no Unix mode (DOS-made zip)
++i=[m for m in ms if m.filename == "agent.yaml" or m.orig_filename == "agent.yaml"]
++mode=(i[0].external_attr >> 16) if len(i) == 1 else -1
++ok=(len(i) == 1 and i[0].orig_filename == "agent.yaml" and "\x00" not in i[0].orig_filename and not i[0].is_dir()
++    and stat.S_IFMT(mode) in (0, stat.S_IFREG) and not any("\x00" in m.orig_filename for m in ms))
++sys.exit(0 if ok else 1)' "$1" || { echo "REFUSED: $2: no single regular root member named exactly agent.yaml"; exit 3; }
++  local size; size=$(stat -c %s "$1"); [ "$size" -lt 3221225472 ] || { echo "REFUSED: $2: zip >= 3 GiB"; exit 3; }
++}
++check_zip "$zip" "local zip"
++kernel=""; kver=""
+ if [ "$SUBMIT_MODE" = "kernel" ]; then
+-  [ -n "$SUBMIT_KERNEL" ] || { echo "SUBMIT_KERNEL not set"; exit 1; }
+-  # Builder: verify exact flags with `kaggle competitions submit -h` in Phase 0 before first use.
+-  kaggle competitions submit "$COMP" -k "$SUBMIT_KERNEL" -f submission.zip -m "$msg"
++  [[ "$SUBMIT_KERNEL" =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]] || { echo "SUBMIT_KERNEL must be owner/slug"; exit 1; }
++  kernel=$SUBMIT_KERNEL; kver=${4:-}
++  [[ "$kver" =~ ^[1-9][0-9]*$ ]] || { echo "REFUSED: kernel mode needs the kernel version (positive integer) as 4th arg"; exit 3; }
++  # 'kaggle kernels output owner/slug/N' fetches the output of version N (CLI sets version_label=vN,
++  # kaggle_api_extended.py parse_kernel_string/_kernel_version_label), so the hash is tied to the version submitted.
++  out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
++  kaggle kernels output "$kernel/$kver" -p "$out" -q >/dev/null
++  [ -f "$out/submission.zip" ] && [ ! -L "$out/submission.zip" ] || { echo "REFUSED: version $kver has no regular submission.zip output"; exit 3; }
++  osha=$(sha256sum "$out/submission.zip" | cut -d' ' -f1)
++  [ "$osha" = "$sha" ] || { echo "REFUSED: kernel v$kver output sha256=$osha != authorized $sha"; exit 3; }
++  check_zip "$out/submission.zip" "kernel output"
++  echo "Kernel $kernel v$kver output verified: sha256=$osha"
++fi
++# Re-check the UTC day right before submitting (the download can cross midnight).
++now=$(date -u +%F)
++day_used "$now" && { echo "REFUSED: already submitted today (UTC $now)"; exit 3; }
++# Server-side pre-check (dec 044 item 2, dec 046 item 1: strict, fail-closed; defence in depth behind lock + ledger + pending).
++# Kaggle's own list must show no submission dated today (UTC) and none whose description carries this sha prefix.
++# The CLI prints no next-page token, so one page of 100 is requested and a FULL page (100 rows) refuses.
++# Assumes the server honours --page-size (unverifiable until > 20 submissions exist).
++msg="sha:${sha:0:12} $msg"
++subs=$(kaggle competitions submissions "$COMP" -v --page-size 100 2>&1) || { echo "REFUSED: cannot list server-side submissions"; exit 3; }
++printf '%s' "$subs" | python3 -I -c 'import csv, io, re, sys
++today, pre = sys.argv[1], "sha:" + sys.argv[2][:12]
++HEADER = ["ref", "fileName", "date", "description", "status", "publicScore", "privateScore"]
++DATE = re.compile(r"\A(\d{4}-\d{2}-\d{2}) \d{2}:\d{2}:\d{2}(\.\d{1,6})?(\+00:00)?\Z")
++def refuse(why):
++    print("REFUSED: server-side submissions list: " + why); sys.exit(1)
++text = sys.stdin.read()
++if text.strip() == "No submissions found":
++    sys.exit(0)
++try:
++    rows = list(csv.reader(io.StringIO(text, newline=""), strict=True))
++except csv.Error as e:
++    refuse("csv error " + str(e))
++while rows and rows[-1] == []:
++    rows.pop()
++if not rows or rows[0] != HEADER:
++    refuse("unexpected header")
++body = rows[1:]
++if not body:
++    refuse("header without rows")
++if len(body) >= 100:
++    refuse("full page (100 rows): older submissions not visible")
++for r in body:
++    if len(r) != len(HEADER):
++        refuse("row with %d fields" % len(r))
++    ref, date, desc = r[0], r[2], r[3]
++    m = DATE.match(date)
++    if not re.fullmatch(r"[0-9]+", ref) or not m:
++        refuse("malformed ref/date in a row")
++    if m.group(1) == today or pre in desc:
++        refuse("a submission dated today (UTC) or carrying this sha exists: ref " + ref)' "$now" "$sha" || exit 3
++# The query can cross midnight: the day must be unchanged after it.
++[ "$(date -u +%F)" = "$now" ] || { echo "REFUSED: UTC day changed during the pre-check; re-run"; exit 3; }
++record() {  # <file> <status> <ref>; JSON-serialized
++  python3 -c 'import json,sys; a=sys.argv[1:]; d=dict(day=a[0], day_checked=a[1], t=a[2], status=a[3], ref=a[4] or None, track=a[5], sha256=a[6], zip=a[7], auth=a[8], msg=a[9]);
++if a[10]: d.update(kernel=a[10], kernel_version=int(a[11]))
++print(json.dumps(d))' "$(date -u +%F)" "$now" "$(date -u +%FT%TZ)" "$2" "$3" "$track" "$sha" "$zip" "$auth" "$msg" "$kernel" "$kver" >> "$1"
++}
++record ops/submissions.pending pending ""
++echo "Submitting $zip ($track, sha256=$sha) authorized by $auth"
++set +e
++if [ -n "$kernel" ]; then
++  resp=$(kaggle competitions submit "$COMP" -k "$kernel" -v "$kver" -f submission.zip -m "$msg" 2>&1); rc=$?
++else
++  resp=$(kaggle competitions submit "$COMP" -f "$zip" -m "$msg" 2>&1); rc=$?
++fi
++set -e
++printf '%s\n' "$resp"
++ref=$(printf '%s\n' "$resp" | sed -n 's/^Submission ref: \([0-9][0-9]*\)$/\1/p' | tail -1)
++if [ -n "$ref" ]; then
++  record ops/submissions.jsonl submitted "$ref"   # day = acceptance day; day_checked = pre-submit day (both block)
++  rm -f ops/submissions.pending
++  bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle (ref $ref)." || true
++  echo "logged to ops/submissions.jsonl (ref $ref)"
++elif [ $rc -ne 0 ] && printf '%s\n' "$resp" | grep -qE '(^|[^0-9])4(0[0-7]|09|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9]) Client Error' \
++     && ! printf '%s' "$resp" | grep -q 'Submission ref'; then
++  # Clear pending ONLY on positive rejection evidence: a requests HTTPError 4xx (not 408 timeout) from the server.
++  # Everything else (killed CLI, empty output, decode errors, 5xx, network) stays AMBIGUOUS.
++  rm -f ops/submissions.pending
++  echo "Submit REJECTED (rc=$rc); authorization not consumed"; exit 4
+ else
+-  kaggle competitions submit "$COMP" -f "$zip" -m "$msg"
++  echo "AMBIGUOUS submit outcome (rc=$rc, no 'Submission ref'); ops/submissions.pending kept; reconcile manually"; exit 5
+ fi
+-printf '{"day": "%s", "t": "%s", "track": "%s", "sha256": "%s", "zip": "%s", "auth": "%s", "msg": "%s"}\n' \
+-  "$today" "$(date -u +%FT%TZ)" "$track" "$sha" "$zip" "$auth" "$msg" >> ops/submissions.jsonl
+-bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle. Score in ~12-15h."
+-echo "logged to ops/submissions.jsonl"
+--- a/config.env
++++ b/config.env
+@@ -14,8 +14,8 @@
+ HUMAN_HOLD_SEC=120            # don't inject mail within this many seconds of Aniket typing
+ GPU_HARD_CAP_USD=150
+ DIGEST_HOUR_UTC=14            # 8am Chicago (CST)
+-SUBMIT_MODE=file              # file | kernel  (Builder verifies in Phase 0)
+-SUBMIT_KERNEL=
++SUBMIT_MODE=kernel            # file | kernel  (verified 2026-11-05: file upload -> 400; code competition, dec 041)
++SUBMIT_KERNEL=aniket0202/gemma-submit-e4b
+ FINAL_DEADLINE=2026-12-02T23:59:00Z
+ CLAUDE_CONFIG_DIR_GEMMA="$HOME/.claude-gemma"   # separate Claude login (university account); Etho's login untouched
+ CODEX_MODEL=              # empty = Codex default; per-call override: CODEX_MODEL=... bin/codex-*
+
+exec
+/bin/bash -lc "sed -n '2250,2385p' /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py && sed -n '2520,2615p' /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py && sed -n '7440,7600p' /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py && sed -n '9130,9220p' /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+                    submit_request.benchmark_model_version_id = int(model_version_id)
+
+                submit_request.competition_name = competition
+                submit_request.blob_file_tokens = response.token
+                if message:
+                    submit_request.submission_description = message
+                if sandbox:
+                    submit_request.sandbox = True
+                submit_response: ApiCreateSubmissionResponse = (
+                    kaggle.competitions.competition_api_client.create_submission(submit_request)
+                )
+                return submit_response
+
+    def competition_submit_cli(
+        self,
+        file_name: Optional[str] = None,
+        message: Optional[str] = None,
+        competition: Optional[str] = None,
+        kernel: Optional[str] = None,
+        version: Optional[str] = None,
+        competition_opt: Optional[str] = None,
+        quiet: bool = False,
+        sandbox: bool = False,
+        wait: Optional[int] = None,
+        poll_interval: int = 60,
+    ) -> str:
+        """Submits a competition using the client.
+
+        Args:
+            file_name (Optional[str]): The competition metadata file.
+            message (Optional[str]): The submission description.
+            competition (Optional[str]): The competition name.
+            kernel (Optional[str]): The name of the kernel to submit to a code competition.
+            version (Optional[str]): The version of the kernel to submit to a code competition, e.g. '1'.
+            competition_opt (Optional[str]): An alternative competition option provided by cli.
+            quiet (bool): Suppress verbose output (default is False).
+            sandbox (bool): Mark as a sandbox submission (default is False).
+            wait (Optional[int]): If not None, wait for the submission to finish scoring.
+                A value of 0 (or a bare --wait) waits up to 12 hours, the maximum Kaggle
+                notebook runtime; a positive value is a timeout in seconds.
+            poll_interval (int): Maximum seconds between status polls while waiting (default 60).
+
+        Returns:
+            str:
+        """
+        if kernel and not version or version and not kernel:
+            raise ValueError("Code competition submissions require both the kernel name and the version number")
+        if wait is not None:
+            if poll_interval < self._MIN_POLL_INTERVAL:
+                raise ValueError(
+                    "--poll-interval must be at least %ss to avoid overloading Kaggle's servers."
+                    % self._MIN_POLL_INTERVAL
+                )
+            # "Wait indefinitely" (0) is capped at the 12h maximum notebook runtime.
+            if wait == 0:
+                wait = self._DEFAULT_WAIT_TIMEOUT
+        competition = competition or competition_opt
+        try:
+            if kernel:
+                submit_result = self.competition_submit_code(
+                    cast(str, file_name),
+                    cast(str, message),
+                    cast(str, competition),
+                    kernel,
+                    int(version) if version else None,
+                    quiet,
+                )
+            else:
+                submit_result = self.competition_submit(
+                    cast(str, file_name), cast(str, message), cast(str, competition), quiet, sandbox
+                )
+        except RequestException as e:
+            # Compare with None: a Response is falsy for every 4xx/5xx status, 404 included.
+            if e.response is not None and e.response.status_code == 404:
+                # A code submission also names a notebook and a version, and either can be what is missing.
+                if kernel:
+                    hint = (
+                        "Could not find competition or notebook - please verify that you entered the correct "
+                        "competition ID, notebook and version, and that the competition is still "
+                        "accepting submissions."
+                    )
+                else:
+                    hint = (
+                        "Could not find competition - please verify that you entered the correct competition ID "
+                        "and that the competition is still accepting submissions."
+                    )
+                # Raise rather than print and return, so the CLI reports it on stderr and exits non-zero.
+                raise ValueError(f"{hint}\n  Error: {e}") from e
+            else:
+                raise e
+
+        # competition_submit reports a failed upload through the message rather than
+        # raising, to stay backwards compatible. Raise here so the CLI exits non-zero
+        # instead of reporting a submission that was never made as a success.
+        if submit_result.message == self.COMPETITION_SUBMIT_UPLOAD_FAILED_MESSAGE:
+            raise ValueError(submit_result.message)
+
+        # The backend returns the new submission's ref; surface it so users can
+        # look the submission up later (e.g. `kaggle competitions submission <ref>`).
+        submission_ref = getattr(submit_result, "ref", None)
+        if submission_ref:
+            print("Submission ref: %s" % submission_ref)
+
+        if not quiet and competition:
+            # Bonus context: how many submissions are left today. Never fail
+            # the submit over a limits-endpoint blip.
+            try:
+                limits = self.competition_get_submission_limits(competition)
+                print(f"{limits.num_allowed_now} submissions remaining today.")
+            except Exception:
+                pass
+
+        # Poll last: --wait can block for a long time, so run it only after the
+        # immediate post-submit output (ref + remaining count) has been printed.
+        if submission_ref and wait is not None:
+            self._poll_submission(submission_ref, wait, poll_interval, quiet=quiet)
+
+        return submit_result.message
+
+    def get_submission(self, submission_ref: int) -> ApiSubmission:
+        """Fetches a single competition submission by its numeric ref.
+
+        Args:
+            submission_ref (int): The numeric submission ref (printed by
+                ``kaggle competitions submit``).
+
+        Returns:
+            ApiSubmission: The submission, including its scoring status and scores.
+        """
+        with self.build_kaggle_client() as kaggle:
+            request = ApiGetSubmissionRequest()
+            request.ref = int(submission_ref)
+            return self.with_retry(kaggle.competitions.competition_api_client.get_submission)(request)
+
+    def _poll_submission(self, submission_ref, wait, poll_interval, quiet=False):
+        """Polls a submission until it finishes scoring or the wait times out.
+        """CLI wrapper for competition_download_submission.
+
+        Args:
+            submission_id: The numeric submission id.
+            submission_id_opt: An alternative id provided by the client.
+            path: A path to download the file to.
+            force: Force the download if the file already exists (default False).
+            quiet: Suppress verbose output (default is False).
+        """
+        submission_id = submission_id if submission_id is not None else submission_id_opt
+        if submission_id is None:
+            raise ValueError("A submission id must be specified")
+        self.competition_download_submission(submission_id, path, force, quiet)
+
+    def competition_submissions(
+        self,
+        competition: str,
+        group: SubmissionGroup = SubmissionGroup.SUBMISSION_GROUP_ALL,
+        sort: SubmissionSortBy = SubmissionSortBy.SUBMISSION_SORT_BY_DATE,
+        page_number: int = -1,
+        page_token: str = "",
+        page_size: int = 20,
+    ) -> list[ApiSubmission | None] | None:
+        """Gets the list of submissions for a competition.
+
+        Args:
+            competition (str): The name of the competition.
+            group (SubmissionGroup): The submission group.
+            sort (SubmissionSortBy): The sort-by option.
+            page_number (int): The page number to show.
+            page_token (str): The pageToken for pagination.
+            page_size (int): The number of items per page.
+
+        Returns:
+            Union[listApiSubmission, None, None]:
+        """
+        with self.build_kaggle_client() as kaggle:
+            request = ApiListSubmissionsRequest()
+            request.competition_name = competition
+            request.group = group
+            request.sort_by = sort
+            self._set_paging(request, page_size, page_token, page_number)
+            response = kaggle.competitions.competition_api_client.list_submissions(request)
+            result: list[ApiSubmission | None] | None = response.submissions
+            return result
+
+    def competition_submissions_cli(
+        self,
+        competition=None,
+        competition_opt=None,
+        csv_display=False,
+        page=-1,
+        page_token="",
+        page_size=20,
+        quiet=False,
+        output_format=None,
+    ):
+        """A wrapper to competition_submission, will return either json or csv to the user.
+
+        Args:
+            competition: the name of the competition. If None, look to config
+            competition_opt: an alternative competition option provided by cli
+            csv_display: if True, print comma separated values
+            page: page number
+            page_token: token for pagination
+            page_size: the number of items per page
+            quiet: suppress verbose output (default is False)
+            output_format: the output format to use
+        """
+        competition = competition or competition_opt
+        if competition is None:
+            competition = self.get_config_value(self.CONFIG_NAME_COMPETITION)
+            if competition is not None and not quiet:
+                print("Using competition: " + competition)
+
+        if competition is None:
+            raise ValueError("No competition specified")
+        else:
+            submissions = self.competition_submissions(
+                competition, page_number=page, page_token=page_token, page_size=page_size
+            )
+            if submissions:
+                self.print_results(
+                    submissions,
+                    self.submission_fields,
+                    csv_display=csv_display,
+                    output_format=output_format,
+                )
+            else:
+                print("No submissions found")
+
+    def competition_get_submission_limits(self, competition_name: str) -> ApiSubmissionLimits:
+        """Fetch the calling user's team's submission counts and remaining allowance.
+
+        Args:
+            competition_name (str): The competition name (slug).
+            f.write(blob.source)
+
+        if metadata:
+            data = {}
+            server_metadata = response.metadata
+            data["id"] = server_metadata.ref
+            data["id_no"] = server_metadata.id
+            data["title"] = server_metadata.title
+            data["code_file"] = file_name
+            data["language"] = server_metadata.language
+            data["kernel_type"] = server_metadata.kernel_type
+            data["is_private"] = server_metadata.is_private
+            data["enable_gpu"] = server_metadata.enable_gpu
+            data["enable_tpu"] = server_metadata.enable_tpu
+            data["enable_internet"] = server_metadata.enable_internet
+            data["keywords"] = server_metadata.category_ids
+            data["dataset_sources"] = server_metadata.dataset_data_sources
+            data["kernel_sources"] = server_metadata.kernel_data_sources
+            data["competition_sources"] = server_metadata.competition_data_sources
+            data["model_sources"] = server_metadata.model_data_sources
+            data["docker_image"] = server_metadata.docker_image
+            data["machine_shape"] = server_metadata.machine_shape
+            with open(metadata_path, "w") as f:
+                json.dump(data, f, indent=2)
+
+            return effective_dir
+        else:
+            return script_path
+
+    def kernels_pull_cli(self, kernel, kernel_opt=None, path=None, metadata=False):
+        """Client wrapper for kernels_pull."""
+        kernel = kernel or kernel_opt
+        effective_path = self.kernels_pull(kernel, path=path, metadata=metadata, quiet=False)
+        if metadata:
+            print("Source code and metadata downloaded to " + effective_path)
+        else:
+            print("Source code downloaded to " + effective_path)
+
+    def kernels_output(
+        self,
+        kernel: str,
+        path: str,
+        file_pattern: Optional[str] = None,
+        force: bool = False,
+        quiet: bool = True,
+        page_token: Optional[str] = None,
+        page_size: int = 20,
+    ) -> Tuple[List[str], str]:
+        """Retrieves the output for a specified kernel.
+
+        Args:
+            kernel (str): The kernel for which to retrieve the output.
+            path (str): The path to which to pull the files.
+            file_pattern (str): Optional regex pattern to match against filenames. Only files matching the pattern will be downloaded.
+            force (bool): If True, force an overwrite if the output already exists (default is False).
+            quiet (bool): Suppress verbose output (default is True).
+            page_token (str): Optional page token for downloading a specific page of output files.
+            page_size (int): The number of items to request per page.
+
+        Returns:
+            Tuple[List[str], str]: A tuple containing a list of output files and a string indicating the response status.
+        """
+        if kernel is None:
+            raise ValueError("A kernel must be specified")
+        owner_slug, kernel_slug, version = self.parse_kernel_string(kernel)
+
+        if path is None:
+            target_dir = self.get_default_download_dir("kernels", owner_slug, kernel_slug, "output")
+        else:
+            target_dir = path
+
+        if not os.path.exists(target_dir):
+            os.makedirs(target_dir)
+
+        if not os.path.isdir(target_dir):
+            raise ValueError("You must specify a directory for the kernels output")
+
+        if file_pattern is not None:
+            try:
+                compiled_pattern = re.compile(file_pattern)
+            except re.error as e:
+                raise ValueError(f"Invalid regex pattern '{file_pattern}': {e}")
+        else:
+            compiled_pattern = None
+
+        token = page_token
+        with self.build_kaggle_client() as kaggle:
+            request = ApiListKernelSessionOutputRequest()
+            request.user_name = owner_slug
+            request.kernel_slug = kernel_slug
+            if version:
+                request.version_label = self._kernel_version_label(version)
+            self._set_paging(request, page_size, token)
+            try:
+                response = kaggle.kernels.kernels_api_client.list_kernel_session_output(request)
+            except HTTPError as e:
+                if e.response.status_code in (401, 403):
+                    raise ValueError(
+                        f"Cannot access kernel '{kernel}' (Permission 'kernels.get' was denied). "
+                        "The most likely cause is a wrong kernel slug. "
+                        "The benchmark_task_slug returned by get_benchmark_leaderboard differs from the actual kernel slug — "
+                        "use the slug from the notebook URL (kaggle.com/code/owner/KERNEL-SLUG), not from the leaderboard. "
+                        "It can also occur if the notebook is private."
+                    )
+                raise
+            token = response.next_page_token
+
+        outfiles = []
+        target_root = os.path.realpath(target_dir)
+        for item in response.files or []:
+            if compiled_pattern and not compiled_pattern.search(item.file_name):
+                continue
+
+            outfile = os.path.join(target_dir, item.file_name)
+            # The name is relayed from the notebook's own output listing, so it is
+            # not trusted: a "../" or absolute name must not escape the target directory.
+            if not _is_within_directory(target_root, os.path.realpath(outfile)):
+                raise ValueError(
+                    f"Refusing to download '{item.file_name}': resolves outside destination '{target_dir}'"
+                )
+            outfiles.append(outfile)
+            download_response = requests.get(item.url, stream=True, timeout=300)
+            # A failed fetch (e.g. an expired signed URL) still has a body, so
+            # writing it would save the error page as the output file and still
+            # report success. Fail loudly instead, like every other download.
+            download_response.raise_for_status()
+            if force or self.download_needed(download_response, outfile, quiet):
+                # Same path as dataset and competition files: streamed in chunks
+                # rather than held in memory, checked against Content-Length, and
+                # resumed if the connection drops. download_file does not use the
+                # client, and the one opened above is already closed.
+                self.download_file(download_response, outfile, None, quiet, not force)
+                if not quiet:
+                    print("Output file downloaded to %s" % outfile)
+
+        while token and page_token is None:
+            page_outfiles, token = self.kernels_output(
+                kernel,
+                path,
+                file_pattern=file_pattern,
+                force=force,
+                quiet=quiet,
+                page_token=token,
+                page_size=page_size,
+            )
+            outfiles.extend(page_outfiles)
+
+        log = response.log
+        if log and page_token is None:
+            outfile = os.path.join(target_dir, kernel_slug + ".log")
+            outfiles.append(outfile)
+            with open(outfile, "w", encoding="utf-8") as out:
+                out.write(log)
+            if not quiet:
+                print("Kernel log downloaded to %s " % outfile)
+
+        return outfiles, token  # Breaking change, we need to get the token to the UI
+
+    def kernels_output_cli(
+        self,
+        kernel,
+        borders = []
+        if len(items) == 0:
+            return
+        for f in fields:
+            length = max(len(f), max([len(self.string(getattr(i, self.camel_to_snake(f)))) for i in items]))
+            justify = (
+                ">"
+                if isinstance(getattr(items[0], self.camel_to_snake(f)), int) or f == "size" or f == "reward"
+                else "<"
+            )
+            formats.append("{:" + justify + self.string(length + 2) + "}")
+            borders.append("-" * length + "  ")
+        row_format = "".join(formats)
+        headers = [f + "  " for f in labels]
+        print(row_format.format(*headers))
+        print(row_format.format(*borders))
+        for i in items:
+            i_fields = [self.string(getattr(i, self.camel_to_snake(f))) + "  " for f in fields]
+            try:
+                print(row_format.format(*i_fields))
+            except UnicodeEncodeError:
+                print(row_format.format(*i_fields).encode("utf-8"))
+
+    def print_csv(self, items, fields, labels=None):
+        """Prints a set of fields from a set of items using a CSV writer.
+
+        Args:
+            items: A list of items to print.
+            fields: A list of fields to select from the items.
+            labels: The labels for the fields (defaults to fields).
+        """
+        if labels is None:
+            labels = fields
+        writer = csv.writer(sys.stdout)
+        writer.writerow(labels)
+        for i in items:
+            i_fields = [self.string(getattr(i, self.camel_to_snake(f))) for f in fields]
+            writer.writerow(i_fields)
+
+    def get_json_serializable(self, items, fields, labels=None):
+        """Converts a set of fields from a set of items into a JSON-serializable list of dicts.
+
+        Args:
+            items: A list of items to convert.
+            fields: A list of fields to select from the items.
+            labels: The labels for the fields (defaults to fields).
+
+        Returns:
+            list: A list of dictionaries containing the selected fields.
+        """
+        if labels is None:
+            labels = fields
+        json_items = []
+        for i in items:
+            item_dict = {}
+            for f, label in zip(fields, labels):
+                val = getattr(i, self.camel_to_snake(f))
+                if isinstance(val, datetime):
+                    val = val.isoformat()
+                elif not isinstance(val, (int, float, bool, str)) and val is not None:
+                    val = str(val)
+                item_dict[label] = val
+            json_items.append(item_dict)
+        return json_items
+
+    def print_json(self, items, fields, labels=None):
+        """Prints a set of fields from a set of items in JSON format.
+
+        Args:
+            items: A list of items to print.
+            fields: A list of fields to select from the items.
+            labels: The labels for the fields (defaults to fields).
+        """
+        print(json.dumps(self.get_json_serializable(items, fields, labels), indent=2))
+
+    def print_results(self, items, fields, labels=None, csv_display=False, output_format=None):
+        """Prints results in the selected format, applying projection if present.
+
+        Args:
+            items: A list of items to print.
+            fields: A list of fields to select from the items.
+            labels: The labels for the fields (defaults to fields).
+            csv_display: If True, print CSV (legacy option).
+            output_format: The format option value, e.g. "json(field1,field2)".
+        """
+        output_fmt = self._get_output_format(csv_display, output_format)
+        resolved_fields, resolved_labels = self._resolve_projection(output_format, fields, labels)
+
+        if output_fmt == OutputFormat.CSV:
+            self.print_csv(items, resolved_fields, resolved_labels)
+        elif output_fmt == OutputFormat.JSON:
+
+exec
+/bin/bash -lc "python3 -I - <<'PY'
+from pathlib import Path
+import re,subprocess
+patch=Path('ops/patches/kaggle-submit-kernel-v5.diff').read_text().splitlines(keepends=True)
+out={}; p=0
+while p<len(patch):
+    if not patch[p].startswith('--- a/'):
+        p+=1; continue
+    name=patch[p][6:].strip(); p+=2
+    src=Path(name).read_text().splitlines(keepends=True)
+    head=subprocess.run(['git','show','HEAD:'+name],capture_output=True,text=True,check=True).stdout
+    assert ''.join(src)==head, name+' differs from HEAD'
+    dst=[]; pos=0
+    while p<len(patch) and not patch[p].startswith('--- a/'):
+        m=re.match(r'@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@',patch[p]); assert m, repr(patch[p]); p+=1
+        start=int(m[1])-1; dst+=src[pos:start]; pos=start; old=new=0
+        while p<len(patch) and not patch[p].startswith(('@@','--- a/')):
+            line=patch[p]; tag=line[0]; assert tag in ' +-'
+            if tag in ' -':
+                assert src[pos]==line[1:],(name,pos+1,src[pos],line); pos+=1; old+=1
+            if tag in ' +': dst.append(line[1:]); new+=1
+            p+=1
+        print('HUNK',name,'declared',m[2],m[4],'actual',old,new)
+    dst+=src[pos:]; out[name]=''.join(dst)
+    print('\\nPATCHED '+name)
+    for n,line in enumerate(dst,1): print(f'{n:4} {line}',end='')
+    if name=='bin/kaggle-submit':
+        r=subprocess.run(['bash','-n'],input=out[name],capture_output=True,text=True); print('BASH SYNTAX RC',r.returncode,r.stderr)
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+HUNK bin/kaggle-submit declared 31 127 actual 31 127
+
+PATCHED bin/kaggle-submit
+   1 #!/usr/bin/env bash
+   2 # Guarded Kaggle submission. Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>" [kernel_version]
+   3 # Refuses unless: a Director decision contains "SUBMIT: AUTHORIZE sha256=<this zip's sha256> track=<track>",
+   4 # that authorization is unused, and no submission was made yet today (UTC).
+   5 # Kernel mode (SUBMIT_MODE=kernel, dec 041/042): the 4th arg is required; the OUTPUT submission.zip of that exact kernel
+   6 # version is downloaded and must be byte-identical (sha256) to the authorized zip, and pass the same root/size checks.
+   7 # Safety (review ops/codex/review-20261105T231632.md): one exclusive lock from ledger checks through recording; success is
+   8 # recorded only on a positive "Submission ref: N"; an ambiguous outcome leaves ops/submissions.pending, which blocks
+   9 # every later call until a human reconciles it against `kaggle competitions submissions`. Only a server 4xx
+  10 # (requests 'NNN Client Error', not 408) counts as a definite rejection (review ops/codex/review-20261105T231919.md).
+  11 # v4/v5 (dec 044/046): strict server-side list pre-check; -m always carries sha:<first 12 hex>.
+  12 set -euo pipefail
+  13 cd "$(dirname "$0")/.."
+  14 source ./config.env
+  15 zip=$1; track=$2; msg=${3:-"$track $(basename "$zip")"}
+  16 [ -f "$zip" ] || { echo "no such zip: $zip"; exit 1; }
+  17 [[ "$track" =~ ^(31b|e4b)$ ]] || { echo "track must be 31b or e4b"; exit 1; }
+  18 exec 9>>ops/.submit.lock
+  19 flock -n 9 || { echo "REFUSED: another bin/kaggle-submit is running"; exit 3; }
+  20 [ ! -e ops/submissions.pending ] || { echo "REFUSED: ops/submissions.pending exists (ambiguous earlier attempt); reconcile with 'kaggle competitions submissions' first"; exit 3; }
+  21 sha=$(sha256sum "$zip" | cut -d' ' -f1)
+  22 auth=$(grep -l "^SUBMIT: AUTHORIZE sha256=$sha track=$track" ops/decisions/*.md 2>/dev/null | tail -1 || true)
+  23 [ -n "$auth" ] || { echo "REFUSED: no Director authorization for sha256=$sha track=$track"; exit 3; }
+  24 touch ops/submissions.jsonl
+  25 grep -q "\"sha256\": \"$sha\"" ops/submissions.jsonl && { echo "REFUSED: this zip was already submitted"; exit 3; }
+  26 day_used() { grep -q "\"day\": \"$1\"\|\"day_checked\": \"$1\"" ops/submissions.jsonl; }
+  27 today=$(date -u +%F)
+  28 day_used "$today" && { echo "REFUSED: already submitted today (UTC $today)"; exit 3; }
+  29 check_zip() {  # <path> <label>
+  30   python3 -I -c 'import stat,sys,zipfile
+  31 z=zipfile.ZipFile(sys.argv[1]); ms=z.infolist()
+  32 # exact ORIGINAL name (Python truncates filename at NUL), no NUL anywhere, regular file or no Unix mode (DOS-made zip)
+  33 i=[m for m in ms if m.filename == "agent.yaml" or m.orig_filename == "agent.yaml"]
+  34 mode=(i[0].external_attr >> 16) if len(i) == 1 else -1
+  35 ok=(len(i) == 1 and i[0].orig_filename == "agent.yaml" and "\x00" not in i[0].orig_filename and not i[0].is_dir()
+  36     and stat.S_IFMT(mode) in (0, stat.S_IFREG) and not any("\x00" in m.orig_filename for m in ms))
+  37 sys.exit(0 if ok else 1)' "$1" || { echo "REFUSED: $2: no single regular root member named exactly agent.yaml"; exit 3; }
+  38   local size; size=$(stat -c %s "$1"); [ "$size" -lt 3221225472 ] || { echo "REFUSED: $2: zip >= 3 GiB"; exit 3; }
+  39 }
+  40 check_zip "$zip" "local zip"
+  41 kernel=""; kver=""
+  42 if [ "$SUBMIT_MODE" = "kernel" ]; then
+  43   [[ "$SUBMIT_KERNEL" =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]] || { echo "SUBMIT_KERNEL must be owner/slug"; exit 1; }
+  44   kernel=$SUBMIT_KERNEL; kver=${4:-}
+  45   [[ "$kver" =~ ^[1-9][0-9]*$ ]] || { echo "REFUSED: kernel mode needs the kernel version (positive integer) as 4th arg"; exit 3; }
+  46   # 'kaggle kernels output owner/slug/N' fetches the output of version N (CLI sets version_label=vN,
+  47   # kaggle_api_extended.py parse_kernel_string/_kernel_version_label), so the hash is tied to the version submitted.
+  48   out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
+  49   kaggle kernels output "$kernel/$kver" -p "$out" -q >/dev/null
+  50   [ -f "$out/submission.zip" ] && [ ! -L "$out/submission.zip" ] || { echo "REFUSED: version $kver has no regular submission.zip output"; exit 3; }
+  51   osha=$(sha256sum "$out/submission.zip" | cut -d' ' -f1)
+  52   [ "$osha" = "$sha" ] || { echo "REFUSED: kernel v$kver output sha256=$osha != authorized $sha"; exit 3; }
+  53   check_zip "$out/submission.zip" "kernel output"
+  54   echo "Kernel $kernel v$kver output verified: sha256=$osha"
+  55 fi
+  56 # Re-check the UTC day right before submitting (the download can cross midnight).
+  57 now=$(date -u +%F)
+  58 day_used "$now" && { echo "REFUSED: already submitted today (UTC $now)"; exit 3; }
+  59 # Server-side pre-check (dec 044 item 2, dec 046 item 1: strict, fail-closed; defence in depth behind lock + ledger + pending).
+  60 # Kaggle's own list must show no submission dated today (UTC) and none whose description carries this sha prefix.
+  61 # The CLI prints no next-page token, so one page of 100 is requested and a FULL page (100 rows) refuses.
+  62 # Assumes the server honours --page-size (unverifiable until > 20 submissions exist).
+  63 msg="sha:${sha:0:12} $msg"
+  64 subs=$(kaggle competitions submissions "$COMP" -v --page-size 100 2>&1) || { echo "REFUSED: cannot list server-side submissions"; exit 3; }
+  65 printf '%s' "$subs" | python3 -I -c 'import csv, io, re, sys
+  66 today, pre = sys.argv[1], "sha:" + sys.argv[2][:12]
+  67 HEADER = ["ref", "fileName", "date", "description", "status", "publicScore", "privateScore"]
+  68 DATE = re.compile(r"\A(\d{4}-\d{2}-\d{2}) \d{2}:\d{2}:\d{2}(\.\d{1,6})?(\+00:00)?\Z")
+  69 def refuse(why):
+  70     print("REFUSED: server-side submissions list: " + why); sys.exit(1)
+  71 text = sys.stdin.read()
+  72 if text.strip() == "No submissions found":
+  73     sys.exit(0)
+  74 try:
+  75     rows = list(csv.reader(io.StringIO(text, newline=""), strict=True))
+  76 except csv.Error as e:
+  77     refuse("csv error " + str(e))
+  78 while rows and rows[-1] == []:
+  79     rows.pop()
+  80 if not rows or rows[0] != HEADER:
+  81     refuse("unexpected header")
+  82 body = rows[1:]
+  83 if not body:
+  84     refuse("header without rows")
+  85 if len(body) >= 100:
+  86     refuse("full page (100 rows): older submissions not visible")
+  87 for r in body:
+  88     if len(r) != len(HEADER):
+  89         refuse("row with %d fields" % len(r))
+  90     ref, date, desc = r[0], r[2], r[3]
+  91     m = DATE.match(date)
+  92     if not re.fullmatch(r"[0-9]+", ref) or not m:
+  93         refuse("malformed ref/date in a row")
+  94     if m.group(1) == today or pre in desc:
+  95         refuse("a submission dated today (UTC) or carrying this sha exists: ref " + ref)' "$now" "$sha" || exit 3
+  96 # The query can cross midnight: the day must be unchanged after it.
+  97 [ "$(date -u +%F)" = "$now" ] || { echo "REFUSED: UTC day changed during the pre-check; re-run"; exit 3; }
+  98 record() {  # <file> <status> <ref>; JSON-serialized
+  99   python3 -c 'import json,sys; a=sys.argv[1:]; d=dict(day=a[0], day_checked=a[1], t=a[2], status=a[3], ref=a[4] or None, track=a[5], sha256=a[6], zip=a[7], auth=a[8], msg=a[9]);
+ 100 if a[10]: d.update(kernel=a[10], kernel_version=int(a[11]))
+ 101 print(json.dumps(d))' "$(date -u +%F)" "$now" "$(date -u +%FT%TZ)" "$2" "$3" "$track" "$sha" "$zip" "$auth" "$msg" "$kernel" "$kver" >> "$1"
+ 102 }
+ 103 record ops/submissions.pending pending ""
+ 104 echo "Submitting $zip ($track, sha256=$sha) authorized by $auth"
+ 105 set +e
+ 106 if [ -n "$kernel" ]; then
+ 107   resp=$(kaggle competitions submit "$COMP" -k "$kernel" -v "$kver" -f submission.zip -m "$msg" 2>&1); rc=$?
+ 108 else
+ 109   resp=$(kaggle competitions submit "$COMP" -f "$zip" -m "$msg" 2>&1); rc=$?
+ 110 fi
+ 111 set -e
+ 112 printf '%s\n' "$resp"
+ 113 ref=$(printf '%s\n' "$resp" | sed -n 's/^Submission ref: \([0-9][0-9]*\)$/\1/p' | tail -1)
+ 114 if [ -n "$ref" ]; then
+ 115   record ops/submissions.jsonl submitted "$ref"   # day = acceptance day; day_checked = pre-submit day (both block)
+ 116   rm -f ops/submissions.pending
+ 117   bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle (ref $ref)." || true
+ 118   echo "logged to ops/submissions.jsonl (ref $ref)"
+ 119 elif [ $rc -ne 0 ] && printf '%s\n' "$resp" | grep -qE '(^|[^0-9])4(0[0-7]|09|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9]) Client Error' \
+ 120      && ! printf '%s' "$resp" | grep -q 'Submission ref'; then
+ 121   # Clear pending ONLY on positive rejection evidence: a requests HTTPError 4xx (not 408 timeout) from the server.
+ 122   # Everything else (killed CLI, empty output, decode errors, 5xx, network) stays AMBIGUOUS.
+ 123   rm -f ops/submissions.pending
+ 124   echo "Submit REJECTED (rc=$rc); authorization not consumed"; exit 4
+ 125 else
+ 126   echo "AMBIGUOUS submit outcome (rc=$rc, no 'Submission ref'); ops/submissions.pending kept; reconcile manually"; exit 5
+ 127 fi
+BASH SYNTAX RC 0 
+HUNK config.env declared 8 8 actual 8 8
+
+PATCHED config.env
+   1 # Settings (safe to commit; no secrets)
+   2 COMP=gemma-4-developer-agent
+   3 BUILDER_MODEL=opus            # long working turns (alias resolves to Opus 5.5)
+   4 BUILDER_EFFORT=high           # claude --effort: low|medium|high|xhigh|max
+   5 DIRECTOR_MODEL=opus           # short decisions; switch to sonnet if usage limits bite
+   6 DIRECTOR_EFFORT=high
+   7 PAPER_MODEL=opus              # paper writer (bin/session paper)
+   8 PAPER_EFFORT=high
+   9 TMUX_SESSION=gemma            # windows: builder, director, router (Etho's tmux session is never touched)
+  10 RL_SLEEP_MIN=30               # back off a role this long after it reports a usage limit
+  11 MIN_GAP_MIN=5                 # nudge an idle Builder whose status is CONTINUE after this long
+  12 WAKE_MAX_MIN=180              # nudge an idle Builder at least this often while waiting on jobs
+  13 HUMAN_QUIET_MIN=30            # don't /clear a session within this many minutes of Aniket typing in it
+  14 HUMAN_HOLD_SEC=120            # don't inject mail within this many seconds of Aniket typing
+  15 GPU_HARD_CAP_USD=150
+  16 DIGEST_HOUR_UTC=14            # 8am Chicago (CST)
+  17 SUBMIT_MODE=kernel            # file | kernel  (verified 2026-11-05: file upload -> 400; code competition, dec 041)
+  18 SUBMIT_KERNEL=aniket0202/gemma-submit-e4b
+  19 FINAL_DEADLINE=2026-12-02T23:59:00Z
+  20 CLAUDE_CONFIG_DIR_GEMMA="$HOME/.claude-gemma"   # separate Claude login (university account); Etho's login untouched
+  21 CODEX_MODEL=              # empty = Codex default; per-call override: CODEX_MODEL=... bin/codex-*
+  22 CODEX_EFFORT_ASK=high
+  23 CODEX_EFFORT_REVIEW=high
+  24 CODEX_EFFORT_BUILD=medium
+
+codex
+V5 reconstructs cleanly against HEAD and passes `bash -n`. I’m checking the paths beyond the parser fixes now: ledger failures, authorization matching, submission retries, and whether the downloaded kernel artifact is the one the server submits.
+exec
+/bin/bash -lc "rg -n 'def competition_submit_code|def competition_submit\\(|def with_retry|def _kernel_version_label|def parse_kernel_string|submission_fields|def string\\(' /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py && rg -n 'retry|Retry' /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/kaggle_http_client.py /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+1250:    submission_fields = ["ref", "fileName", "date", "description", "status", "publicScore", "privateScore"]
+1351:    def with_retry(
+2149:    def competition_submit_code(
+2200:    def competition_submit(
+2604:                    self.submission_fields,
+2929:    team_public_submission_fields = ["id", "dateSubmitted", "publicScore"]
+2967:            self.team_public_submission_fields,
+9225:    def string(self, item):
+9858:    def parse_kernel_string(self, kernel: str) -> Tuple[str, str, Optional[str]]:
+9882:    def _kernel_version_label(version: str) -> str:
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:56:from urllib3.util.retry import Retry
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:425:    max_attempts=50, retry_delay=15, remove_run_files=True,
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:714:            # to give it a chance to retry/resume on the next invocation.
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1036:    429: "You have been rate limited. Wait a little while before retrying.",
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1312:    def _get_retry_after_delay(response: Response) -> Optional[float]:
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1313:        """Parse the Retry-After header from an HTTP response.
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1323:        retry_after = response.headers.get("Retry-After")
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1324:        if retry_after is None:
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1329:            return max(0.0, float(retry_after))
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1335:            retry_date = datetime.strptime(retry_after, "%a, %d %b %Y %H:%M:%S %Z")
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1336:            delay = (retry_date - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds()
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1343:    def _calculate_backoff_delay(self, attempt, initial_delay_millis, retry_multiplier, randomness_factor):
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1344:        delay_ms = initial_delay_millis * (retry_multiplier**attempt)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1351:    def with_retry(
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1356:        retry_multiplier: float = 1.7,
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1368:                        # Use Retry-After header for 429 responses when available
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1371:                            retry_delay = self._get_retry_after_delay(http_error.response)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1372:                            if retry_delay is not None:
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1373:                                total_delay = retry_delay
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1375:                                    "Rate limited (429). Retry-After: %.1f seconds (attempt %d/%d)",
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1382:                                    i, initial_delay_millis, retry_multiplier, randomness_factor
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1385:                                    "Rate limited (429). No valid Retry-After header; "
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1393:                                i, initial_delay_millis, retry_multiplier, randomness_factor
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1395:                        print("Request failed: %s. Will retry in %2.1f seconds" % (e, total_delay), file=sys.stderr)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:2382:            return self.with_retry(kaggle.competitions.competition_api_client.get_submission)(request)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:2387:        Reuses the shared adaptive-backoff (``_adaptive_sleep``) and retry
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:2388:        (``with_retry``) infrastructure. A transient 404 immediately after
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:5810:                    start_blob_upload_response = self.with_retry(method)(file_upload.start_blob_upload_request)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:5818:                continue  # Continue (i.e., retry/resume) only if the upload is incomplete.
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:5919:                response = cast(ApiCreateDatasetResponse, self.with_retry(message)(request))
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6190:                retry_request = ApiCreateDatasetRequest()
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6191:                retry_request.title = title
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6192:                retry_request.slug = dataset_slug
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6193:                retry_request.owner_slug = owner_slug
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6194:                retry_request.license_name = license_name
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6195:                retry_request.subtitle = subtitle
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6196:                retry_request.description = description
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6197:                retry_request.files = request.files
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6198:                retry_request.is_private = not public
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6199:                retry_request.category_ids = keywords
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6200:                response = self.with_retry(kaggle.datasets.dataset_api_client.create_dataset)(retry_request)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6300:        """Downloads a file to an output file, streaming in chunks with automatic retry on failure.
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6304:        because it is an in-process retry of the same download, or because a persisted
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6316:            max_retries: Maximum number of retry attempts on network errors (default is 5).
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6343:        # Retry loop for handling network errors
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6344:        retry_count = 0
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6353:        while retry_count <= max_retries:
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6355:                # Check file existence inside loop (may be created during retry)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6362:                # only for an in-process retry (same download session) or when a
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6367:                resume_from_partial = retry_count == 0 and self._can_resume_partial(
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6371:                if retry_count > 0 or resume_from_partial:
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6376:                        # Every byte is already present (e.g. a retry that had in
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6389:                        if retry_count > 0:
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6390:                            print(f"Retry {retry_count}/{max_retries}: Resuming from {size_read} bytes{remaining}...")
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6398:                    retry_headers = original_headers.copy()
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6399:                    retry_headers["Range"] = f"bytes={size_read}-"
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6401:                        retry_headers["If-Range"] = resume_validator
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6405:                        headers=retry_headers,
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6496:                # Success - exit retry loop
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6509:                retry_count += 1
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6511:                if retry_count > max_retries:
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6519:                # Use Retry-After header for 429 responses when available
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6522:                    retry_delay = self._get_retry_after_delay(http_error.response)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6523:                    if retry_delay is not None:
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6524:                        backoff_time = retry_delay
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6526:                            "Rate limited (429). Retry-After: %.1f seconds (attempt %d/%d)",
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6528:                            retry_count,
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6532:                        backoff_time = min(2**retry_count + random(), 60)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6534:                            "Rate limited (429). No valid Retry-After header; "
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6537:                            retry_count,
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6542:                            f"\nRate limited (HTTP 429). Retrying in {backoff_time:.1f} seconds... "
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6543:                            f"(attempt {retry_count}/{max_retries})"
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6547:                    backoff_time = min(2**retry_count + random(), 60)  # Cap at 60 seconds
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:6550:                        print(f"Retrying in {backoff_time:.1f} seconds... (attempt {retry_count}/{max_retries})")
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:7871:                # idle SSE connections every few minutes, so a single retry is
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:8447:                response = cast(ApiCreateModelResponse, self.with_retry(message)(request))
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:8760:                response = cast(ApiCreateModelResponse, self.with_retry(message)(request))
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:9066:                    self.with_retry(create_inbox_file)(create_inbox_file_request)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:9557:                    retries = Retry(total=10, backoff_factor=0.5)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:10317:            return self.with_retry(kaggle.benchmarks.benchmark_tasks_api_client.get_benchmark_task)(request)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:10337:            return self.with_retry(kaggle.benchmarks.benchmark_tasks_api_client.list_benchmark_task_runs)(request)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:10355:            return self.with_retry(kaggle.benchmarks.benchmarks_api_client.list_benchmark_models)(req)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:10817:            response = self.with_retry(kaggle.benchmarks.benchmark_tasks_api_client.create_benchmark_task)(request)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:10887:                response = self.with_retry(
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:10922:                return self.with_retry(kaggle.benchmarks.benchmark_tasks_api_client.list_benchmark_tasks)(request)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:11080:                response = self.with_retry(
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:11204:                    response = self.with_retry(
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:11304:            response = self.with_retry(kaggle.benchmarks.benchmark_tasks_api_client.publish_benchmark_task)(request)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:11333:            response = self.with_retry(kaggle.benchmarks.benchmarks_api_client.get_benchmark_leaderboard)(request)
+
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py | sed -n '2140,2265p' && nl -ba /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py | sed -n '9170,9250p' && rg -n 'exceptions|HTTPError|except|format_exc|traceback|print\\(' /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/cli.py" in /home/ubuntu/work/gemma
+exec
+/bin/bash -lc 'git status --short && ls -ld ops ops/submissions.jsonl ops/submissions.pending ops/.submit.lock dist/e4b-v002.zip && nl -ba eval/kaggle/submit_kernel/stage.py && tail -5 eval/tests/guard_mock_test.sh' in /home/ubuntu/work/gemma
+ exited 2 in 0ms:
+ M ops/codex/build-probes-fix7.log
+ M ops/codex/review-20261105T233800.log
+ M ops/logs/router.log
+ D ops/mail/builder/20261105T233628-19853-from-director.md
+?? ops/mail/builder/read/20261105T233628-19853-from-director.md
+?? ops/mail/director/read/20261105T233817-11602-from-builder.md
+ls: cannot access 'ops/submissions.pending': No such file or directory
+ls: cannot access 'ops/.submit.lock': No such file or directory
+-rw-------  1 ubuntu ubuntu 4152 Nov  5 21:05 dist/e4b-v002.zip
+drwxr-xr-x 16 ubuntu ubuntu 4096 Nov  5 23:36 ops
+-rw-rw-r--  1 ubuntu ubuntu    0 Nov  5 23:13 ops/submissions.jsonl
+
+ succeeded in 0ms:
+  2140	            self.print_results(
+  2141	                response.competitions,
+  2142	                self.competition_fields,
+  2143	                csv_display=csv_display,
+  2144	                output_format=output_format,
+  2145	            )
+  2146	        else:
+  2147	            print("No competitions found")
+  2148	
+  2149	    def competition_submit_code(
+  2150	        self,
+  2151	        file_name: str,
+  2152	        message: str,
+  2153	        competition: Optional[str] = None,
+  2154	        kernel: Optional[str] = None,
+  2155	        kernel_version: Optional[int] = None,
+  2156	        quiet: bool = False,
+  2157	    ) -> ApiCreateCodeSubmissionResponse:
+  2158	        """Submit to a code competition.
+  2159	
+  2160	        Args:
+  2161	            file_name (str): the name of  the output file created by the kernel (not used for packages)
+  2162	            message (str): the submission description
+  2163	            competition (Optional[str]): the competition name; if not given use the 'competition' config value
+  2164	            kernel (Optional[str]): the <owner>/<notebook> of the notebook to use for a code competition
+  2165	            kernel_version (Optional[int]): the version number, returned by 'kaggle kernels push ...'
+  2166	            quiet (bool): suppress verbose output (default is False)
+  2167	
+  2168	        Returns:
+  2169	            ApiCreateCodeSubmissionResponse:
+  2170	        """
+  2171	        if competition is None:
+  2172	            competition = self.get_config_value(self.CONFIG_NAME_COMPETITION)
+  2173	            if competition is not None and not quiet:
+  2174	                print("Using competition: " + competition)
+  2175	        if competition is None:
+  2176	            raise ValueError("No competition specified")
+  2177	
+  2178	        if kernel is None:
+  2179	            raise ValueError("No kernel specified")
+  2180	
+  2181	        if file_name is None:
+  2182	            raise ValueError("No file specified")
+  2183	
+  2184	        with self.build_kaggle_client() as kaggle:
+  2185	            items = kernel.split("/")
+  2186	            if len(items) != 2:
+  2187	                raise ValueError("The kernel must be specified as <owner>/<notebook>")
+  2188	            submit_request = ApiCreateCodeSubmissionRequest()
+  2189	            submit_request.file_name = file_name
+  2190	            submit_request.competition_name = competition
+  2191	            submit_request._kernel_owner = items[0]
+  2192	            submit_request.kernel_slug = items[1]
+  2193	            if kernel_version:
+  2194	                submit_request.kernel_version = int(kernel_version)
+  2195	            if message:
+  2196	                submit_request.submission_description = message
+  2197	            submit_response = kaggle.competitions.competition_api_client.create_code_submission(submit_request)
+  2198	            return submit_response
+  2199	
+  2200	    def competition_submit(
+  2201	        self,
+  2202	        file_name: str | None,
+  2203	        message: str,
+  2204	        competition: str | None,
+  2205	        quiet: bool = False,
+  2206	        sandbox: bool = False,
+  2207	    ) -> ApiCreateSubmissionResponse:
+  2208	        """Submits to a competition.
+  2209	
+  2210	        Args:
+  2211	            file_name (str): The competition metadata file.
+  2212	            message (str): The submission description.
+  2213	            competition (str): The competition name.
+  2214	            quiet (bool): Suppress verbose output (default is False).
+  2215	            sandbox (bool): Mark as a sandbox submission (default is False).
+  2216	
+  2217	        Returns:
+  2218	            ApiCreateSubmissionResponse:
+  2219	        """
+  2220	        if competition is None:
+  2221	            competition = self.get_config_value(self.CONFIG_NAME_COMPETITION)
+  2222	            if competition is not None and not quiet:
+  2223	                print("Using competition: " + competition)
+  2224	
+  2225	        if competition is None:
+  2226	            raise ValueError("No competition specified")
+  2227	        else:
+  2228	            if file_name is None:
+  2229	                raise ValueError("No file specified")
+  2230	            with self.build_kaggle_client() as kaggle:
+  2231	                request = ApiStartSubmissionUploadRequest()
+  2232	                request.competition_name = competition
+  2233	                request.file_name = os.path.basename(file_name)
+  2234	                request.content_length = os.path.getsize(file_name)
+  2235	                request.last_modified_epoch_seconds = int(os.path.getmtime(file_name))
+  2236	                response = kaggle.competitions.competition_api_client.start_submission_upload(request)
+  2237	                upload_status = self.upload_complete(file_name, response.create_url, quiet)
+  2238	                if upload_status != ResumableUploadResult.COMPLETE:
+  2239	                    # Actual error is printed during upload_complete. Not
+  2240	                    # ideal but changing would not be backwards compatible
+  2241	                    resp = ApiCreateSubmissionResponse()
+  2242	                    resp.message = self.COMPETITION_SUBMIT_UPLOAD_FAILED_MESSAGE
+  2243	                    return resp
+  2244	
+  2245	                submit_request = ApiCreateSubmissionRequest()
+  2246	
+  2247	                # Admin-only feature to submit for a given model (b/475908216)
+  2248	                model_version_id = os.getenv("KAGGLE_COMPETITION_SUBMISSION_MODEL_VERSION_ID", None)
+  2249	                if model_version_id:
+  2250	                    submit_request.benchmark_model_version_id = int(model_version_id)
+  2251	
+  2252	                submit_request.competition_name = competition
+  2253	                submit_request.blob_file_tokens = response.token
+  2254	                if message:
+  2255	                    submit_request.submission_description = message
+  2256	                if sandbox:
+  2257	                    submit_request.sandbox = True
+  2258	                submit_response: ApiCreateSubmissionResponse = (
+  2259	                    kaggle.competitions.competition_api_client.create_submission(submit_request)
+  2260	                )
+  2261	                return submit_response
+  2262	
+  2263	    def competition_submit_cli(
+  2264	        self,
+  2265	        file_name: Optional[str] = None,
+  9170	        """Converts a set of fields from a set of items into a JSON-serializable list of dicts.
+  9171	
+  9172	        Args:
+  9173	            items: A list of items to convert.
+  9174	            fields: A list of fields to select from the items.
+  9175	            labels: The labels for the fields (defaults to fields).
+  9176	
+  9177	        Returns:
+  9178	            list: A list of dictionaries containing the selected fields.
+  9179	        """
+  9180	        if labels is None:
+  9181	            labels = fields
+  9182	        json_items = []
+  9183	        for i in items:
+  9184	            item_dict = {}
+  9185	            for f, label in zip(fields, labels):
+  9186	                val = getattr(i, self.camel_to_snake(f))
+  9187	                if isinstance(val, datetime):
+  9188	                    val = val.isoformat()
+  9189	                elif not isinstance(val, (int, float, bool, str)) and val is not None:
+  9190	                    val = str(val)
+  9191	                item_dict[label] = val
+  9192	            json_items.append(item_dict)
+  9193	        return json_items
+  9194	
+  9195	    def print_json(self, items, fields, labels=None):
+  9196	        """Prints a set of fields from a set of items in JSON format.
+  9197	
+  9198	        Args:
+  9199	            items: A list of items to print.
+  9200	            fields: A list of fields to select from the items.
+  9201	            labels: The labels for the fields (defaults to fields).
+  9202	        """
+  9203	        print(json.dumps(self.get_json_serializable(items, fields, labels), indent=2))
+  9204	
+  9205	    def print_results(self, items, fields, labels=None, csv_display=False, output_format=None):
+  9206	        """Prints results in the selected format, applying projection if present.
+  9207	
+  9208	        Args:
+  9209	            items: A list of items to print.
+  9210	            fields: A list of fields to select from the items.
+  9211	            labels: The labels for the fields (defaults to fields).
+  9212	            csv_display: If True, print CSV (legacy option).
+  9213	            output_format: The format option value, e.g. "json(field1,field2)".
+  9214	        """
+  9215	        output_fmt = self._get_output_format(csv_display, output_format)
+  9216	        resolved_fields, resolved_labels = self._resolve_projection(output_format, fields, labels)
+  9217	
+  9218	        if output_fmt == OutputFormat.CSV:
+  9219	            self.print_csv(items, resolved_fields, resolved_labels)
+  9220	        elif output_fmt == OutputFormat.JSON:
+  9221	            self.print_json(items, resolved_fields, resolved_labels)
+  9222	        else:
+  9223	            self.print_table(items, resolved_fields, resolved_labels)
+  9224	
+  9225	    def string(self, item):
+  9226	        return item if isinstance(item, str) else str(item)
+  9227	
+  9228	    def get_or_fail(self, data: Mapping[str, T], key: str) -> T:
+  9229	        if key in data:
+  9230	            return data[key]
+  9231	        raise ValueError("Key " + key + " not found in data")
+  9232	
+  9233	    def get_or_default(self, data: Dict[str, T], key: str, default: Optional[T]) -> Optional[T]:
+  9234	        if key in data:
+  9235	            return data[key]
+  9236	        return default
+  9237	
+  9238	    def get_bool(self, data: Dict[str, Union[str, bool]], key: str, default: bool) -> bool:
+  9239	        if key in data:
+  9240	            val = data[key]
+  9241	            if isinstance(val, str):
+  9242	                val = val.lower()
+  9243	                if val == "true":
+  9244	                    return True
+  9245	                elif val == "false":
+  9246	                    return False
+  9247	                else:
+  9248	                    raise ValueError("Invalid boolean value: " + val)
+  9249	            if isinstance(val, bool):
+  9250	                return val
+6:# you may not use this file except in compliance with the License.
+24:from requests.exceptions import HTTPError
+56:        help="Print the full traceback when an unexpected error occurs",
+88:    except HTTPError as e:
+92:            print(format_http_error(e), file=sys.stderr)
+95:    except ApiException as e:
+96:        print(e, file=sys.stderr)
+99:    except ValueError as e:
+100:        print(e, file=sys.stderr)
+103:    except KeyboardInterrupt:
+104:        print("User cancelled operation")
+106:    except Exception as e:
+108:        # show a short message instead of a traceback the user cannot act on.
+111:        print(f"{type(e).__name__}: {e}", file=sys.stderr)
+112:        print(
+114:            f"traceback. If you think this is a bug, please report it at {ISSUE_TRACKER_URL}",
+120:        print(out, end="")
+133:    except Exception as e:
+
+exec
+/bin/bash -lc 'nl -ba /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/kaggle_http_client.py | head -260 && nl -ba /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/cli.py | head -160 && nl -ba eval/kaggle/submit_kernel/stage.py && tail -5 eval/tests/guard_mock_test.sh' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	import binascii
+     2	import codecs
+     3	import json
+     4	import os
+     5	import urllib.parse
+     6	from io import BytesIO
+     7	from pathlib import Path
+     8	
+     9	import requests
+    10	from urllib3.fields import RequestField
+    11	
+    12	from kagglesdk.kaggle_env import (
+    13	    get_endpoint,
+    14	    get_env,
+    15	    get_access_token_from_env,
+    16	    KaggleEnv,
+    17	)
+    18	from kagglesdk.kaggle_object import KaggleObject
+    19	from kagglesdk.common.types.file_download import FileDownload
+    20	from kagglesdk.common.types.http_redirect import HttpRedirect
+    21	from typing import Type
+    22	
+    23	# TODO (http://b/354237483) Generate the client from the existing one.
+    24	# This was created from kaggle_api_client.py, prior to recent changes to
+    25	# auth handling. The new client requires KAGGLE_API_TOKEN, so it is not
+    26	# currently usable by the CLI.
+    27	
+    28	
+    29	def _headers_to_str(headers):
+    30	  return "\n".join(f"{k}: {v}" for k, v in headers.items())
+    31	
+    32	
+    33	def _get_apikey_creds():
+    34	  apikey_filename = os.path.expanduser("~/.kaggle/kaggle.json")
+    35	  if not os.path.exists(apikey_filename):
+    36	    return None
+    37	
+    38	  kaggle_json = None
+    39	  with open(apikey_filename) as apikey_file:
+    40	    kaggle_json = apikey_file.read()
+    41	
+    42	  if not kaggle_json or not kaggle_json.strip():
+    43	    return None
+    44	
+    45	  try:
+    46	    # Be careful, since the file may be used for more than credential storage.
+    47	    api_key_data = json.loads(kaggle_json)
+    48	    username = api_key_data["username"]
+    49	    api_key = api_key_data["key"]
+    50	    return username, api_key
+    51	  except (KeyError, json.JSONDecodeError):
+    52	    return None
+    53	
+    54	
+    55	class KaggleHttpClient(object):
+    56	  _xsrf_cookie_name = "XSRF-TOKEN"
+    57	  _csrf_cookie_name = "CSRF-TOKEN"
+    58	  _xsrf_cookies = (_xsrf_cookie_name, _csrf_cookie_name)
+    59	  _xsrf_header_name = "X-XSRF-TOKEN"
+    60	
+    61	  def __init__(
+    62	      self,
+    63	      env: KaggleEnv = None,
+    64	      verbose: bool = False,
+    65	      username: str = None,
+    66	      password: str = None,
+    67	      api_token: str = None,
+    68	      user_agent: str = "kaggle-api/v1.7.0",  # Was: V2
+    69	      response_processor=None,
+    70	  ):
+    71	    self._env = env or get_env()
+    72	    self._signed_in = None
+    73	    self._endpoint = get_endpoint(self._env)
+    74	    self._verbose = verbose
+    75	    self._session = None
+    76	    self._username = username
+    77	    self._password = password
+    78	    self._api_token = api_token
+    79	    self._user_agent = user_agent
+    80	    self._response_processor = response_processor
+    81	
+    82	  def call(
+    83	      self,
+    84	      service_name: str,
+    85	      request_name: str,
+    86	      request: KaggleObject,
+    87	      response_type: Type[KaggleObject],
+    88	  ):
+    89	    self._init_session()
+    90	    http_request = self._prepare_request(service_name, request_name, request)
+    91	
+    92	    # Merge environment settings into session
+    93	    settings = self._session.merge_environment_settings(
+    94	        http_request.url, {}, None, None, None
+    95	    )
+    96	
+    97	    # Use stream=True for file downloads to avoid loading entire file into memory
+    98	    # See: https://github.com/Kaggle/kaggle-api/issues/754
+    99	    if response_type is not None and (
+   100	        response_type == FileDownload or response_type == HttpRedirect
+   101	    ):
+   102	      settings["stream"] = True
+   103	
+   104	    http_response = self._session.send(http_request, **settings)
+   105	
+   106	    response = self._prepare_response(response_type, http_response)
+   107	    return response
+   108	
+   109	  def _prepare_request(
+   110	      self, service_name: str, request_name: str, request: KaggleObject
+   111	  ):
+   112	    request_url = self._get_request_url(service_name, request_name)
+   113	    http_request = requests.Request(
+   114	        method="POST",
+   115	        url=request_url,
+   116	        json=request.__class__.to_dict(request),
+   117	        headers=self._session.headers,
+   118	        auth=self._session.auth,
+   119	    )
+   120	    prepared_request = http_request.prepare()
+   121	    self._print_request(prepared_request)
+   122	    return prepared_request
+   123	
+   124	  def _prepare_response(self, response_type, http_response):
+   125	    """Extract the kaggle response and raise an exception if it is an error."""
+   126	    self._print_response(http_response)
+   127	    try:
+   128	      if "application/json" in http_response.headers["Content-Type"]:
+   129	        resp = http_response.json()
+   130	        if "code" in resp and resp["code"] >= 400:
+   131	          raise requests.exceptions.HTTPError(resp["message"], response=http_response)
+   132	    except KeyError:
+   133	      pass
+   134	    http_response.raise_for_status()
+   135	    # Allow client to check header content.
+   136	    if self._response_processor:
+   137	      self._response_processor(http_response)
+   138	    if response_type is None:  # Method doesn't have a return type
+   139	      return None
+   140	    return response_type.prepare_from(http_response)
+   141	
+   142	  def _print_request(self, request):
+   143	    if not self._verbose:
+   144	      return
+   145	    self._print("---------------------Request----------------------")
+   146	    self._print(
+   147	        f"{request.method} {request.url}\n{_headers_to_str(request.headers)}\n\n{request.body}"
+   148	    )
+   149	    self._print("--------------------------------------------------")
+   150	
+   151	  def _print_response(self, response, body=True):
+   152	    if not self._verbose:
+   153	      return
+   154	    self._print("---------------------Response---------------------")
+   155	    self._print(f"{response.status_code}\n{_headers_to_str(response.headers)}")
+   156	    if body:
+   157	      self._print(f"\n{response.text}")
+   158	    self._print("--------------------------------------------------")
+   159	
+   160	  def _print(self, message: str):
+   161	    if self._verbose:
+   162	      print(message)
+   163	
+   164	  def __enter__(self):
+   165	    self._init_session()
+   166	    return self
+   167	
+   168	  def __exit__(self, exc_type, exc_value, tb):
+   169	    if self._session is not None:
+   170	      self._session.close()
+   171	
+   172	  def _init_session(self):
+   173	    if self._session is not None:
+   174	      return self._session
+   175	
+   176	    self._session = requests.Session()
+   177	    self._session.headers.update(
+   178	        {"User-Agent": self._user_agent, "Content-Type": "application/json"}
+   179	    )
+   180	
+   181	    iap_token = self._get_iap_token_if_required()
+   182	    if iap_token is not None:
+   183	      self._session.headers.update(
+   184	          {
+   185	              # https://cloud.google.com/iap/docs/authentication-howto#authenticating_from_proxy-authorization_header
+   186	              "Proxy-Authorization": f"Bearer {iap_token}",
+   187	          }
+   188	      )
+   189	
+   190	    self._try_fill_auth()
+   191	    # self._fill_xsrf_token(iap_token)  # TODO Make this align with original handler.
+   192	
+   193	  def _get_iap_token_if_required(self):
+   194	    if self._env not in (KaggleEnv.STAGING, KaggleEnv.ADMIN):
+   195	      return None
+   196	    iap_token = os.getenv("KAGGLE_IAP_TOKEN")
+   197	    if iap_token is None:
+   198	      raise Exception(f'Must set KAGGLE_IAP_TOKEN to access "{self._endpoint}"')
+   199	    return iap_token
+   200	
+   201	  def _fill_xsrf_token(self, iap_token):
+   202	    initial_get_request = requests.Request(
+   203	        method="GET",
+   204	        url=self._endpoint,
+   205	        headers=self._session.headers,
+   206	        auth=self._session.auth,
+   207	    )
+   208	    prepared_request = initial_get_request.prepare()
+   209	    self._print_request(prepared_request)
+   210	
+   211	    http_response = self._session.send(prepared_request)
+   212	
+   213	    self._print_response(http_response, body=False)
+   214	    if iap_token is not None and http_response.status_code in (401, 403):
+   215	      raise requests.exceptions.HTTPError("IAP token invalid or expired")
+   216	    http_response.raise_for_status()
+   217	
+   218	    self._session.headers.update(
+   219	        {
+   220	            KaggleHttpClient._xsrf_header_name: self._session.cookies[
+   221	                KaggleHttpClient._xsrf_cookie_name
+   222	            ],
+   223	        }
+   224	    )
+   225	
+   226	  def build_start_oauth_url(
+   227	      self,
+   228	      client_id: str,
+   229	      redirect_uri: str,
+   230	      scope: list[str],
+   231	      state: str,
+   232	      code_challenge: str,
+   233	  ) -> str:
+   234	    params = {
+   235	        "response_type": "code",
+   236	        "client_id": client_id,
+   237	        "redirect_uri": redirect_uri,
+   238	        "scope": " ".join(scope),
+   239	        "state": state,
+   240	        "code_challenge": code_challenge,
+   241	        "code_challenge_method": "S256",
+   242	        "response_type": "code",
+   243	        "response_mode": "query",
+   244	    }
+   245	    auth_url = f"{self.get_non_api_endpoint()}/api/v1/oauth2/authorize"
+   246	    query_string = urllib.parse.urlencode(params, quote_via=urllib.parse.quote_plus)
+   247	    return f"{auth_url}?{query_string}"
+   248	
+   249	  def get_oauth_default_redirect_url(self) -> str:
+   250	    return f"{self.get_non_api_endpoint()}/account/api/oauth/token"
+   251	
+   252	  def get_non_api_endpoint(self) -> str:
+   253	    return "https://www.kaggle.com" if self._env == KaggleEnv.PROD else self._endpoint
+   254	
+   255	  class BearerAuth(requests.auth.AuthBase):
+   256	
+   257	    def __init__(self, token):
+   258	      self.token = token
+   259	
+   260	    def __call__(self, r):
+     1	#!/usr/bin/python
+     2	#
+     3	# Copyright 2019 Kaggle Inc
+     4	#
+     5	# Licensed under the Apache License, Version 2.0 (the "License");
+     6	# you may not use this file except in compliance with the License.
+     7	# You may obtain a copy of the License at
+     8	#
+     9	#      http://www.apache.org/licenses/LICENSE-2.0
+    10	#
+    11	# Unless required by applicable law or agreed to in writing, software
+    12	# distributed under the License is distributed on an "AS IS" BASIS,
+    13	# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    14	# See the License for the specific language governing permissions and
+    15	# limitations under the License.
+    16	
+    17	# coding=utf-8
+    18	from __future__ import print_function
+    19	
+    20	import argparse
+    21	import json
+    22	import sys
+    23	
+    24	from requests.exceptions import HTTPError
+    25	
+    26	import kaggle
+    27	from kaggle import KaggleApi
+    28	from kaggle import api
+    29	from kaggle.api.kaggle_api_extended import ISSUE_TRACKER_URL, format_http_error, print_auth_help, OutputFormat
+    30	
+    31	# from rest import ApiException
+    32	ApiException = IOError
+    33	
+    34	
+    35	def main() -> None:
+    36	    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter, epilog=Help.examples)
+    37	
+    38	    parser.add_argument(
+    39	        "-v",
+    40	        "--version",
+    41	        action="version",
+    42	        help="Print the Kaggle CLI version",
+    43	        version="Kaggle CLI " + kaggle.__version__,
+    44	    )
+    45	    parser.add_argument(
+    46	        "-W",
+    47	        "--no-warn",
+    48	        dest="disable_version_warning",
+    49	        action="store_true",
+    50	        help="Disable out-of-date API version warning",
+    51	    )
+    52	    parser.add_argument(
+    53	        "--debug",
+    54	        dest="debug",
+    55	        action="store_true",
+    56	        help="Print the full traceback when an unexpected error occurs",
+    57	    )
+    58	
+    59	    subparsers = parser.add_subparsers(title="commands", help=Help.kaggle, dest="command")
+    60	    subparsers.required = True
+    61	    subparsers.choices = Help.kaggle_choices  # type: ignore[assignment]
+    62	    parse_competitions(subparsers)
+    63	    parse_datasets(subparsers)
+    64	    parse_kernels(subparsers)
+    65	    parse_models(subparsers)
+    66	    parse_files(subparsers)
+    67	    parse_forums(subparsers)
+    68	    parse_benchmarks(subparsers)
+    69	    parse_config(subparsers)
+    70	    parse_auth(subparsers)
+    71	    parse_quota(subparsers)
+    72	    parse_search(subparsers)
+    73	    args = parser.parse_args()
+    74	    command_args = {}
+    75	    command_args.update(vars(args))
+    76	    del command_args["func"]
+    77	    del command_args["command"]
+    78	    if command_args["disable_version_warning"]:
+    79	        KaggleApi.already_printed_version_warning = True
+    80	    del command_args["disable_version_warning"]
+    81	    debug = command_args.pop("debug")
+    82	    if not api._authenticated:
+    83	        api.authenticate()
+    84	
+    85	    error = False
+    86	    try:
+    87	        out = args.func(**command_args)
+    88	    except HTTPError as e:
+    89	        if e.response is not None and e.response.status_code == 401:
+    90	            print_auth_help()
+    91	        else:
+    92	            print(format_http_error(e), file=sys.stderr)
+    93	        out = None
+    94	        error = True
+    95	    except ApiException as e:
+    96	        print(e, file=sys.stderr)
+    97	        out = None
+    98	        error = True
+    99	    except ValueError as e:
+   100	        print(e, file=sys.stderr)
+   101	        out = None
+   102	        error = True
+   103	    except KeyboardInterrupt:
+   104	        print("User cancelled operation")
+   105	        out = None
+   106	    except Exception as e:
+   107	        # Anything reaching here is a bug in the CLI rather than user error, so
+   108	        # show a short message instead of a traceback the user cannot act on.
+   109	        if debug:
+   110	            raise
+   111	        print(f"{type(e).__name__}: {e}", file=sys.stderr)
+   112	        print(
+   113	            "\nIf this is unexpected, you can re-run with `kaggle --debug [command]` to see the full\n"
+   114	            f"traceback. If you think this is a bug, please report it at {ISSUE_TRACKER_URL}",
+   115	            file=sys.stderr,
+   116	        )
+   117	        out = None
+   118	        error = True
+   119	    if out is not None:
+   120	        print(out, end="")
+   121	
+   122	    # This is so that scripts that pick up on error codes can tell when there was a failure
+   123	    if error:
+   124	        exit(1)
+   125	
+   126	
+   127	from typing import Any
+   128	
+   129	
+   130	def __parse_body(body) -> Any:
+   131	    try:
+   132	        return json.loads(body)
+   133	    except Exception as e:
+   134	        return {}
+   135	
+   136	
+   137	def _add_output_format_args(parser) -> None:
+   138	    group = parser.add_mutually_exclusive_group()
+   139	    group.add_argument("-v", "--csv", dest="csv_display", action="store_true", help=Help.param_csv)
+   140	    group.add_argument(
+   141	        "--format",
+   142	        dest="output_format",
+   143	        help=Help.param_format,
+   144	    )
+   145	
+   146	
+   147	def _get_shared_topics_parser() -> argparse.ArgumentParser:
+   148	    shared = argparse.ArgumentParser(add_help=False)
+   149	    shared.add_argument("--page-size", dest="page_size", type=int, required=False, help=Help.param_page_size)
+   150	    shared.add_argument("--page-token", dest="page_token", required=False, help=Help.param_page_token)
+   151	    _add_output_format_args(shared)
+   152	    shared.add_argument("-q", "--quiet", dest="quiet", action="store_true", help=Help.param_quiet)
+   153	    return shared
+   154	
+   155	
+   156	def _get_shared_competition_topics_parser() -> argparse.ArgumentParser:
+   157	    shared = argparse.ArgumentParser(add_help=False)
+   158	    shared.add_argument("-p", "--page", dest="page", type=int, default=None, required=False, help=Help.param_page)
+   159	    shared.add_argument("--page-size", dest="page_size", type=int, required=False, help=Help.param_page_size)
+   160	    shared.add_argument("--page-token", dest="page_token", required=False, help=Help.param_page_token)
+nl: write error: Broken pipe
+     1	"""Stage a CPU-only Kaggle kernel that writes a byte-identical bundle zip to /kaggle/working/submission.zip.
+     2	Usage: python3 eval/kaggle/submit_kernel/stage.py <zip> <owner/slug> <stage_dir>
+     3	Code-competition submissions are notebook outputs (CreateSubmission with -f returns 400). The zip is embedded
+     4	base64 (bundles are KB-sized); the kernel re-checks the sha256 and fails loudly on mismatch."""
+     5	import base64, hashlib, json, sys
+     6	from pathlib import Path
+     7	zp, kid, stage = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+     8	data = zp.read_bytes()
+     9	if len(data) > 5_000_000:
+    10	    sys.exit('zip too large to embed; use a dataset source instead')
+    11	sha = hashlib.sha256(data).hexdigest()
+    12	stage.mkdir(parents=True, exist_ok=True)
+    13	(stage / 'make_submission.py').write_text(f'''import base64, hashlib, pathlib
+    14	EXPECTED = "{sha}"
+    15	data = base64.b64decode("{base64.b64encode(data).decode()}")
+    16	got = hashlib.sha256(data).hexdigest()
+    17	assert got == EXPECTED, ("sha256 mismatch", got, EXPECTED)
+    18	out = pathlib.Path("/kaggle/working/submission.zip")
+    19	out.write_bytes(data)
+    20	print("wrote", out, len(data), "bytes sha256", got)
+    21	''')
+    22	(stage / 'kernel-metadata.json').write_text(json.dumps(dict(
+    23	    id=kid, title=kid.split('/')[1], code_file='make_submission.py', language='python', kernel_type='script',
+    24	    is_private=True, enable_gpu=False, enable_tpu=False, enable_internet=False, dataset_sources=[],
+    25	    competition_sources=['gemma-4-developer-agent'], kernel_sources=[], model_sources=[]), indent=2) + '\n')
+    26	print(sha, stage)
+  set +e; out=$(G MODE=ok bin/kaggle-submit dist/$b.zip e4b m 1 2>&1); rc=$?; set -e
+  [ $rc = 3 ] && printf '%s' "$out" | grep -q 'agent.yaml' && echo "PASS zip_$b" || { echo "FAIL zip_$b rc=$rc"; fail=1; }
+done
+grep -qv '^competitions submit mock-competition-not-real \|^competitions submissions mock-competition-not-real \|^kernels output mockowner/mock-kernel/' "$T/calls.log" && { echo "FAIL unexpected mock calls"; fail=1; } || true
+echo "mock calls: $(wc -l < "$T/calls.log")"; [ $fail = 0 ] && echo "ALL PASS" || { echo "SOME FAILED"; exit 1; }
+
+exec
+/bin/bash -lc "rg -n 'create_code_submission|class ApiCreateCodeSubmissionRequest|kernel_owner|class ApiListSubmissionsResponse|def _set_paging' /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py && nl -ba /home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py | sed -n '9850,9905p' && nl -ba ops/patches/kaggle-submit-kernel-v5.diff | tail -70" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:1403:    def _set_paging(
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:2191:            submit_request._kernel_owner = items[0]
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kaggle/api/kaggle_api_extended.py:2197:            submit_response = kaggle.competitions.competition_api_client.create_code_submission(submit_request)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/services/competition_api_service.py:121:  def create_code_submission(self, request: ApiCreateCodeSubmissionRequest = None) -> ApiCreateCodeSubmissionResponse:
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:1231:class ApiCreateCodeSubmissionRequest(KaggleObject):
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:1235:    kernel_owner (str)
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:1244:    self._kernel_owner = ""
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:1265:  def kernel_owner(self) -> str:
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:1266:    return self._kernel_owner
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:1268:  @kernel_owner.setter
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:1269:  def kernel_owner(self, kernel_owner: str):
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:1270:    if kernel_owner is None:
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:1271:      del self.kernel_owner
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:1273:    if not isinstance(kernel_owner, str):
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:1274:      raise TypeError('kernel_owner must be of type str')
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:1275:    self._kernel_owner = kernel_owner
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:4147:class ApiListSubmissionsResponse(KaggleObject):
+/home/ubuntu/.venvs/gemma/lib/python3.12/site-packages/kagglesdk/competitions/types/competition_api_service.py:5454:  FieldMetadata("kernelOwner", "kernel_owner", "_kernel_owner", str, "", PredefinedSerializer()),
+  9850	
+  9851	            if len(split[1]) < 5:
+  9852	                raise ValueError("Kernel slug must be at least five characters")
+  9853	
+  9854	            if len(split) == 3:
+  9855	                if not split[2]:
+  9856	                    raise ValueError("Kernel version cannot be empty if specified")
+  9857	
+  9858	    def parse_kernel_string(self, kernel: str) -> Tuple[str, str, Optional[str]]:
+  9859	        """Parses a kernel string.
+  9860	
+  9861	        Args:
+  9862	            kernel: The kernel string to parse. Can be 'slug', 'owner/slug', or 'owner/slug/version'.
+  9863	
+  9864	        Returns:
+  9865	            A tuple of (owner, slug, version).
+  9866	        """
+  9867	        if not kernel:
+  9868	            raise ValueError("A kernel must be specified")
+  9869	
+  9870	        if "/" in kernel:
+  9871	            self.validate_kernel_string(kernel)
+  9872	            parts = kernel.split("/")
+  9873	            owner = parts[0]
+  9874	            slug = parts[1]
+  9875	            version = parts[2] if len(parts) > 2 else None
+  9876	            return owner, slug, version
+  9877	        else:
+  9878	            owner = self.get_config_value(self.CONFIG_NAME_USER) or ""
+  9879	            return owner, kernel, None
+  9880	
+  9881	    @staticmethod
+  9882	    def _kernel_version_label(version: str) -> str:
+  9883	        """Formats a kernel version for the API's `version_label` field.
+  9884	
+  9885	        `kernels push` reports versions as plain numbers, but the API expects them written as
+  9886	        `v<N>` and returns 404 for the bare number. A number is prefixed; anything else, including
+  9887	        a value that already reads `v2`, is passed through unchanged.
+  9888	        """
+  9889	        return f"v{version}" if version.isdigit() else version
+  9890	
+  9891	    def validate_resources(
+  9892	        self, folder: str, resources: List[Dict[str, Union[str, Dict[str, List[Dict[str, str]]]]]]
+  9893	    ) -> None:
+  9894	        """Validates the existence and uniqueness of resource files in a folder.
+  9895	
+  9896	        This method is a wrapper that validates the existence of files and ensures
+  9897	        that there are no duplicates for a given folder and set of resources.
+  9898	
+  9899	        Args:
+  9900	            folder (str): The folder to validate.
+  9901	            resources (List[Dict[str, Union[str, Dict[str, List[Dict[str, str]]]]]]): One or more resources to validate within the folder.
+  9902	
+  9903	        Returns:
+  9904	            None:
+  9905	        """
+    87	+except csv.Error as e:
+    88	+    refuse("csv error " + str(e))
+    89	+while rows and rows[-1] == []:
+    90	+    rows.pop()
+    91	+if not rows or rows[0] != HEADER:
+    92	+    refuse("unexpected header")
+    93	+body = rows[1:]
+    94	+if not body:
+    95	+    refuse("header without rows")
+    96	+if len(body) >= 100:
+    97	+    refuse("full page (100 rows): older submissions not visible")
+    98	+for r in body:
+    99	+    if len(r) != len(HEADER):
+   100	+        refuse("row with %d fields" % len(r))
+   101	+    ref, date, desc = r[0], r[2], r[3]
+   102	+    m = DATE.match(date)
+   103	+    if not re.fullmatch(r"[0-9]+", ref) or not m:
+   104	+        refuse("malformed ref/date in a row")
+   105	+    if m.group(1) == today or pre in desc:
+   106	+        refuse("a submission dated today (UTC) or carrying this sha exists: ref " + ref)' "$now" "$sha" || exit 3
+   107	+# The query can cross midnight: the day must be unchanged after it.
+   108	+[ "$(date -u +%F)" = "$now" ] || { echo "REFUSED: UTC day changed during the pre-check; re-run"; exit 3; }
+   109	+record() {  # <file> <status> <ref>; JSON-serialized
+   110	+  python3 -c 'import json,sys; a=sys.argv[1:]; d=dict(day=a[0], day_checked=a[1], t=a[2], status=a[3], ref=a[4] or None, track=a[5], sha256=a[6], zip=a[7], auth=a[8], msg=a[9]);
+   111	+if a[10]: d.update(kernel=a[10], kernel_version=int(a[11]))
+   112	+print(json.dumps(d))' "$(date -u +%F)" "$now" "$(date -u +%FT%TZ)" "$2" "$3" "$track" "$sha" "$zip" "$auth" "$msg" "$kernel" "$kver" >> "$1"
+   113	+}
+   114	+record ops/submissions.pending pending ""
+   115	+echo "Submitting $zip ($track, sha256=$sha) authorized by $auth"
+   116	+set +e
+   117	+if [ -n "$kernel" ]; then
+   118	+  resp=$(kaggle competitions submit "$COMP" -k "$kernel" -v "$kver" -f submission.zip -m "$msg" 2>&1); rc=$?
+   119	+else
+   120	+  resp=$(kaggle competitions submit "$COMP" -f "$zip" -m "$msg" 2>&1); rc=$?
+   121	+fi
+   122	+set -e
+   123	+printf '%s\n' "$resp"
+   124	+ref=$(printf '%s\n' "$resp" | sed -n 's/^Submission ref: \([0-9][0-9]*\)$/\1/p' | tail -1)
+   125	+if [ -n "$ref" ]; then
+   126	+  record ops/submissions.jsonl submitted "$ref"   # day = acceptance day; day_checked = pre-submit day (both block)
+   127	+  rm -f ops/submissions.pending
+   128	+  bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle (ref $ref)." || true
+   129	+  echo "logged to ops/submissions.jsonl (ref $ref)"
+   130	+elif [ $rc -ne 0 ] && printf '%s\n' "$resp" | grep -qE '(^|[^0-9])4(0[0-7]|09|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9]) Client Error' \
+   131	+     && ! printf '%s' "$resp" | grep -q 'Submission ref'; then
+   132	+  # Clear pending ONLY on positive rejection evidence: a requests HTTPError 4xx (not 408 timeout) from the server.
+   133	+  # Everything else (killed CLI, empty output, decode errors, 5xx, network) stays AMBIGUOUS.
+   134	+  rm -f ops/submissions.pending
+   135	+  echo "Submit REJECTED (rc=$rc); authorization not consumed"; exit 4
+   136	 else
+   137	-  kaggle competitions submit "$COMP" -f "$zip" -m "$msg"
+   138	+  echo "AMBIGUOUS submit outcome (rc=$rc, no 'Submission ref'); ops/submissions.pending kept; reconcile manually"; exit 5
+   139	 fi
+   140	-printf '{"day": "%s", "t": "%s", "track": "%s", "sha256": "%s", "zip": "%s", "auth": "%s", "msg": "%s"}\n' \
+   141	-  "$today" "$(date -u +%FT%TZ)" "$track" "$sha" "$zip" "$auth" "$msg" >> ops/submissions.jsonl
+   142	-bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle. Score in ~12-15h."
+   143	-echo "logged to ops/submissions.jsonl"
+   144	--- a/config.env
+   145	+++ b/config.env
+   146	@@ -14,8 +14,8 @@
+   147	 HUMAN_HOLD_SEC=120            # don't inject mail within this many seconds of Aniket typing
+   148	 GPU_HARD_CAP_USD=150
+   149	 DIGEST_HOUR_UTC=14            # 8am Chicago (CST)
+   150	-SUBMIT_MODE=file              # file | kernel  (Builder verifies in Phase 0)
+   151	-SUBMIT_KERNEL=
+   152	+SUBMIT_MODE=kernel            # file | kernel  (verified 2026-11-05: file upload -> 400; code competition, dec 041)
+   153	+SUBMIT_KERNEL=aniket0202/gemma-submit-e4b
+   154	 FINAL_DEADLINE=2026-12-02T23:59:00Z
+   155	 CLAUDE_CONFIG_DIR_GEMMA="$HOME/.claude-gemma"   # separate Claude login (university account); Etho's login untouched
+   156	 CODEX_MODEL=              # empty = Codex default; per-call override: CODEX_MODEL=... bin/codex-*
+

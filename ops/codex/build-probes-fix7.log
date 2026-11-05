@@ -2746,3 +2746,456 @@ PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/p
 ................                                                         [100%]
 160 passed in 5.35s
 
+exec
+/bin/bash -lc "python3 - <<'PY'
+p='eval/tests/test_agent_timing.py'
+s=open(p).read().replace('def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, skip):','def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, skip, budget_scenario=None):')
+s=s.replace('        def __init__(self, config):\\n            def cleanup():','        def __init__(self, config):\\n            assert budget_scenario is None, \"measured task must not start\"\\n            def cleanup():')
+s=s.replace(\"    monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or False)\\n    with\", \"\"\"    monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or False)
+    totals = []
+    if budget_scenario:
+        # Review example: 5200 + 1.5*463 fits 6000, but P1's reservation does not.
+        # The second case admits P1, then catches an unexpectedly long fake probe.
+        clock = [5200.0 if budget_scenario == 'reserve' else 5000.0]
+        real_should_stop = load('agent_timing').should_stop
+        monkeypatch.setattr(timing.time, 'monotonic', lambda: clock[0])
+        monkeypatch.setenv('KERNEL_BUDGET_SECONDS', '6000')
+        monkeypatch.setattr(timing, 'STOCK_PROBE', True)
+        monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or real_should_stop(*a))
+        probes = []
+        def fake_probe(*args):
+            probes.append(True)
+            clock[0] += 360
+            return dict(total_s=360, error='deadline', steps_s={})
+        monkeypatch.setattr(timing, 'stock_setup_probe', fake_probe)
+        totals = [463.0]
+    with\"\"\")
+s=s.replace(\"asyncio.run(timing.evaluate(Entry(tasks_path=None), stream, timing.time.monotonic(),\\n                    dict(max_time_minutes=1.4, verification_timeout_seconds=300), []))\", \"asyncio.run(timing.evaluate(Entry(tasks_path=None), stream, 0 if budget_scenario else timing.time.monotonic(),\\n                    dict(max_time_minutes=1.4, verification_timeout_seconds=300), totals))\")
+s=s.replace(\"    assert row['verification_skipped'] is skip\", \"\"\"    if budget_scenario:
+        assert row == {'_stopped': 'insufficient remaining budget for next task'}
+        assert len(probes) == (0 if budget_scenario == 'reserve' else 1)
+        assert len(seen) == (1 if budget_scenario == 'reserve' else 2)
+        assert totals == [463.0]
+        assert ev.verify_task is original_verify
+        return
+    assert row['verification_skipped'] is skip\"\"\")
+s += '''\\n\\n@pytest.mark.parametrize('scenario', ['reserve', 'after-probe'])
+def test_p1_budget_stops_before_measured_task(tmp_path, monkeypatch, scenario):
+    test_skip_verification_result_and_task_row(tmp_path, monkeypatch, None, True, scenario)
+'''
+open(p,'w').write(s)
+PY" in /home/ubuntu/work/gemma-wt/kernel-gate-finfix
+ succeeded in 0ms:
+exec
+/bin/bash -lc "rg -n 'def execute_subprocess_command|except|killpg' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess_sandbox.py; git diff --check; PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages /home/ubuntu/gemma-local/venv/bin/python -m pytest eval/tests/test_agent_timing.py eval/tests/test_kernel_probes.py eval/tests/test_setup_check.py -q" in /home/ubuntu/work/gemma-wt/kernel-gate-finfix
+exec
+/bin/bash -lc "head -32 /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py; rg -n 'def execute_subprocess_command|except|killpg' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py; git diff -- eval/kaggle/agent_timing.py eval/kaggle/timing_summary.py" in /home/ubuntu/work/gemma-wt/kernel-gate-finfix
+ succeeded in 0ms:
+"""Process and filesystem-based sandbox lifecycle management with per-task venv isolation."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import posixpath
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import uuid
+import venv
+from pathlib import Path
+
+from adk_eval_core.sandbox import (
+    BaseSandbox,
+    ExecutionResult,
+    build_sanitized_env,
+    execute_subprocess_command,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class SubprocessManager(BaseSandbox):
+    """Manages isolated local working directories and virtual environments directly conforming to BaseSandbox."""
+
+57:def execute_subprocess_command(
+83:    except (RuntimeError, OSError, ValueError, EvalCoreError) as e:
+110:    except subprocess.TimeoutExpired:
+112:            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+114:            os.killpg(proc.pid, signal.SIGKILL)
+117:        except (subprocess.TimeoutExpired, Exception):  # noqa: BLE001
+127:    except (RuntimeError, OSError, ValueError, EvalCoreError) as e:
+129:            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+131:            os.killpg(proc.pid, signal.SIGKILL)
+142:            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+144:            os.killpg(proc.pid, signal.SIGKILL)
+diff --git a/eval/kaggle/agent_timing.py b/eval/kaggle/agent_timing.py
+index 8a0c655..3566e79 100644
+--- a/eval/kaggle/agent_timing.py
++++ b/eval/kaggle/agent_timing.py
+@@ -18,6 +18,7 @@ from pathlib import Path
+ import re
+ import shutil
+ import shlex
++import signal
+ import socket
+ import subprocess
+ import sys
+@@ -35,6 +36,7 @@ SKIP_VERIFICATION = True
+ SETUP_FIX = 1
+ GIT_SHA = ""
+ KERNEL_BUDGET_SECONDS = 3 * 3600
++P1_DEADLINE_SECONDS = 180
+ STOCK_PROBE = True  # P1 (plan 006 addendum): time the stock subprocess setup per task
+ DATA = Path('/kaggle/input/competitions/gemma-4-developer-agent')
+ WORK = Path('/kaggle/working')
+@@ -888,11 +890,31 @@ def stock_setup_probe(config, iid, repo):
+     install_test_dependencies is used even though patch_subprocess_deps rebinds it. Never raises."""
+     steps, error, mgr, sid = {}, None, None, None
+     t0 = time.perf_counter()
++    deadline = t0 + P1_DEADLINE_SECONDS
++    # BaseException prevents stock helpers' broad Exception handlers from swallowing the deadline.
++    class Deadline(BaseException):
++        pass
++    def expired(*args):
++        raise Deadline()
++    def remaining():
++        left = deadline - time.perf_counter()
++        if left <= 0:
++            raise Deadline()
++        return left
++    old_handler, old_timer = None, None
+     try:
++        old_handler = signal.signal(signal.SIGALRM, expired)
++        old_timer = signal.setitimer(signal.ITIMER_REAL, remaining())
+         import swegemma.harness.container_setup as cs
+         from swegemma.sandbox.subprocess import SubprocessManager
+         install_deps = getattr(cs.install_test_dependencies, '_timing_original', cs.install_test_dependencies)
+         mgr = SubprocessManager(timeout_seconds=120)
++        original_exec = mgr.exec
++        def bounded_exec(*args, **kwargs):
++            kwargs['timeout'] = min(120, remaining())
++            return original_exec(*args, **kwargs)
++        mgr.exec = bounded_exec
++        remaining()
+         s = time.perf_counter(); sid = mgr.start(); steps['start_venv'] = round(time.perf_counter() - s, 3)
+         for name, fn, args, kwargs in (
+                 ('setup_container_wheels', cs.setup_container_wheels, (mgr, sid, config), {}),
+@@ -902,19 +924,38 @@ def stock_setup_probe(config, iid, repo):
+                 ('install_test_dependencies', install_deps, (mgr, sid, repo), dict(config=config)),
+                 ('setup_workspace_test_config', cs.setup_workspace_test_config, (mgr, sid), dict(repo=repo)),
+                 ('setup_baseline_commit', cs.setup_baseline_commit, (mgr, sid, 'baseline'), {})):
++            remaining()
+             s = time.perf_counter()
+             try:
+                 fn(*args, **kwargs)
++                remaining()
+             finally:
+                 steps[name] = round(time.perf_counter() - s, 3)
++    except Deadline:
++        error = 'deadline'
+     except Exception as exc:
+         error = type(exc).__name__
+     finally:
+         try:
++            if old_timer is not None:
++                # Cleanup always gets a bounded chance, even after the overall deadline.
++                signal.setitimer(signal.ITIMER_REAL, max(.001, min(30, deadline - time.perf_counter()))
++                                 if time.perf_counter() < deadline else 30)
+             if mgr is not None:
+                 mgr.cleanup_all()
++        except Deadline:
++            error = 'deadline'
+         except Exception as exc:
+             error = error or 'cleanup ' + type(exc).__name__
++        finally:
++            if time.perf_counter() >= deadline:
++                error = 'deadline'
++            if old_timer is not None:
++                signal.setitimer(signal.ITIMER_REAL, 0)
++                signal.signal(signal.SIGALRM, old_handler)
++                if old_timer[0]:
++                    signal.setitimer(signal.ITIMER_REAL,
++                                     max(.001, old_timer[0] - (time.perf_counter() - t0)), old_timer[1])
+     return dict(total_s=round(time.perf_counter() - t0, 3), steps_s=steps, error=error)
+ 
+ def llm_calls(trace, limit=200):
+@@ -1001,11 +1042,14 @@ async def evaluate(config, journal, started, caps, totals):
+             raise ValueError('Duplicate or missing task IDs')
+         patch_subprocess_deps(DATA, state)
+         for iid in TASK_IDS:
+-            if should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
++            if should_stop(time.monotonic()-started + (P1_DEADLINE_SECONDS + 30 if STOCK_PROBE else 0), caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
+                 append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+                 break
+             task = dataclasses.replace(inventory[iid], patch='')
+             stock = stock_setup_probe(config, iid, task.repo) if STOCK_PROBE else None
++            if STOCK_PROBE and should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
++                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
++                break
+             times = dict(instance_id=task.instance_id, verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+             state.set(times)
+             evaluator, result, error = TimingEvaluator(config), None, None
+diff --git a/eval/kaggle/timing_summary.py b/eval/kaggle/timing_summary.py
+index cfbfdf5..a20f9db 100644
+--- a/eval/kaggle/timing_summary.py
++++ b/eval/kaggle/timing_summary.py
+@@ -68,16 +68,31 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
+         raise ValueError('Duplicate or unexpected task records')
+     if done is not None and done['n'] != len(rows):
+         raise ValueError('Done count does not match task records')
+-    def numbers(values):
+-        if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in values):
++    def numbers(values, *, signed=False):
++        if any(type(v) not in (int, float) or not math.isfinite(v) or (not signed and v < -1e-3) for v in values):
+             raise ValueError('Invalid measurement')
+-        return values
++        return values if signed else [max(0.0, v) for v in values]
++    # Clamp raw clock rounding noise before arithmetic, per-task reporting and gating.
++    for row in rows:
++        for key in ('sandbox_setup_seconds', 'agent_clock_seconds', 'finalization_seconds',
++                    'teardown_seconds', 'phase1_wall_seconds', 'image_emulation_seconds'):
++            if row.get(key) is not None:
++                row[key] = numbers([row[key]])[0]
++        for key, value in row['wall_seconds'].items():
++            if value is not None:
++                row['wall_seconds'][key] = numbers([value])[0]
++        for call in row.get('setup_calls', []):
++            if call.get('duration_s') is not None:
++                call['duration_s'] = numbers([call['duration_s']])[0]
+     totals = distribution(numbers([r['wall_seconds']['total'] for r in rows]))
+     shares = distribution(numbers([r.get('test_run', {}).get('share_of_agent_seconds') for r in rows if r.get('test_run', {}).get('share_of_agent_seconds') is not None]))
+     runs = distribution(numbers([r.get('test_run', {}).get('n', 0) for r in rows]))
+     caps = header.get('caps') or {}
+     cap = caps.get('max_time_minutes')
+-    numbers([v for v in (startup, cap) if v is not None])
++    if startup is not None:
++        startup = numbers([startup])[0]
++    if cap is not None:
++        cap = numbers([cap])[0]
+     timing_minutes = totals['p90'] * 125 / 60 + startup / 60 if totals['p90'] is not None and startup is not None else None
+     cap_minutes = cap * 125 + 30 if cap is not None else None
+     def setup_py_seconds(row):
+@@ -87,7 +102,8 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
+         return sum(steps) if steps and all(type(v) in (int, float) for v in steps) else None
+     def stock_total(row):
+         st = row.get('stock_setup') or {}
+-        return st.get('total_s') if type(st.get('total_s')) in (int, float) and not st.get('error') else None
++        v = st.get('total_s')
++        return v if type(v) in (int, float) and math.isfinite(v) and v >= 0 and not st.get('error') else None
+     tasks = []
+     for row in rows:
+         setup_py = setup_py_seconds(row)
+@@ -104,6 +120,14 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
+             phase1_minus_image_seconds=(row['phase1_wall_seconds'] - row['image_emulation_seconds']
+                 if row.get('phase1_wall_seconds') is not None and row.get('image_emulation_seconds') is not None else None),
+             setup_py_emulation_seconds=setup_py,
++            stockpath_retained_emulation_seconds=(
++                sum(c['duration_s'] for c in row.get('setup_calls', [])
++                    if c.get('step') in ('workspace_editable', 'base_tar_extraction'))
++                if all(any(c.get('step') == step and c.get('duration_s') is not None
++                           for c in row.get('setup_calls', []))
++                       for step in ('workspace_editable', 'base_tar_extraction'))
++                and all(c.get('duration_s') is not None for c in row.get('setup_calls', [])
++                        if c.get('step') in ('workspace_editable', 'base_tar_extraction')) else None),
+             stockpath_phase1_seconds=(row['phase1_wall_seconds'] - row['image_emulation_seconds'] - setup_py
+                 if row.get('phase1_wall_seconds') is not None and row.get('image_emulation_seconds') is not None
+                 and setup_py is not None else None),
+@@ -118,7 +142,8 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
+             total=row['wall_seconds']['total'],
+             nonempty_source_diff=not row.get('empty_patch', True) and bool(source_files)))
+     def measured(key):
+-        return numbers([r[key] for r in tasks if r[key] is not None])
++        return numbers([r[key] for r in tasks if r[key] is not None],
++                       signed=key in ('phase1_minus_image_seconds', 'stockpath_phase1_seconds'))
+     phase1, setup = distribution(measured('phase1_wall_seconds')), distribution(measured('sandbox_setup_seconds'))
+     finalization = distribution(measured('finalization_seconds'))
+     # Dec 028 (a): harness errors only. Non-fatal setup results (setup_failed/editable_failed) and
+@@ -134,6 +159,7 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
+         return dict(status='PASS' if passed else 'FAIL', value=value, threshold=threshold)
+     all_phase1 = bool(tasks) and all(wrapped(r) for r in tasks)
+     gate = dict(n_expected=n_expected,
++        b_note='conservative: stock-path residual still includes workspace_editable and base_tar_extraction emulation steps (skipped by the stock path); biases (b) toward FAIL by their duration',
+         a_all_tasks_complete_no_harness_error=check(n_expected > 0 and complete == n_expected and not missing
+                                                     and not stopped and done is not None, complete, n_expected),
+         d_vllm_seconds=None, e_nonempty_source_diff=None)
+@@ -152,8 +178,12 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
+         e_nonempty_source_diff=check(nonempty >= gate_min_nonempty, nonempty, gate_min_nonempty))
+     gate['mode'] = gate_mode
+     gate['status'] = 'PASS' if all(v['status'] == 'PASS' for v in gate.values() if isinstance(v, dict)) else 'FAIL'
+-    stock = [dict(instance_id=r['instance_id'], **(r.get('stock_setup') or {})) for r in rows if 'stock_setup' in r]
+-    stock_totals = [x['total_s'] for x in stock if x.get('total_s') is not None and not x.get('error')]
++    stock = [dict(r.get('stock_setup') or {}, instance_id=r['instance_id']) for r in rows if 'stock_setup' in r]
++    valid_stock = {r['instance_id']: stock_total(r) for r in rows
++                   if stock_total(r) is not None
++                   and (r.get('stock_setup') or {}).get('instance_id', r['instance_id']) == r['instance_id']}
++    stock_totals = list(valid_stock.values())
++    stock_missing = [iid for iid in header['task_ids'] if iid not in valid_stock]
+     def llm_stats(r):
+         calls = r.get('llm_calls') or []
+         comp = [c['completion_tokens'] for c in calls if isinstance(c.get('completion_tokens'), (int, float))]
+@@ -168,8 +198,9 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
+                                     tasks={t['instance_id']: t['h1_composite_seconds'] for t in tasks},
+                                     max_s=max(h1) if h1 and all(v is not None for v in h1) else None,
+                                     n_missing=sum(v is None for v in h1)),
+-                  stock_setup=dict(tasks=stock, n_ok=len(stock_totals), max_s=max(stock_totals) if stock_totals else None,
+-                                   all_le_30s=bool(stock) and len(stock_totals) == len(stock) and max(stock_totals) <= 30),
++                  stock_setup=dict(tasks=stock, n_expected=n_expected,
++                                   n_missing=len(stock_missing), missing_ids=stock_missing, n_ok=len(stock_totals), max_s=max(stock_totals) if stock_totals else None,
++                                   all_le_30s=n_expected > 0 and not stock_missing and len(valid_stock) == n_expected and max(stock_totals) <= 30),
+                   llm=[llm_stats(r) for r in rows if 'llm_calls' in r],
+                   mean_agent_seconds=distribution(numbers([r['wall_seconds']['agent'] for r in rows if r['wall_seconds'].get('agent') is not None]))['mean'])
+     return dict(_schema='kaggle_timing_summary_v1',
+@@ -198,18 +229,18 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
+                     vllm_startup_seconds='Measured vLLM startup seconds',
+                     gate='a-e checks: PASS/FAIL, observed value, CLI threshold; overall status requires all checks; mode total (dec 028) or stock-path (dec 034 item 2 / dec 036 item 1: b = max stockpath_phase1 <= cap*60+37)',
+                     probes='Plan 006 addendum P1-P3: platform_probe (header), h1_composite (not gated; per task + max_s, null if any part missing), stock_setup per task (+max_s, all_le_30s = G1 P1 leg), llm per-task call stats, mean_agent_seconds',
+-                    decision_note='decision is the legacy total-wall/cap projection, NOT the gate (dec 032 item 5)',
++                    decision_note='legacy_projection_decision is the legacy total-wall/cap projection, NOT the gate (dec 032 item 5)',
+                     total_seconds='Total task wall seconds distribution',
+                     test_run_share='Agent test time share distribution', test_runs_per_task='Test request count distribution',
+                     empty_patch_count='Blank patches', test_files_edited_count='Tasks editing protected/test files',
+                     stray_files_count='Tasks adding stray files', test_files_edited_files='Total protected/test paths',
+-                    stray_files_files='Total stray paths', decision='Legacy total-wall/cap projection check',
++                    stray_files_files='Total stray paths', legacy_projection_decision='Legacy total-wall/cap projection check',
+                     projected_minutes='p90 total seconds times 125 plus vLLM, in minutes',
+                     cap_worst_case_minutes='Configured cap times 125 plus 30 minutes', cap_minutes='Configured agent cap',
+                     artifact_errors='Raw artifact write failures (diagnostic; rows unaffected)',
+                     missing_task_ids='Header task IDs absent from task rows', done_present='Journal contains _done', stopped='Journal stop reasons'),
+                 tasks=tasks, gate=gate, probes=probes, n_complete_no_error=complete,
+-                decision_note='decision is the legacy total-wall/cap projection, NOT the gate (dec 032 item 5)',
++                decision_note='legacy_projection_decision is the legacy total-wall/cap projection, NOT the gate (dec 032 item 5)',
+                 provenance={k: header.get(k) for k in ('git_sha', 'bundle_sha256', 'agent_yaml_sha256', 'gpu_names',
+                     'gpu_count', 'caps', 'created_utc', 'concurrency', 'mcp_import_ok')},
+                 agent_outcome_counts=dict(Counter(str(t['agent_outcome']) for t in tasks)),
+@@ -236,7 +267,7 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
+                 stray_files_count=sum(bool(r.get('stray_files', [])) for r in rows),
+                 test_files_edited_files=sum(len(r.get('test_files_edited', [])) for r in rows),
+                 stray_files_files=sum(len(r.get('stray_files', [])) for r in rows),
+-                decision='PASS' if timing_minutes is not None and cap_minutes is not None and timing_minutes <= 660 and cap_minutes <= 660 else 'FAIL',
++                legacy_projection_decision='PASS' if timing_minutes is not None and cap_minutes is not None and timing_minutes <= 660 and cap_minutes <= 660 else 'FAIL',
+                 projected_minutes=timing_minutes, cap_worst_case_minutes=cap_minutes,
+                 cap_minutes=cap, missing_task_ids=missing,
+                 done_present=done is not None, stopped=stopped, artifact_errors=artifact_errors)
+
+ succeeded in 6605ms:
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess_sandbox.py: IO error for operation on /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess_sandbox.py: No such file or directory (os error 2)
+........................................................................ [ 44%]
+........................................................................ [ 88%]
+..................                                                       [100%]
+162 passed in 5.14s
+
+exec
+/bin/bash -lc "sed -n '98,151p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py; sed -n '1000,1045p' eval/kaggle/agent_timing.py; rg -n 'decision_note' eval/tests; git status --short" in /home/ubuntu/work/gemma-wt/kernel-gate-finfix
+ succeeded in 0ms:
+        if max_output_chars and len(stdout) > max_output_chars:
+            stdout = stdout[:max_output_chars] + "\n...[Output truncated at 10MB limit]\n"
+        if max_output_chars and len(stderr) > max_output_chars:
+            stderr = stderr[:max_output_chars] + "\n...[Output truncated at 10MB limit]\n"
+        status = "ok" if proc.returncode == 0 else "error"
+        return ExecutionResult(
+            status=status,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=proc.returncode,
+            duration_seconds=round(duration, 3),
+        )
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            stdout, stderr = proc.communicate(timeout=1.0)
+        except (subprocess.TimeoutExpired, Exception):  # noqa: BLE001
+            stdout, stderr = "", ""
+        duration = time.perf_counter() - start
+        return ExecutionResult(
+            status="timeout",
+            stdout=stdout or "",
+            stderr=stderr or "",
+            exit_code=124,
+            duration_seconds=round(duration, 3),
+        )
+    except (RuntimeError, OSError, ValueError, EvalCoreError) as e:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        duration = time.perf_counter() - start
+        return ExecutionResult(
+            status="error",
+            stdout="",
+            stderr=str(e),
+            exit_code=1,
+            duration_seconds=round(duration, 3),
+        )
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+
+class SubprocessSandbox(BaseSandbox):
+    """Local process sandbox operating within a host directory."""
+
+    def __init__(
+        self,
+    from swegemma.evaluate import Evaluator
+    from swegemma.models import load_tasks
+    from swegemma.harness.verification import _is_protected_test_or_config_path
+    import swegemma.evaluate as ev
+    import swegemma.harness.verification as vf
+    import swegemma.harness.agent_runner as ar
+    state = ContextVar('timing')
+    original_asyncio = ar.asyncio
+    original_sandbox = {name: getattr(ar, name) for name in ('sandbox_start', 'sandbox_stop', 'sandbox_exec')}
+    ar.asyncio = AsyncioTimingProxy(original_asyncio, state)
+    for name, original in original_sandbox.items():
+        setattr(ar, name, observe_sandbox(original, state, name))
+    original_verify, original_strip = ev.verify_task, vf.strip_protected_files_from_patch
+    vf.strip_protected_files_from_patch = observe_patch_strip(original_strip, state)
+    async def verify(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return await (skip_verification if SKIP_VERIFICATION else original_verify)(*args, **kwargs)
+        finally:
+            state.get()['verification'] = time.perf_counter() - start
+    ev.verify_task = verify
+    class TimingEvaluator(Evaluator):
+        agent_seconds, patch, trace, agent_error = 0.0, '', None, ''
+        def _hydrate_task_from_secret(self, task):
+            return task
+        def _get_secret_bundle_data(self):
+            return {}, {}, None
+        async def _run_agent_sandbox(self, task, *args, **kwargs):
+            safe = dataclasses.replace(task, patch='', test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=())
+            self.context = kwargs['context']
+            self.context.task = safe
+            start = time.perf_counter()
+            state.get()['agent_active'] = True
+            try:
+                self.patch, self.agent_error, self.trace = await super()._run_agent_sandbox(safe, *args, **kwargs)
+                return self.patch, self.agent_error, self.trace
+            finally:
+                self.agent_seconds = time.perf_counter() - start
+                state.get()['agent_active'] = False
+    try:
+        inventory = {t.instance_id: t for t in load_tasks(config.tasks_path)}
+        if len(set(TASK_IDS)) != len(TASK_IDS) or set(TASK_IDS) - inventory.keys():
+            raise ValueError('Duplicate or missing task IDs')
+        patch_subprocess_deps(DATA, state)
+        for iid in TASK_IDS:
+            if should_stop(time.monotonic()-started + (P1_DEADLINE_SECONDS + 30 if STOCK_PROBE else 0), caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
+ M docs/ATTRIBUTION.md
+ M eval/kaggle/agent_timing.py
+ M eval/kaggle/timing_summary.py
+ M eval/tests/test_agent_timing.py
+ M eval/tests/test_kernel_probes.py
+
