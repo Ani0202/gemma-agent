@@ -151,3 +151,123 @@ def test_stock_path_on_v5_rich_3067(tmp_path):
     expected = 303.241871703 - 11.522305 - 202.194855  # = 89.52 s (Director estimate ~91 s used setup.py ~200.7)
     assert abs(task['stockpath_phase1_seconds'] - expected) < 1e-6 and 89.0 < task['stockpath_phase1_seconds'] < 90.0
     assert out['gate']['b_max_stockpath_phase1']['threshold'] == 1.4 * 60 + 37
+
+
+@pytest.mark.parametrize('bad', ['missing', 'error', 'nan', 'negative', 'mismatched_id'])
+def test_stock_evidence_requires_every_expected_id(tmp_path, bad):
+    path = tmp_path / 't.jsonl'
+    write(path)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    if bad == 'missing':
+        del rows[2]['stock_setup']
+    elif bad == 'error':
+        rows[2]['stock_setup']['error'] = 'deadline'
+    elif bad == 'mismatched_id':
+        rows[2]['stock_setup']['instance_id'] = 'wrong'
+    else:
+        rows[2]['stock_setup']['total_s'] = float('nan') if bad == 'nan' else -.000001
+    path.write_text('\n'.join(json.dumps(r) for r in rows))
+    stock = summary.summarize(path)['probes']['stock_setup']
+    assert stock['all_le_30s'] is False
+    assert stock['n_expected'] == 2 and stock['n_ok'] == 1
+    assert stock['n_missing'] == 1 and stock['missing_ids'] == ['t_1']
+
+
+@pytest.mark.parametrize('mode', ['total', 'stock-path'])
+def test_signed_residual_and_raw_rounding_noise(tmp_path, mode):
+    path = tmp_path / 't.jsonl'
+    write(path, phase1=(29.999999,), image=(10,), setup_py=(20,), stock=(3,))
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[1]['finalization_seconds'] = -.000001
+    path.write_text('\n'.join(json.dumps(r) for r in rows))
+    out = summary.summarize(path, gate_mode=mode)
+    assert out['gate']['status'] == 'PASS'
+    assert out['tasks'][0]['stockpath_phase1_seconds'] == pytest.approx(-.000001)
+    assert out['stockpath_phase1_seconds']['max'] == pytest.approx(-.000001)
+    assert out['tasks'][0]['finalization_seconds'] == 0.0
+    assert out['finalization_max_seconds'] == 0.0
+    assert out['tasks'][0]['h1_composite_seconds'] == 93.0
+    write(path, phase1=(9,), image=(10,), setup_py=(20,), stock=(3,))
+    assert summary.summarize(path, gate_mode=mode)['phase1_minus_image_seconds']['max'] == -1
+
+
+@pytest.mark.parametrize('key', ['phase1_wall_seconds', 'image_emulation_seconds', 'agent_clock_seconds',
+                                 'sandbox_setup_seconds', 'finalization_seconds'])
+@pytest.mark.parametrize('value', [-.00101, float('nan'), float('inf'), '1', True])
+def test_summary_rejects_invalid_raw_measurements(tmp_path, key, value):
+    path = tmp_path / 't.jsonl'
+    write(path)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[1][key] = value
+    path.write_text('\n'.join(json.dumps(r) for r in rows))
+    with pytest.raises(ValueError, match='Invalid measurement'):
+        summary.summarize(path)
+
+
+def test_retained_emulation_diagnostic(tmp_path):
+    path = tmp_path / 't.jsonl'
+    write(path)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[1]['setup_calls'] += [dict(step='workspace_editable', duration_s=1.2),
+                               dict(step='base_tar_extraction', duration_s=.5),
+                               dict(step='workspace_editable', duration_s=.1)]
+    path.write_text('\n'.join(json.dumps(r) for r in rows))
+    out = summary.summarize(path, gate_mode='stock-path')
+    assert out['tasks'][0]['stockpath_retained_emulation_seconds'] == pytest.approx(1.8)
+    assert out['tasks'][1]['stockpath_retained_emulation_seconds'] is None
+    assert out['tasks'][0]['stockpath_phase1_seconds'] == 50
+    assert out['gate']['b_note'] == ('conservative: stock-path residual still includes workspace_editable and '
+        'base_tar_extraction emulation steps (skipped by the stock path); biases (b) toward FAIL by their duration')
+
+
+@pytest.mark.parametrize('slow_step', ['start', 'copy', 'exec', 'cleanup'])
+def test_stock_probe_overall_deadline(monkeypatch, slow_step):
+    import sys
+    import time
+    from types import ModuleType
+    names = ('swegemma', 'swegemma.harness', 'swegemma.harness.container_setup',
+             'swegemma.sandbox', 'swegemma.sandbox.subprocess')
+    modules = {name: ModuleType(name) for name in names}
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    cs = modules['swegemma.harness.container_setup']
+    calls, timeouts = [], []
+    def slow():
+        time.sleep(2)
+    class Manager:
+        def __init__(self, **kw):
+            pass
+        def start(self):
+            calls.append('start')
+            if slow_step == 'start':
+                slow()
+            return 'sid'
+        def exec(self, *args, **kw):
+            timeouts.append(kw['timeout'])
+            slow()
+        def cleanup_all(self):
+            calls.append('cleanup')
+            if slow_step == 'cleanup':
+                slow()
+    modules['swegemma.sandbox.subprocess'].SubprocessManager = Manager
+    def copy(mgr, sid, *args, **kw):
+        calls.append('copy')
+        if slow_step == 'copy':
+            slow()
+        if slow_step == 'exec':
+            mgr.exec(sid, 'sleep', timeout=999)
+    cs.setup_container_wheels = copy
+    for name in ('extract_snapshot', 'setup_git_exclude', 'install_editable_package',
+                 'install_test_dependencies', 'setup_workspace_test_config', 'setup_baseline_commit'):
+        setattr(cs, name, lambda *a, **kw: calls.append('step'))
+    monkeypatch.setattr(timing, 'P1_DEADLINE_SECONDS', .05)
+    start = time.perf_counter()
+    out = timing.stock_setup_probe(E(snapshots_dir='/tmp'), 'x_1', 'r')
+    duration = time.perf_counter() - start
+    assert out['error'] == 'deadline'
+    assert .04 <= out['total_s'] < .5 and duration < .5
+    assert calls[-1] == 'cleanup'
+    if slow_step != 'cleanup':
+        assert 'step' not in calls
+    if slow_step == 'exec':
+        assert 0 < timeouts[0] <= .05

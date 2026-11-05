@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import shutil
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -35,6 +36,7 @@ SKIP_VERIFICATION = True
 SETUP_FIX = 1
 GIT_SHA = ""
 KERNEL_BUDGET_SECONDS = 3 * 3600
+P1_DEADLINE_SECONDS = 180
 STOCK_PROBE = True  # P1 (plan 006 addendum): time the stock subprocess setup per task
 DATA = Path('/kaggle/input/competitions/gemma-4-developer-agent')
 WORK = Path('/kaggle/working')
@@ -888,11 +890,31 @@ def stock_setup_probe(config, iid, repo):
     install_test_dependencies is used even though patch_subprocess_deps rebinds it. Never raises."""
     steps, error, mgr, sid = {}, None, None, None
     t0 = time.perf_counter()
+    deadline = t0 + P1_DEADLINE_SECONDS
+    # BaseException prevents stock helpers' broad Exception handlers from swallowing the deadline.
+    class Deadline(BaseException):
+        pass
+    def expired(*args):
+        raise Deadline()
+    def remaining():
+        left = deadline - time.perf_counter()
+        if left <= 0:
+            raise Deadline()
+        return left
+    old_handler, old_timer = None, None
     try:
+        old_handler = signal.signal(signal.SIGALRM, expired)
+        old_timer = signal.setitimer(signal.ITIMER_REAL, remaining())
         import swegemma.harness.container_setup as cs
         from swegemma.sandbox.subprocess import SubprocessManager
         install_deps = getattr(cs.install_test_dependencies, '_timing_original', cs.install_test_dependencies)
         mgr = SubprocessManager(timeout_seconds=120)
+        original_exec = mgr.exec
+        def bounded_exec(*args, **kwargs):
+            kwargs['timeout'] = min(120, remaining())
+            return original_exec(*args, **kwargs)
+        mgr.exec = bounded_exec
+        remaining()
         s = time.perf_counter(); sid = mgr.start(); steps['start_venv'] = round(time.perf_counter() - s, 3)
         for name, fn, args, kwargs in (
                 ('setup_container_wheels', cs.setup_container_wheels, (mgr, sid, config), {}),
@@ -902,19 +924,40 @@ def stock_setup_probe(config, iid, repo):
                 ('install_test_dependencies', install_deps, (mgr, sid, repo), dict(config=config)),
                 ('setup_workspace_test_config', cs.setup_workspace_test_config, (mgr, sid), dict(repo=repo)),
                 ('setup_baseline_commit', cs.setup_baseline_commit, (mgr, sid, 'baseline'), {})):
+            remaining()
             s = time.perf_counter()
             try:
                 fn(*args, **kwargs)
+                remaining()
             finally:
                 steps[name] = round(time.perf_counter() - s, 3)
+    except Deadline:
+        error = 'deadline'
     except Exception as exc:
         error = type(exc).__name__
     finally:
         try:
+            if old_timer is not None:
+                # Cleanup always gets a bounded chance, even after the overall deadline.
+                signal.setitimer(signal.ITIMER_REAL, max(.001, min(30, deadline - time.perf_counter()))
+                                 if time.perf_counter() < deadline else 30)
             if mgr is not None:
                 mgr.cleanup_all()
+        except Deadline:
+            error = 'deadline'
         except Exception as exc:
             error = error or 'cleanup ' + type(exc).__name__
+        finally:
+            if time.perf_counter() >= deadline:
+                error = 'deadline'
+            if old_timer is not None:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            if old_handler is not None:
+                signal.signal(signal.SIGALRM, old_handler)
+            if old_timer is not None:
+                if old_timer[0]:
+                    signal.setitimer(signal.ITIMER_REAL,
+                                     max(.001, old_timer[0] - (time.perf_counter() - t0)), old_timer[1])
     return dict(total_s=round(time.perf_counter() - t0, 3), steps_s=steps, error=error)
 
 def llm_calls(trace, limit=200):
@@ -1001,11 +1044,14 @@ async def evaluate(config, journal, started, caps, totals):
             raise ValueError('Duplicate or missing task IDs')
         patch_subprocess_deps(DATA, state)
         for iid in TASK_IDS:
-            if should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
+            if should_stop(time.monotonic()-started + (P1_DEADLINE_SECONDS + 30 if STOCK_PROBE else 0), caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
                 append(journal, {'_stopped': 'insufficient remaining budget for next task'})
                 break
             task = dataclasses.replace(inventory[iid], patch='')
             stock = stock_setup_probe(config, iid, task.repo) if STOCK_PROBE else None
+            if STOCK_PROBE and should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
+                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+                break
             times = dict(instance_id=task.instance_id, verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
             state.set(times)
             evaluator, result, error = TimingEvaluator(config), None, None

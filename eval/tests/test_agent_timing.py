@@ -109,7 +109,7 @@ def test_summary_boundary_and_cli(tmp_path):
     path, output = tmp_path / 'timing.jsonl', tmp_path / 'summary.json'
     journal(path)
     result = summary.summarize(path)
-    assert result['decision'] == 'PASS'
+    assert result['legacy_projection_decision'] == 'PASS'
     assert result['projected_minutes'] == 660
     assert result['cap_worst_case_minutes'] == 660
     assert result['test_run_share']['p90'] == .45
@@ -120,9 +120,9 @@ def test_summary_boundary_and_cli(tmp_path):
     subprocess.run(['python3', str(ROOT / 'eval/kaggle/timing_summary.py'), str(path), '--output', str(output)], check=True, capture_output=True)
     assert json.loads(output.read_text())['_schema'] == 'kaggle_timing_summary_v1'
     journal(path, seconds=302.40001)
-    assert summary.summarize(path)['decision'] == 'FAIL'
+    assert summary.summarize(path)['legacy_projection_decision'] == 'FAIL'
     journal(path, cap=5.04001)
-    assert summary.summarize(path)['decision'] == 'FAIL'
+    assert summary.summarize(path)['legacy_projection_decision'] == 'FAIL'
 
 
 def test_summary_rejects_dropped_or_duplicate_rows(tmp_path):
@@ -536,7 +536,7 @@ def test_finalization_only_after_timeout_and_phase_fields():
 
 @pytest.mark.parametrize('failure', [None, 'runner', 'setup', 'cleanup'])
 @pytest.mark.parametrize('skip', [True, False])
-def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, skip):
+def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, skip, budget_scenario=None):
     import asyncio
     from contextvars import ContextVar
     import dataclasses
@@ -583,6 +583,7 @@ def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, s
     originals = dict(vars(ar))
     class Evaluator:
         def __init__(self, config):
+            assert budget_scenario is None, "measured task must not start"
             def cleanup():
                 if failure == 'cleanup':
                     raise RuntimeError('cleanup failed')
@@ -608,11 +609,35 @@ def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, s
     monkeypatch.setattr(timing, 'patch_subprocess_deps', lambda *a: None)
     seen = []
     monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or False)
+    totals = []
+    if budget_scenario:
+        # Review example: 5200 + 1.5*463 fits 6000, but P1's reservation does not.
+        # The second case admits P1, then catches an unexpectedly long fake probe.
+        clock = [5200.0 if budget_scenario == 'reserve' else 5000.0]
+        real_should_stop = load('agent_timing').should_stop
+        monkeypatch.setattr(timing.time, 'monotonic', lambda: clock[0])
+        monkeypatch.setenv('KERNEL_BUDGET_SECONDS', '6000')
+        monkeypatch.setattr(timing, 'STOCK_PROBE', True)
+        monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or real_should_stop(*a))
+        probes = []
+        def fake_probe(*args):
+            probes.append(True)
+            clock[0] += 360
+            return dict(total_s=360, error='deadline', steps_s={})
+        monkeypatch.setattr(timing, 'stock_setup_probe', fake_probe)
+        totals = [463.0]
     with (tmp_path / 'journal').open('w+') as stream:
-        asyncio.run(timing.evaluate(Entry(tasks_path=None), stream, timing.time.monotonic(),
-                    dict(max_time_minutes=1.4, verification_timeout_seconds=300), []))
+        asyncio.run(timing.evaluate(Entry(tasks_path=None), stream, 0 if budget_scenario else timing.time.monotonic(),
+                    dict(max_time_minutes=1.4, verification_timeout_seconds=300), totals))
         stream.seek(0)
         row = json.loads(stream.read())
+    if budget_scenario:
+        assert row == {'_stopped': 'insufficient remaining budget for next task'}
+        assert len(probes) == (0 if budget_scenario == 'reserve' else 1)
+        assert len(seen) == (1 if budget_scenario == 'reserve' else 2)
+        assert totals == [463.0]
+        assert ev.verify_task is original_verify
+        return
     assert row['verification_skipped'] is skip
     assert (row['error'] is not None) is bool(failure)
     verified = not skip and failure not in ('runner', 'setup')
@@ -1042,3 +1067,8 @@ def test_gate_a_rejects_failed_finalization_exec(tmp_path, calls, ok):
     assert result['gate']['a_all_tasks_complete_no_harness_error']['status'] == want
     assert result['gate']['status'] == want
     assert all(bool(t['finalization_failed']) is (not ok) for t in result['tasks'])
+
+
+@pytest.mark.parametrize('scenario', ['reserve', 'after-probe'])
+def test_p1_budget_stops_before_measured_task(tmp_path, monkeypatch, scenario):
+    test_skip_verification_result_and_task_row(tmp_path, monkeypatch, None, True, scenario)

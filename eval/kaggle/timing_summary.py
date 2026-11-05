@@ -68,29 +68,48 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
         raise ValueError('Duplicate or unexpected task records')
     if done is not None and done['n'] != len(rows):
         raise ValueError('Done count does not match task records')
-    def numbers(values):
-        if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in values):
+    def numbers(values, *, signed=False, raw=False):
+        floor = -1e-3 if raw else 0
+        if any(type(v) not in (int, float) or not math.isfinite(v) or (not signed and v < floor) for v in values):
             raise ValueError('Invalid measurement')
-        return values
+        return [max(0.0, v) for v in values] if raw else values
+    # Clamp raw clock rounding noise before arithmetic, per-task reporting and gating.
+    for row in rows:
+        for key in ('sandbox_setup_seconds', 'agent_clock_seconds', 'finalization_seconds',
+                    'teardown_seconds', 'phase1_wall_seconds', 'image_emulation_seconds'):
+            if row.get(key) is not None:
+                row[key] = numbers([row[key]], raw=True)[0]
+        for key, value in row['wall_seconds'].items():
+            if value is not None:
+                row['wall_seconds'][key] = numbers([value], raw=True)[0]
+        for call in row.get('setup_calls', []):
+            if call.get('duration_s') is not None:
+                call['duration_s'] = numbers([call['duration_s']], raw=True)[0]
     totals = distribution(numbers([r['wall_seconds']['total'] for r in rows]))
     shares = distribution(numbers([r.get('test_run', {}).get('share_of_agent_seconds') for r in rows if r.get('test_run', {}).get('share_of_agent_seconds') is not None]))
     runs = distribution(numbers([r.get('test_run', {}).get('n', 0) for r in rows]))
     caps = header.get('caps') or {}
     cap = caps.get('max_time_minutes')
-    numbers([v for v in (startup, cap) if v is not None])
+    if startup is not None:
+        startup = numbers([startup], raw=True)[0]
+    if cap is not None:
+        cap = numbers([cap])[0]
     timing_minutes = totals['p90'] * 125 / 60 + startup / 60 if totals['p90'] is not None and startup is not None else None
     cap_minutes = cap * 125 + 30 if cap is not None else None
-    def setup_py_seconds(row):
-        # Dec 036 item 1: the Dockerfile.public setup.py emulation step(s) in setup_calls (install_editable_package +
-        # install_test_dependencies), which the stock subprocess path replaces with P1 stock_setup. Missing -> None.
-        steps = [c.get('duration_s') for c in row.get('setup_calls', []) if c.get('step') == 'setup.py']
-        return sum(steps) if steps and all(type(v) in (int, float) for v in steps) else None
+    def step_seconds(row, names):
+        # Every named step must be measured; repeated steps are summed. Missing -> None.
+        calls = [c for c in row.get('setup_calls', []) if c.get('step') in names]
+        if {c['step'] for c in calls} != set(names) or any(c.get('duration_s') is None for c in calls):
+            return None
+        return sum(c['duration_s'] for c in calls)
     def stock_total(row):
         st = row.get('stock_setup') or {}
-        return st.get('total_s') if type(st.get('total_s')) in (int, float) and not st.get('error') else None
+        v = st.get('total_s')
+        return v if type(v) in (int, float) and math.isfinite(v) and v >= 0 and not st.get('error') else None
     tasks = []
     for row in rows:
-        setup_py = setup_py_seconds(row)
+        # Dec 036: setup.py emulation is skipped by the stock dependency hooks.
+        setup_py = step_seconds(row, ('setup.py',))
         stock_s = stock_total(row)
         parts = [row.get('agent_clock_seconds'), row.get('finalization_seconds'), stock_s]
         source_files = set(row.get('patch_files', [])) - set(row.get('test_files_edited', [])) - set(row.get('stray_files', []))
@@ -104,6 +123,7 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
             phase1_minus_image_seconds=(row['phase1_wall_seconds'] - row['image_emulation_seconds']
                 if row.get('phase1_wall_seconds') is not None and row.get('image_emulation_seconds') is not None else None),
             setup_py_emulation_seconds=setup_py,
+            stockpath_retained_emulation_seconds=step_seconds(row, ('workspace_editable', 'base_tar_extraction')),
             stockpath_phase1_seconds=(row['phase1_wall_seconds'] - row['image_emulation_seconds'] - setup_py
                 if row.get('phase1_wall_seconds') is not None and row.get('image_emulation_seconds') is not None
                 and setup_py is not None else None),
@@ -118,7 +138,8 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
             total=row['wall_seconds']['total'],
             nonempty_source_diff=not row.get('empty_patch', True) and bool(source_files)))
     def measured(key):
-        return numbers([r[key] for r in tasks if r[key] is not None])
+        return numbers([r[key] for r in tasks if r[key] is not None],
+                       signed=key in ('phase1_minus_image_seconds', 'stockpath_phase1_seconds'))
     phase1, setup = distribution(measured('phase1_wall_seconds')), distribution(measured('sandbox_setup_seconds'))
     finalization = distribution(measured('finalization_seconds'))
     # Dec 028 (a): harness errors only. Non-fatal setup results (setup_failed/editable_failed) and
@@ -134,6 +155,7 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
         return dict(status='PASS' if passed else 'FAIL', value=value, threshold=threshold)
     all_phase1 = bool(tasks) and all(wrapped(r) for r in tasks)
     gate = dict(n_expected=n_expected,
+        b_note='conservative: stock-path residual still includes workspace_editable and base_tar_extraction emulation steps (skipped by the stock path); biases (b) toward FAIL by their duration',
         a_all_tasks_complete_no_harness_error=check(n_expected > 0 and complete == n_expected and not missing
                                                     and not stopped and done is not None, complete, n_expected),
         d_vllm_seconds=None, e_nonempty_source_diff=None)
@@ -152,8 +174,12 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
         e_nonempty_source_diff=check(nonempty >= gate_min_nonempty, nonempty, gate_min_nonempty))
     gate['mode'] = gate_mode
     gate['status'] = 'PASS' if all(v['status'] == 'PASS' for v in gate.values() if isinstance(v, dict)) else 'FAIL'
-    stock = [dict(instance_id=r['instance_id'], **(r.get('stock_setup') or {})) for r in rows if 'stock_setup' in r]
-    stock_totals = [x['total_s'] for x in stock if x.get('total_s') is not None and not x.get('error')]
+    stock = [dict(r.get('stock_setup') or {}, instance_id=r['instance_id']) for r in rows if 'stock_setup' in r]
+    valid_stock = {r['instance_id']: stock_total(r) for r in rows
+                   if stock_total(r) is not None
+                   and (r.get('stock_setup') or {}).get('instance_id', r['instance_id']) == r['instance_id']}
+    stock_totals = list(valid_stock.values())
+    stock_missing = [iid for iid in header['task_ids'] if iid not in valid_stock]
     def llm_stats(r):
         calls = r.get('llm_calls') or []
         comp = [c['completion_tokens'] for c in calls if isinstance(c.get('completion_tokens'), (int, float))]
@@ -168,8 +194,9 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                                     tasks={t['instance_id']: t['h1_composite_seconds'] for t in tasks},
                                     max_s=max(h1) if h1 and all(v is not None for v in h1) else None,
                                     n_missing=sum(v is None for v in h1)),
-                  stock_setup=dict(tasks=stock, n_ok=len(stock_totals), max_s=max(stock_totals) if stock_totals else None,
-                                   all_le_30s=bool(stock) and len(stock_totals) == len(stock) and max(stock_totals) <= 30),
+                  stock_setup=dict(tasks=stock, n_expected=n_expected,
+                                   n_missing=len(stock_missing), missing_ids=stock_missing, n_ok=len(stock_totals), max_s=max(stock_totals) if stock_totals else None,
+                                   all_le_30s=n_expected > 0 and not stock_missing and len(valid_stock) == n_expected and max(stock_totals) <= 30),
                   llm=[llm_stats(r) for r in rows if 'llm_calls' in r],
                   mean_agent_seconds=distribution(numbers([r['wall_seconds']['agent'] for r in rows if r['wall_seconds'].get('agent') is not None]))['mean'])
     return dict(_schema='kaggle_timing_summary_v1',
@@ -182,11 +209,12 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                     image_emulation_seconds='Distribution of in-Phase-1 seconds emulating image layers the scorer image already has',
                     phase1_minus_image_seconds='Distribution of phase1_wall_seconds minus image_emulation_seconds (not gated; reported for the Director)',
                     setup_py_emulation_seconds='Distribution of per-task seconds in setup_calls step setup.py (Dockerfile.public setup.py emulation: install_editable_package + install_test_dependencies)',
+                    stockpath_retained_emulation_seconds='Per-task sum of workspace_editable and base_tar_extraction steps retained by the conservative stock-path formula; null if missing',
                     stockpath_phase1_seconds='Distribution of phase1_wall - image_emulation - setup_py_emulation (gate b in stock-path mode)',
                     h1_composite_seconds='Distribution of agent_clock + finalization + P1 stock_setup total_s (not gated)',
                     fallback_invocations='Index-enabled editable fallback invocations across setup calls',
                     retrying_lines_total='pip Retrying lines across setup calls, nested output counted once',
-                    tasks='Per-task instance_id, repo, setup_calls [{step,duration_s,rc,retrying_lines}], sandbox_setup_seconds, agent_clock_seconds, agent_timeout_fired, finalization_seconds, teardown_seconds, phase1_wall_seconds, setup_py_emulation_seconds, stockpath_phase1_seconds, stock_setup_seconds, h1_composite_seconds, total, error, finalization_failed [{cmd,rc,exception}] (post-timeout commands with rc!=0, exception or unknown rc; any entry fails gate a), nonempty_source_diff, fallback_patch_used; unavailable measurements are null',
+                    tasks='Per-task instance_id, repo, setup_calls [{step,duration_s,rc,retrying_lines}], sandbox_setup_seconds, agent_clock_seconds, agent_timeout_fired, finalization_seconds, teardown_seconds, phase1_wall_seconds, setup_py_emulation_seconds, stockpath_phase1_seconds, stock_setup_seconds, stockpath_retained_emulation_seconds, h1_composite_seconds, total, error, finalization_failed [{cmd,rc,exception}] (post-timeout commands with rc!=0, exception or unknown rc; any entry fails gate a), nonempty_source_diff, fallback_patch_used; unavailable measurements are null',
                     nonempty_source_diff='Nonblank classified patch with a path outside protected/test and stray files',
                     phase1_seconds='Phase-1 wall seconds: mean/p50/p90/max of available measurements',
                     setup_seconds='Setup S seconds: mean/p50/p90/max of available measurements',
@@ -197,19 +225,19 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                     fallback_patch_count='Tasks using a non-empty fallback patch',
                     vllm_startup_seconds='Measured vLLM startup seconds',
                     gate='a-e checks: PASS/FAIL, observed value, CLI threshold; overall status requires all checks; mode total (dec 028) or stock-path (dec 034 item 2 / dec 036 item 1: b = max stockpath_phase1 <= cap*60+37)',
-                    probes='Plan 006 addendum P1-P3: platform_probe (header), h1_composite (not gated; per task + max_s, null if any part missing), stock_setup per task (+max_s, all_le_30s = G1 P1 leg), llm per-task call stats, mean_agent_seconds',
-                    decision_note='decision is the legacy total-wall/cap projection, NOT the gate (dec 032 item 5)',
+                    probes='Plan 006 addendum P1-P3: platform_probe (header), h1_composite (not gated; per task + max_s, null if any part missing), stock_setup per task (+n_expected, n_missing, missing_ids, max_s, all_le_30s = valid successful P1 for every expected ID <=30s, G1 P1 leg), llm per-task call stats, mean_agent_seconds',
+                    decision_note='legacy_projection_decision is the legacy total-wall/cap projection, NOT the gate (dec 032 item 5)',
                     total_seconds='Total task wall seconds distribution',
                     test_run_share='Agent test time share distribution', test_runs_per_task='Test request count distribution',
                     empty_patch_count='Blank patches', test_files_edited_count='Tasks editing protected/test files',
                     stray_files_count='Tasks adding stray files', test_files_edited_files='Total protected/test paths',
-                    stray_files_files='Total stray paths', decision='Legacy total-wall/cap projection check',
+                    stray_files_files='Total stray paths', legacy_projection_decision='Legacy total-wall/cap projection check',
                     projected_minutes='p90 total seconds times 125 plus vLLM, in minutes',
                     cap_worst_case_minutes='Configured cap times 125 plus 30 minutes', cap_minutes='Configured agent cap',
                     artifact_errors='Raw artifact write failures (diagnostic; rows unaffected)',
                     missing_task_ids='Header task IDs absent from task rows', done_present='Journal contains _done', stopped='Journal stop reasons'),
                 tasks=tasks, gate=gate, probes=probes, n_complete_no_error=complete,
-                decision_note='decision is the legacy total-wall/cap projection, NOT the gate (dec 032 item 5)',
+                decision_note='legacy_projection_decision is the legacy total-wall/cap projection, NOT the gate (dec 032 item 5)',
                 provenance={k: header.get(k) for k in ('git_sha', 'bundle_sha256', 'agent_yaml_sha256', 'gpu_names',
                     'gpu_count', 'caps', 'created_utc', 'concurrency', 'mcp_import_ok')},
                 agent_outcome_counts=dict(Counter(str(t['agent_outcome']) for t in tasks)),
@@ -236,7 +264,7 @@ def summarize(path, *, gate_max_phase1=296, gate_mean_phase1=270,
                 stray_files_count=sum(bool(r.get('stray_files', [])) for r in rows),
                 test_files_edited_files=sum(len(r.get('test_files_edited', [])) for r in rows),
                 stray_files_files=sum(len(r.get('stray_files', [])) for r in rows),
-                decision='PASS' if timing_minutes is not None and cap_minutes is not None and timing_minutes <= 660 and cap_minutes <= 660 else 'FAIL',
+                legacy_projection_decision='PASS' if timing_minutes is not None and cap_minutes is not None and timing_minutes <= 660 and cap_minutes <= 660 else 'FAIL',
                 projected_minutes=timing_minutes, cap_worst_case_minutes=cap_minutes,
                 cap_minutes=cap, missing_task_ids=missing,
                 done_present=done is not None, stopped=stopped, artifact_errors=artifact_errors)
