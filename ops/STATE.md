@@ -7,8 +7,9 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad, bin/pack PASS, load check OK
   (results/bundle_load_check_e4b_v002.json: 8192/8192, 60 s). Dec 032 item 3 conditions (i)-(iv) all hold (23:11Z).
   Dec 040 AUTHORIZED (unused). File upload -> 400 at 23:13Z (code competition). Dec 041: submit via kernel aniket0202/gemma-submit-e4b
-  v1 (CPU, private, output sha verified = 60c0...4dad). Guard patch ops/patches/kaggle-submit-kernel-v3.diff (v1/v2 superseded, never apply): bin/ edit DENIED by permission
-  classifier -> needs apply by owner/permission + review-submit-guard3-light no BLOCKING; clean -> bin/send aniket apply -v3. Cutoff 23:55Z, else Nov 6 slot (same auth).
+  v1 (CPU, private, output sha verified = 60c0...4dad). Guard patch ops/patches/kaggle-submit-kernel-v4.diff (v1-v3 superseded, never apply): bin/ edit DENIED by permission
+  classifier -> needs apply by owner/permission + review-submit-guard4-light no BLOCKING; clean -> bin/send aniket apply -v4. Nov 5 slot LOST (dec 044); submit Nov 6 after 00:00Z.
+  After apply+commit: dec 044 item 3 dry checks (unauthorized sha -> exit 3; wrong kernel version -> sha REFUSED), log both in the commit.
   Then: bin/kaggle-submit dist/e4b-v002.zip e4b '<msg>' 1; log ops/budget/kaggle.md; results/lb_e4b_v002.json (dec 038 item 3).
 - CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 E4B/12B/E2B validator
   acceptance (first e4b submit settles E4B); l.55 submit_patch/get_status vs call limits; l.63 private-LB multiple runs; l.72 wheels arch
