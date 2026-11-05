@@ -7,8 +7,8 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad, bin/pack PASS, load check OK
   (results/bundle_load_check_e4b_v002.json: 8192/8192, 60 s). Dec 032 item 3 conditions (i)-(iv) all hold (23:11Z).
   Dec 040 AUTHORIZED (unused). File upload -> 400 at 23:13Z (code competition). Dec 041: submit via kernel aniket0202/gemma-submit-e4b
-  v1 (CPU, private, output sha verified = 60c0...4dad). Guard patch ops/patches/kaggle-submit-kernel-v4.diff (v1-v3 superseded, never apply): bin/ edit DENIED by permission
-  classifier -> needs apply by owner/permission + review-submit-guard4-light no BLOCKING; clean -> bin/send aniket apply -v4. Nov 5 slot LOST (dec 044); submit Nov 6 after 00:00Z.
+  v1 (CPU, private, output sha verified = 60c0...4dad). Guard: v4 review BLOCKING x3 (pagination, strict CSV, stale day) -> v5 NEW file + FULL adversarial review (dec 045); v1-v4 never apply: bin/ edit DENIED by permission
+  classifier -> needs apply by owner/permission + v5 clean -> bin/send aniket apply -v5 only. Tests ONLY via eval/tests/guard_mock_test.sh <cand> dist/e4b-v002.zip. Nov 5 slot LOST (dec 044); submit Nov 6 after 00:00Z.
   After apply+commit: dec 044 item 3 dry checks (unauthorized sha -> exit 3; wrong kernel version -> sha REFUSED), log both in the commit.
   Then: bin/kaggle-submit dist/e4b-v002.zip e4b '<msg>' 1; log ops/budget/kaggle.md; results/lb_e4b_v002.json (dec 038 item 3).
 - CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 E4B/12B/E2B validator
@@ -75,6 +75,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   pass-rate evals start, pre-register which environment the local sandbox models and why. Don't act on it before then.
 - Dec 032 item 5: decision_note is in timing_summary (probes branch); add the same note field to results/kaggle_timing_e4b_v001.json at merge.
 ## Next 3
-1. guard v4 clean -> Aniket applies -> dry checks -> submit v002 after 00:00Z Nov 6; log (ops/budget/kaggle.md); LB -> results/lb_e4b_v002.json.
+1. guard v5 (scratchpad base kaggle-submit.v5 is lost on /clear: rebuild from ops/patches/kaggle-submit-kernel-v4.diff) + full review -> Aniket applies -> dry checks -> submit v002 after 00:00Z Nov 6; log (ops/budget/kaggle.md); LB -> results/lb_e4b_v002.json.
 2. probes + probes-gate reviews clean -> push codex/kernel-probes-gate (cap 4.0) -> timing_summary from finfix branch --gate-mode stock-path -> report 010.
 3. finfix + fix6e reviews -> merge stack / deploy memguard-light. Then plan 005 (dec 022 item 4) + plan 007 (dec 039) = first quality levers.
