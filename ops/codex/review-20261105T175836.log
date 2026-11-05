@@ -2174,3 +2174,870 @@ ops/jobs/gold-smoke-wait8.cmd
 ops/jobs/e4b-timing-wait2.cmd
 ops/jobs/codex-timing-kernel.cmd
 
+exec
+/bin/bash -lc "git diff 02a883d 2c42c7a -- eval/kaggle/gold_calibration.py; nl -ba eval/kaggle/gold_calibration.py | sed -n '18,72p;130,265p;325,360p'; nl -ba eval/tests/test_gold_calibration.py | sed -n '1,235p'" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+diff --git a/eval/kaggle/gold_calibration.py b/eval/kaggle/gold_calibration.py
+index 706dce5..bd55f64 100644
+--- a/eval/kaggle/gold_calibration.py
++++ b/eval/kaggle/gold_calibration.py
+@@ -20,7 +20,9 @@ os.environ['PYTEST_ADDOPTS'] = (os.environ.get('PYTEST_ADDOPTS', '') + ' -p no:l
+ DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
+ WORKING_DIR = Path('/kaggle/working')
+ WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+-CONCURRENCY = 2
++CONCURRENCY = int(os.environ.get('GOLD_CONCURRENCY', '2'))
++if CONCURRENCY < 1:
++    raise ValueError('GOLD_CONCURRENCY must be positive')
+ ONLY_IDS = None  # all tasks (diag ids list removed after local repro, cycle 37)
+ 
+ 
+@@ -178,10 +180,10 @@ def choose_sandbox():
+ # push.sh embeds this module here when staging the single-file Kaggle kernel.
+ # BEGIN SHARED ENV IMPORT
+ try:
+-    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
++    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
+ except ModuleNotFoundError:
+     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+-    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
++    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
+ # END SHARED ENV IMPORT
+ 
+ 
+@@ -239,6 +241,8 @@ async def verify_gold(task, patch, data_dir, sandbox, out_dir=None):
+ def worker(args):
+     """No stdout/stderr from this process is exposed by the coordinator."""
+     logging.disable(logging.CRITICAL)
++    metrics = dict(peak_rss_bytes=0, mem_kills=0, orphan_kills=0)
++    metrics_token = command_metrics.set(metrics)
+     start = time.monotonic()
+     raw = next(t for t in load_inventory(args.data_dir) if t['instance_id'] == args.worker)
+     row = dict(instance_id=raw['instance_id'], repo=raw['repo'], resolved=False,
+@@ -282,6 +286,8 @@ def worker(args):
+         # Location only (file:line:function), never messages or values.
+         row['where'] = ' <- '.join(f'{Path(f.filename).name}:{f.lineno}:{f.name}'
+                                    for f in reversed(traceback.extract_tb(exc.__traceback__)[-4:]))
++    command_metrics.reset(metrics_token)
++    row.update({key: int(metrics[key]) for key in ('peak_rss_bytes', 'mem_kills', 'orphan_kills')})
+     row['duration_seconds'] = round(time.monotonic() - start, 3)
+     args.result.write_text(json.dumps(row) + '\n', encoding='utf-8')
+ 
+@@ -308,7 +314,8 @@ def run_one(task, data_dir, sandbox, allow_unsandboxed=False):
+         except Exception as exc:
+             error = f'Worker failure ({type(exc).__name__})'
+     return dict(instance_id=task['instance_id'], repo=task['repo'], resolved=False,
+-                exit_code=None, duration_seconds=round(time.monotonic() - start, 3),
++                exit_code=None, peak_rss_bytes=0, mem_kills=0, orphan_kills=0,
++                duration_seconds=round(time.monotonic() - start, 3),
+                 error=error, sandbox=sandbox)
+ 
+ 
+@@ -356,6 +363,7 @@ def main():
+                 os.fsync(stream.fileno())
+                 results[row['instance_id']] = row
+                 print(f"Finished {len(results)}/{len(tasks)}: {row['instance_id']} "
++                      f"peak_rss_bytes={row.get('peak_rss_bytes', 0)} mem_kills={row.get('mem_kills', 0)} orphan_kills={row.get('orphan_kills', 0)} "
+                       f"resolved={row['resolved']} exit_code={row['exit_code']} err={row.get('error')} where={row.get('where')} shape={row.get('shape')}", flush=True)
+     summary = summarize(tasks, results)
+     encoded = json.dumps(summary, indent=2, sort_keys=True) + '\n'
+    18	# Kaggle's system python autoloads a langsmith pytest plugin that the scorer docker image lacks; it breaks on repo-local requests.py shadowing.
+    19	os.environ['PYTEST_ADDOPTS'] = (os.environ.get('PYTEST_ADDOPTS', '') + ' -p no:langsmith_plugin').strip()
+    20	DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
+    21	WORKING_DIR = Path('/kaggle/working')
+    22	WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+    23	CONCURRENCY = int(os.environ.get('GOLD_CONCURRENCY', '2'))
+    24	if CONCURRENCY < 1:
+    25	    raise ValueError('GOLD_CONCURRENCY must be positive')
+    26	ONLY_IDS = None  # all tasks (diag ids list removed after local repro, cycle 37)
+    27	
+    28	
+    29	def finished_results(text):
+    30	    """Parse a journal, ignoring only a torn final JSON line; last full row wins.
+    31	
+    32	    Both successful verifications and errors are finished attempts. Malformed
+    33	    complete records fail loudly rather than silently removing tasks.
+    34	    """
+    35	    results = {}
+    36	    lines = text.splitlines(keepends=True)
+    37	    for index, line in enumerate(lines):
+    38	        try:
+    39	            row = json.loads(line)
+    40	        except json.JSONDecodeError:
+    41	            if index == len(lines) - 1 and not line.endswith('\n'):
+    42	                break
+    43	            raise ValueError(f'Invalid results JSON at line {index + 1}') from None
+    44	        if (not isinstance(row, dict) or not isinstance(row.get('instance_id'), str)
+    45	                or not row['instance_id'] or not isinstance(row.get('repo'), str)
+    46	                or type(row.get('resolved')) is not bool
+    47	                or 'exit_code' not in row or 'error' not in row
+    48	                or (row['exit_code'] is not None and type(row['exit_code']) is not int)
+    49	                or (row['error'] is not None and not isinstance(row['error'], str))
+    50	                or type(row.get('duration_seconds')) not in (float, int)
+    51	                or not math.isfinite(row['duration_seconds']) or row['duration_seconds'] < 0):
+    52	            raise ValueError(f'Invalid result schema at line {index + 1}')
+    53	        results[row['instance_id']] = row
+    54	    return results
+    55	
+    56	
+    57	def pending_tasks(tasks, results):
+    58	    """Validate the current task inventory and return unfinished tasks in order."""
+    59	    inventory = {task['instance_id']: task['repo'] for task in tasks}
+    60	    if len(inventory) != len(tasks):
+    61	        raise ValueError('Duplicate task ids in tasks.jsonl')
+    62	    for task_id, row in results.items():
+    63	        if task_id not in inventory or inventory[task_id] != row['repo']:
+    64	            raise ValueError('Resume journal does not match task inventory')
+    65	    return [task for task in tasks if task['instance_id'] not in results]
+    66	
+    67	
+    68	def summarize(tasks, results):
+    69	    """Aggregate every input task, including failures and unfinished attempts."""
+    70	    pending = pending_tasks(tasks, results)
+    71	    if os.environ.get('GOLD_LIMIT'):  # smoke runs only: first task of each repo
+    72	        seen = set(); pending = [t for t in pending if not (t['repo'] in seen or seen.add(t['repo']))]
+   130	        return
+   131	    except ImportError:
+   132	        pass
+   133	    staged = Path('/tmp/wheelhouse')
+   134	    staged.mkdir(parents=True, exist_ok=True)
+   135	    for w in WHEELHOUSE.glob('*.whl'):
+   136	        # CPU image is Python 3.13; wheelhouse binaries are cp312, so take pure wheels only.
+   137	        if 'cutlass' in w.name.lower() or not w.name.endswith('-none-any.whl'):
+   138	            continue
+   139	        # Kaggle dataset upload strips '+' from local version tags (e.g. cu128).
+   140	        name = w.name.replace('cu128', '+cu128') if 'cu128' in w.name and '+' not in w.name else w.name
+   141	        target = staged / name
+   142	        if not target.exists():
+   143	            try:
+   144	                os.symlink(w, target)
+   145	            except OSError:
+   146	                shutil.copyfile(w, target)
+   147	    wheels = sorted(str(p) for p in staged.glob('*.whl'))
+   148	    if not wheels:
+   149	        raise RuntimeError('Harness unavailable; attach metric/gemma-4-developer-agent-wheelhouse')
+   150	    proc = subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '--no-index', '--no-deps',
+   151	                           '--force-reinstall', '--disable-pip-version-check', *wheels],
+   152	                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+   153	    if proc.returncode:
+   154	        # pip diagnostics only (no task data); keep the tail for debugging.
+   155	        raise RuntimeError('wheel install failed: ' + proc.stderr[-1500:].replace(str(WHEELHOUSE), '<wh>'))
+   156	
+   157	
+   158	def choose_sandbox():
+   159	    """Probe actual offline container startup, not merely existence of docker CLI."""
+   160	    name = f'gold-calibration-probe-{os.getpid()}'
+   161	    try:
+   162	        probe = subprocess.run(
+   163	            ['docker', 'run', '--pull=never', '--rm', '--name', name,
+   164	             '--network=none', '--memory=4g', '--cpus=2',
+   165	             '--entrypoint', 'python3', 'swebench-sandbox:latest', '-c', 'pass'],
+   166	            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+   167	        if probe.returncode == 0:
+   168	            return 'docker'
+   169	    except (OSError, subprocess.TimeoutExpired):
+   170	        pass
+   171	    finally:
+   172	        try:
+   173	            subprocess.run(['docker', 'rm', '-f', name], stdout=subprocess.DEVNULL,
+   174	                           stderr=subprocess.DEVNULL, timeout=10)
+   175	        except (OSError, subprocess.TimeoutExpired):
+   176	            pass
+   177	    return 'subprocess'
+   178	
+   179	
+   180	# push.sh embeds this module here when staging the single-file Kaggle kernel.
+   181	# BEGIN SHARED ENV IMPORT
+   182	try:
+   183	    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
+   184	except ModuleNotFoundError:
+   185	    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+   186	    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
+   187	# END SHARED ENV IMPORT
+   188	
+   189	
+   190	async def verify_gold(task, patch, data_dir, sandbox, out_dir=None):
+   191	    """The only swegemma API adapter; see docs/GOLD_CALIBRATION.md assumptions.
+   192	
+   193	    verify_task owns fresh sandbox staging, baseline setup, and test_patch.
+   194	    Bind explicit parameters from Evaluator resources, failing closed on an
+   195	    unknown required argument rather than guessing positional argument order.
+   196	    """
+   197	    from swegemma.config import EvalConfig
+   198	    from swegemma.evaluate import Evaluator
+   199	    from swegemma.harness.verification import verify_task
+   200	
+   201	    out_dir = Path(out_dir or WORKING_DIR).resolve()
+   202	    out_dir.mkdir(parents=True, exist_ok=True)
+   203	    with tempfile.TemporaryDirectory(prefix='gold-verify-', dir=out_dir) as scratch:
+   204	        config = EvalConfig(tasks_path=data_dir / 'tasks.jsonl',
+   205	                            snapshots_dir=data_dir / 'snapshots', wheels_dir=data_dir / 'wheels',
+   206	                            results_dir=Path(scratch), submission_dir=data_dir / 'sample_submission',
+   207	                            models={}, sandbox=sandbox, verification_timeout_seconds=300, verbose=False)
+   208	        evaluator = Evaluator(config)
+   209	        context = {name.lstrip('_'): value for name, value in vars(evaluator).items()}
+   210	        context.update(task=task, agent_patch=patch, config=config,
+   211	                       snapshots_dir=config.snapshots_dir, wheels_dir=config.wheels_dir,
+   212	                       timeout_seconds=300, verification_timeout_seconds=300)
+   213	        from swegemma.deduplication import resolve_task_snapshot_paths
+   214	        _paths = resolve_task_snapshot_paths(config.snapshots_dir, task.instance_id, task.repo)
+   215	        context.update(snapshot_path=_paths[0], base_snapshot_path=_paths[1], patch_path=_paths[2])
+   216	        parameters = inspect.signature(verify_task).parameters
+   217	        if not {'task', 'agent_patch'} <= parameters.keys():
+   218	            raise RuntimeError('Unsupported verify_task signature')
+   219	        kwargs = {name: context[name] for name, p in parameters.items()
+   220	                  if name in context and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD)}
+   221	        try:
+   222	            inspect.signature(verify_task).bind(**kwargs)
+   223	        except TypeError as exc:
+   224	            sig = inspect.signature(verify_task)
+   225	            req = [n for n, p in sig.parameters.items() if p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
+   226	            import swegemma.evaluate as _ev, swegemma.harness.verification as _vf, re as _re
+   227	            _src = (inspect.getsource(_ev) + '\n' + inspect.getsource(_vf)).splitlines()
+   228	            _hits = [l.strip() for l in _src if _re.search(r'snapshot', l)]
+   229	            _d1 = ' || '.join(_hits)[:3000]
+   230	            import swegemma.sandbox as _sb
+   231	            _d2 = ','.join(n for n in dir(_sb) if 'Manager' in n or 'Sandbox' in n)
+   232	            raise RuntimeError('bind failed; SRC=' + _d1 + '; SB=' + _d2 + '; sig=' + str(sig)[:300] + '; required=' + ','.join(req) + '; ctx=' + ','.join(sorted(context))[:300]) from None
+   233	        token = gold_artifact_dir.set(Path(scratch))
+   234	        try:
+   235	            result = verify_task(**kwargs)
+   236	            return await result if inspect.isawaitable(result) else result
+   237	        finally:
+   238	            gold_artifact_dir.reset(token)
+   239	
+   240	
+   241	def worker(args):
+   242	    """No stdout/stderr from this process is exposed by the coordinator."""
+   243	    logging.disable(logging.CRITICAL)
+   244	    metrics = dict(peak_rss_bytes=0, mem_kills=0, orphan_kills=0)
+   245	    metrics_token = command_metrics.set(metrics)
+   246	    start = time.monotonic()
+   247	    raw = next(t for t in load_inventory(args.data_dir) if t['instance_id'] == args.worker)
+   248	    row = dict(instance_id=raw['instance_id'], repo=raw['repo'], resolved=False,
+   249	               exit_code=None, duration_seconds=0.0, error=None, sandbox=args.sandbox)
+   250	    try:
+   251	        if args.sandbox == 'subprocess':
+   252	            environment = setup_scorer_env(
+   253	                args.data_dir, out_dir=args.result.parent,
+   254	                allow_unsandboxed=getattr(args, 'allow_unsandboxed', False))
+   255	            row['sandbox'] = environment['sandbox']
+   256	        from swegemma.models import load_tasks
+   257	        task = next(t for t in load_tasks(args.data_dir / 'tasks.jsonl')
+   258	                    if t.instance_id == args.worker)
+   259	        patch = raw.get('patch')
+   260	        if os.environ.get('GOLD_NULL_PATCH'):  # control: no source change; tests should fail
+   261	            patch = ('diff --git a/NULL_CONTROL.txt b/NULL_CONTROL.txt\nnew file mode 100644\n'
+   262	                     '--- /dev/null\n+++ b/NULL_CONTROL.txt\n@@ -0,0 +1 @@\n+null\n')
+   263	        if not isinstance(patch, str) or not patch.strip():
+   264	            row['error'] = 'Missing or empty gold patch'
+   265	        else:
+   325	        subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 'langsmith'],
+   326	                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+   327	    parser = argparse.ArgumentParser(description=__doc__)
+   328	    parser.add_argument('--data-dir', type=Path, default=DATA_DIR)
+   329	    parser.add_argument('--working-dir', type=Path, default=WORKING_DIR)
+   330	    parser.add_argument('--allow-unsandboxed', action='store_true',
+   331	                        default=os.environ.get('GOLD_ALLOW_UNSANDBOXED') == '1')
+   332	    parser.add_argument('--worker', help=argparse.SUPPRESS)
+   333	    parser.add_argument('--result', type=Path, help=argparse.SUPPRESS)
+   334	    parser.add_argument('--sandbox', choices=('docker', 'subprocess'), help=argparse.SUPPRESS)
+   335	    args = parser.parse_args()
+   336	    os.environ.update(PIP_NO_INDEX='1', HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1',
+   337	                      OTEL_SDK_DISABLED='true', LITELLM_TELEMETRY='False', TMPDIR='/tmp')
+   338	    if args.worker:
+   339	        worker(args)
+   340	        return
+   341	    tasks = load_inventory(args.data_dir)
+   342	    ids = ONLY_IDS or ([l.strip() for l in open(os.environ['GOLD_IDS_FILE']) if l.strip()]
+   343	                       if os.environ.get('GOLD_IDS_FILE') else None)
+   344	    if ids:
+   345	        tasks = [t for t in tasks if t['instance_id'] in set(ids)]
+   346	    args.working_dir.mkdir(parents=True, exist_ok=True)
+   347	    journal = args.working_dir / 'gold_results.jsonl'
+   348	    results = resume_journal(journal)
+   349	    pending = pending_tasks(tasks, results)
+   350	    if os.environ.get('GOLD_LIMIT'):  # smoke runs only: first task of each repo
+   351	        seen = set(); pending = [t for t in pending if not (t['repo'] in seen or seen.add(t['repo']))]
+   352	    if pending:
+   353	        install_harness()
+   354	        sandbox = choose_sandbox()
+   355	        print(f'Gold calibration: total={len(tasks)}, resumed={len(results)}, '
+   356	              f'sandbox={sandbox}, concurrency={CONCURRENCY}', flush=True)
+   357	        with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool, journal.open('a', encoding='utf-8') as stream:
+   358	            futures = [pool.submit(run_one, task, args.data_dir, sandbox, args.allow_unsandboxed) for task in pending]
+   359	            for future in as_completed(futures):
+   360	                row = future.result()
+     1	"""Offline tests: stdlib unittest, no competition data or harness imports."""
+     2	import argparse
+     3	import importlib.util
+     4	import json
+     5	from pathlib import Path
+     6	import tempfile
+     7	import types
+     8	import unittest
+     9	from unittest.mock import patch
+    10	
+    11	SCRIPT = Path(__file__).resolve().parents[1] / 'kaggle/gold_calibration.py'
+    12	spec = importlib.util.spec_from_file_location('gold_calibration', SCRIPT)
+    13	gold = importlib.util.module_from_spec(spec)
+    14	spec.loader.exec_module(gold)
+    15	
+    16	
+    17	def result(task_id='a', repo='org/repo', resolved=True, error=None):
+    18	    return dict(instance_id=task_id, repo=repo, resolved=resolved,
+    19	                exit_code=0 if resolved else 1, duration_seconds=1.5, error=error)
+    20	
+    21	
+    22	class ResumeTests(unittest.TestCase):
+    23	    def test_success_and_failure_are_finished(self):
+    24	        rows = [result(), result('b', resolved=False, error='setup failed')]
+    25	        results = gold.finished_results(''.join(json.dumps(row) + '\n' for row in rows))
+    26	        tasks = [dict(instance_id=x, repo='org/repo') for x in 'abc']
+    27	        self.assertEqual([t['instance_id'] for t in gold.pending_tasks(tasks, results)], ['c'])
+    28	
+    29	    def test_last_completed_duplicate_wins(self):
+    30	        rows = [result(resolved=False), result()]
+    31	        results = gold.finished_results('\n'.join(map(json.dumps, rows)) + '\n')
+    32	        self.assertTrue(results['a']['resolved'])
+    33	        self.assertEqual(len(results), 1)
+    34	
+    35	    def test_partial_tail_repaired_and_append_survives_second_resume(self):
+    36	        with tempfile.TemporaryDirectory() as directory:
+    37	            path = Path(directory) / 'results.jsonl'
+    38	            complete = json.dumps(result()) + '\n'
+    39	            path.write_text(complete + '{"instance_id": "unfinished')
+    40	            self.assertEqual(set(gold.resume_journal(path)), {'a'})
+    41	            self.assertEqual(path.read_text(), complete)
+    42	            with path.open('a') as stream:
+    43	                stream.write(json.dumps(result('b')) + '\n')
+    44	            self.assertEqual(set(gold.resume_journal(path)), {'a', 'b'})
+    45	
+    46	    def test_complete_last_record_without_newline(self):
+    47	        with tempfile.TemporaryDirectory() as directory:
+    48	            path = Path(directory) / 'results.jsonl'
+    49	            path.write_text(json.dumps(result()))
+    50	            self.assertEqual(set(gold.resume_journal(path)), {'a'})
+    51	            self.assertTrue(path.read_text().endswith('\n'))
+    52	
+    53	    def test_missing_file_and_empty_journal(self):
+    54	        with tempfile.TemporaryDirectory() as directory:
+    55	            self.assertEqual(gold.resume_journal(Path(directory) / 'absent'), {})
+    56	        self.assertEqual(gold.finished_results(''), {})
+    57	
+    58	    def test_corruption_is_not_silently_dropped(self):
+    59	        for text in ('bad\n', 'bad\n' + json.dumps(result()), '{}\n',
+    60	                     json.dumps(dict(result(), duration_seconds=float('nan'))) + '\n'):
+    61	            with self.subTest(text=text), self.assertRaises(ValueError):
+    62	                gold.finished_results(text)
+    63	
+    64	    def test_inventory_mismatch_and_duplicate_ids(self):
+    65	        tasks = [dict(instance_id='a', repo='org/repo')]
+    66	        for inventory, results in ((tasks * 2, {}), (tasks, {'b': result('b')}),
+    67	                                   (tasks, {'a': result(repo='wrong/repo')})):
+    68	            with self.assertRaises(ValueError):
+    69	                gold.pending_tasks(inventory, results)
+    70	
+    71	
+    72	class SummaryTests(unittest.TestCase):
+    73	    def test_all_tasks_counted_by_repo(self):
+    74	        tasks = [dict(instance_id=x, repo=repo) for x, repo in
+    75	                 [('a', 'org/one'), ('b', 'org/one'), ('c', 'org/two'), ('d', 'org/two')]]
+    76	        results = {'a': result('a', 'org/one'),
+    77	                   'b': result('b', 'org/one', False, 'setup failed'),
+    78	                   'c': result('c', 'org/two', False)}
+    79	        summary = gold.summarize(tasks, results)
+    80	        self.assertEqual([summary[k] for k in ('total', 'finished', 'passed', 'failed', 'pending')],
+    81	                         [4, 3, 1, 2, 1])
+    82	        self.assertEqual(summary['passing_ids'], ['a'])
+    83	        self.assertEqual(summary['pending_ids'], ['d'])
+    84	        self.assertEqual(summary['failing_ids'], [
+    85	            dict(instance_id='b', reason='setup failed'),
+    86	            dict(instance_id='c', reason='verification unresolved (exit_code=1)')])
+    87	        self.assertEqual(summary['per_repo']['org/one'],
+    88	                         dict(total=2, finished=2, passed=1, failed=1, pending=0))
+    89	        self.assertEqual(summary['per_repo']['org/two'],
+    90	                         dict(total=2, finished=1, passed=0, failed=1, pending=1))
+    91	
+    92	    def test_empty_summary_and_short_reasons(self):
+    93	        self.assertEqual(gold.summarize([], {})['total'], 0)
+    94	        summary = gold.summarize([dict(instance_id='a', repo='org/repo')],
+    95	                                {'a': result(resolved=False, error='x' * 500)})
+    96	        self.assertEqual(len(summary['failing_ids'][0]['reason']), 200)
+    97	
+    98	    def test_main_fully_resumed_needs_no_harness(self):
+    99	        with tempfile.TemporaryDirectory() as directory:
+   100	            root = Path(directory)
+   101	            (root / 'tasks.jsonl').write_text(json.dumps(dict(instance_id='a', repo='org/repo')) + '\n')
+   102	            (root / 'gold_results.jsonl').write_text(json.dumps(result()) + '\n')
+   103	            with patch('sys.argv', [str(SCRIPT), '--data-dir', str(root), '--working-dir', str(root)]), \
+   104	                    patch.object(gold, 'install_harness', side_effect=AssertionError('must not import harness')), \
+   105	                    patch('builtins.print'):
+   106	                gold.main()
+   107	            self.assertEqual(json.loads((root / 'gold_summary.json').read_text())['passing_ids'], ['a'])
+   108	
+   109	    def test_gold_ids_file_selects_inventory_before_resume(self):
+   110	        with tempfile.TemporaryDirectory() as directory:
+   111	            root = Path(directory)
+   112	            (root / 'tasks.jsonl').write_text(''.join(json.dumps(dict(instance_id=i, repo='org/repo')) + '\n'
+   113	                                                     for i in ('a', 'b')))
+   114	            (root / 'gold_results.jsonl').write_text(json.dumps(result()) + '\n')
+   115	            (root / 'ids.txt').write_text('a\n')
+   116	            with patch('sys.argv', [str(SCRIPT), '--data-dir', str(root), '--working-dir', str(root)]), \
+   117	                    patch.dict('os.environ', GOLD_IDS_FILE=str(root / 'ids.txt')), \
+   118	                    patch.object(gold, 'install_harness', side_effect=AssertionError('fully resumed')), \
+   119	                    patch('builtins.print'):
+   120	                gold.main()
+   121	            self.assertEqual(json.loads((root / 'gold_summary.json').read_text())['total'], 1)
+   122	
+   123	
+   124	class WorkerTests(unittest.TestCase):
+   125	    def run_worker(self, verifier):
+   126	        raw = dict(instance_id='a', repo='org/repo', patch='GOLD_PATCH_SECRET',
+   127	                   test_patch='TEST_PATCH_SECRET', problem_statement='TASK_TEXT_SECRET')
+   128	        task = types.SimpleNamespace(instance_id='a')
+   129	        models = types.ModuleType('swegemma.models')
+   130	        models.load_tasks = lambda path: [task]
+   131	        with tempfile.TemporaryDirectory() as directory:
+   132	            args = argparse.Namespace(data_dir=Path(directory), worker='a',
+   133	                                      sandbox='subprocess', result=Path(directory) / 'result.json')
+   134	            with patch.object(gold, 'patch_subprocess_deps'), \
+   135	                    patch.object(gold, 'load_inventory', return_value=[raw]), \
+   136	                    patch.dict('sys.modules', {'swegemma.models': models}), \
+   137	                    patch.object(gold, 'setup_scorer_env', return_value={'sandbox': 'bwrap'}), \
+   138	                    patch.object(gold, 'verify_gold', side_effect=verifier):
+   139	                gold.worker(args)
+   140	            return json.loads(args.result.read_text())
+   141	
+   142	    def test_gold_patch_only_and_harness_verdict_preserved(self):
+   143	        async def verify(task, patch_text, data_dir, sandbox, **kwargs):
+   144	            self.assertEqual(patch_text, 'GOLD_PATCH_SECRET')
+   145	            self.assertEqual(sandbox, 'subprocess')
+   146	            # Exit 0 can still fail the harness's required-test/JUnit checks.
+   147	            return dict(resolved=False, test_exit_code=0, error='TEST_PATCH_SECRET',
+   148	                        error_message='TASK_TEXT_SECRET', test_output='ERROR TASK_TEXT_SECRET')
+   149	        row = self.run_worker(verify)
+   150	        self.assertFalse(row['resolved'])
+   151	        self.assertEqual(row['exit_code'], 0)
+   152	        self.assertNotIn('SECRET', json.dumps(row))
+   153	        self.assertGreaterEqual(row['duration_seconds'], 0)
+   154	        for key in ('peak_rss_bytes', 'mem_kills', 'orphan_kills'):
+   155	            self.assertIs(type(row[key]), int)
+   156	
+   157	    def test_metrics_propagate_from_async_verifier(self):
+   158	        async def verify(*args, **kwargs):
+   159	            gold.command_metrics.get().update(peak_rss_bytes=123456, mem_kills=1, orphan_kills=2)
+   160	            return dict(resolved=False, test_exit_code=137)
+   161	        row = self.run_worker(verify)
+   162	        self.assertEqual([row[k] for k in ('peak_rss_bytes', 'mem_kills', 'orphan_kills')],
+   163	                         [123456, 1, 2])
+   164	        self.assertIsNone(gold.command_metrics.get())
+   165	
+   166	    def test_exception_text_never_copied_into_result(self):
+   167	        async def verify(*args, **kwargs):
+   168	            raise RuntimeError('GOLD_PATCH_SECRET TASK_TEXT_SECRET')
+   169	        row = self.run_worker(verify)
+   170	        self.assertFalse(row['resolved'])
+   171	        self.assertIsNone(row['exit_code'])
+   172	        self.assertEqual(row['error'], 'Verification/setup exception (RuntimeError)')
+   173	        self.assertNotIn('SECRET', json.dumps(row))
+   174	
+   175	    def test_null_patch_control_still_reaches_verifier(self):
+   176	        async def verify(task, patch_text, data_dir, sandbox, **kwargs):
+   177	            self.assertIn('NULL_CONTROL.txt', patch_text)
+   178	            self.assertNotIn('GOLD_PATCH_SECRET', patch_text)
+   179	            self.assertIn('out_dir', kwargs)
+   180	            return dict(resolved=False, test_exit_code=1)
+   181	        with patch.dict('os.environ', GOLD_NULL_PATCH='1'):
+   182	            row = self.run_worker(verify)
+   183	        self.assertFalse(row['resolved'])
+   184	        self.assertEqual(row['sandbox'], 'bwrap')
+   185	
+   186	    def test_docker_unavailable_falls_back_without_network_pull(self):
+   187	        with patch.object(gold.subprocess, 'run', side_effect=FileNotFoundError):
+   188	            self.assertEqual(gold.choose_sandbox(), 'subprocess')
+   189	        with patch.object(gold.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)) as run:
+   190	            self.assertEqual(gold.choose_sandbox(), 'docker')
+   191	            self.assertIn('--pull=never', run.call_args_list[0].args[0])
+   192	            self.assertIn('--network=none', run.call_args_list[0].args[0])
+   193	
+   194	
+   195	if __name__ == '__main__':
+   196	    unittest.main()
+
+exec
+/bin/bash -lc "rg -n 'stage_kernel|CONCURRENCY|command_metrics|cmd_timeouts' eval/tests eval/kaggle eval/runner.py eval/sandbox_env.py; tail -70 ops/jobs/codex-sandbox-limits.log; cat ops/jobs/memguard.status" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+rg: eval/runner.py: No such file or directory (os error 2)
+eval/sandbox_env.py:17:command_metrics = ContextVar('command_metrics', default=None)
+eval/sandbox_env.py:112:        metrics = command_metrics.get()
+eval/sandbox_env.py:114:            metrics['cmd_timeouts'] = metrics.get('cmd_timeouts', 0) + 1
+eval/tests/test_eval_fixes.py:21:from eval.kaggle.stage_kernel import stage_kernel
+eval/tests/test_eval_fixes.py:143:    token = env.command_metrics.set(state)
+eval/tests/test_eval_fixes.py:148:        assert state['cmd_timeouts'] == 2
+eval/tests/test_eval_fixes.py:153:        env.command_metrics.reset(token)
+eval/tests/test_eval_fixes.py:231:    stage_kernel(staged)
+eval/kaggle/gold_calibration.py:23:CONCURRENCY = 2
+eval/kaggle/gold_calibration.py:91:                failed=len(failing), pending=len(pending), concurrency=CONCURRENCY,
+eval/kaggle/gold_calibration.py:349:              f'sandbox={sandbox}, concurrency={CONCURRENCY}', flush=True)
+eval/kaggle/gold_calibration.py:350:        with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool, journal.open('a', encoding='utf-8') as stream:
+eval/kaggle/stage_kernel.py:6:def stage_kernel(destination):
+eval/kaggle/stage_kernel.py:23:    stage_kernel(sys.argv[1])
+eval/kaggle/push.sh:11:python3 "$script_dir/stage_kernel.py" "$stage_dir/gold_calibration.py"
+[bin/job] memory cap: systemd scope MemoryMax=5G (whole job); pgid 11159
+running 7933 2026-11-05T17:48:04Z
+
+exec
+/bin/bash -lc "nl -ba eval/tests/test_eval_fixes.py | sed -n '1,225p'; nl -ba eval/tests/test_sandbox_limits.py; rg -n 'def exec|execute_subprocess_command|env=' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py; command -v node; command -v bwrap; git rev-parse HEAD" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+     1	"""Offline isolation, protocol identity and real ADK execution contracts."""
+     2	import asyncio
+     3	import base64
+     4	import importlib.util
+     5	import json
+     6	import os
+     7	from pathlib import Path
+     8	import shutil
+     9	import subprocess
+    10	import sys
+    11	import time
+    12	import tarfile
+    13	from types import SimpleNamespace
+    14	
+    15	import pytest
+    16	
+    17	ROOT = Path(__file__).resolve().parents[2]
+    18	if str(ROOT) not in sys.path:
+    19	    sys.path.insert(0, str(ROOT))
+    20	from eval import run_agent_eval as runner, sandbox_env as env, tool_timing as timing
+    21	from eval.kaggle.stage_kernel import stage_kernel
+    22	
+    23	
+    24	@pytest.fixture
+    25	def harness():
+    26	    pytest.importorskip('swegemma')
+    27	
+    28	
+    29	def test_bwrap_argv_masks_before_reexposing_runtime(tmp_path):
+    30	    root = tmp_path / 'box'
+    31	    workspace = root / 'workspace'
+    32	    argv = env.bwrap_argv(['/bin/bash', '-c', 'true'], workspace,
+    33	                          ['/home/ubuntu/repo', '/home/ubuntu'], ['/opt/python'])
+    34	    assert argv[:11] == env.BWRAP_TEMPLATE[:11]
+    35	    assert argv[11:15] == ['--tmpfs', '/home/ubuntu', '--tmpfs', '/home/ubuntu/repo']
+    36	    assert argv[15:20] == ['--tmpfs', '/tmp', '--bind', str(root), str(root)]
+    37	    assert argv[20:23] == ['--ro-bind', '/opt/python', '/opt/python']
+    38	    assert argv[-5:] == ['--chdir', str(workspace), '/bin/bash', '-c', 'true']
+    39	    for path in ['/x/tasks.jsonl', '/x/splits', '/x/runs', '/x/results']:
+    40	        with pytest.raises(ValueError, match='Forbidden'):
+    41	            env.bwrap_argv(['/bin/bash', '-c', 'true'], workspace, [], [path])
+    42	
+    43	
+    44	def test_runtime_paths_include_prefix_and_wheel_symlink_targets(tmp_path, monkeypatch):
+    45	    root = tmp_path / 'box'
+    46	    (root / 'venv').mkdir(parents=True)
+    47	    (root / 'venv/pyvenv.cfg').write_text('home = /opt/pyimg/bin\n')
+    48	    monkeypatch.setattr(env.sys, 'base_prefix', '/opt/pyimg')
+    49	    (root / 'wheels').mkdir()
+    50	    wheel = tmp_path / 'wh/pkg.whl'
+    51	    wheel.parent.mkdir()
+    52	    wheel.touch()
+    53	    (root / 'wheels/pkg.whl').symlink_to(wheel)
+    54	    assert env.runtime_ro_paths(root / 'workspace', [wheel.parent]) == {
+    55	        Path('/opt/pyimg'), wheel.parent, wheel}
+    56	    (root / 'wheels/escape').symlink_to(Path.home(), target_is_directory=True)
+    57	    with pytest.raises(ValueError, match='Untrusted wheel symlink'):
+    58	        env.runtime_ro_paths(root / 'workspace', [wheel.parent])
+    59	    (root / 'wheels/escape').unlink()
+    60	    (root / 'venv/pyvenv.cfg').write_text('home = /home/ubuntu/bin\n')
+    61	    with pytest.raises(ValueError, match='python prefix differs'):
+    62	        env.runtime_ro_paths(root / 'workspace', [wheel.parent])
+    63	
+    64	
+    65	@pytest.mark.parametrize('exit_code,write,ok', [(0, True, True), (1, True, False), (0, False, False)])
+    66	def test_probe_logic_fake_executor(tmp_path, exit_code, write, ok):
+    67	    class Manager:
+    68	        sandboxes = {'id': {'workspace': tmp_path}}
+    69	        cleaned = False
+    70	
+    71	        def start(self):
+    72	            return 'id'
+    73	
+    74	        def exec(self, sid, command, timeout):
+    75	            assert base64.b64encode(b'/hidden/tasks.jsonl').decode() in command
+    76	            assert 'test ! -e "$inventory"' in command
+    77	            assert 'contents=$(ls -A "$data") && test -z "$contents"' in command
+    78	            assert "import pytest" in command and '/tmp/y' in command and '/workspace/x' in command
+    79	            if write:
+    80	                (tmp_path / 'x').touch()
+    81	            return SimpleNamespace(exit_code=exit_code, stderr='probe failure')
+    82	
+    83	        def cleanup_all(self):
+    84	            self.cleaned = True
+    85	
+    86	    manager = Manager()
+    87	    if ok:
+    88	        env.probe_isolation(manager, Path('/hidden/tasks.jsonl'), Path('/hidden'))
+    89	    else:
+    90	        with pytest.raises(RuntimeError, match='probe failed'):
+    91	            env.probe_isolation(manager, Path('/hidden/tasks.jsonl'), Path('/hidden'))
+    92	    assert manager.cleaned
+    93	
+    94	
+    95	@pytest.mark.parametrize('failure', ['missing', 'probe'])
+    96	def test_setup_fails_closed_and_explicit_optout(monkeypatch, tmp_path, harness, failure):
+    97	    calls = []
+    98	    monkeypatch.setattr(env, 'isolate_host_packages', lambda: calls.append('pth'))
+    99	    monkeypatch.setattr(env, 'isolate_gold_tempfiles', lambda: calls.append('gold'))
+   100	    patched = object()
+   101	    monkeypatch.setattr(env, 'patch_subprocess_deps', lambda p: patched)
+   102	    monkeypatch.setattr(env.shutil, 'which', lambda p: None if failure == 'missing' else '/usr/bin/bwrap')
+   103	    monkeypatch.setattr(env, 'apply_isolation', lambda hidden, ro: calls.append(list(hidden)))
+   104	    monkeypatch.setattr(env, 'probe_isolation', lambda *args: (_ for _ in ()).throw(RuntimeError('probe failed')))
+   105	    with pytest.raises(RuntimeError):
+   106	        env.setup_scorer_env(tmp_path, out_dir=tmp_path / 'out')
+   107	    result = env.setup_scorer_env(tmp_path, out_dir=tmp_path / 'out', allow_unsandboxed=True)
+   108	    assert result['sandbox'] == 'none' and result['patched'] is patched
+   109	    assert result['bwrap_argv_template'] is None and calls[-1] == []
+   110	
+   111	
+   112	def test_setup_probes_empty_data_then_full_runtime_mounts(tmp_path, monkeypatch, harness):
+   113	    import swegemma.harness.container_setup as cs
+   114	    calls = []
+   115	    for name in ('isolate_host_packages', 'isolate_gold_tempfiles'):
+   116	        monkeypatch.setattr(env, name, lambda: None)
+   117	    monkeypatch.setattr(env, 'patch_subprocess_deps', lambda p: 'patched')
+   118	    monkeypatch.setattr(env.shutil, 'which', lambda p: '/usr/bin/bwrap')
+   119	    wheels = tmp_path / 'inventory/wheels'
+   120	    monkeypatch.setattr(cs, 'resolve_wheels_dir', lambda config: wheels)
+   121	    def apply(hidden, ro):
+   122	        assert set(map(Path, hidden)) >= {Path.home(), tmp_path / 'repo', tmp_path / 'inventory',
+   123	                                          tmp_path / 'output', Path('/home/ubuntu/work/gemma-wt')}
+   124	        calls.append(('mounts', ro))
+   125	        return env.BWRAP_TEMPLATE
+   126	    monkeypatch.setattr(env, 'apply_isolation', apply)
+   127	    monkeypatch.setattr(env, 'probe_isolation', lambda *args, **kw: calls.append(('probe', kw.get('empty_data', True))))
+   128	    result = env.setup_scorer_env(tmp_path / 'inventory', out_dir=tmp_path / 'output', repo_root=tmp_path / 'repo')
+   129	    assert calls == [('mounts', []), ('probe', True), ('mounts', [wheels]), ('probe', False)]
+   130	    assert result['sandbox'] == 'bwrap' and result['bwrap_argv_template'] == env.BWRAP_TEMPLATE
+   131	
+   132	
+   133	def test_executor_wraps_translated_commands_and_counts_timeouts(tmp_path, monkeypatch, harness):
+   134	    import swegemma.sandbox.subprocess as sb
+   135	    seen = []
+   136	    def execute(**kwargs):
+   137	        seen.append(kwargs)
+   138	        return SimpleNamespace(status='timeout', exit_code=124)
+   139	    monkeypatch.setattr(env, 'execute_limited', execute)
+   140	    monkeypatch.setattr(env, 'runtime_ro_paths', lambda *args: [Path('/opt/python')])
+   141	    env.apply_isolation(['/home/ubuntu'], [])
+   142	    state = {}
+   143	    token = env.command_metrics.set(state)
+   144	    try:
+   145	        for _ in range(2):
+   146	            sb.execute_subprocess_command(command=['/bin/bash', '-c', 'translated'],
+   147	                                          cwd=tmp_path / 'workspace', env={}, timeout=3, shell=False)
+   148	        assert state['cmd_timeouts'] == 2
+   149	        assert seen[0]['command'][0] == 'bwrap'
+   150	        assert seen[0]['command'][-1] == 'translated'
+   151	        assert seen[0]['timeout'] == 3 and seen[0]['shell'] is False
+   152	    finally:
+   153	        env.command_metrics.reset(token)
+   154	
+   155	
+   156	def test_real_bwrap_probe(tmp_path, monkeypatch, harness):
+   157	    if not shutil.which('bwrap'):
+   158	        pytest.skip('bubblewrap not installed')
+   159	    preflight = subprocess.run(env.BWRAP_TEMPLATE[:11] + ['/bin/true'], capture_output=True, text=True)
+   160	    if preflight.returncode:
+   161	        pytest.skip('bubblewrap blocked by sandbox: ' + preflight.stderr.strip())
+   162	    import swegemma.sandbox.subprocess as sb
+   163	    monkeypatch.setattr(sb, 'execute_subprocess_command', sb.execute_subprocess_command)
+   164	    (tmp_path / 'tasks.jsonl').write_text('hidden inventory')
+   165	    env.isolate_host_packages()
+   166	    env.apply_isolation([Path.home(), ROOT, tmp_path], [])
+   167	    env.probe_isolation(sb.SubprocessManager(), tmp_path / 'tasks.jsonl', tmp_path)
+   168	
+   169	
+   170	def test_config_forwards_fields_and_resolves_graph_paths(tmp_path, caplog, harness):
+   171	    from swegemma.context import SwegemmaContext
+   172	    args = SimpleNamespace(data_dir=tmp_path / 'other-data', bundle=tmp_path / 'bundle', concurrency=1)
+   173	    config = runner.build_config(dict(verification_timeout_seconds=17, max_llm_calls=9,
+   174	                                      enable_sandbox_testing=False, graph_dir='mygraphs',
+   175	                                      embeddings_dir='myembeddings', future_option=42),
+   176	                                 args, {}, tmp_path / 'out', {})
+   177	    assert config.harness.verification_timeout_seconds == 17
+   178	    assert config.max_llm_calls == 9 and not config.enable_sandbox_testing
+   179	    assert 'Unknown EvalConfig key: future_option' in caplog.text
+   180	    context = SwegemmaContext(docker_manager=None, container_id='',
+   181	                             graph_dir=config.graph_dir, embeddings_dir=config.embeddings_dir)
+   182	    assert context.graph_dir == str(args.data_dir / 'mygraphs')
+   183	    assert context.embeddings_dir == str(args.data_dir / 'myembeddings')
+   184	    assert runner.config_snapshot(config)['verification_timeout_seconds'] == 17
+   185	    json.dumps(runner.config_snapshot(config))
+   186	
+   187	
+   188	@pytest.mark.parametrize('key,value', [('runner_source_sha256', 'new-source'),
+   189	    ('tasks_sha256', 'new-inventory'), ('versions', {'swegemma': '99'}),
+   190	    ('wheels_listing_sha256', 'new-wheels'), ('sandbox', 'none'), ('python_version', '99')])
+   191	def test_resume_identity_refuses_changed_environment(tmp_path, key, value):
+   192	    header = dict(_schema='agent_eval_v2', runner_source_sha256='old-source',
+   193	                  provenance=dict(git_sha='old-sha', git_dirty=False),
+   194	                  tasks_sha256='old-inventory', versions={'swegemma': '0.2.11'},
+   195	                  wheels_listing_sha256='old-wheels', sandbox='bwrap', python_version='3.13')
+   196	    path = tmp_path / 'run.jsonl'
+   197	    runner.Journal(path, header).close()
+   198	    with pytest.raises(ValueError, match='header mismatch') as exc:
+   199	        runner.Journal(path, dict(header, **{key: value}))
+   200	    assert key in str(exc.value) and '--force-new-out' in str(exc.value)
+   201	
+   202	
+   203	def test_inventory_duplicate_scanned_before_harness_deduplication(tmp_path):
+   204	    path = tmp_path / 'tasks.jsonl'
+   205	    path.write_text('\n'.join(json.dumps(dict(instance_id=i, patch=p)) for i, p in
+   206	                              [('one', 'A'), ('two', 'B'), ('one', 'C')]))
+   207	    with pytest.raises(ValueError, match='Duplicate inventory IDs at line 3'):
+   208	        runner.validate_inventory_ids(path)
+   209	
+   210	
+   211	def test_git_c_quoted_utf8_octal_paths_and_diag_failure(monkeypatch):
+   212	    patch = ('diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\n'
+   213	             '--- "a/caf\\303\\251.py"\n+++ "b/caf\\303\\251.py"\n@@ -1 +1 @@\n-a\n+b\n')
+   214	    assert runner.classify_patch(patch, 'org/pkg')['patch_files'] == ['café.py']
+   215	    monkeypatch.setattr(runner, 'classify_patch', lambda *args: 1 / 0)
+   216	    out = runner.task_diagnostics(None, patch, 'org/pkg', None, [], Path('/inventory'))
+   217	    assert out['diag_error'] == 'ZeroDivisionError' and out['patch_bytes'] > 0
+   218	
+   219	
+   220	def test_leak_scan_records_tokens_only():
+   221	    trace = SimpleNamespace(entries=[SimpleNamespace(event_type='tool_call', tool_name='run_command',
+   222	        usage=None, tool_args={'command': f'cat /inventory/tasks.jsonl # test_patch FAIL_TO_PASS {ROOT} secret contents'})])
+   223	    out = runner.task_diagnostics(trace, '', 'org/pkg', None, [], Path('/inventory'))
+   224	    assert out['leak_suspect']
+   225	    assert out['leak_hits'] == [str(ROOT), '/inventory', 'tasks.jsonl', 'test_patch', 'FAIL_TO_PASS']
+     1	"""Offline, bounded process-tree regression tests; no competition tasks."""
+     2	import os
+     3	from pathlib import Path
+     4	import shlex
+     5	import sys
+     6	import time
+     7	from dataclasses import replace
+     8	
+     9	import pytest
+    10	
+    11	os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
+    12	
+    13	from eval import proctree, sandbox_env
+    14	from adk_eval_core.sandbox.subprocess_sandbox import execute_subprocess_command as original
+    15	
+    16	
+    17	@pytest.fixture
+    18	def execute(tmp_path, monkeypatch):
+    19	    import swegemma.sandbox.subprocess as sb
+    20	    monkeypatch.setattr(sb, 'execute_subprocess_command', original)
+    21	    sandbox_env.apply_isolation([], [])
+    22	    metrics = {}
+    23	    token = sandbox_env.command_metrics.set(metrics)
+    24	    def run(command, **kwargs):
+    25	        return sb.execute_subprocess_command(command=command, cwd=tmp_path,
+    26	                                             env=dict(os.environ), **kwargs)
+    27	    yield run, metrics
+    28	    sandbox_env.command_metrics.reset(token)
+    29	
+    30	
+    31	def python(code):
+    32	    return [sys.executable, '-c', code]
+    33	
+    34	
+    35	def assert_dead(path):
+    36	    pid = int(path.read_text())
+    37	    p = proctree.snapshot().get(pid)
+    38	    assert p is None or p.state in ('Z', 'X')
+    39	
+    40	
+    41	@pytest.mark.parametrize('detach', [False, True])
+    42	def test_timeout_orphans(execute, tmp_path, detach):
+    43	    run, metrics = execute
+    44	    if detach:
+    45	        code = ("import os,time; p=os.fork(); "
+    46	                "os._exit(0) if p else None; os.setsid(); "
+    47	                "open('child.pid','w').write(str(os.getpid())); time.sleep(600)")
+    48	        cmd = ['/bin/bash', '-c', shlex.join(python(code)) + '; sleep 600']
+    49	    else:
+    50	        cmd = ['/bin/bash', '-c', '(sleep 600 & echo $! > child.pid); sleep 600']
+    51	    start = time.monotonic()
+    52	    result = run(cmd, timeout=1)
+    53	    assert result.status == 'timeout' and result.exit_code == 124
+    54	    assert metrics['cmd_timeouts'] == 1
+    55	    assert_dead(tmp_path / 'child.pid')
+    56	    assert time.monotonic() - start < 5
+    57	
+    58	
+    59	def test_memory_tree(execute, monkeypatch):
+    60	    run, metrics = execute
+    61	    monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(300 * 1024**2))
+    62	    code = ("import time; chunks=[]\nfor _ in range(60):\n"
+    63	            " chunks.append(bytearray(10*1024**2)); time.sleep(.04)\ntime.sleep(600)")
+    64	    # Allocate in a child, so accounting must include descendants.
+    65	    result = run(['/bin/bash', '-c', shlex.join(python(code)) + ' & wait'], timeout=8)
+    66	    assert result.status == 'error' and result.exit_code == 137
+    67	    assert 'killed: sandbox memory limit' in result.stderr
+    68	    assert metrics['mem_kills'] == 1
+    69	    assert metrics['peak_rss_bytes'] > 300 * 1024**2
+    70	
+    71	
+    72	@pytest.mark.parametrize('command,kwargs', [
+    73	    (['/bin/bash', '-c', 'echo hello'], {}),
+    74	    (['/bin/bash', '-c', 'exit 3'], {}),
+    75	    (['/bin/bash', '-c', 'exit 137'], {}),
+    76	    (['/bin/bash', '-c', 'echo err >&2'], {}),
+    77	    ('printf hello', {}),
+    78	    (['/bin/bash', '-c', 'printf abcdef'], {'max_output_chars': 3}),
+    79	    (python("import os; os.write(1, b'\\xff')"), {}),
+    80	])
+    81	def test_original_output_contract(execute, tmp_path, command, kwargs):
+    82	    run, metrics = execute
+    83	    expected = original(command, tmp_path, dict(os.environ), **kwargs)
+    84	    actual = run(command, **kwargs)
+    85	    assert type(actual) is type(expected)
+    86	    assert (actual.status, actual.exit_code, actual.stdout, actual.stderr) == (
+    87	        expected.status, expected.exit_code, expected.stdout, expected.stderr)
+    88	    assert metrics['peak_rss_bytes'] > 0
+    89	
+    90	
+    91	def test_normal_exit_daemon(execute, tmp_path):
+    92	    run, metrics = execute
+    93	    result = run(['/bin/bash', '-c', 'sleep 600 >/dev/null 2>&1 & echo $! > child.pid'], timeout=3)
+    94	    assert result.status == 'ok' and result.exit_code == 0
+    95	    assert metrics['orphan_kills'] >= 1
+    96	    assert_dead(tmp_path / 'child.pid')
+    97	
+    98	
+    99	def test_pid_reuse_is_not_a_survivor():
+   100	    p = proctree.snapshot()[os.getpid()]
+   101	    stale = replace(p, starttime=p.starttime - 1)
+   102	    assert proctree.survivors({p.pid: stale}) == {}
+   103	    assert proctree.kill_tree({p.pid: stale}) == 0
+   104	    assert proctree.tree_rss({p.pid: p}) > 0
+   105	
+   106	
+   107	def test_without_prlimit(execute, monkeypatch):
+   108	    run, metrics = execute
+   109	    which = sandbox_env.shutil.which
+   110	    monkeypatch.setattr(sandbox_env.shutil, 'which',
+   111	                        lambda name: None if name == 'prlimit' else which(name))
+   112	    result = run(['/bin/bash', '-c', 'echo fallback'])
+   113	    assert result.status == 'ok' and result.stdout == 'fallback\n'
+   114	    assert metrics['peak_rss_bytes'] > 0
+24:    execute_subprocess_command,
+418:    def exec(
+493:            extra_env=extra_env,
+495:        return execute_subprocess_command(
+498:            env=env,
+503:    async def exec_async(
+/usr/bin/node
+/usr/bin/bwrap
+2c42c7a6a9d834997f9509eae3d850df2ef29e0d
+
+codex
+The process-group setup is present, but I’ve found gaps in tracking detached children and in the PID-reuse checks. I’m also checking whether the 8 GiB virtual-memory cap changes valid command results, and whether the tests cover those cases.
