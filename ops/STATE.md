@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 18:05Z (cycle 65, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 18:12Z (cycle 66, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -14,27 +14,24 @@ Builder on Opus (dec 010: local-first, two-strike).
 - requests/httpx dropped (wheel shadowing = scorer property, dec 014). Gold v2 files in results/ (gold_calibration_*, gold_failure_causes).
 
 ## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 023 item 1b)
-- Until bin-job-fallback.diff is applied: `bin/job status` + `ls /run/user/1001/bus`. If the bus is gone and a job says running with a dead pid, mark it failed and relaunch it ONCE (logout killed the scope; NOT a 137/memory bug). Linger is OFF (Aniket's SSH login supplies the bus).
-- `bin/job status memguard` must say running; if not: `bin/job start memguard -- bin/memguard`. Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
+- Linger check (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`; if not, tell the Director. After the NEXT reboot, once: `systemctl --user list-units --type=service --state=running`, names only; report non-ours units to the Director, never inspect or touch them (may be Etho).
+- Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
-## Running jobs (17:55Z)
-- memguard (pid 7933): running, 0 kills. codex-review ops/codex/review-20261105T175251.md: 6 BLOCKING (descendants not allowlist-checked; pid reuse; orphan/fork survivors; test validity; 2 on the applied bin/job kill path). Fix: codex-build memguard-fix (branch codex/memguard-fix). The bin/job findings (stale pgid, setsid escapes) go in a later owner patch. On restart, admission refuses the name "memguard" when MemAvailable < 5G: use memguard-light then (Director informed).
-- codex-sandbox-limits DONE: 2c42c7a, 76 pass (bwrap live check blocked inside Codex); its ops/ edits must NOT be merged. codex-review job review-sandbox-limits.
-- RELAUNCHED 17:52Z (the first attempts all failed because Codex's tool host crashes under the ulimit -v 5G fallback): review-memguard, codex-sandbox-limits (branch codex/sandbox-limits), ask-setup-210s. All three now run under the systemd scope (the user bus exists since 17:51Z).
-- review-job-fallback: codex-review of ops/patches/bin-job-fallback.diff.
-- scout DONE: ops/scout/2026-11-05-timing-caps.md. No public setup figure; the rules text puts setup inside the 12 h; unclear whether it counts against the per-task cap; public caps 4.5/8 min. Dec 023 item 3 DONE: RULES_FINDINGS C1-C3 (starter defaults to 60 min if the key is absent; sample_submission 1 min; "[0.10]" notebook 4.5 min). Weigh C3 as a mean, not a worst case, in report 004.
+## Running jobs (18:12Z)
+- memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
+- review-job-patch2-light, review-memguard-fix-light, codex-sandbox-limits2, codex-kernel-setup-fix.
+- Done this cycle: pipfb2-light (plan 003), scout (ops/scout/2026-11-05-timing-caps.md; RULES_FINDINGS C1-C3).
 
-## Codex x bin/job (cycles 62-63)
-- Dec 023 item 1a DONE: ops/patches/bin-job-fallback.diff (scope path only if Linger=yes; fallback ulimit -d). codex-review clean (ops/codex/review-20261105T175555.md); path mailed to the Director 18:04Z. Awaiting Aniket.
-- bin/job hardening applied by Aniket (b1eedd7). Its ulimit -v 5G fallback (no user bus) crashes Codex (SIGTRAP). ulimit -d 5G works (A/B probe 17:52Z). Asked the Director to relay a one-line fix to Aniket. If a Codex job fails with 'code-mode host closed its stdout', check the [bin/job] cap line in the log.
+## bin/job, memguard, owner patch (cycles 62-66)
+- Linger=yes since ~18:05Z (dec 025): the scope path (MemoryMax=5G) is normal; Codex works under it.
+- Owner patch v2 = ONE diff (dec 024 item 3): ops/patches/bin-job-fallback.diff (linger-gated scope, ulimit -d fallback, 6-field status with boot_id+starttime, GEMMA_JOB_ID marker, stale-boot refusal, trusted-pgid check, setsid escapes killed+reported, scope stop only if active). Smoke test ops/patches/bin-job-killtest.sh: 4/4 pass. v1 review clean; v2 review job review-job-patch2-light. Then mail the Director the path.
+- memguard-fix: branch codex/memguard-fix (53c87da + my ddf9746: status parse >=3 fields for the v2 patch). 22 pass/1 skip. Review job review-memguard-fix-light. Merge only with no BLOCKING; deploy as memguard-light, start the new one BEFORE stopping old pid 7933 (dec 024 item 4).
 
-## Dec 022 item 2: setup root cause (IN PROGRESS, cycle 65)
-- 2a: results/kaggle_timing_e4b_v000_setup_breakdown.json. The ~208 s lies between the ensurepip warning and the first prompt (dependency setup), with no per-command timestamps. Verification ~410 s is about 2x.
-- 2b (codex-ask ops/codex/ask-20261105T175253.md): ~80% "kernel artifact". No unconditional 210 s wait in the harness. Leading suspect: sandbox/setup.py:208-211, where the offline editable pip fails, then a fallback pip WITHOUT --no-index runs (PIP_* is stripped by sandbox env sanitization) and retries an unreachable index on Kaggle.
-- My checks: Dockerfile.public:9 pre-installs the build backends. The kernel's injector does extract poetry_core/pdm_backend (skip set = pytest/pluggy/pip/setuptools/wheel only, container_setup.py:155). The Kaggle venv was created WITHOUT pip (ensurepip failed -> subprocess.py:357 fallback), so setup.py's pip calls used whatever pip system_site_packages gave. The wheelhouse is 27 MB (extraction is not 210 s). setup.py has only 3 subprocess calls (208, 211, 390 slow path), so pip is the only candidate inside setup.py.
-- Plan 003 repro (scripts eval/repro/plan003_pipfb_v{1,2}.sh; v2 needs the v1 out dir for proj-*; output dir in the scratchpad, see ops/jobs/pipfb2-light.cmd): v1 invalid (pip ignores http untrusted hosts, 0.5 s); v2 (https unroutable index) RUNNING as job pipfb2-light, already >3 min on one fallback. Mechanism plausible; NOT proven that Kaggle hit it.
-- Next: if pipfb2 shows hang ~100-200 s -> report 004 with option: a CPU-only Kaggle kernel (internet off, pinned image, no GPU quota) that runs the kernel install() path on 2 tasks and logs every setup subprocess (cmd, s, rc, stderr tail). That's the decisive, cheap proof. Fix candidate: pre-install the backends + pip into the sandbox venv, or pass --no-index to the fallback via a setup.py wrapper; never fail silently.
+## Dec 022 item 2: CONCLUDED "artifact" -> report 004 (NEEDS_DECISION)
+- Plan 003 repro: one hung-index fallback pip = 103.4 s; 2 calls = 206.8 s vs Kaggle 207.4-210.8; verification 4 calls = 413 vs 410-412. results/plan003_pip_fallback_repro.json. Why Kaggle's offline install failed is unproven.
+- Kernel fix: codex-build kernel-setup-fix (branch codex/kernel-setup-fix; spec ops/codex/build-kernel-setup-fix.spec). Needs my review + codex-review before any Kaggle push.
+- Report 004 recommends B: Kaggle CPU-only setup check (no GPU quota), then ONE GPU re-time of v000 at cap 5. Even with the fix, the ship cap is ~4.75 (cap 5 + 0.2 setup = 680 > 660).
 
 ## OOM incident (dec 020/021)
 - Root cause from runs/gold-null2: null-phase rows 22 rich_4006 (327 s), 38 rich_3480 (2683 s), 39 rich_3772 (2867 s) hit exit 124. The harness executor already uses start_new_session+killpg (adk_eval_core subprocess_sandbox.py:57), so the orphan theory is weaker; the leading suspect is unbounded memory in a null-patch rich test with no per-sandbox memory cap (none locally; the scorer has 4 GiB). Unproven: no RSS was logged. The codex-sandbox-limits fix covers both.
@@ -46,7 +43,7 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Kaggle GPU this week: 0.07 h used (v1+v2 failed fast, per `kaggle quota`); 3.48 quota-h used after v3 (~1.74 L4x4 h). Log: ops/budget/kaggle.md. Resets Sat 00:00Z.
 
 ## Live caveats
-- Reminder to Aniket due 2026-11-09T15:00Z: Etho judging over -> enable linger (check ~/.config/systemd/user for auto-starting units first, then `sudo loginctl enable-linger ubuntu`). Dec 023 item 4: on the first cycle at or after then, bin/send aniket the dec-023 text, then mail the Director. Keep until a decision marks it done.
+- Job naming (dec 024): waiters, codex-ask and codex-review jobs end in -light; builds, test suites and evals never do.
 - LORO with only 2 repos (rich, fastapi) is weak; report 002 must say so (dec 014 item 3).
 - Paper evidence due Nov 9 23:59Z (dec 007): schema-headed results/ files for gold calibration (done), Kaggle E4B timing (pending), failure taxonomy via trace-analyst once (pending). paper/ is the paper session's; don't edit.
 - Director reminder due 2026-11-06T23:02Z: GCP quota re-request line to Aniket; keep until a decision marks it done.
@@ -69,6 +66,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
 ## Next 3
-1. Merge codex/sandbox-limits (eval/ files only) after review-sandbox-limits; merge memguard-fix after its review, then restart memguard; mail the Director bin-job-fallback.diff after review-job-fallback.
-2. Dec 022 item 2: finish plan 003 (pipfb2-light), then report 004 (setup root cause + options; weigh RULES_FINDINGS C3 as a mean).
-3. EV-1 implementation, then the cpu8 gold+null run; then item 4 levers and report 004.
+1. Await dec on report 004. Review + merge kernel-setup-fix; on approval push the CPU setup check.
+2. Act on reviews: review-job-patch2-light (then mail the Director), review-memguard-fix-light (merge, deploy memguard-light), codex-sandbox-limits2 (then re-review, merge eval/ only).
+3. EV-1 + the cpu8 gold/null run (dec 019/020) after the sandbox-limits merge; then dec 022 item 4 levers (truncation-safe diff, patch hygiene, tool-output trimming).

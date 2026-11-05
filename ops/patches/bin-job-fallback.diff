@@ -1,6 +1,17 @@
 --- a/bin/job
 +++ b/bin/job
-@@ -18,18 +18,24 @@
+@@ -1,7 +1,9 @@
+ #!/usr/bin/env bash
+ # Detached long-running jobs that survive the end of a Claude cycle.
+ #   bin/job start <name> -- <command...>   bin/job status [name]   bin/job tail <name> [lines]   bin/job kill <name>
+-# Writes ops/jobs/<name>.status: "running <pid> <start> <pgid>" -> "done 0 <end>" / "failed <rc> <end>"
++# Writes ops/jobs/<name>.status: "running <pid> <start> <pgid> <boot_id> <starttime>" -> "done 0 <end>" / "failed <rc> <end>"
++# Every job process inherits GEMMA_JOB_ID=<name>/<boot_id>/<starttime> (unique per run), so `kill` can find
++# descendants that left the process group (setsid) and never trusts a pgid recorded before a reboot.
+ set -uo pipefail
+ cd "$(dirname "$0")/.." || exit 1
+ mkdir -p ops/jobs
+@@ -18,25 +20,34 @@
      fi
      printf '%q ' "$@" > "ops/jobs/$name.cmd"
      # Memory cap per job: a runaway job must not stall the VM (Etho shares it; 2026-11-05 incident).
@@ -30,3 +41,71 @@
      fi
      # setsid: the wrapper leads its own process group, so `kill` can signal the whole tree.
      GEMMA_JOB_CAP=$cap setsid nohup bash -c '
+       name=$1; shift
+       echo 1000 > /proc/self/oom_score_adj 2>/dev/null || true   # kernel OOM killer picks our jobs before Etho
+       pgid=$(ps -o pgid= -p $$ | tr -d " ")
+-      echo "running $$ $(date -u +%FT%TZ) $pgid" > "ops/jobs/$name.status"
++      boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
++      stime=$(sed "s/.*) //" /proc/$$/stat | awk "{print \$20}")
++      export GEMMA_JOB_ID="$name/$boot/$stime"
++      echo "running $$ $(date -u +%FT%TZ) $pgid $boot $stime" > "ops/jobs/$name.status"
+       { echo "[bin/job] $GEMMA_JOB_CAP; pgid $pgid"; nice -n 15 "$@"; } > "ops/jobs/$name.log" 2>&1; rc=$?
+       [ $rc -eq 137 ] && echo "[bin/job] exit 137: killed, most likely at the memory cap" >> "ops/jobs/$name.log"
+       if [ $rc -eq 0 ]; then st=done; else st=failed; fi
+@@ -47,20 +58,47 @@
+     if [ -n "${1:-}" ]; then cat "ops/jobs/$1.status"; else for f in ops/jobs/*.status; do [ -e "$f" ] && echo "$(basename "$f" .status): $(cat "$f")"; done; fi;;
+   tail) tail -n "${2:-40}" "ops/jobs/$1.log";;
+   kill)
+-    read -r st pid _ pgid < "ops/jobs/$1.status"
++    read -r st pid _ pgid boot stime < "ops/jobs/$1.status"
+     [ "$st" = running ] || { echo "not running"; exit 0; }
++    if [ -n "${boot:-}" ] && [ "$boot" != "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ]; then
++      echo "failed stale $(date -u +%FT%TZ)" > "ops/jobs/$1.status"
++      echo "stale status from before a reboot: nothing signalled"; exit 0
++    fi
++    proc_start() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; }
++    # Processes of THIS run, wherever they are now (setsid escapes included).
++    marked() { [ -n "$id" ] || return 0; local e p
++      for e in /proc/[0-9]*/environ; do
++        grep -qzx "GEMMA_JOB_ID=$id" "$e" 2>/dev/null && { p=${e#/proc/}; echo "${p%/environ}"; }
++      done; }
++    id=""; [ -n "${stime:-}" ] && id="$1/$boot/$stime"
++    # Trust the recorded pgid only while its leader (the wrapper) is provably the same process: start time
++    # matches (new records) or, for 4-field records, the live pid still leads that group. Otherwise the
++    # number may belong to an unrelated, reused group; the job's own processes are still found by marker.
++    group_ok=0
+     if [[ "${pgid:-}" =~ ^[0-9]+$ ]] && [ "$pgid" -gt 1 ]; then
+-      kill -TERM -- "-$pgid" 2>/dev/null
+-      for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -g "$pgid" >/dev/null || break; sleep 0.5; done
+-      kill -KILL -- "-$pgid" 2>/dev/null; sleep 0.3
+-    else  # status written by an older bin/job without a pgid
++      if [ -n "${stime:-}" ]; then [ "$(proc_start "$pid")" = "$stime" ] && group_ok=1
++      elif [ "$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$pgid" ]; then group_ok=1; fi
++    fi
++    members() { { [ $group_ok = 1 ] && pgrep -g "$pgid"; marked; } 2>/dev/null | sort -u; }
++    if [ $group_ok = 1 ] || [ -n "$id" ]; then
++      [ $group_ok = 1 ] && kill -TERM -- "-$pgid" 2>/dev/null
++      for p in $(marked); do kill -TERM "$p" 2>/dev/null; done
++      for _ in 1 2 3 4 5 6 7 8 9 10; do [ -n "$(members)" ] || break; sleep 0.5; done
++      [ $group_ok = 1 ] && kill -KILL -- "-$pgid" 2>/dev/null
++      for p in $(marked); do kill -KILL "$p" 2>/dev/null; done; sleep 0.3
++    elif [ -z "${pgid:-}" ]; then  # 3-field status written by an older bin/job without a pgid
+       pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null
++    else
++      echo "pgid $pgid no longer led by wrapper $pid and no job marker: not signalling it"
+     fi
+-    if [ -s "ops/jobs/$1.unit" ]; then
+-      XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user stop "$(cat "ops/jobs/$1.unit").scope" 2>/dev/null
++    if [ -s "ops/jobs/$1.unit" ]; then  # --collect removes an emptied scope; stop it only if still active
++      u="$(cat "ops/jobs/$1.unit").scope"
++      if XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user is-active --quiet "$u" 2>/dev/null; then
++        XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user stop "$u" 2>/dev/null || echo "warning: scope stop failed for $u"
++      fi
+     fi
+     echo "failed killed $(date -u +%FT%TZ)" > "ops/jobs/$1.status"
+-    surv=$( { [ -n "${pgid:-}" ] && pgrep -g "$pgid"; pgrep -P "$pid"; } 2>/dev/null | sort -u | tr '\n' ' ')
+-    if [ -n "$surv" ]; then echo "killed; SURVIVORS: $surv"; exit 1; else echo "killed (no survivors in group)"; fi;;
++    surv=$( { members; [ -z "${pgid:-}" ] && pgrep -P "$pid"; } 2>/dev/null | sort -u | tr '\n' ' ')
++    if [ -n "$surv" ]; then echo "killed; SURVIVORS (incl. setsid escapes): $surv"; exit 1; else echo "killed (no survivors)"; fi;;
+   *) echo "usage: bin/job start <name> -- <cmd...> | status [name] | tail <name> [n] | kill <name>"; exit 2;;
+ esac

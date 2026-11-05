@@ -107,3 +107,9 @@
 2026-11-05T18:00Z | ask-setup-210s: ~80% kernel artifact; suspect the setup.py:211 index-backed pip fallback offline | ops/codex/ask-20261105T175253.md
 2026-11-05T18:02Z | dec 022 2a: setup breakdown saved | results/kaggle_timing_e4b_v000_setup_breakdown.json
 2026-11-05T18:03Z | plan 003 pre-registered; repro v1 invalid (pip ignores http index); v2 (https) running | eval/plans/003.md, ops/jobs/pipfb2-light.log
+2026-11-05T18:06Z | dec 024/025 read: -light naming; linger ON (owner); reminder dropped; owner patch = one diff | ops/decisions/024-20261105T175902-14149-from-builder.md, ops/decisions/025-owner-linger-on-2026-11-05.md
+2026-11-05T18:06Z | plan 003: hung-index fallback 103.4 s/call; 2 calls = 206.8 s vs Kaggle 207-211 s -> artifact supported | results/plan003_pip_fallback_repro.json
+2026-11-05T18:07Z | review-sandbox-limits: 3 BLOCKING; round 2 build launched | ops/codex/review-20261105T175836.md, ops/codex/build-sandbox-limits2.spec
+2026-11-05T18:07Z | memguard-fix built (22 pass); status parse loosened for patch v2 (ddf9746); review launched | ops/codex/build-memguard-fix.md
+2026-11-05T18:08Z | owner patch v2 (kill-path: stale boot/pgid, setsid escapes) + 4-case smoke test pass; review launched | ops/patches/bin-job-fallback.diff, ops/patches/bin-job-killtest.sh
+2026-11-05T18:10Z | codex-build kernel-setup-fix launched; report 004 (setup root cause) -> NEEDS_DECISION | ops/reports/004-setup-210s-root-cause.md
