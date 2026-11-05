@@ -38,3 +38,5 @@
 2026-11-05T10:35Z | router nudge; gold-diag3-wait still running, no action | ops/jobs
 2026-11-05T12:04Z | diag3 no fastapi recovery (plugin env not propagated); uninstall langsmith, kernel v8, job gold-diag4-wait | eval/kaggle/gold_calibration.py
 2026-11-05T14:06Z | owner: BUILDER_MODEL sonnet->opus, config.env conflict resolved, builder restarted | config.env
+2026-11-05T14:15Z | correction: 14:06Z line — conflict markers were in ops/journal.md, not config.env (config.env never conflicted) | ops/decisions/010-owner-builder-opus-process.md
+2026-11-05T14:15Z | dec 010 read; local gold repro built (~10s/task); root cause = subprocess venv inherits host site-packages; docker-faithful wheel injection in patch_subprocess_deps; starlette/httpbin failures persist => genuine env exclusions; job gold-local | eval/kaggle/gold_calibration.py, runs/gold-local

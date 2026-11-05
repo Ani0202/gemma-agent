@@ -24,7 +24,7 @@ DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
 WORKING_DIR = Path('/kaggle/working')
 WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
 CONCURRENCY = 2
-ONLY_IDS = ['fastapi_15030', 'fastapi_14962', 'fastapi_14964', 'fastapi_15023', 'fastapi_14978', 'requests_7505', 'requests_7502', 'requests_7433', 'requests_7328', 'requests_7205', 'rich_4070', 'rich_4079', 'fastapi_13920', 'fastapi_14794', 'fastapi_14786', 'fastapi_14492', 'fastapi_14479', 'fastapi_12942', 'fastapi_14463', 'fastapi_14099', 'fastapi_14609', 'fastapi_14349', 'fastapi_14512', 'fastapi_14487', 'fastapi_11355', 'fastapi_14485', 'fastapi_14306', 'fastapi_14482', 'fastapi_14459', 'fastapi_14458', 'fastapi_14448', 'fastapi_14455', 'fastapi_9753', 'fastapi_14430', 'fastapi_5077', 'fastapi_9555', 'fastapi_13207', 'fastapi_14361', 'fastapi_14360', 'fastapi_14356', 'fastapi_14419', 'fastapi_5624', 'fastapi_14301', 'fastapi_14262', 'fastapi_14246', 'fastapi_14266', 'fastapi_9425', 'fastapi_14186', 'fastapi_14077', 'fastapi_13713', 'httpx_3672', 'fastapi_14791', 'fastapi_14371', 'fastapi_15785', 'fastapi_14605', 'fastapi_15763', 'fastapi_14583', 'fastapi_15745', 'fastapi_14303', 'fastapi_14297', 'fastapi_13537', 'fastapi_14953', 'fastapi_14616', 'fastapi_13786', 'fastapi_11194', 'requests_6757', 'requests_6644', 'requests_6629', 'requests_6589', 'requests_6592', 'rich_3486', 'rich_3782', 'rich_3296', 'rich_3472', 'rich_3469', 'rich_3130', 'rich_3064']  # diagnostic rerun of previously failing tasks; None = all
+ONLY_IDS = None  # all tasks (diag ids list removed after local repro, cycle 37)
 
 
 def finished_results(text):
@@ -179,11 +179,17 @@ def choose_sandbox():
 
 
 def patch_subprocess_deps(data_dir):
-    """Emulate docker-only dependency setup for the subprocess sandbox (swegemma skips it).
+    """Emulate the docker-only dependency setup for the subprocess sandbox (swegemma skips it).
 
-    Symlink py313-compatible wheels into the sandbox /wheels dir, then run the
-    competition's own sandbox/setup.py (no fast path) inside the sandbox venv.
+    Contract (swegemma 0.2.11 container_setup): for docker, _ensure_container_site_packages
+    unpacks every deduplicated (highest-version, py313-compatible) wheel from wheels_dir that is
+    < 20 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
+    site-packages, no resolver; large wheels are added only if imported by the workspace; then
+    sandbox/setup.py runs with --fast-path. We replicate exactly that inside the sandbox venv.
+    The sandbox venv uses system_site_packages=True, so the HOST python must mirror the image
+    (Dockerfile.public: pytest, pytest-timeout==2.1.0, typer, build backends; nothing else).
     """
+    import tarfile
     import swegemma.harness.container_setup as cs
     import swegemma.harness.verification as vf
     orig = cs.install_test_dependencies
@@ -197,18 +203,18 @@ def patch_subprocess_deps(data_dir):
     def install(docker, container_id, repo='', *, fast_path=True, config=None):
         if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
             return orig(docker, container_id, repo, fast_path=fast_path, config=config)
-        wdir = docker.sandboxes[container_id]['wheels']
-        wdir.mkdir(parents=True, exist_ok=True)
-        for w in wheels_src.glob('*.whl'):
-            if not cs._is_wheel_compatible_py313(w.name) or 'cutlass' in w.name.lower():
-                continue
-            name = w.name.replace('cu128', '+cu128') if 'cu128' in w.name and '+' not in w.name else w.name
-            try:
-                os.symlink(w, wdir / name)
-            except FileExistsError:
-                pass
+        venv_dir = docker.sandboxes[container_id]['venv']
+        sp_dir = next(iter(sorted(venv_dir.glob('lib/python3*/site-packages'))))
+        base_wheels, large_wheels, _m2p, _req = cs._inspect_wheels_dir(wheels_src)
+        selected = list(base_wheels)
+        if large_wheels:  # public wheels have none; fail loudly rather than silently diverge
+            raise RuntimeError('large wheels present; workspace-import scan not emulated')
+        tar_path = cs._build_unpacked_wheels_tar(selected, 'sp_base_local', '.swegemma_base_injected')
+        with tarfile.open(tar_path) as tf:
+            tf.extractall(sp_dir, filter='data')
         docker.copy_to(container_id, setup_py, '/tmp/setup.py')
-        docker.exec(container_id, f'python3 /tmp/setup.py --no-fast-path {repo}'.strip(), timeout=280)
+        flag = '--fast-path' if fast_path else ''
+        docker.exec(container_id, f'python3 /tmp/setup.py {flag} {repo}'.strip(), timeout=280)
     cs.install_test_dependencies = install
     vf.install_test_dependencies = install
 
