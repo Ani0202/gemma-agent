@@ -23,6 +23,8 @@ if [ "\$2" = submissions ]; then case "\${SUBS:-none}" in
   old) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,2026-11-01 01:00:00,other,COMPLETE,0.1,\n';;
   junk) echo "<html>oops";; fail) exit 1;;
   short) printf 'ref,fileName,date,description,status,publicScore,privateScore\n1\n';;
+  impossible) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,2026-02-30 01:00:00,x,COMPLETE,0.1,\n';;
+  unicode) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,\xef\xbc\x92\xef\xbc\x90\xef\xbc\x92\xef\xbc\x96-11-01 01:00:00,x,COMPLETE,0.1,\n';;
   baddate) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,junk,x,COMPLETE,0.1,\n';;
   quote) printf 'ref,fileName,date,description,status,publicScore,privateScore\n9,submission.zip,"2026-11-01 01:00:00,x,COMPLETE,0.1,\n';;
   header) printf 'ref,fileName,date,description,status,publicScore,privateScore\n';;
@@ -47,7 +49,7 @@ expect() {  # <name> <expected rc> <expected pending Y|N> <expected records> <ke
     echo "FAIL $name: rc=$rc pending=$pend records=$rec :: $(printf '%s' "$out" | tail -1)"; fail=1; fi
 }
 expect ok 0 N 1 1 -- MODE=ok
-expect reject400 4 N 0 1 -- MODE=400
+expect reject400 5 Y 0 1 -- MODE=400   # v6: no ref => always pending (review 20261105T233800 item 1)
 expect amb408 5 Y 0 1 -- MODE=408
 expect amb503 5 Y 0 1 -- MODE=503
 expect killed 5 Y 0 1 -- MODE=killed
@@ -62,8 +64,35 @@ expect subs_baddate 3 N 0 1 -- SUBS=baddate
 expect subs_quote 3 N 0 1 -- SUBS=quote
 expect subs_header_only 3 N 0 1 -- SUBS=header
 expect subs_full_page 3 N 0 1 -- SUBS=full
+expect subs_impossible_date 3 N 0 1 -- SUBS=impossible
+expect subs_unicode_digits 3 N 0 1 -- SUBS=unicode
 expect no_version 3 N 0 x -- MODE=ok
 expect bad_output 3 N 0 1 -- OUTZIP=/etc/hostname
+# authorization must be an exact directive (review 20261105T233800 item 3)
+mv ops/decisions/z.md ops/decisions/z.hold
+for line in "track=e4b_REJECTED" "track=e4b-extra" "track=e4b bundle=dist/other.zip" "track=e4b trailing junk"; do
+  echo "SUBMIT: AUTHORIZE sha256=$sha $line" > ops/decisions/auth.md; reset
+  set +e; G MODE=ok bin/kaggle-submit dist/z.zip e4b m 1 >/dev/null 2>&1; rc=$?; set -e
+  [ $rc = 3 ] && echo "PASS auth_exact '$line'" || { echo "FAIL auth_exact '$line' rc=$rc"; fail=1; }
+done
+echo "SUBMIT: AUTHORIZE sha256=$sha track=e4b bundle=dist/z.zip" > ops/decisions/auth.md; reset
+set +e; G MODE=ok bin/kaggle-submit dist/z.zip e4b m 1 >/dev/null 2>&1; rc=$?; set -e
+[ $rc = 0 ] && echo "PASS auth_bundle_match" || { echo "FAIL auth_bundle_match rc=$rc"; fail=1; }
+rm ops/decisions/auth.md; mv ops/decisions/z.hold ops/decisions/z.md
+# ledger is parsed strictly (review 20261105T233800 item 2)
+for led in '{"sha256":"'"$sha"'","day":"2026-01-01"}' '{"sha256":"x","day":"'"$(date -u +%F)"'"}' 'not json' '{"day":"2026-01-01"}'; do
+  reset; printf '%s\n' "$led" > ops/submissions.jsonl
+  set +e; G MODE=ok bin/kaggle-submit dist/z.zip e4b m 1 >/dev/null 2>&1; rc=$?; set -e
+  [ $rc = 3 ] && echo "PASS ledger_strict '$led'" || { echo "FAIL ledger_strict '$led' rc=$rc"; fail=1; }
+done
+reset; mkdir -p ops/ledgerdir; rm -f ops/submissions.jsonl; ln -s /nonexistent/x ops/submissions.jsonl
+set +e; G MODE=ok bin/kaggle-submit dist/z.zip e4b m 1 >/dev/null 2>&1; rc=$?; set -e; rm -f ops/submissions.jsonl
+[ $rc != 0 ] && echo "PASS ledger_unreadable" || { echo "FAIL ledger_unreadable rc=$rc"; fail=1; }
+# unsupported mode refuses
+reset; sed -i 's/SUBMIT_MODE=kernel/SUBMIT_MODE=file/' config.env
+set +e; G MODE=ok bin/kaggle-submit dist/z.zip e4b m 1 >/dev/null 2>&1; rc=$?; set -e
+sed -i 's/SUBMIT_MODE=file/SUBMIT_MODE=kernel/' config.env
+[ $rc = 3 ] && echo "PASS mode_file_refused" || { echo "FAIL mode_file_refused rc=$rc"; fail=1; }
 # pending blocks the next call
 reset; echo '{}' > ops/submissions.pending; set +e; G bin/kaggle-submit dist/z.zip e4b m 1 >/dev/null 2>&1; rc=$?; set -e
 [ $rc = 3 ] && echo "PASS pending_blocks" || { echo "FAIL pending_blocks rc=$rc"; fail=1; }
