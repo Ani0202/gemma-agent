@@ -1,0 +1,1 @@
+bash -c ops/codex/memguard-fix6-livetest.sh\;\ a=\$\?\;\ ops/codex/docker-order-hosttest.sh\;\ b=\$\?\;\ echo\ \"livetest=\$a\ dockerorder=\$b\"\;\ \[\ \$a\ -eq\ 0\ \]\ \&\&\ \[\ \$b\ -eq\ 0\ \] 

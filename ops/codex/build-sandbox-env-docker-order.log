@@ -3325,3 +3325,234 @@ def test_job_name_parses_bin_job_wrapper():
  M eval/sandbox_env.py
 ?? eval/tests/test_sandbox_deps.py
 
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-sandbox-env-docker-order/eval/sandbox_env.py
+/home/ubuntu/work/gemma-wt/codex-sandbox-env-docker-order/eval/tests/test_sandbox_deps.py
+diff --git a/eval/sandbox_env.py b/eval/sandbox_env.py
+index e8ff7cefd77a514219d91984f0ee0397f8d6e0f5..385fd369b0938260c42eee8fd1fbb3fdeb808332
+--- a/eval/sandbox_env.py
++++ b/eval/sandbox_env.py
+@@ -275,18 +275,27 @@
+                 sha256=hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None)
+ 
+ 
++def base_cache_key(wheels, harness_version):
++    """Identify the selected base wheels, independent of enumeration order/path."""
++    import hashlib
++    identity = (str(harness_version), sorted((p.name, p.stat().st_size) for p in wheels))
++    return 'sp_base_local_' + hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:24]
++
++
+ def patch_subprocess_deps(data_dir):
+     """Emulate the docker-only dependency setup for the subprocess sandbox (swegemma skips it).
+ 
+-    Contract (swegemma 0.2.11 container_setup): for docker, _ensure_container_site_packages
+-    unpacks every deduplicated (highest-version, py313-compatible) wheel from wheels_dir that is
+-    < 20 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
++    Contract (swegemma 0.2.11 container_setup): Docker workspace setup first attempts
++    the workspace editable install; _ensure_container_site_packages then unpacks every deduplicated
++    (highest-version, py313-compatible) wheel from wheels_dir that is
++    < 16 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
+     site-packages, no resolver; large wheels are added only if imported by the workspace; then
+     sandbox/setup.py runs with --fast-path. We replicate exactly that inside the sandbox venv.
+     The sandbox venv uses system_site_packages=True, so the HOST python must mirror the image
+     (Dockerfile.public: pytest, pytest-timeout==2.1.0, typer, build backends; nothing else).
+     """
+     import tarfile
++    from importlib.metadata import version
+     import swegemma.harness.container_setup as cs
+     import swegemma.harness.verification as vf
+     import swegemma.harness.sample_verification  # load all known by-name bindings
+@@ -305,13 +314,26 @@
+             return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+         venv_dir = docker.sandboxes[container_id]['venv']
+         sp_dir = next(iter(sorted(venv_dir.glob('lib/python3*/site-packages'))))
++        # The stock editable hook returns early for subprocess managers. Mirror
++        # its Docker command, ignored failure, and default manager timeout here.
++        docker.exec(container_id,
++                    'pip install --no-index --find-links=/wheels --no-build-isolation --no-deps -e /workspace 2>/dev/null || true')
++        # The harness index caches by directory path alone. Refresh it so a changed
++        # wheelhouse is still selected/deduplicated by the actual harness code.
++        cs._WHEEL_INDEX_CACHE.pop(str(wheels_src.resolve()), None)
+         base_wheels, large_wheels, _m2p, _req = cs._inspect_wheels_dir(wheels_src)
+         selected = list(base_wheels)
+         if large_wheels:  # public wheels have none; fail loudly rather than silently diverge
+             raise RuntimeError('large wheels present; workspace-import scan not emulated')
+-        tar_path = cs._build_unpacked_wheels_tar(selected, 'sp_base_local', '.swegemma_base_injected')
+-        with tarfile.open(tar_path) as tf:
+-            tf.extractall(sp_dir, filter='data')
++        cache_key = base_cache_key(selected, version('swegemma'))
++        marker = sp_dir / '.swegemma_base_injected'
++        if not marker.is_file() or marker.read_text() != cache_key:
++            tar_path = cs._build_unpacked_wheels_tar(selected, cache_key, marker.name)
++            with tarfile.open(tar_path) as tf:
++                tf.extractall(sp_dir, filter='data')
++            # The harness archive contains an 'ok' marker; bind the container's
++            # marker to this wheel identity only after extraction succeeds.
++            marker.write_text(cache_key)
+         docker.copy_to(container_id, setup_py, '/tmp/setup.py')
+         flag = '--fast-path' if fast_path else ''
+         docker.exec(container_id, f'python3 /tmp/setup.py {flag} {repo}'.strip(), timeout=280)
+diff --git a/eval/tests/test_sandbox_deps.py b/eval/tests/test_sandbox_deps.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c36bdab5c2634c50a51f8e91656377a87031e066
+--- /dev/null
++++ b/eval/tests/test_sandbox_deps.py
+@@ -0,0 +1,141 @@
++"""Offline Docker-order and wheel-cache contracts using fake harness modules."""
++import importlib.metadata
++import io
++import sys
++import tarfile
++from types import ModuleType, SimpleNamespace
++
++import pytest
++
++from eval import sandbox_env as env
++
++
++@pytest.fixture
++def local_setup(tmp_path, monkeypatch):
++    events = []
++    original = lambda *args, **kwargs: events.append(('docker', args, kwargs))
++    names = ['swegemma', 'swegemma.harness', 'swegemma.harness.container_setup',
++             'swegemma.harness.verification', 'swegemma.harness.sample_verification',
++             'swegemma.evaluate', 'swegemma.cli', 'swegemma.harness.agent_runner']
++    for name in names:
++        module = ModuleType(name)
++        monkeypatch.setitem(sys.modules, name, module)
++        if '.' in name:
++            parent, attr = name.rsplit('.', 1)
++            setattr(sys.modules[parent], attr, module)
++    cs = sys.modules['swegemma.harness.container_setup']
++    cs.install_test_dependencies = original
++    monkeypatch.setattr(importlib.metadata, 'version', lambda name: 'fake-0.2.11')
++    monkeypatch.delenv('GOLD_PROBE_LOG', raising=False)
++    wheels = tmp_path / 'wheels'
++    wheels.mkdir()
++    (wheels / 'a-1-py3-none-any.whl').write_bytes(b'wheel a')
++    site = tmp_path / 'venv/lib/python3.13/site-packages'
++    site.mkdir(parents=True)
++    cs._WHEEL_INDEX_CACHE = {str(wheels.resolve()): 'stale index'}
++
++    def inspect(path):
++        assert path == wheels
++        assert str(wheels.resolve()) not in cs._WHEEL_INDEX_CACHE
++        events.append(('inspect',))
++        return sorted(path.glob('*.whl')), {}, {}, {}
++
++    def build(selected, cache_key, marker_name):
++        events.append(('build', cache_key, tuple(p.name for p in selected)))
++        archive = tmp_path / (cache_key + '.tar')
++        if not archive.exists():
++            with tarfile.open(archive, 'w') as tf:
++                for name, content in [(p.name + '.payload', p.read_bytes()) for p in selected] + [(marker_name, b'ok\n')]:
++                    info = tarfile.TarInfo(name)
++                    info.size = len(content)
++                    tf.addfile(info, io.BytesIO(content))
++        return archive
++
++    cs._inspect_wheels_dir = inspect
++    cs._build_unpacked_wheels_tar = build
++
++    class SubprocessManager:
++        sandboxes = {'id': {'venv': tmp_path / 'venv'}}
++
++        def exec(self, sid, command, **kwargs):
++            events.append(('exec', command, kwargs))
++            # Even a failed editable attempt must be followed by injection.
++            return SimpleNamespace(exit_code=1)
++
++        def copy_to(self, sid, source, destination):
++            events.append(('copy', destination))
++
++    install = env.patch_subprocess_deps(tmp_path)
++    return SimpleNamespace(install=install, manager=SubprocessManager(), cs=cs,
++                           wheels=wheels, site=site, events=events)
++
++
++def test_editable_precedes_injection_and_setup_without_pip_environment(local_setup):
++    s = local_setup
++    s.install(s.manager, 'id', 'org/package')
++    assert [e[0] for e in s.events] == ['exec', 'inspect', 'build', 'copy', 'exec']
++    assert s.events[0] == ('exec',
++        'pip install --no-index --find-links=/wheels --no-build-isolation --no-deps -e /workspace 2>/dev/null || true', {})
++    assert s.events[-1] == ('exec', 'python3 /tmp/setup.py --fast-path org/package', {'timeout': 280})
++    assert all('PIP_' not in e[1] for e in s.events if e[0] == 'exec')
++    assert (s.site / 'a-1-py3-none-any.whl.payload').read_bytes() == b'wheel a'
++
++
++def test_base_cache_key_is_stable_and_tracks_wheel_identity(tmp_path):
++    a, b = tmp_path / 'a.whl', tmp_path / 'b.whl'
++    a.write_bytes(b'a')
++    b.write_bytes(b'bb')
++    key = env.base_cache_key([a, b], 'v1')
++    assert key == env.base_cache_key([b, a], 'v1')
++    assert key == env.base_cache_key([a, b], 'v1')
++    assert key != env.base_cache_key([a, b], 'v2')
++    a.write_bytes(b'aa')
++    assert key != env.base_cache_key([a, b], 'v1')
++    a.write_bytes(b'a')
++    a = a.rename(tmp_path / 'renamed.whl')
++    assert key != env.base_cache_key([a, b], 'v1')
++
++
++def test_matching_marker_skips_archive_and_extraction(local_setup):
++    s = local_setup
++    key = env.base_cache_key(list(s.wheels.glob('*.whl')), 'fake-0.2.11')
++    (s.site / '.swegemma_base_injected').write_text(key)
++    s.install(s.manager, 'id')
++    assert [e[0] for e in s.events] == ['exec', 'inspect', 'copy', 'exec']
++    assert not list(s.site.glob('*.payload'))
++
++
++@pytest.mark.parametrize('marker_value', ['ok\n', 'different-wheel-set'])
++def test_stale_marker_is_replaced_after_injection(local_setup, marker_value):
++    s = local_setup
++    marker = s.site / '.swegemma_base_injected'
++    marker.write_text(marker_value)
++    s.install(s.manager, 'id')
++    assert marker.read_text() == env.base_cache_key(list(s.wheels.glob('*.whl')), 'fake-0.2.11')
++    assert any(e[0] == 'build' for e in s.events)
++
++
++@pytest.mark.parametrize('change', ['size', 'name'])
++def test_changed_wheelhouse_uses_new_archive_and_reinjects(local_setup, change):
++    s = local_setup
++    s.install(s.manager, 'id')
++    first_key = (s.site / '.swegemma_base_injected').read_text()
++    wheel = next(s.wheels.glob('*.whl'))
++    if change == 'size':
++        wheel.write_bytes(b'new larger wheel')
++    else:
++        wheel = wheel.rename(s.wheels / 'renamed-1-py3-none-any.whl')
++    s.cs._WHEEL_INDEX_CACHE[str(s.wheels.resolve())] = 'stale index'
++    s.install(s.manager, 'id')
++    builds = [e for e in s.events if e[0] == 'build']
++    assert len(builds) == 2 and builds[0][1] != builds[1][1]
++    assert (s.site / '.swegemma_base_injected').read_text() != first_key
++    assert (s.site / (wheel.name + '.payload')).read_bytes() == wheel.read_bytes()
++
++
++def test_docker_manager_still_uses_original_hook(local_setup):
++    s = local_setup
++    manager = object()
++    s.install(manager, 'docker-id', 'org/package', fast_path=False, config='config')
++    assert s.events == [('docker', (manager, 'docker-id', 'org/package'),
++                         {'fast_path': False, 'config': 'config'})]
+
+exec
+/bin/bash -lc 'git diff --check; PATH=/home/ubuntu/gemma-local/venv/bin:$PATH PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True python -m pytest eval/tests/test_sandbox_deps.py -q' in /home/ubuntu/work/gemma-wt/codex-sandbox-env-docker-order
+ succeeded in 152ms:
+........                                                                 [100%]
+8 passed in 0.05s
+
+codex
+Implemented Docker-order editable install before injection, wheel/version-derived cache keys, matching-marker skips, and wheel-index refresh. Harness selection and sandbox limits remain unchanged. Added eight offline tests; no commit created.
+
+Tests: **468 passed, 4 skipped, 1 failed**. New tests: **8 passed**. `git diff --check` passed.
+
+Open issue: the unchanged memguard test expects `oom_score_adj=0`; this sandbox supplies inherited `1000`. Sandbox restrictions prevent resetting it, so full-suite acceptance remains blocked.
+tokens used
+44,621
