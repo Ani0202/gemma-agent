@@ -22,8 +22,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - Heavy jobs one at a time (waiters/memguard/codex exempt); bin/job hardened b1eedd7. codex-build branches from main HEAD.
-## Running jobs (23:18Z): review-submit-guard-light; review-kernel-probes-light (OLD prompt, dec 037 moot) -> then probes-gate-light +
-  memguard-fix6e-light -> then kernel-gate-finfix-light (dec 041 item 3: finfix + legacy-decision + attribution in one change); memguard 7933.
+## Running jobs (23:30Z): review-kernel-probes-light -> probes-gate + memguard-fix6e -> kernel-gate-finfix (+legacy-decision/attribution, dec 041); memguard 7933.
 - KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
   dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
 - fix5c BLOCKING 1 (gate a ignored failed finalization git rc/exception) FIXED on codex/kernel-gate-finfix e02666f (on 92a74c7;
