@@ -64,7 +64,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Hosted-LLM-API data question OPEN; no new third-party services.
 - One pending Kaggle submission at a time; no partial credit on timeout (docs/RULES_FINDINGS.md).
 
-## Dec 017/018: done (router verified; owner activity beats the 2 h clear valve).
 
 ## Timing facts (results/kaggle_timing_e4b_v000_setup.json)
 - Harness sandbox setup ~210 s/task, outside max_time_minutes (the budget clock starts after setup); flat across repos.

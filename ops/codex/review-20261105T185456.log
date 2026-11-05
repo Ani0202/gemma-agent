@@ -656,3 +656,1580 @@ ddf9746 memguard: accept status lines with extra trailing fields (owner patch co
 CLAUDE.md
 AGENTS.md
 
+exec
+/bin/bash -lc 'nl -ba eval/tests/test_memguard.py' in /home/ubuntu/work/gemma-wt/codex-memguard-fix
+ succeeded in 0ms:
+     1	"""Offline identity/membership tests; opt-in live allocation test (<3 GiB)."""
+     2	import importlib.machinery
+     3	import importlib.util
+     4	import os
+     5	from pathlib import Path
+     6	import signal
+     7	import subprocess
+     8	import sys
+     9	import time
+    10	from types import SimpleNamespace
+    11	import uuid
+    12	
+    13	import pytest
+    14	
+    15	REPO = Path(__file__).resolve().parents[2]
+    16	MG = REPO / "bin/memguard"
+    17	
+    18	
+    19	@pytest.fixture
+    20	def mg():
+    21	    loader = importlib.machinery.SourceFileLoader("memguard", str(MG))
+    22	    spec = importlib.util.spec_from_loader("memguard", loader)
+    23	    module = importlib.util.module_from_spec(spec)
+    24	    loader.exec_module(module)
+    25	    return module
+    26	
+    27	
+    28	@pytest.fixture
+    29	def args():
+    30	    return SimpleNamespace()
+    31	
+    32	
+    33	def proc(pid, ppid=1, pgid=10, starttime=123, comm="python", rss=1024, uid=None):
+    34	    return dict(pid=pid, ppid=ppid, pgid=pgid, starttime=starttime, comm=comm,
+    35	                rss=rss, uid=os.getuid() if uid is None else uid, state="S")
+    36	
+    37	
+    38	def mock_world(monkeypatch, mg, initial, markers, records=()):
+    39	    world = dict(initial)
+    40	    monkeypatch.setattr(mg, "snapshot", lambda: dict(world))
+    41	    # Legacy records exercise ancestry admission; record-free fixtures use job IDs.
+    42	    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+    43	                        markers.get(p) if marker == "GEMMA_JOB_CAP" or
+    44	                        (marker == "GEMMA_JOB_ID" and not records) else None)
+    45	    original_read = mg.read
+    46	    source = (REPO / "bin/job").read_text()
+    47	    script = "\n" + source.split("GEMMA_JOB_CAP=$cap setsid nohup bash -c '\n", 1)[1].split("    ' _ \"$name\"", 1)[0]
+    48	    def read(path, mode="r"):
+    49	        for record in records:
+    50	            if str(path) == f"/proc/{record['pid']}/cmdline":
+    51	                return b"\0".join([b"bash", b"-c", script.encode(), b"_", record["name"].encode(), b"command", b""])
+    52	        return original_read(path, mode)
+    53	    monkeypatch.setattr(mg, "read", read)
+    54	    monkeypatch.setattr(mg, "running_jobs", lambda: list(records))
+    55	    monkeypatch.setattr(mg, "proc_stat", lambda p: world.get(p))
+    56	    monkeypatch.setattr(mg, "proc_info", lambda p: world.get(p))
+    57	    monkeypatch.setattr(mg, "runs_memguard", lambda p: False)
+    58	    clock = [0.0]
+    59	    monkeypatch.setattr(mg.time, "monotonic", lambda: clock[0])
+    60	    monkeypatch.setattr(mg.time, "sleep", lambda t: clock.__setitem__(0, clock[0] + t))
+    61	    return world
+    62	
+    63	
+    64	def select(mg, args):
+    65	    _, jobs = mg.find_jobs(mg.snapshot(), args, set())
+    66	    assert len(jobs) == 1
+    67	    return next(iter(jobs.values()))
+    68	
+    69	
+    70	def test_child_without_job_provenance_is_never_signalled(monkeypatch, mg, args):
+    71	    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)}, {10: b"cap"})
+    72	    sent = []
+    73	
+    74	    def kill(d, log, args, known_jobs=None):
+    75	        sent.append(d["pid"])
+    76	        world.pop(d["pid"])
+    77	        return True
+    78	
+    79	    monkeypatch.setattr(mg, "send_kill", kill)
+    80	    killed, survivors = mg.kill_tree(select(mg, args), args, set(), lambda _: None)
+    81	    assert killed == sent == [10]
+    82	    assert survivors == []
+    83	    assert 11 in world
+    84	
+    85	
+    86	@pytest.mark.parametrize("pidfd", [False, True])
+    87	def test_pid_reuse_is_not_signalled(monkeypatch, mg, args, pidfd):
+    88	    calls = []
+    89	    monkeypatch.setattr(mg, "proc_info", lambda p: proc(p, starttime=999))
+    90	    monkeypatch.setattr(mg.os, "kill", lambda *a: calls.append(a))
+    91	    if pidfd:
+    92	        monkeypatch.setattr(mg.os, "pidfd_open", lambda p: 42)
+    93	        monkeypatch.setattr(mg.signal, "pidfd_send_signal", lambda *a: calls.append(a))
+    94	        closed = []
+    95	        monkeypatch.setattr(mg.os, "close", closed.append)
+    96	    else:
+    97	        monkeypatch.delattr(mg.os, "pidfd_open", raising=False)
+    98	    assert not mg.send_kill(proc(10), lambda _: None, args)
+    99	    assert calls == []
+   100	    if pidfd:
+   101	        assert closed == [42]
+   102	
+   103	
+   104	def test_pidfd_is_opened_before_identity_check(monkeypatch, mg, args):
+   105	    calls = []
+   106	    monkeypatch.setattr(mg.os, "pidfd_open", lambda p: calls.append("open") or 42)
+   107	    monkeypatch.setattr(mg, "proc_info", lambda p: calls.append("check") or proc(p, ppid=0))
+   108	    monkeypatch.setattr(mg, "snapshot", lambda: {})
+   109	    monkeypatch.setattr(mg, "running_jobs", lambda: [])
+   110	    monkeypatch.setattr(mg, "marker_value", lambda *a: b"cap")
+   111	    monkeypatch.setattr(mg.signal, "pidfd_send_signal", lambda *a: calls.append("signal"))
+   112	    monkeypatch.setattr(mg.os, "close", lambda fd: calls.append("close"))
+   113	    assert mg.send_kill(proc(10), lambda _: None, args)
+   114	    assert calls == ["open", "check", "check", "signal", "close"]
+   115	
+   116	
+   117	def test_oom_write_skips_reused_identity(monkeypatch, mg, args):
+   118	    import io
+   119	    class File(io.StringIO):
+   120	        def close(self):
+   121	            pass
+   122	    output = File()
+   123	    monkeypatch.setattr("builtins.open", lambda *a, **k: output)
+   124	    monkeypatch.setattr(mg, "proc_info", lambda p: proc(p, starttime=999))
+   125	    assert mg.raise_oom_adj({10: proc(10)}, False, args) == 0
+   126	    assert output.getvalue() == ""
+   127	
+   128	
+   129	def test_marked_orphans_and_separate_wrappers(monkeypatch, mg, args):
+   130	    records = [dict(name="a", pid=10, pgid=10), dict(name="b", pid=20, pgid=20)]
+   131	    world = mock_world(monkeypatch, mg, {
+   132	        11: proc(11, pgid=10), 21: proc(21, pgid=20), 31: proc(31, pgid=30)},
+   133	        {11: b"cap", 21: b"cap", 31: b"cap"}, records)
+   134	    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+   135	                        str(p).encode() if marker == "GEMMA_JOB_ID" else None)
+   136	    _, jobs = mg.find_jobs(world, args, set())
+   137	    assert sorted(sorted(j["pids"]) for j in jobs.values()) == [[11], [21], [31]]
+   138	    for j in list(jobs.values()):
+   139	        monkeypatch.setattr(mg, "send_kill", lambda d, log, args, known_jobs=None: world.pop(d["pid"]) is not None)
+   140	        assert mg.kill_tree(j, args, set(), lambda _: None) == (j["pids"], [])
+   141	    assert not world
+   142	
+   143	
+   144	def test_fork_during_kill_is_found_after_root_grace(monkeypatch, mg, args):
+   145	    records = [dict(name="job", pid=10, pgid=10)]
+   146	    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+   147	                       {10: b"cap", 11: b"cap", 12: b"cap"}, records)
+   148	    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+   149	                        b"job/boot/123" if marker == "GEMMA_JOB_ID" else b"cap")
+   150	    records[0]["job_id"] = b"job/boot/123"
+   151	    sent = []
+   152	
+   153	    def kill(d, log, args, known_jobs=None):
+   154	        sent.append(d["pid"])
+   155	        world.pop(d["pid"])
+   156	        if d["pid"] == 10:
+   157	            assert mg.time.monotonic() >= 3
+   158	            world[12] = proc(12)  # new orphan discovered after wrapper grace/kill
+   159	        return True
+   160	
+   161	    monkeypatch.setattr(mg, "send_kill", kill)
+   162	    assert mg.kill_tree(select(mg, args), args, set(), lambda _: None) == ([10, 11, 12], [])
+   163	    assert sent == [11, 10, 12]
+   164	
+   165	
+   166	def test_survivors_use_independent_final_inventory(monkeypatch, mg, args):
+   167	    mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap", 99: b"cap"})
+   168	    job = select(mg, args)
+   169	    inventories = iter([{}, {}, {99: proc(99)}])
+   170	    monkeypatch.setattr(mg, "inventory", lambda *a: next(inventories))
+   171	    monkeypatch.setattr(mg, "send_kill", lambda *a: pytest.fail("no signal expected"))
+   172	    assert mg.kill_tree(job, args, set(), lambda _: None) == ([], [99])
+   173	
+   174	
+   175	@pytest.mark.parametrize("comm", ["claude", "node", "codex", "tmux", "bash"])
+   176	def test_markers_do_not_override_session_exclusion(monkeypatch, mg, args, comm):
+   177	    world = mock_world(monkeypatch, mg, {9: proc(9, comm="claude"),
+   178	                       10: proc(10, ppid=9, comm=comm)}, {10: b"cap"})
+   179	    assert mg.find_jobs(world, args, set())[0] == {}
+   180	
+   181	
+   182	def test_legacy_status_and_job_names(monkeypatch, mg, args, tmp_path):
+   183	    directory = tmp_path / "ops/jobs"
+   184	    directory.mkdir(parents=True)
+   185	    (directory / "legacy.status").write_text("running 10 2026-11-05T00:00:00Z\n")
+   186	    (directory / "current.status").write_text("running 20 now 20\n")
+   187	    (directory / "done.status").write_text("done 0 now\n")
+   188	    monkeypatch.setattr(mg, "REPO", str(tmp_path))
+   189	    records = mg.running_jobs()
+   190	    assert records == [dict(name="current", pid=20, pgid=20), dict(name="legacy", pid=10, pgid=None)]
+   191	    world = mock_world(monkeypatch, mg, {
+   192	        10: proc(10), 11: proc(11, ppid=10), 20: proc(20, pgid=20),
+   193	        21: proc(21, ppid=20, pgid=20)}, {}, records)
+   194	    # The fixture supplies the actual installed wrapper body, even though status
+   195	    # records here live in a temporary repository.
+   196	    original_read = mg.read
+   197	    monkeypatch.setattr(mg, "read", lambda path, mode="r":
+   198	                        (REPO / "bin/job").read_text() if str(path) == str(tmp_path / "bin/job")
+   199	                        else original_read(path, mode))
+   200	    targets, jobs = mg.find_jobs(world, args, set())
+   201	    assert set(targets) == {10, 11, 20, 21}
+   202	    assert {j["name"]: sorted(j["pids"]) for j in jobs.values()} == {
+   203	        "legacy": [10, 11], "current": [20, 21]}
+   204	
+   205	
+   206	
+   207	def test_job_name_matches_pid_and_process_group(mg):
+   208	    records = [dict(name="wrapper", pid=10, pgid=20), dict(name="legacy", pid=30, pgid=None)]
+   209	    procs = {10: proc(10, pgid=20), 11: proc(11, pgid=20), 31: proc(31, pgid=30)}
+   210	    assert mg.job_name(10, procs, records) == "wrapper"
+   211	    assert mg.job_name(11, procs, records) == "wrapper"
+   212	    assert mg.job_name(20, procs, records) == "wrapper"
+   213	    assert mg.job_name(31, procs, records) == "legacy"
+   214	    assert mg.job_name(99, procs, records) is None
+   215	
+   216	
+   217	@pytest.mark.parametrize("failure", [7, "timeout"])
+   218	def test_mail_failure_is_bounded_and_logged(monkeypatch, mg, failure):
+   219	    def run(*a, **kw):
+   220	        assert kw["timeout"] == 10
+   221	        if failure == "timeout":
+   222	            raise subprocess.TimeoutExpired(a[0], 10)
+   223	        return SimpleNamespace(returncode=failure)
+   224	    monkeypatch.setattr(mg.subprocess, "run", run)
+   225	    messages = []
+   226	    mg.send_mail("test", messages.append)
+   227	    assert len(messages) == 1 and "mail failed" in messages[0]
+   228	
+   229	
+   230	
+   231	def test_final_root_is_reclassified_before_signal(monkeypatch, mg, args):
+   232	    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+   233	                       {10: b"cap", 11: b"cap"})
+   234	    job = select(mg, args)
+   235	    sent = []
+   236	
+   237	    def kill(d, log, args, known_jobs=None):
+   238	        sent.append(d["pid"])
+   239	        world.pop(d["pid"])
+   240	        # The wrapper execs a protected session process during its grace period.
+   241	        world[10] = proc(10, comm="node")
+   242	        return True
+   243	
+   244	    monkeypatch.setattr(mg, "send_kill", kill)
+   245	    assert mg.kill_tree(job, args, set(), lambda _: None) == ([11], [])
+   246	    assert sent == [11]
+   247	
+   248	
+   249	def test_other_uid_and_small_unmarked_are_excluded(monkeypatch, mg, args):
+   250	    world = mock_world(monkeypatch, mg, {
+   251	        10: proc(10, uid=os.getuid() + 1), 11: proc(11),
+   252	        12: proc(12, rss=4 * 1024**3)}, {10: b"cap"})
+   253	    assert mg.find_jobs(world, args, set())[0] == {}
+   254	
+   255	
+   256	def test_self_job_siblings_are_excluded(monkeypatch, mg, args):
+   257	    records = [dict(name="guard", pid=10, pgid=10), dict(name="work", pid=20, pgid=20)]
+   258	    world = mock_world(monkeypatch, mg, {
+   259	        10: proc(10), 11: proc(11, ppid=10), 12: proc(12, ppid=10), 20: proc(20, pgid=20)},
+   260	        {p: b"cap" for p in (10, 11, 12, 20)}, records)
+   261	    assert set(mg.find_jobs(world, args, {10, 11})[0]) == {20}
+   262	
+   263	
+   264	def test_failed_signal_stops_at_deadline_and_reports_survivor(monkeypatch, mg, args):
+   265	    mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"})
+   266	    monkeypatch.setattr(mg, "send_kill", lambda *a: False)
+   267	    assert mg.kill_tree(select(mg, args), args, set(), lambda _: None) == ([], [10])
+   268	    assert 5 <= mg.time.monotonic() < 5.3
+   269	
+   270	
+   271	def test_proc_stat_field_22_and_allowed_reads(monkeypatch, mg):
+   272	    fields = ["S", "1", "10"] + ["0"] * 16 + ["987654"]
+   273	    reads = []
+   274	
+   275	    def read(path, mode="r"):
+   276	        reads.append(path)
+   277	        if path.endswith("/stat"):
+   278	            return "10 (name with ) spaces) " + " ".join(fields)
+   279	        if path.endswith("/status"):
+   280	            return f"Name: python\nUid: {os.getuid()}\nVmRSS: 4 kB\n"
+   281	        pytest.fail(f"forbidden read: {path}")
+   282	
+   283	    monkeypatch.setattr(mg, "read", read)
+   284	    monkeypatch.setattr(mg.os, "stat", lambda p: SimpleNamespace(st_uid=os.getuid()))
+   285	    info = mg.proc_info(10)
+   286	    assert info["starttime"] == 987654
+   287	    assert info["pgid"] == 10
+   288	    assert info["rss"] == 4096
+   289	    assert set(reads) == {"/proc/10/stat", "/proc/10/status"}
+   290	
+   291	STEP = 200 * 1024 * 1024
+   292	ALLOC = f"""
+   293	import resource, time
+   294	resource.setrlimit(resource.RLIMIT_AS, (1536 * 1024**2, 1536 * 1024**2))
+   295	held = []
+   296	for _ in range(6):
+   297	    held.append(b"\\x01" * {STEP})
+   298	    time.sleep(0.4)
+   299	time.sleep(120)
+   300	"""
+   301	CHILD = f"""
+   302	import subprocess, sys, time
+   303	subprocess.Popen([sys.executable, "-c", {ALLOC!r}])
+   304	time.sleep(120)
+   305	"""
+   306	
+   307	
+   308	def marked_live(mg, marker, value):
+   309	    return {p for p, d in mg.snapshot().items()
+   310	            if d["state"] not in {"Z", "X"} and mg.marker_value(p, marker) == value.encode()}
+   311	
+   312	
+   313	@pytest.mark.skipif(os.environ.get("MEMGUARD_LIVE") != "1", reason="set MEMGUARD_LIVE=1")
+   314	def test_memguard_kills_job_tree_and_spares_dummy(tmp_path, mg, args):
+   315	    marker = "GEMMA_JOB_ID"
+   316	    job_id = "mgtest-workload/" + uuid.uuid4().hex
+   317	    root = tmp_path / "jobcwd"
+   318	    root.mkdir()
+   319	    rcfile = tmp_path / "rc"
+   320	    log = tmp_path / "memguard.log"
+   321	    env_clean = {k: v for k, v in os.environ.items()
+   322	                 if k not in {"GEMMA_JOB_CAP", "GEMMA_JOB_ID"} and not k.startswith("GEMMA_MGTEST_")}
+   323	    # Both allocators peak at 1.2 GiB each, with only small interpreter/wrapper overhead.
+   324	    dummy = subprocess.Popen([sys.executable, "-c", ALLOC], cwd="/", env=env_clean)
+   325	    baseline = Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip()
+   326	    job = subprocess.Popen(["bash", "-c", '"$PYTHON" -c "$CHILD_SRC"; echo $? > "$RCFILE"'],
+   327	                           cwd=root, start_new_session=True,
+   328	                           env={**env_clean, marker: job_id, "CHILD_SRC": CHILD,
+   329	                                "PYTHON": sys.executable, "RCFILE": str(rcfile)})
+   330	    guard = None
+   331	    try:
+   332	        time.sleep(3)
+   333	        assert len(marked_live(mg, marker, job_id)) >= 3
+   334	        # Confine the live guard's discovery to this test's unique job identity.
+   335	        # Production admission remains fixed to GEMMA_JOB_ID; no private marker bypass.
+   336	        guard_source = f"""
+   337	import os, types
+   338	from pathlib import Path
+   339	module = types.ModuleType("memguard_test")
+   340	module.__file__ = {str(MG)!r}
+   341	exec(compile(Path(module.__file__).read_text(), module.__file__, "exec"), module.__dict__)
+   342	snapshot = module.snapshot
+   343	module.snapshot = lambda: {{p: d for p, d in snapshot().items()
+   344	    if p == os.getpid() or module.marker_value(p, "GEMMA_JOB_ID") == {job_id.encode()!r}}}
+   345	module.main()
+   346	"""
+   347	        guard = subprocess.Popen(
+   348	            [sys.executable, "-c", guard_source, "--max-total", "0.8", "--min-available", "0",
+   349	             "--interval", "0.5",
+   350	             "--log", str(log), "--no-mail"], env=env_clean,
+   351	            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+   352	        deadline = time.monotonic() + 30
+   353	        while time.monotonic() < deadline and "survivors=" not in (log.read_text() if log.exists() else ""):
+   354	            time.sleep(0.2)
+   355	        text = log.read_text()
+   356	        assert "KILL" in text and "survivors=[]" in text, text
+   357	        job.wait(timeout=10)
+   358	        assert marked_live(mg, marker, job_id) == set(), "fresh inventory found marked survivors"
+   359	        assert rcfile.read_text().strip() == "137"
+   360	        assert mg.proc_info(dummy.pid)["state"] not in {"Z", "X"}
+   361	        assert mg.marker_value(dummy.pid, "GEMMA_JOB_CAP") is None
+   362	        assert Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip() == baseline
+   363	        assert text.count("KILL") == 1, text
+   364	    finally:
+   365	        if guard and guard.poll() is None:
+   366	            guard.kill()
+   367	            guard.wait(timeout=5)
+   368	        # Discover descendants and marked orphans BEFORE killing their parents.
+   369	        procs = mg.snapshot()
+   370	        cleanup = set(mg.descendants(job.pid, procs)) | marked_live(mg, marker, job_id)
+   371	        for p in sorted(cleanup - {job.pid}):
+   372	            d = procs.get(p)
+   373	            if d:
+   374	                mg.send_kill(d, lambda _: None, args)
+   375	        for child in (dummy, job):
+   376	            if child.poll() is None:
+   377	                child.kill()
+   378	            child.wait(timeout=5)
+   379	
+   380	
+   381	@pytest.mark.parametrize("legacy", [False, True])
+   382	@pytest.mark.parametrize("survives", [False, True])
+   383	def test_escaped_members_remain_in_job(monkeypatch, mg, args, legacy, survives):
+   384	    record = dict(name="job", pid=10, pgid=None if legacy else 10)
+   385	    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+   386	                       {10: b"cap", 11: b"cap"}, [record])
+   387	    if not legacy:
+   388	        record.update(job_id=b"job/boot/123")
+   389	        monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+   390	                            b"job/boot/123" if marker == "GEMMA_JOB_ID" else b"cap")
+   391	    job = select(mg, args)
+   392	    # Change membership after discovery, as setsid/reparenting would do.
+   393	    world[11] = proc(11, ppid=1, pgid=11)
+   394	    # Normal polling and the kill/final inventories must agree.
+   395	    _, jobs = mg.find_jobs(world, args, set(), known_jobs={job["key"]: job})
+   396	    assert set(jobs[job["key"]]["members"]) == {10, 11}
+   397	    sent = []
+   398	
+   399	    def kill(d, log, args, known_jobs=None):
+   400	        sent.append(d["pid"])
+   401	        if survives and d["pid"] == 11:
+   402	            return False
+   403	        world.pop(d["pid"])
+   404	        return True
+   405	
+   406	    monkeypatch.setattr(mg, "send_kill", kill)
+   407	    assert mg.kill_tree(job, args, set(), lambda _: None) == (
+   408	        [10] if survives else [10, 11], [11] if survives else [])
+   409	    assert 11 in sent
+   410	
+   411	
+   412	def test_job_id_is_exact_primary_key_and_keeps_allowlist(monkeypatch, mg, args):
+   413	    world = mock_world(monkeypatch, mg, {
+   414	        10: proc(10), 11: proc(11, pgid=99), 12: proc(12),
+   415	        13: proc(13, comm="node"), 14: proc(14)},
+   416	        {10: b"cap", 11: b"different-cap", 12: b"cap", 13: b"cap"})
+   417	    ids = {10: b"job/[boot]/123", 11: b"job/[boot]/123",
+   418	           12: b"job/[boot]/1234", 13: b"job/[boot]/123", 14: b"job/[boot]/123"}
+   419	    caps = {10: b"cap", 11: b"different-cap", 12: b"cap", 13: b"cap"}
+   420	    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+   421	                        ids.get(p) if marker == "GEMMA_JOB_ID" else caps.get(p))
+   422	    targets, jobs = mg.find_jobs(world, args, set())
+   423	    assert set(targets) == {10, 11, 12, 14}
+   424	    assert sorted(sorted(j["pids"]) for j in jobs.values()) == [[10, 11, 14], [12]]
+   425	
+   426	
+   427	def test_legacy_known_members_do_not_follow_reused_pid(monkeypatch, mg, args):
+   428	    world = mock_world(monkeypatch, mg, {10: proc(10), 11: proc(11, ppid=10)},
+   429	                       {10: b"cap", 11: b"cap"}, [dict(name="job", pid=10, pgid=None)])
+   430	    job = select(mg, args)
+   431	    world[11] = proc(11, pgid=11, starttime=999)
+   432	    assert set(mg.inventory(job, args, set())) == {10}
+   433	
+   434	
+   435	@pytest.mark.parametrize("survives", [False, True])
+   436	def test_legacy_history_survives_new_first_member_and_temporary_node(monkeypatch, mg, args, survives):
+   437	    records = [dict(name="job", pid=10, pgid=10)]
+   438	    world = mock_world(monkeypatch, mg, {
+   439	        10: proc(10), 11: proc(11, ppid=10, comm="node"),
+   440	        12: proc(12, ppid=10), 13: proc(13, ppid=10)},
+   441	        {p: b"cap" for p in (10, 11, 12, 13)}, records)
+   442	    world[11] = proc(11, ppid=10)
+   443	    _, seeded = mg.find_jobs(world, args, set())
+   444	    world[11] = proc(11, ppid=10, comm="node")
+   445	    _, jobs = mg.find_jobs(world, args, set(), known_jobs=seeded)  # poll 1
+   446	    key = next(iter(jobs))
+   447	    assert set(jobs[key]["known_members"]) == {10, 11, 12, 13}
+   448	    del world[10]
+   449	    world[11] = proc(11, comm="python")
+   450	    world[13] = proc(13, comm="node")
+   451	    _, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)  # poll 2: 11 first
+   452	    assert jobs[key]["pids"] == [11, 12]
+   453	    assert jobs[key]["known_members"][13] == 123
+   454	    assert set(mg.inventory(jobs[key], args, set())) == {11, 12}
+   455	    world[13] = proc(13, ppid=1, pgid=13)  # unchanged starttime, setsid
+   456	    _, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)  # poll 3
+   457	    assert set(jobs[key]["members"]) == {11, 12, 13}
+   458	    sent = []
+   459	
+   460	    def kill(d, log, args, known_jobs=None):
+   461	        assert world[d["pid"]]["comm"] != "node"
+   462	        sent.append(d["pid"])
+   463	        if survives and d["pid"] == 13:
+   464	            return False
+   465	        del world[d["pid"]]
+   466	        return True
+   467	
+   468	    monkeypatch.setattr(mg, "send_kill", kill)
+   469	    killed, survivors = mg.kill_tree(jobs[key], args, set(), lambda _: None)
+   470	    assert killed == ([11, 12] if survives else [11, 12, 13])
+   471	    assert survivors == ([13] if survives else [])
+   472	    assert 13 in sent
+   473	    assert not (13 in world and survivors == [])
+   474	
+   475	
+   476	def test_legacy_history_survives_poll_with_no_eligible_members(monkeypatch, mg, args):
+   477	    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"},
+   478	                       [dict(name="job", pid=10, pgid=None)])
+   479	    _, jobs = mg.find_jobs(world, args, set())
+   480	    key = next(iter(jobs))
+   481	    world[10] = proc(10, comm="node")
+   482	    targets, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)
+   483	    assert targets == {}
+   484	    assert jobs[key]["known_members"] == {10: 123}
+   485	    assert jobs[key]["rss"] == 0
+   486	    world[10] = proc(10, pgid=99)
+   487	    targets, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)
+   488	    assert set(targets) == set(jobs[key]["members"]) == {10}
+   489	
+   490	
+   491	@pytest.mark.parametrize("legacy_pgid", [None, 10])
+   492	def test_old_legacy_and_new_job_id_watchdogs_are_never_victims(monkeypatch, mg, args, legacy_pgid):
+   493	    import io
+   494	    records = [dict(name="memguard", pid=10, pgid=legacy_pgid),
+   495	               dict(name="memguard-light", pid=20, pgid=20, job_id=b"memguard-light/boot/123")]
+   496	    world = mock_world(monkeypatch, mg, {
+   497	        10: proc(10, comm="bash"), 11: proc(11, ppid=10),
+   498	        20: proc(20, pgid=20, comm="bash"), 21: proc(21, ppid=20, pgid=20)},
+   499	        {p: b"cap" for p in (10, 11, 20, 21)}, records)
+   500	    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+   501	                        (b"memguard-light/boot/123" if p in {20, 21} else None)
+   502	                        if marker == "GEMMA_JOB_ID" else b"cap")
+   503	    targets, jobs = mg.find_jobs(world, args, {20, 21})
+   504	    assert targets == jobs == {}  # neither OOM candidates nor victim jobs
+   505	    assert mg.raise_oom_adj(targets, False, args) == 0
+   506	    class File(io.StringIO):
+   507	        def close(self):
+   508	            pass
+   509	    writes, sent = File(), []
+   510	    monkeypatch.setattr("builtins.open", lambda *a, **kw: writes)
+   511	    monkeypatch.delattr(mg.os, "pidfd_open", raising=False)
+   512	    monkeypatch.setattr(mg.os, "kill", lambda *a: sent.append(a))
+   513	    # Stale candidates must also be excluded at the final action-time check.
+   514	    assert mg.raise_oom_adj(world, False, args) == 0
+   515	    for d in world.values():
+   516	        assert not mg.send_kill(d, lambda _: None, args)
+   517	    assert sent == []
+   518	    assert writes.getvalue() == ""
+   519	
+   520	
+   521	@pytest.mark.parametrize("argv", [b"/repo/bin/memguard\0--once\0",
+   522	                                  b"/usr/bin/python3\0/repo/bin/memguard\0"])
+   523	def test_cmdline_watchdog_and_wrapper_are_protected_without_job_metadata(monkeypatch, mg, args, argv):
+   524	    runs_memguard = mg.runs_memguard
+   525	    world = mock_world(monkeypatch, mg, {10: proc(10, comm="bash"), 11: proc(11, ppid=10)},
+   526	                       {10: b"cap", 11: b"cap"})
+   527	    # Exercise the real parser with a guard which has no identifying env or status.
+   528	    monkeypatch.setattr(mg, "runs_memguard", runs_memguard)
+   529	    monkeypatch.setattr(mg, "read", lambda path, mode="r": argv if path == "/proc/11/cmdline" else b"")
+   530	    assert mg.find_jobs(world, args, set()) == ({}, {})
+   531	    assert not mg.action_eligible(world[10], args)
+   532	    assert not mg.action_eligible(world[11], args)
+   533	
+   534	
+   535	@pytest.mark.parametrize("job_id,protected", [(b"memguard", True), (b"memguard-other/boot/1", True),
+   536	                                               (b"xmemguard/boot/1", False), (b"Memguard/boot/1", False)])
+   537	def test_watchdog_job_id_uses_literal_prefix(monkeypatch, mg, args, job_id, protected):
+   538	    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"cap"})
+   539	    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+   540	                        job_id if marker == "GEMMA_JOB_ID" else b"cap")
+   541	    targets, jobs = mg.find_jobs(world, args, set())
+   542	    assert bool(targets) == bool(jobs) == (not protected)
+   543	
+   544	
+   545	def test_watchdog_job_id_also_protects_legacy_wrapper(monkeypatch, mg, args):
+   546	    world = mock_world(monkeypatch, mg, {10: proc(10, comm="bash"), 11: proc(11, ppid=10)},
+   547	                       {10: b"cap", 11: b"cap"})
+   548	    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+   549	                        (b"memguard-light/boot/123" if p == 11 else None)
+   550	                        if marker == "GEMMA_JOB_ID" else b"cap")
+   551	    assert mg.find_jobs(world, args, set()) == ({}, {})
+   552	    assert not mg.action_eligible(world[10], args)
+   553	
+   554	
+   555	@pytest.mark.parametrize("argv", [b"/bin/python3\0--arg\0/repo/bin/memguard\0",
+   556	                                  b"/bin/memguard-helper\0", b"/bin/xmemguard\0"])
+   557	def test_cmdline_watchdog_match_requires_exact_basename_in_first_two_args(monkeypatch, mg, argv):
+   558	    monkeypatch.setattr(mg, "read", lambda *a: argv)
+   559	    assert not mg.runs_memguard(10)
+   560	
+   561	
+   562	@pytest.mark.parametrize("action", ["signal", "oom"])
+   563	@pytest.mark.parametrize("change", ["node", "uid", "shell", "marker",
+   564	                                    "guard-id", "guard-cmd", "guard-child"])
+   565	def test_action_revalidates_allowlist_after_handle_open(monkeypatch, mg, args, action, change):
+   566	    import io
+   567	    marked = {10: b"cap"}
+   568	    world = mock_world(monkeypatch, mg, {10: proc(10)}, marked)
+   569	    targets, _ = mg.find_jobs(world, args, set())
+   570	    assert 10 in targets
+   571	    class File(io.StringIO):
+   572	        def close(self):
+   573	            pass
+   574	    writes = File()
+   575	
+   576	    def change_eligibility():
+   577	        if change == "node":
+   578	            world[10] = proc(10, comm="node")
+   579	        elif change == "uid":
+   580	            world[10] = proc(10, uid=os.getuid() + 1)
+   581	        elif change == "shell":
+   582	            world[10] = proc(10, comm="bash", ppid=9)
+   583	            world[9] = proc(9, comm="claude")
+   584	        elif change == "marker":
+   585	            marked.clear()
+   586	        elif change == "guard-id":
+   587	            monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+   588	                                b"memguard-light/boot/123" if marker == "GEMMA_JOB_ID" else b"cap")
+   589	        elif change == "guard-cmd":
+   590	            monkeypatch.setattr(mg, "runs_memguard", lambda p: p == 10)
+   591	        elif change == "guard-child":
+   592	            world[11] = proc(11, ppid=10)
+   593	            monkeypatch.setattr(mg, "runs_memguard", lambda p: p == 11)
+   594	
+   595	    sent, closed = [], []
+   596	    def pidfd_open(p):
+   597	        change_eligibility()
+   598	        return 42
+   599	    monkeypatch.setattr(mg.os, "pidfd_open", pidfd_open)
+   600	    monkeypatch.setattr(mg.os, "close", closed.append)
+   601	    monkeypatch.setattr(mg.signal, "pidfd_send_signal", lambda *a: sent.append(a))
+   602	    monkeypatch.setattr(mg.os, "kill", lambda *a: sent.append(a))
+   603	    if action == "signal":
+   604	        assert not mg.send_kill(targets[10], lambda _: None, args)
+   605	        assert closed == [42]
+   606	    else:
+   607	        def open_oom(path, mode):
+   608	            assert path == "/proc/10/oom_score_adj"
+   609	            change_eligibility()
+   610	            return writes
+   611	        monkeypatch.setattr("builtins.open", open_oom)
+   612	        assert mg.raise_oom_adj(targets, False, args) == 0
+   613	    assert sent == []
+   614	    assert writes.getvalue() == ""
+   615	
+   616	
+   617	def test_six_field_status_retains_identity_and_names_escaped_job(monkeypatch, mg, args, tmp_path):
+   618	    directory = tmp_path / "ops/jobs"
+   619	    directory.mkdir(parents=True)
+   620	    (directory / "new.status").write_text("running 10 now 10 boot-id 123\n")
+   621	    monkeypatch.setattr(mg, "REPO", str(tmp_path))
+   622	    records = mg.running_jobs()
+   623	    assert records == [dict(name="new", pid=10, pgid=10, boot_id="boot-id",
+   624	                            starttime="123", job_id=b"new/boot-id/123")]
+   625	    monkeypatch.setattr(mg, "marker_value", lambda p, marker:
+   626	                        b"new/boot-id/123" if marker == "GEMMA_JOB_ID" else b"cap")
+   627	    _, jobs = mg.find_jobs({11: proc(11, pgid=11)}, args, set())
+   628	    job = next(iter(jobs.values()))
+   629	    assert job["name"] == "new"
+   630	    assert job["root"] == 10
+   631	    assert job["pids"] == [11]
+   632	
+   633	
+   634	@pytest.mark.parametrize("action", ["signal", "oom"])
+   635	@pytest.mark.parametrize("change", ["node", "reused", "missing"])
+   636	@pytest.mark.parametrize("phase", ["snapshot", "protection"])
+   637	def test_recipient_is_refreshed_after_scans(monkeypatch, mg, args, action, change, phase):
+   638	    import io
+   639	    world = mock_world(monkeypatch, mg, {10: proc(10)}, {10: b"job/boot/123"})
+   640	    candidate = world[10]
+   641	    def change_recipient():
+   642	        if change == "missing":
+   643	            world.clear()
+   644	        else:
+   645	            world[10] = proc(10, comm="node" if change == "node" else "python",
+   646	                             starttime=999 if change == "reused" else 123)
+   647	    if phase == "snapshot":
+   648	        def snapshot():
+   649	            change_recipient()
+   650	            return dict(world)
+   651	        monkeypatch.setattr(mg, "snapshot", snapshot)
+   652	    else:
+   653	        def protected(procs, records):
+   654	            change_recipient()
+   655	            return set()
+   656	        monkeypatch.setattr(mg, "protected_watchdogs", protected)
+   657	    class File(io.StringIO):
+   658	        def close(self):
+   659	            pass
+   660	    output, sent = File(), []
+   661	    monkeypatch.setattr("builtins.open", lambda *a, **kw: output)
+   662	    monkeypatch.setattr(mg.os, "pidfd_open", lambda p: 42)
+   663	    monkeypatch.setattr(mg.os, "close", lambda fd: None)
+   664	    monkeypatch.setattr(mg.signal, "pidfd_send_signal", lambda *a: sent.append(a))
+   665	    monkeypatch.setattr(mg.os, "kill", lambda *a: sent.append(a))
+   666	    if action == "signal":
+   667	        assert mg.send_kill(candidate, lambda _: None, args) is False
+   668	    else:
+   669	        assert mg.raise_oom_adj({10: candidate}, False, args) == 0
+   670	    assert sent == []
+   671	    assert output.getvalue() == ""
+   672	
+   673	
+   674	@pytest.mark.parametrize("record_kind", ["three", "four", "identity"])
+   675	def test_large_unrelated_process_requires_verified_wrapper(monkeypatch, mg, args, record_kind):
+   676	    import io
+   677	    record = dict(name="work", pid=20, pgid=None if record_kind == "three" else 20)
+   678	    if record_kind == "identity":
+   679	        record["starttime"] = "123"
+   680	    world = mock_world(monkeypatch, mg, {10: proc(10, rss=4 * 1024**3)}, {}, [record])
+   681	    # Its cwd is intentionally irrelevant, even when it is /tmp/other-project.
+   682	    monkeypatch.setattr(mg.os, "readlink", lambda p: "/tmp/other-project")
+   683	    assert mg.find_jobs(world, args, set()) == ({}, {})
+   684	    class File(io.StringIO):
+   685	        def close(self):
+   686	            pass
+   687	    output, sent = File(), []
+   688	    real_open = open
+   689	    def open_oom(path, *a, **kw):
+   690	        return output if str(path).endswith("oom_score_adj") else real_open(path, *a, **kw)
+   691	    monkeypatch.setattr("builtins.open", open_oom)
+   692	    monkeypatch.delattr(mg.os, "pidfd_open", raising=False)
+   693	    monkeypatch.setattr(mg.os, "kill", lambda *a: sent.append(a))
+   694	    assert mg.send_kill(world[10], lambda _: None, args) is False
+   695	    assert mg.raise_oom_adj(world, False, args) == 0
+   696	    assert sent == [] and output.getvalue() == ""
+   697	    world[20] = proc(20, comm="bash", pgid=20)
+   698	    # Sharing a PGID alone is insufficient.
+   699	    world[10] = proc(10, pgid=20, rss=4 * 1024**3)
+   700	    assert 10 not in mg.find_jobs(world, args, set())[0]
+   701	    world[10] = proc(10, ppid=20, pgid=20, rss=4 * 1024**3)
+   702	    targets, jobs = mg.find_jobs(world, args, set())
+   703	    assert set(targets) == {10, 20}
+   704	    assert mg.action_eligible(world[10], args)
+   705	    # Retained provenance survives losing both marker and wrapper ancestry.
+   706	    del world[20]
+   707	    world[10] = proc(10, pgid=99, rss=4 * 1024**3)
+   708	    targets, jobs = mg.find_jobs(world, args, set(), known_jobs=jobs)
+   709	    assert set(targets) == {10}
+   710	    assert mg.raise_oom_adj(targets, False, args, jobs) == 1
+   711	    assert mg.send_kill(targets[10], lambda _: None, args, jobs)
+   712	    assert sent == [(10, signal.SIGKILL)] and output.getvalue() == "1000"
+   713	    world[10] = proc(10, starttime=999, rss=4 * 1024**3)
+   714	    assert mg.find_jobs(world, args, set(), known_jobs=jobs) == ({}, {})
+   715	
+   716	
+   717	@pytest.mark.parametrize("bad_wrapper", ["dead", "reused", "cmdline", "cap-only"])
+   718	def test_status_and_cap_alone_are_not_provenance(monkeypatch, mg, args, bad_wrapper):
+   719	    record = dict(name="work", pid=20, pgid=20)
+   720	    world = mock_world(monkeypatch, mg, {10: proc(10, ppid=20), 20: proc(20)},
+   721	                       {10: b"cap", 20: b"cap"}, [record])
+   722	    if bad_wrapper == "dead":
+   723	        world[20]["state"] = "Z"
+   724	    elif bad_wrapper == "reused":
+   725	        record["starttime"] = "999"
+   726	    elif bad_wrapper == "cmdline":
+   727	        original_read = mg.read
+   728	        monkeypatch.setattr(mg, "read", lambda path, mode="r":
+   729	                            b"bash\0-c\0echo bin/job\0_\0work\0" if mode == "rb"
+   730	                            else original_read(path, mode))
+   731	    else:
+   732	        world.clear()
+   733	        world[10] = proc(10, rss=4 * 1024**3)
+   734	    assert mg.find_jobs(world, args, set()) == ({}, {})
+   735	    assert not mg.action_eligible(world[10], args)
+
+exec
+/bin/bash -lc 'diff -u /home/ubuntu/work/gemma/AGENTS.md AGENTS.md; diff -u /home/ubuntu/work/gemma/CLAUDE.md CLAUDE.md; nl -ba bin/job | head -180; cat ops/codex/build-memguard-fix4.md' in /home/ubuntu/work/gemma-wt/codex-memguard-fix
+exec
+/bin/bash -lc 'git diff b299167 5cb49c2 -- bin/memguard && nl -ba bin/memguard' in /home/ubuntu/work/gemma-wt/codex-memguard-fix
+ exited 1 in 0ms:
+     1	#!/usr/bin/env bash
+     2	# Detached long-running jobs that survive the end of a Claude cycle.
+     3	#   bin/job start <name> -- <command...>   bin/job status [name]   bin/job tail <name> [lines]   bin/job kill <name>
+     4	# Writes ops/jobs/<name>.status: "running <pid> <start> <pgid>" -> "done 0 <end>" / "failed <rc> <end>"
+     5	set -uo pipefail
+     6	cd "$(dirname "$0")/.." || exit 1
+     7	mkdir -p ops/jobs
+     8	cmd=${1:-}; shift || true
+     9	case "$cmd" in
+    10	  start)
+    11	    name=$1; shift; [ "${1:-}" = "--" ] && shift
+    12	    [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "bad name"; exit 2; }
+    13	    if grep -q '^running' "ops/jobs/$name.status" 2>/dev/null; then echo "job $name already running"; exit 1; fi
+    14	    # Admission control (dec 021): refuse heavy jobs when the VM is already short of memory.
+    15	    avail_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+    16	    if [[ "$name" != *-light ]] && [ "${avail_kb:-0}" -lt $((5 * 1024 * 1024)) ]; then
+    17	      echo "refusing $name: MemAvailable $((avail_kb / 1024)) MiB < 5 GiB (name it *-light if it is small)"; exit 3
+    18	    fi
+    19	    printf '%q ' "$@" > "ops/jobs/$name.cmd"
+    20	    # Memory cap per job: a runaway job must not stall the VM (Etho shares it; 2026-11-05 incident).
+    21	    # Prefer a systemd user scope (caps the whole process tree); after a cron-started boot with no
+    22	    # login there is no user manager, so fall back to a per-process ulimit -v.
+    23	    rt=/run/user/$(id -u)
+    24	    rm -f "ops/jobs/$name.unit"
+    25	    if [ -S "$rt/bus" ] && XDG_RUNTIME_DIR=$rt systemd-run --user --scope --quiet -p MemoryMax=64M true 2>/dev/null; then
+    26	      unit="gemma-job-$name-$(date +%s)"
+    27	      echo "$unit" > "ops/jobs/$name.unit"
+    28	      pre=(env XDG_RUNTIME_DIR="$rt" systemd-run --user --scope --quiet --collect --unit="$unit" -p MemoryMax=5G)
+    29	      cap="memory cap: systemd scope MemoryMax=5G (whole job)"
+    30	    else
+    31	      pre=(bash -c 'ulimit -v 5242880 && exec "$@"' _)
+    32	      cap="memory cap: ulimit -v 5G per process (no systemd user manager)"
+    33	    fi
+    34	    # setsid: the wrapper leads its own process group, so `kill` can signal the whole tree.
+    35	    GEMMA_JOB_CAP=$cap setsid nohup bash -c '
+    36	      name=$1; shift
+    37	      echo 1000 > /proc/self/oom_score_adj 2>/dev/null || true   # kernel OOM killer picks our jobs before Etho
+    38	      pgid=$(ps -o pgid= -p $$ | tr -d " ")
+    39	      echo "running $$ $(date -u +%FT%TZ) $pgid" > "ops/jobs/$name.status"
+    40	      { echo "[bin/job] $GEMMA_JOB_CAP; pgid $pgid"; nice -n 15 "$@"; } > "ops/jobs/$name.log" 2>&1; rc=$?
+    41	      [ $rc -eq 137 ] && echo "[bin/job] exit 137: killed, most likely at the memory cap" >> "ops/jobs/$name.log"
+    42	      if [ $rc -eq 0 ]; then st=done; else st=failed; fi
+    43	      echo "$st $rc $(date -u +%FT%TZ)" > "ops/jobs/$name.status"
+    44	    ' _ "$name" "${pre[@]}" "$@" >/dev/null 2>&1 < /dev/null &
+    45	    sleep 1; echo "started $name: $(cat "ops/jobs/$name.status" 2>/dev/null) [$cap]";;
+    46	  status)
+    47	    if [ -n "${1:-}" ]; then cat "ops/jobs/$1.status"; else for f in ops/jobs/*.status; do [ -e "$f" ] && echo "$(basename "$f" .status): $(cat "$f")"; done; fi;;
+    48	  tail) tail -n "${2:-40}" "ops/jobs/$1.log";;
+    49	  kill)
+    50	    read -r st pid _ pgid < "ops/jobs/$1.status"
+    51	    [ "$st" = running ] || { echo "not running"; exit 0; }
+    52	    if [[ "${pgid:-}" =~ ^[0-9]+$ ]] && [ "$pgid" -gt 1 ]; then
+    53	      kill -TERM -- "-$pgid" 2>/dev/null
+    54	      for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -g "$pgid" >/dev/null || break; sleep 0.5; done
+    55	      kill -KILL -- "-$pgid" 2>/dev/null; sleep 0.3
+    56	    else  # status written by an older bin/job without a pgid
+    57	      pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null
+    58	    fi
+    59	    if [ -s "ops/jobs/$1.unit" ]; then
+    60	      XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user stop "$(cat "ops/jobs/$1.unit").scope" 2>/dev/null
+    61	    fi
+    62	    echo "failed killed $(date -u +%FT%TZ)" > "ops/jobs/$1.status"
+    63	    surv=$( { [ -n "${pgid:-}" ] && pgrep -g "$pgid"; pgrep -P "$pid"; } 2>/dev/null | sort -u | tr '\n' ' ')
+    64	    if [ -n "$surv" ]; then echo "killed; SURVIVORS: $surv"; exit 1; else echo "killed (no survivors in group)"; fi;;
+    65	  *) echo "usage: bin/job start <name> -- <cmd...> | status [name] | tail <name> [n] | kill <name>"; exit 2;;
+    66	esac
+cat: ops/codex/build-memguard-fix4.md: No such file or directory
+
+ succeeded in 0ms:
+diff --git a/bin/memguard b/bin/memguard
+index 5dc9fd0..9d01a22 100755
+--- a/bin/memguard
++++ b/bin/memguard
+@@ -3,21 +3,18 @@
+ 
+ Protects Etho (and the Claude sessions) from our own runaway work. No sudo, no systemd.
+ Every --interval seconds (default 2):
+-  1. Find TARGETS, only processes of our own uid that are either
+-     (i)  carrying the bin/job env marker (GEMMA_JOB_CAP=... in /proc/<pid>/environ), i.e. bin/job
+-          descendants, including orphans re-parented away from their wrapper; or
+-     (ii) cwd under /home/ubuntu/work/gemma or /tmp, RSS > 3G, and comm not a session process
+-          (claude/node/codex/tmux, or a bash/sh whose parent is one of those).
+-     Session processes and all memguard jobs/wrappers are excluded from both sets.
++  1. Find TARGETS of our own uid with positive bin/job provenance: GEMMA_JOB_ID,
++     verified running wrapper ancestry, or retained (pid, starttime) job membership.
++     Session processes and all memguard jobs/wrappers are excluded.
+   2. Raise oom_score_adj to 1000 on every target (unprivileged), so the kernel picks us first.
+   3. Group by exact GEMMA_JOB_ID when present; retain legacy member identities.
+-     Marked orphans outside running groups remain targets in an orphan job.
++     Job-ID marked orphans outside running groups remain targets.
+   4. On memory pressure, kill eligible members of the largest job, allowing its wrapper
+      3 seconds to record failure. Re-inventory for up to 5 seconds, including new forks.
+-Reads only /proc/<pid>/{status,stat,environ,cwd,cmdline} of our own uid; writes oom_score_adj.
++Reads only /proc/<pid>/{status,stat,environ,cmdline} of our own uid; writes oom_score_adj.
+ Python stdlib only. No process-group signals: every recipient must pass the allowlist.
+ Usage: bin/memguard [--once] [--dry-run] [--interval S] [--min-available G] [--max-total G]
+-                    [--unmarked-rss G] [--marker NAME] [--roots DIR,DIR] [--log PATH] [--no-mail]
++                    [--log PATH] [--no-mail]
+ """
+ import argparse, errno, os, signal, subprocess, sys, threading, time
+ from pathlib import Path
+@@ -100,17 +97,6 @@ def marker_value(pid, marker):
+     return None
+ 
+ 
+-def cwd_of(pid):
+-    try:
+-        return os.readlink(f"/proc/{pid}/cwd")
+-    except OSError:
+-        return ""
+-
+-
+-def under(path, roots):
+-    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+-
+-
+ def ancestors(pid, procs):
+     out, seen = [], set()
+     p = procs.get(pid, {}).get("ppid", 0)
+@@ -189,17 +175,55 @@ def protected_watchdogs(procs, records):
+     return guards | {procs[p]["ppid"] for p in guards}
+ 
+ 
+-def eligible(pid, procs, args, protected=()):
++def verified_records(procs, records):
++    """A status pid/PGID alone is never proof of current job ownership."""
++    if not records:
++        return []
++    # Compare the full bash -c wrapper body with our installed bin/job. Fail closed
++    # if its layout changes; substring matches could admit unrelated shell scripts.
++    source = read(os.path.join(REPO, "bin/job")) or ""
++    prefix = "GEMMA_JOB_CAP=$cap setsid nohup bash -c '\n"
++    suffix = "    ' _ \"$name\""
++    script = source.split(prefix, 1)[1].split(suffix, 1)[0] if prefix in source and suffix in source else None
++    verified = []
++    for record in records:
++        d = procs.get(record["pid"])
++        if not d or d["state"] in {"Z", "X"} or d["uid"] != UID:
++            continue
++        if "starttime" in record:
++            if str(d["starttime"]) != str(record["starttime"]):
++                continue
++        else:
++            argv = (read(f"/proc/{record['pid']}/cmdline", "rb") or b"").split(b"\0")
++            if not (script is not None and len(argv) >= 6 and
++                    os.path.basename(argv[0]) == b"bash" and argv[1] == b"-c" and
++                    argv[2] == ("\n" + script).encode() and argv[3] == b"_" and
++                    argv[4] == record["name"].encode()):
++                continue
++        verified.append(record)
++    return verified
++
++
++def provenance(pid, procs, records, known_jobs=None):
++    if marker_value(pid, "GEMMA_JOB_ID") is not None:
++        return True
++    identity = procs[pid]["starttime"]
++    if any(j["known_members"].get(pid) == identity for j in (known_jobs or {}).values()):
++        return True
++    lineage = [pid] + ancestors(pid, procs)
++    return any(r["pid"] in lineage for r in records)
++
++
++def eligible(pid, procs, args, protected=(), records=(), known_jobs=None):
+     d = procs[pid]
+     return (pid not in protected and d["uid"] == UID and d["state"] not in {"Z", "X"} and
+-            not is_session(pid, procs) and
+-            (marker_value(pid, args.marker) is not None or
+-             (d["rss"] > args.unmarked_rss and under(cwd_of(pid), args.roots))))
++            not is_session(pid, procs) and provenance(pid, procs, records, known_jobs))
+ 
+ 
+ def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
+-    """Classify every recipient independently; ancestry only associates eligible members."""
++    """Require positive provenance and classify every recipient independently."""
+     records = running_jobs() if records is None else records
++    verified = verified_records(procs, records)
+     known = {(p, start): j for j in (known_jobs or {}).values()
+              for p, start in j["known_members"].items()}
+     protected = protected_watchdogs(procs, records)
+@@ -213,9 +237,8 @@ def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
+             jobs[key] = {**previous, "pids": [], "members": {}, "rss": 0,
+                          "records": records, "known_members": dict(previous["known_members"])}
+     for p, d in procs.items():
+-        if not eligible(p, procs, args, protected):
++        if not eligible(p, procs, args, protected, verified, known_jobs):
+             continue
+-        value = marker_value(p, args.marker)
+         job_id = marker_value(p, "GEMMA_JOB_ID")
+         record = None
+         previous = known.get((p, d["starttime"])) if job_id is None else None
+@@ -226,15 +249,12 @@ def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
+             key = ("job_id", job_id)
+         elif previous:
+             key = previous["key"]
+-        elif value is not None:
+-            lineage = [p] + ancestors(p, procs)
+-            record = next((r for r in records if
+-                           (r["pgid"] is not None and d["pgid"] == r["pgid"]) or
+-                           (r["pgid"] is None and r["pid"] in lineage)), None)
+-            key = (("job", value, record["pid"], record["pgid"]) if record else
+-                   ("orphan", value))
+         else:
+-            key = ("unmarked", p, d["starttime"])
++            lineage = [p] + ancestors(p, procs)
++            record = next((r for r in verified if r["pid"] in lineage), None)
++            if record is None:
++                continue  # The job-ID marker may have disappeared since eligibility.
++            key = ("job", record["pid"], procs[record["pid"]]["starttime"])
+         root = record["pid"] if record else p
+         if previous:
+             root = previous["root"]
+@@ -245,8 +265,7 @@ def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
+             j["name"] = previous["name"]
+             for member, start in previous["known_members"].items():
+                 j["known_members"].setdefault(member, start)
+-        if job_id is None:
+-            j["known_members"][p] = d["starttime"]
++        j["known_members"][p] = d["starttime"]
+         j["pids"].append(p)
+         j["members"][p] = d
+         j["rss"] += d["rss"]
+@@ -259,25 +278,34 @@ def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
+     return targets, jobs
+ 
+ 
+-def action_eligible(d, args):
+-    """Refresh identity AND allowlist after opening the process handle (exec keeps starttime)."""
+-    current = proc_info(d["pid"])
+-    if not current or current["starttime"] != d["starttime"]:
++def action_eligible(d, args, known_jobs=None):
++    """Refresh the recipient AFTER discovery/protection scans (exec keeps starttime)."""
++    initial = proc_info(d["pid"])
++    if not initial or initial["starttime"] != d["starttime"]:
+         return False
+-    # Include children so a guard's bin/job parent is protected at action time too.
+     procs = snapshot()
+-    procs[d["pid"]] = current
+-    parent = current["ppid"]
+-    while current["comm"] in SHELL_COMMS and parent and parent not in procs:
++    # Preserve session ancestry checks when a shell's parent was missed by the scan.
++    parent = initial["ppid"]
++    while initial["comm"] in SHELL_COMMS and parent and parent not in procs:
+         info = proc_info(parent)
+         if not info:
+             break
+         procs[parent] = info
+         parent = info["ppid"]
+-    return eligible(d["pid"], procs, args, protected_watchdogs(procs, running_jobs()))
++    records = running_jobs()
++    verified = verified_records(procs, records)
++    protected = protected_watchdogs(procs, records)
++    current = proc_info(d["pid"])
++    if not current or current["starttime"] != d["starttime"]:
++        return False
++    if current["comm"] in SHELL_COMMS and current["ppid"] and current["ppid"] not in procs:
++        return False
++    procs[d["pid"]] = current
++    # Re-evaluate fresh recipient metadata against the scanned protections/ancestry.
++    return eligible(d["pid"], procs, args, protected, verified, known_jobs)
+ 
+ 
+-def send_kill(d, log, args):
++def send_kill(d, log, args, known_jobs=None):
+     """Pin a pidfd before the final identity check; never signal a recycled pid."""
+     fd = None
+     try:
+@@ -287,7 +315,7 @@ def send_kill(d, log, args):
+             except OSError as exc:
+                 if exc.errno not in (errno.ENOSYS, errno.EINVAL, errno.EPERM):
+                     raise
+-        if not action_eligible(d, args):
++        if not action_eligible(d, args, known_jobs):
+             return False
+         if fd is not None:
+             signal.pidfd_send_signal(fd, signal.SIGKILL)
+@@ -304,7 +332,7 @@ def send_kill(d, log, args):
+             os.close(fd)
+ 
+ 
+-def raise_oom_adj(targets, dry, args):
++def raise_oom_adj(targets, dry, args, known_jobs=None):
+     n = 0
+     if dry:
+         return n
+@@ -312,7 +340,7 @@ def raise_oom_adj(targets, dry, args):
+         # Opening first pins the proc file to this process, even if its numeric pid is reused.
+         try:
+             with open(f"/proc/{p}/oom_score_adj", "w") as f:
+-                if action_eligible(d, args):
++                if action_eligible(d, args, known_jobs):
+                     f.write("1000")
+                     n += 1
+         except OSError:
+@@ -322,7 +350,7 @@ def raise_oom_adj(targets, dry, args):
+ 
+ def inventory(job, args, self_pids):
+     # Use the same job ID / known legacy identities for every scan, including survivors.
+-    _, jobs = find_jobs(snapshot(), args, self_pids, job["records"], {job["key"]: job})
++    _, jobs = find_jobs(snapshot(), args, self_pids, known_jobs={job["key"]: job})
+     current = jobs.get(job["key"], {})
+     job["known_members"].update(current.get("known_members", {}))
+     return current.get("members", {})
+@@ -344,7 +372,7 @@ def kill_tree(job, args, self_pids, log):
+         for p, d in members.items():
+             if grace and p == job["root"] and d["starttime"] == root_identity["starttime"]:
+                 continue
+-            if send_kill(d, log, args):
++            if send_kill(d, log, args, {job["key"]: job}):
+                 killed.add(p)
+         empty_scans = empty_scans + 1 if not members else 0
+         if empty_scans >= 2 and not grace:
+@@ -370,18 +398,14 @@ def main():
+     ap.add_argument("--interval", type=float, default=2.0)
+     ap.add_argument("--min-available", type=float, default=2.5, help="GiB")
+     ap.add_argument("--max-total", type=float, default=6.0, help="GiB of summed targeted RSS")
+-    ap.add_argument("--unmarked-rss", type=float, default=3.0, help="GiB, for unmarked targets (ii)")
+     ap.add_argument("--min-kill-rss", type=float, default=0.25,
+                     help="GiB; on low MemAvailable alone, skip jobs smaller than this (killing a waiter frees nothing)")
+-    ap.add_argument("--marker", default="GEMMA_JOB_CAP")
+-    ap.add_argument("--roots", default="/home/ubuntu/work/gemma,/tmp")
+     ap.add_argument("--log", default=os.path.join(REPO, "ops/logs/memguard.log"))
+     ap.add_argument("--once", action="store_true")
+     ap.add_argument("--dry-run", action="store_true")
+     ap.add_argument("--no-mail", action="store_true")
+     args = ap.parse_args()
+-    args.roots = [r for r in args.roots.split(",") if r]
+-    for k in ("min_available", "max_total", "unmarked_rss", "min_kill_rss"):
++    for k in ("min_available", "max_total", "min_kill_rss"):
+         setattr(args, k, int(getattr(args, k) * GIB))
+     os.makedirs(os.path.dirname(args.log), exist_ok=True)
+ 
+@@ -392,7 +416,7 @@ def main():
+         print(line, flush=True)
+ 
+     log(f"start pid={os.getpid()} min_available={args.min_available/GIB:.2f}G max_total={args.max_total/GIB:.2f}G "
+-        f"marker={args.marker} roots={args.roots} dry_run={args.dry_run}")
++        f"dry_run={args.dry_run}")
+     last_beat = 0
+     jobs = {}
+     while True:
+@@ -404,7 +428,7 @@ def main():
+             log(f"targets={sorted(targets)} jobs=" + repr([
+                 {"name": j["name"], "root": j["root"], "pids": sorted(j["pids"])}
+                 for j in jobs.values()]))
+-        raise_oom_adj(targets, args.dry_run, args)
++        raise_oom_adj(targets, args.dry_run, args, jobs)
+         avail = mem_available() or 0
+         total = sum(j["rss"] for j in jobs.values())
+         if time.time() - last_beat > 600:
+@@ -428,7 +452,7 @@ def main():
+             if not args.dry_run:
+                 killed, surv = kill_tree(j, args, self_pids, log)
+                 log(f"  killed {len(killed)} pids; survivors={surv}")
+-                msg = (f"memguard killed job {name or '(unmarked pid %d %s)' % (root, comm)}: "
++                msg = (f"memguard killed job {name or '(job pid %d %s)' % (root, comm)}: "
+                        f"{j['rss']/GIB:.2f}G, {reason}. Survivors: {surv or 'none'}. See ops/logs/memguard.log.")
+                 if name:
+                     time.sleep(0.5)
+     1	#!/usr/bin/env python3
+     2	"""bin/memguard: unprivileged userspace memory watchdog for this shared VM (dec 021).
+     3	
+     4	Protects Etho (and the Claude sessions) from our own runaway work. No sudo, no systemd.
+     5	Every --interval seconds (default 2):
+     6	  1. Find TARGETS of our own uid with positive bin/job provenance: GEMMA_JOB_ID,
+     7	     verified running wrapper ancestry, or retained (pid, starttime) job membership.
+     8	     Session processes and all memguard jobs/wrappers are excluded.
+     9	  2. Raise oom_score_adj to 1000 on every target (unprivileged), so the kernel picks us first.
+    10	  3. Group by exact GEMMA_JOB_ID when present; retain legacy member identities.
+    11	     Job-ID marked orphans outside running groups remain targets.
+    12	  4. On memory pressure, kill eligible members of the largest job, allowing its wrapper
+    13	     3 seconds to record failure. Re-inventory for up to 5 seconds, including new forks.
+    14	Reads only /proc/<pid>/{status,stat,environ,cmdline} of our own uid; writes oom_score_adj.
+    15	Python stdlib only. No process-group signals: every recipient must pass the allowlist.
+    16	Usage: bin/memguard [--once] [--dry-run] [--interval S] [--min-available G] [--max-total G]
+    17	                    [--log PATH] [--no-mail]
+    18	"""
+    19	import argparse, errno, os, signal, subprocess, sys, threading, time
+    20	from pathlib import Path
+    21	
+    22	REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    23	GIB = 1024 ** 3
+    24	SESSION_COMMS = {"claude", "node", "codex", "tmux", "tmux: server", "tmux: client"}
+    25	SHELL_COMMS = {"bash", "sh", "dash", "zsh"}
+    26	UID = os.getuid()
+    27	
+    28	
+    29	def read(path, mode="r"):
+    30	    try:
+    31	        with open(path, mode) as f:
+    32	            return f.read()
+    33	    except OSError:
+    34	        return None
+    35	
+    36	
+    37	def mem_available():
+    38	    txt = read("/proc/meminfo") or ""
+    39	    for line in txt.splitlines():
+    40	        if line.startswith("MemAvailable:"):
+    41	            return int(line.split()[1]) * 1024
+    42	    return None
+    43	
+    44	
+    45	def proc_stat(pid):
+    46	    raw = read(f"/proc/{pid}/stat")
+    47	    if not raw:
+    48	        return None
+    49	    try:
+    50	        fields = raw.rsplit(") ", 1)[1].split()
+    51	        return {"state": fields[0], "ppid": int(fields[1]),
+    52	                "pgid": int(fields[2]), "starttime": int(fields[19])}
+    53	    except (IndexError, ValueError):
+    54	        return None
+    55	
+    56	
+    57	def proc_info(pid):
+    58	    """Read only our uid's processes, binding status to a stable stat identity."""
+    59	    try:
+    60	        if os.stat(f"/proc/{pid}").st_uid != UID:
+    61	            return None
+    62	    except OSError:
+    63	        return None
+    64	    before = proc_stat(pid)
+    65	    st = read(f"/proc/{pid}/status")
+    66	    after = proc_stat(pid)
+    67	    if not before or not after or before["starttime"] != after["starttime"] or st is None:
+    68	        return None
+    69	    d = {"pid": pid, "rss": 0, "uid": None, "comm": "", **after}
+    70	    for line in st.splitlines():
+    71	        k, _, v = line.partition(":")
+    72	        if k == "Name":
+    73	            d["comm"] = v.strip()
+    74	        elif k == "Uid":
+    75	            d["uid"] = int(v.split()[0])
+    76	        elif k == "VmRSS":
+    77	            d["rss"] = int(v.split()[0]) * 1024
+    78	    return d if d["uid"] == UID else None
+    79	
+    80	
+    81	def snapshot():
+    82	    procs = {}
+    83	    for name in os.listdir("/proc"):
+    84	        if name.isdigit():
+    85	            d = proc_info(int(name))
+    86	            if d:
+    87	                procs[d["pid"]] = d
+    88	    return procs
+    89	
+    90	
+    91	def marker_value(pid, marker):
+    92	    env = read(f"/proc/{pid}/environ", "rb") or b""
+    93	    key = marker.encode() + b"="
+    94	    for entry in env.split(b"\0"):
+    95	        if entry.startswith(key):
+    96	            return entry[len(key):]  # Empty marker values still count as marked.
+    97	    return None
+    98	
+    99	
+   100	def ancestors(pid, procs):
+   101	    out, seen = [], set()
+   102	    p = procs.get(pid, {}).get("ppid", 0)
+   103	    while p and p in procs and p not in seen:
+   104	        seen.add(p); out.append(p); p = procs[p]["ppid"]
+   105	    return out
+   106	
+   107	
+   108	def descendants(root, procs):
+   109	    kids = {}
+   110	    for d in procs.values():
+   111	        kids.setdefault(d["ppid"], []).append(d["pid"])
+   112	    out, stack = [], [root]
+   113	    while stack:
+   114	        for c in kids.get(stack.pop(), []):
+   115	            if c not in out:
+   116	                out.append(c); stack.append(c)
+   117	    return out
+   118	
+   119	
+   120	def is_session(pid, procs):
+   121	    d = procs[pid]
+   122	    return (d["comm"] in SESSION_COMMS or
+   123	            (d["comm"] in SHELL_COMMS and
+   124	             any(procs[a]["comm"] in SESSION_COMMS for a in ancestors(pid, procs))))
+   125	
+   126	
+   127	def running_jobs():
+   128	    """Legacy three-field, current four-field, and longer (extra trailing fields) status records."""
+   129	    records = []
+   130	    for path in sorted(Path(REPO, "ops/jobs").glob("*.status")):
+   131	        fields = (read(path) or "").split()
+   132	        # >=3: legacy 3-field, current 4-field, and the proposed owner patch's extra identity fields.
+   133	        if len(fields) < 3 or fields[0] != "running":
+   134	            continue
+   135	        try:
+   136	            pid = int(fields[1])
+   137	            pgid = int(fields[3]) if len(fields) >= 4 else None
+   138	        except ValueError:
+   139	            continue
+   140	        record = {"name": path.stem, "pid": pid, "pgid": pgid}
+   141	        if len(fields) >= 6:
+   142	            record.update(boot_id=fields[4], starttime=fields[5],
+   143	                          job_id=f"{path.stem}/{fields[4]}/{fields[5]}".encode())
+   144	        records.append(record)
+   145	    return records
+   146	
+   147	
+   148	def job_name(root, procs, records):
+   149	    """Use status metadata only; never inspect a process command line."""
+   150	    pgid = procs.get(root, {}).get("pgid")
+   151	    for record in records:
+   152	        if (record["pid"] == root or record["pgid"] == root or
+   153	                (pgid is not None and pgid in (record["pid"], record["pgid"]))):
+   154	            return record["name"]
+   155	    return None
+   156	
+   157	
+   158	def runs_memguard(pid):
+   159	    argv = (read(f"/proc/{pid}/cmdline", "rb") or b"").split(b"\0")
+   160	    return any(os.path.basename(arg) == b"memguard" for arg in argv[:2])
+   161	
+   162	
+   163	def protected_watchdogs(procs, records):
+   164	    # Deployment stops the old guard before starting the new one, with no heavy
+   165	    # jobs running. We do not rely on the old implementation excluding this guard.
+   166	    guards = {p for p in procs if runs_memguard(p)}
+   167	    for p in procs:
+   168	        job_id = marker_value(p, "GEMMA_JOB_ID")
+   169	        name = job_name(p, procs, records)
+   170	        if ((job_id is not None and job_id.startswith(b"memguard")) or
+   171	                (name is not None and name.startswith("memguard")) or
+   172	                any(r["name"].startswith("memguard") and r["pid"] in ancestors(p, procs)
+   173	                    for r in records)):
+   174	            guards.add(p)
+   175	    return guards | {procs[p]["ppid"] for p in guards}
+   176	
+   177	
+   178	def verified_records(procs, records):
+   179	    """A status pid/PGID alone is never proof of current job ownership."""
+   180	    if not records:
+   181	        return []
+   182	    # Compare the full bash -c wrapper body with our installed bin/job. Fail closed
+   183	    # if its layout changes; substring matches could admit unrelated shell scripts.
+   184	    source = read(os.path.join(REPO, "bin/job")) or ""
+   185	    prefix = "GEMMA_JOB_CAP=$cap setsid nohup bash -c '\n"
+   186	    suffix = "    ' _ \"$name\""
+   187	    script = source.split(prefix, 1)[1].split(suffix, 1)[0] if prefix in source and suffix in source else None
+   188	    verified = []
+   189	    for record in records:
+   190	        d = procs.get(record["pid"])
+   191	        if not d or d["state"] in {"Z", "X"} or d["uid"] != UID:
+   192	            continue
+   193	        if "starttime" in record:
+   194	            if str(d["starttime"]) != str(record["starttime"]):
+   195	                continue
+   196	        else:
+   197	            argv = (read(f"/proc/{record['pid']}/cmdline", "rb") or b"").split(b"\0")
+   198	            if not (script is not None and len(argv) >= 6 and
+   199	                    os.path.basename(argv[0]) == b"bash" and argv[1] == b"-c" and
+   200	                    argv[2] == ("\n" + script).encode() and argv[3] == b"_" and
+   201	                    argv[4] == record["name"].encode()):
+   202	                continue
+   203	        verified.append(record)
+   204	    return verified
+   205	
+   206	
+   207	def provenance(pid, procs, records, known_jobs=None):
+   208	    if marker_value(pid, "GEMMA_JOB_ID") is not None:
+   209	        return True
+   210	    identity = procs[pid]["starttime"]
+   211	    if any(j["known_members"].get(pid) == identity for j in (known_jobs or {}).values()):
+   212	        return True
+   213	    lineage = [pid] + ancestors(pid, procs)
+   214	    return any(r["pid"] in lineage for r in records)
+   215	
+   216	
+   217	def eligible(pid, procs, args, protected=(), records=(), known_jobs=None):
+   218	    d = procs[pid]
+   219	    return (pid not in protected and d["uid"] == UID and d["state"] not in {"Z", "X"} and
+   220	            not is_session(pid, procs) and provenance(pid, procs, records, known_jobs))
+   221	
+   222	
+   223	def find_jobs(procs, args, self_pids, records=None, known_jobs=None):
+   224	    """Require positive provenance and classify every recipient independently."""
+   225	    records = running_jobs() if records is None else records
+   226	    verified = verified_records(procs, records)
+   227	    known = {(p, start): j for j in (known_jobs or {}).values()
+   228	             for p, start in j["known_members"].items()}
+   229	    protected = protected_watchdogs(procs, records)
+   230	    jobs = {}
+   231	    # Carry history independently of eligible-member traversal order. In particular,
+   232	    # an exec to node must not erase a live legacy identity, even if no member is
+   233	    # eligible this poll. Only members/pids/RSS describe current eligible recipients.
+   234	    for key, previous in (known_jobs or {}).items():
+   235	        if any(p in procs and procs[p]["starttime"] == start
+   236	               for p, start in previous["known_members"].items()):
+   237	            jobs[key] = {**previous, "pids": [], "members": {}, "rss": 0,
+   238	                         "records": records, "known_members": dict(previous["known_members"])}
+   239	    for p, d in procs.items():
+   240	        if not eligible(p, procs, args, protected, verified, known_jobs):
+   241	            continue
+   242	        job_id = marker_value(p, "GEMMA_JOB_ID")
+   243	        record = None
+   244	        previous = known.get((p, d["starttime"])) if job_id is None else None
+   245	        if job_id is not None:
+   246	            # Bytes equality, never a prefix/substring/regex match. Identity takes
+   247	            # precedence over PGID, ancestry, and the eligibility marker's value.
+   248	            record = next((r for r in records if r.get("job_id") == job_id), None)
+   249	            key = ("job_id", job_id)
+   250	        elif previous:
+   251	            key = previous["key"]
+   252	        else:
+   253	            lineage = [p] + ancestors(p, procs)
+   254	            record = next((r for r in verified if r["pid"] in lineage), None)
+   255	            if record is None:
+   256	                continue  # The job-ID marker may have disappeared since eligibility.
+   257	            key = ("job", record["pid"], procs[record["pid"]]["starttime"])
+   258	        root = record["pid"] if record else p
+   259	        if previous:
+   260	            root = previous["root"]
+   261	        j = jobs.setdefault(key, {"key": key, "root": root, "name": record["name"] if record else job_name(root, procs, records),
+   262	                                  "pids": [], "members": {}, "rss": 0, "records": records,
+   263	                                  "known_members": dict(previous["known_members"]) if previous else {}})
+   264	        if previous:
+   265	            j["name"] = previous["name"]
+   266	            for member, start in previous["known_members"].items():
+   267	                j["known_members"].setdefault(member, start)
+   268	        j["known_members"][p] = d["starttime"]
+   269	        j["pids"].append(p)
+   270	        j["members"][p] = d
+   271	        j["rss"] += d["rss"]
+   272	    # Exclude the watchdog's whole job, including siblings, rather than only its pid.
+   273	    for key, j in list(jobs.items()):
+   274	        if (set(j["pids"]) & (self_pids | protected) or j["root"] in self_pids | protected or
+   275	                (j["name"] is not None and j["name"].startswith("memguard"))):
+   276	            del jobs[key]
+   277	    targets = {p: d for j in jobs.values() for p, d in j["members"].items()}
+   278	    return targets, jobs
+   279	
+   280	
+   281	def action_eligible(d, args, known_jobs=None):
+   282	    """Refresh the recipient AFTER discovery/protection scans (exec keeps starttime)."""
+   283	    initial = proc_info(d["pid"])
+   284	    if not initial or initial["starttime"] != d["starttime"]:
+   285	        return False
+   286	    procs = snapshot()
+   287	    # Preserve session ancestry checks when a shell's parent was missed by the scan.
+   288	    parent = initial["ppid"]
+   289	    while initial["comm"] in SHELL_COMMS and parent and parent not in procs:
+   290	        info = proc_info(parent)
+   291	        if not info:
+   292	            break
+   293	        procs[parent] = info
+   294	        parent = info["ppid"]
+   295	    records = running_jobs()
+   296	    verified = verified_records(procs, records)
+   297	    protected = protected_watchdogs(procs, records)
+   298	    current = proc_info(d["pid"])
+   299	    if not current or current["starttime"] != d["starttime"]:
+   300	        return False
+   301	    if current["comm"] in SHELL_COMMS and current["ppid"] and current["ppid"] not in procs:
+   302	        return False
+   303	    procs[d["pid"]] = current
+   304	    # Re-evaluate fresh recipient metadata against the scanned protections/ancestry.
+   305	    return eligible(d["pid"], procs, args, protected, verified, known_jobs)
+   306	
+   307	
+   308	def send_kill(d, log, args, known_jobs=None):
+   309	    """Pin a pidfd before the final identity check; never signal a recycled pid."""
+   310	    fd = None
+   311	    try:
+   312	        if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
+   313	            try:
+   314	                fd = os.pidfd_open(d["pid"])
+   315	            except OSError as exc:
+   316	                if exc.errno not in (errno.ENOSYS, errno.EINVAL, errno.EPERM):
+   317	                    raise
+   318	        if not action_eligible(d, args, known_jobs):
+   319	            return False
+   320	        if fd is not None:
+   321	            signal.pidfd_send_signal(fd, signal.SIGKILL)
+   322	        else:
+   323	            os.kill(d["pid"], signal.SIGKILL)
+   324	        return True
+   325	    except ProcessLookupError:
+   326	        return False
+   327	    except OSError as exc:
+   328	        log(f"  cannot kill {d['pid']}: {exc}")
+   329	        return False
+   330	    finally:
+   331	        if fd is not None:
+   332	            os.close(fd)
+   333	
+   334	
+   335	def raise_oom_adj(targets, dry, args, known_jobs=None):
+   336	    n = 0
+   337	    if dry:
+   338	        return n
+   339	    for p, d in targets.items():
+   340	        # Opening first pins the proc file to this process, even if its numeric pid is reused.
+   341	        try:
+   342	            with open(f"/proc/{p}/oom_score_adj", "w") as f:
+   343	                if action_eligible(d, args, known_jobs):
+   344	                    f.write("1000")
+   345	                    n += 1
+   346	        except OSError:
+   347	            pass
+   348	    return n
+   349	
+   350	
+   351	def inventory(job, args, self_pids):
+   352	    # Use the same job ID / known legacy identities for every scan, including survivors.
+   353	    _, jobs = find_jobs(snapshot(), args, self_pids, known_jobs={job["key"]: job})
+   354	    current = jobs.get(job["key"], {})
+   355	    job["known_members"].update(current.get("known_members", {}))
+   356	    return current.get("members", {})
+   357	
+   358	
+   359	def kill_tree(job, args, self_pids, log):
+   360	    """Two empty scans, bounded by five seconds, then an independent survivor inventory."""
+   361	    killed = set()
+   362	    started = time.monotonic()
+   363	    deadline = started + 5
+   364	    root_identity = job["members"].get(job["root"])
+   365	    empty_scans = 0
+   366	    while time.monotonic() < deadline:
+   367	        members = inventory(job, args, self_pids)
+   368	        # The wrapper gets a grace period to record the child's failure. A new process
+   369	        # with the same numeric pid does not inherit this special treatment.
+   370	        grace = (root_identity and time.monotonic() < started + 3 and
+   371	                 any(p != job["root"] for p in job["members"]))
+   372	        for p, d in members.items():
+   373	            if grace and p == job["root"] and d["starttime"] == root_identity["starttime"]:
+   374	                continue
+   375	            if send_kill(d, log, args, {job["key"]: job}):
+   376	                killed.add(p)
+   377	        empty_scans = empty_scans + 1 if not members else 0
+   378	        if empty_scans >= 2 and not grace:
+   379	            break
+   380	        time.sleep(0.2)
+   381	    survivors = sorted(inventory(job, args, self_pids))
+   382	    return sorted(killed), survivors
+   383	
+   384	
+   385	def send_mail(msg, log):
+   386	    try:
+   387	        result = subprocess.run([os.path.join(REPO, "bin/send"), "builder", msg],
+   388	                                env={**os.environ, "SEND_FROM": "memguard", "GEMMA_ROLE": "memguard"},
+   389	                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+   390	        if result.returncode:
+   391	            log(f"  mail failed: exit {result.returncode}")
+   392	    except (OSError, subprocess.TimeoutExpired) as exc:
+   393	        log(f"  mail failed: {exc}")
+   394	
+   395	
+   396	def main():
+   397	    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+   398	    ap.add_argument("--interval", type=float, default=2.0)
+   399	    ap.add_argument("--min-available", type=float, default=2.5, help="GiB")
+   400	    ap.add_argument("--max-total", type=float, default=6.0, help="GiB of summed targeted RSS")
+   401	    ap.add_argument("--min-kill-rss", type=float, default=0.25,
+   402	                    help="GiB; on low MemAvailable alone, skip jobs smaller than this (killing a waiter frees nothing)")
+   403	    ap.add_argument("--log", default=os.path.join(REPO, "ops/logs/memguard.log"))
+   404	    ap.add_argument("--once", action="store_true")
+   405	    ap.add_argument("--dry-run", action="store_true")
+   406	    ap.add_argument("--no-mail", action="store_true")
+   407	    args = ap.parse_args()
+   408	    for k in ("min_available", "max_total", "min_kill_rss"):
+   409	        setattr(args, k, int(getattr(args, k) * GIB))
+   410	    os.makedirs(os.path.dirname(args.log), exist_ok=True)
+   411	
+   412	    def log(msg):
+   413	        line = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}"
+   414	        with open(args.log, "a") as f:
+   415	            f.write(line + "\n")
+   416	        print(line, flush=True)
+   417	
+   418	    log(f"start pid={os.getpid()} min_available={args.min_available/GIB:.2f}G max_total={args.max_total/GIB:.2f}G "
+   419	        f"dry_run={args.dry_run}")
+   420	    last_beat = 0
+   421	    jobs = {}
+   422	    while True:
+   423	        procs = snapshot()
+   424	        self_pids = {os.getpid()} | set(ancestors(os.getpid(), procs))
+   425	        # Our ancestors include the bin/job wrapper and maybe a Claude shell; they're never targets.
+   426	        targets, jobs = find_jobs(procs, args, self_pids, known_jobs=jobs)
+   427	        if args.dry_run:
+   428	            log(f"targets={sorted(targets)} jobs=" + repr([
+   429	                {"name": j["name"], "root": j["root"], "pids": sorted(j["pids"])}
+   430	                for j in jobs.values()]))
+   431	        raise_oom_adj(targets, args.dry_run, args, jobs)
+   432	        avail = mem_available() or 0
+   433	        total = sum(j["rss"] for j in jobs.values())
+   434	        if time.time() - last_beat > 600:
+   435	            log(f"beat avail={avail/GIB:.2f}G targeted_rss={total/GIB:.2f}G jobs={len(jobs)} targets={len(targets)}")
+   436	            last_beat = time.time()
+   437	        reason = None
+   438	        if total > args.max_total:
+   439	            reason = f"targeted RSS {total/GIB:.2f}G > {args.max_total/GIB:.2f}G"
+   440	        elif avail < args.min_available:
+   441	            reason = f"MemAvailable {avail/GIB:.2f}G < {args.min_available/GIB:.2f}G"
+   442	        if reason and jobs:
+   443	            _, j = max(jobs.items(), key=lambda kv: kv[1]["rss"])
+   444	            root = j["root"]
+   445	            if total <= args.max_total and j["rss"] < args.min_kill_rss:
+   446	                reason = None  # pressure is not ours to fix by killing a tiny job
+   447	        if reason and jobs:
+   448	            name = j["name"]
+   449	            comm = procs.get(root, {}).get("comm", "?")
+   450	            log(f"KILL job={name or '-'} root={root} comm={comm} rss={j['rss']/GIB:.2f}G reason: {reason}"
+   451	                + (" [dry-run]" if args.dry_run else ""))
+   452	            if not args.dry_run:
+   453	                killed, surv = kill_tree(j, args, self_pids, log)
+   454	                log(f"  killed {len(killed)} pids; survivors={surv}")
+   455	                msg = (f"memguard killed job {name or '(job pid %d %s)' % (root, comm)}: "
+   456	                       f"{j['rss']/GIB:.2f}G, {reason}. Survivors: {surv or 'none'}. See ops/logs/memguard.log.")
+   457	                if name:
+   458	                    time.sleep(0.5)
+   459	                    try:
+   460	                        with open(os.path.join(REPO, "ops/jobs", f"{name}.log"), "a") as f:
+   461	                            f.write(f"[memguard] {msg}\n")
+   462	                    except OSError:
+   463	                        pass
+   464	                if not args.no_mail:
+   465	                    # Mail may take up to ten seconds; keep polling while it completes.
+   466	                    threading.Thread(target=send_mail, args=(msg, log)).start()
+   467	        if args.once:
+   468	            return 0
+   469	        time.sleep(args.interval)
+   470	
+   471	
+   472	if __name__ == "__main__":
+   473	    sys.exit(main())
+

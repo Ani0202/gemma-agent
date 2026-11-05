@@ -2125,3 +2125,186 @@ if __name__ == '__main__':
 
 codex
 The review’s order finding matches the code: the fixed path injects base wheels before installing tools, and the earlier editable hook returns immediately for SubprocessManager. I’ll move the Docker-equivalent editable attempt between tool installation and tar injection, add sandbox metadata probes after each stage, and preserve the control path except for cache validation and reporting.
+exec
+/bin/bash -lc "sed -n '145,235p' eval/tests/test_agent_timing.py; sed -n '295,360p' eval/tests/test_agent_timing.py; rg -n 'setup_calls|state.set|ContextVar' eval/kaggle/agent_timing.py" in /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix
+ succeeded in 0ms:
+    monkeypatch.setattr(timing, 'install', fail_install)
+    with pytest.raises(RuntimeError):
+        timing.main()
+    text = (tmp_path / 'timing.jsonl').read_text()
+    rows = [json.loads(line) for line in text.splitlines()]
+    assert rows[0]['_schema'] == 'kaggle_timing_v1'
+    assert rows[0]['agent_yaml_sha256'] == hashlib.sha256(payload).hexdigest()
+    assert rows[-1]['_done']['n'] == 0
+    assert rows[-1]['_done']['startup_seconds'] is None
+    assert rows[-2] == {'_stopped': 'Kernel exception (RuntimeError)'}
+    assert 'TASK_TEXT_SECRET' not in text
+
+
+
+def test_wheels_follow_sandbox_abi(tmp_path):
+    for name in ['native-1-cp312-cp312-manylinux_2_17_x86_64.whl',
+                 'native-2-cp313-cp313-manylinux_2_17_x86_64.whl',
+                 'native-3-cp312-cp312-win_amd64.whl', 'pure-1-py3-none-any.whl']:
+        (tmp_path / name).touch()
+    selected = timing.compatible_wheels(tmp_path, ['cp312-cp312-manylinux_2_17_x86_64', 'py3-none-any'])
+    assert selected['native'].name.startswith('native-1-')
+    assert selected['pure'].name == 'pure-1-py3-none-any.whl'
+
+
+@pytest.mark.parametrize('setup_rc', [0, 7])
+def test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch, setup_rc):
+    import contextvars
+    import sys
+    import tarfile
+    import zipfile
+    from types import ModuleType, SimpleNamespace
+    cs = ModuleType('swegemma.harness.container_setup')
+    cs.install_test_dependencies = lambda *a, **k: None
+    cs._LARGE_WHEEL_THRESHOLD_BYTES = 20 * 1024 * 1024
+    archive = tmp_path / 'base.tar'
+    with tarfile.open(archive, 'w'):
+        pass
+    selections = []
+    def build(wheels, key, marker):
+        selections.extend(wheels)
+        assert key.startswith('timing_')
+        return archive
+    cs._build_unpacked_wheels_tar = build
+    for name in ['swegemma', 'swegemma.harness']:
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    monkeypatch.setitem(sys.modules, 'swegemma.harness.container_setup', cs)
+    wheels = tmp_path / 'wheels'
+    wheels.mkdir()
+    for tool in timing.SCORER_TOOLS:
+        version = '2.1.0' if tool == 'pytest-timeout' else '1.0'
+        make_wheel(wheels, tool, version)
+    (tmp_path / 'sandbox').mkdir()
+    (tmp_path / 'sandbox/setup.py').touch()
+    sp = tmp_path / 'venv/lib/python3.12/site-packages'
+    sp.mkdir(parents=True)
+    commands = []
+    (tmp_path / 'tmp').mkdir()
+    class SubprocessManager:
+        sandboxes = {'id': {'venv': tmp_path / 'venv', 'tmp': tmp_path / 'tmp'}}
+        def copy_to(self, *args):
+            pass
+        def exec(self, sid, command, **kw):
+            commands.append(command)
+            if 'sys_tags' in command:
+                return SimpleNamespace(exit_code=0, stdout=json.dumps(dict(version='3.12', tags=['py3-none-any'], environment=sandbox_markers())), stderr='')
+            return SimpleNamespace(exit_code=setup_rc if '/tmp/setup.py' in command else (1 if 'pip check' in command else 0),
+                                   stdout='x' * 5000, stderr='é' * 5000)
+    current = dict(started=timing.time.perf_counter(), setup_calls=[], setup_failed=False)
+    state = contextvars.ContextVar('test_setup')
+    state.set(current)
+    install = timing.patch_subprocess_deps(tmp_path, state)
+    install(SubprocessManager(), 'id', 'example/repo')
+    assert current['setup_failed'] == bool(setup_rc)
+    assert current['setup_calls'][-1]['rc'] == setup_rc
+    assert [r['step'] for r in current['setup_calls']] == [
+        'venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'base_tar_extraction',
+        'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check', 'setup.py']
+    assert all(len(r['stdout'].encode()) <= 2048 and len(r['stderr'].encode()) <= 2048
+               and r['duration_s'] >= 0 and r['start_offset_s'] >= 0 for r in current['setup_calls'])
+    assert commands[-1].startswith('python3 /tmp/setup_observer.py /tmp/setup.py')
+    assert any('--no-index --find-links=/wheels --no-deps' in c for c in commands)
+    assert current['missing_tool_deps'] == []
+    assert next(r for r in current['setup_calls'] if r['step'] == 'pip_check')['rc'] == 1
+    assert 'pip' not in [p.name.split('-')[0] for p in selections]
+    (wheels / 'hatchling-1.0-py3-none-any.whl').unlink()
+    with pytest.raises(RuntimeError, match='hatchling'):
+        install(SubprocessManager(), 'id')
+    assert current['setup_calls'][-1]['rc'] == -1
+
+
+def test_gold_single_file_staging_still_compiles(tmp_path):
+    monkeypatch.setattr(importlib.metadata, 'distribution', distribution)
+    copies = []
+    def copy(name, destination):
+        copies.append(name)
+        return 'runtime-site-packages:/image'
+    monkeypatch.setattr(timing, 'copy_runtime_package', copy)
+    entries, missing = timing.close_tool_dependencies(
+        [timing.wheel_metadata(root)], tmp_path, ['py3-none-any'], sandbox_markers(),
+        tmp_path / 'site', lambda path: pytest.fail('no matching wheel'))
+    assert copies == ['runtime-package']
+    assert missing == ['absent', 'old', 'transitive']
+    assert entries[0]['source'] == 'runtime-site-packages:/image'
+    assert entries[0]['version_installed'] == '2.0'
+    assert entries[1]['source'] == 'missing' and entries[1]['version_installed'] is None
+
+
+def test_dependency_closure_selects_satisfying_wheel(tmp_path):
+    root = make_wheel(tmp_path, 'root', requires=['dep<2'])
+    expected = make_wheel(tmp_path, 'dep')
+    make_wheel(tmp_path, 'dep', '2.0')
+    calls = []
+    def install(path):
+        calls.append(path)
+        return Entry(exit_code=0, stdout='', stderr='')
+    entries, missing = timing.close_tool_dependencies(
+        [timing.wheel_metadata(root)], tmp_path, ['py3-none-any'], sandbox_markers(),
+        tmp_path / 'site', install)
+    assert calls == [expected] and not missing
+    assert entries[0]['required_spec'] == '<2'
+
+
+def test_copy_runtime_package_handles_distribution_import_names(tmp_path, monkeypatch):
+    import importlib.metadata
+    source = tmp_path / 'image'
+    (source / 'trove_classifiers').mkdir(parents=True)
+    (source / 'trove_classifiers/__init__.py').write_text('')
+    (source / 'trove_classifiers-1.dist-info').mkdir()
+    (source / 'trove_classifiers-1.dist-info/METADATA').write_text('Name: trove-classifiers')
+    files = [importlib.metadata.PackagePath(str(p.relative_to(source)))
+             for p in source.rglob('*') if p.is_file()]
+    monkeypatch.setattr(importlib.metadata, 'distribution', lambda name: Entry(
+        version='1', files=files, locate_file=lambda path: source / path))
+    dest = tmp_path / 'site'
+    assert timing.copy_runtime_package('trove-classifiers', dest).startswith('runtime-site-packages:')
+    assert (dest / 'trove_classifiers/__init__.py').exists()
+    files.append(importlib.metadata.PackagePath('native.so'))
+    assert timing.copy_runtime_package('trove-classifiers', dest) == 'missing'
+
+
+def test_diagnostic_step_exception_is_nonfatal():
+    current = dict(started=timing.time.perf_counter(), setup_calls=[], setup_failed=False)
+    def fail():
+        raise TimeoutError('private output')
+    timing.setup_step(current, 'pip_check', fail, fatal=False)
+    assert not current['setup_failed']
+    assert current['setup_calls'][0]['rc'] == -1
+    assert current['setup_calls'][0]['stderr'] == 'TimeoutError'
+
+
+def test_dependency_closure_expands_already_installed_base_wheel(tmp_path):
+    import zipfile
+    root = make_wheel(tmp_path, 'root', requires=['base-package>=1'])
+    base = make_wheel(tmp_path, 'base-package', requires=['missing-child'])
+    site = tmp_path / 'site'
+    with zipfile.ZipFile(base) as archive:
+        archive.extractall(site)
+118:    current['setup_calls'].append(row)
+305:            started=time.perf_counter(), setup_calls=[], setup_failed=False)
+335:                    current['setup_calls'][-1]['source'] = str(pip_wheel)
+340:                    current['setup_calls'][-1]['source'] = copy_runtime_package('pip', sp)
+341:                    if current['setup_calls'][-1]['source'] == 'missing':
+379:                current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
+380:                if current['setup_calls'][-1]['source'] == 'missing':
+407:                current['setup_calls'][-1]['dependencies'] = entries
+424:            setup_row = next(c for c in reversed(current['setup_calls']) if c['step'] == 'setup.py')
+427:            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+554:    from contextvars import ContextVar
+560:    state = ContextVar('timing')
+598:            times = dict(verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+599:            state.set(times)
+626:                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+627:                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+639:                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+700:                   started=time.perf_counter(), setup_calls=[], setup_failed=False,
+703:    state.set(current)
+730:    from contextvars import ContextVar
+743:            state = ContextVar('setup_check')
+771:                          sandbox_setup_seconds='Sum of measured setup steps', setup_calls='Bounded setup command timings/output', setup_failed='Any setup failure', resolved='Harness verdict', exit_code='Verification exit code or null',
+
