@@ -124,3 +124,5 @@
 2026-11-05T18:24Z | item 4 scoped: submit_patch freezes the patch; fallback diff otherwise; no trimming knobs; compaction faithful to starter. Draft prompt + plan 005 | ops/codex/ask-20261105T181222.md, bundles/drafts/item4-system.md, eval/plans/005.md
 2026-11-05T18:27Z | review memguard-fix round 2: 2 BLOCKING (legacy history lost when a new member initialises the job; old+new guards target each other). Round 3 launched; deploy is now stop-old-then-start-new, no overlap | ops/codex/review-20261105T182108.md, ops/codex/build-memguard-fix3.spec
 2026-11-05T18:27Z | sandbox-limits round 3 built (9d610b5, wait4 peak RSS; Codex 459 pass); host test job launched | ops/codex/build-sandbox-limits3.md, ops/codex/sandbox-limits3-hosttest.sh
+2026-11-05T18:29Z | codex-kernel-setup-check done (b21e400, 444 pass; bwrap blocked in Codex sandbox) -> local acceptance job kernel-setup-accept | ops/codex/build-kernel-setup-check.md
+2026-11-05T18:29Z | sandbox-limits3-hosttest green (460 pass/3 skip) -> review-sandbox-limits3-light | ops/jobs/sandbox-limits3-hosttest.log

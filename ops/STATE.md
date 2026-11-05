@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 18:28Z (cycle 71, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 18:30Z (cycle 72, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -18,9 +18,11 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
-## Running jobs (18:28Z)
+## Running jobs (18:30Z)
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
-- codex-kernel-setup-check (round 2 of kernel setup), codex-memguard-fix3, sandbox-limits3-hosttest (full eval/tests on host, branch 9d610b5).
+- kernel-setup-accept (local plan003_kernel_setup.py, both SETUP_FIX modes, in worktree codex-kernel-setup-fix b21e400; output that worktree's results/plan003_kernel_setup_acceptance.json).
+- review-sandbox-limits3-light (codex review of 9d610b5; host test 460 pass/3 skip).
+- codex-memguard-fix3 (round 3).
 
 ## bin/job, memguard, owner patch (cycles 62-66)
 - Linger=yes since ~18:05Z (dec 025): the scope path (MemoryMax=5G) is normal; Codex works under it.
@@ -30,7 +32,7 @@ Builder on Opus (dec 010: local-first, two-strike).
 
 ## Dec 027 (report 004 approved, option B with fidelity changes): plan 004 pre-registered (eval/plans/004.md)
 - FIDELITY: the timing kernel may only reproduce Dockerfile.public (pip + the line-9 tool set, offline). NO PIP_NO_INDEX/retry prefixes. setup_calls logging is mandatory.
-- Build chain on branch codex/kernel-setup-fix: round 1 c57bd65 (437 pass; still has the PIP prefix; bwrap acceptance blocked in Codex's sandbox; local wheelhouse lacks pip/pytest-timeout wheels). Round 2 job codex-kernel-setup-check (spec ops/codex/build-kernel-setup-check.spec items 1-9: remove the prefix, SETUP_FIX toggle, SETUP_ONLY CPU mode, CPU push, summarizer, pip sourcing, Builder-runnable acceptance). Then I run eval/repro/plan003_kernel_setup.py locally (both modes) + codex-review, then push CPU stage 2a.
+- Build chain on branch codex/kernel-setup-fix: round 1 c57bd65 (437 pass; still has the PIP prefix; bwrap acceptance blocked in Codex's sandbox; local wheelhouse lacks pip/pytest-timeout wheels). Round 2 DONE b21e400 (444 pass/4 skip; Codex's bwrap blocked: NETLINK). Now running locally (job kernel-setup-accept): eval/repro/plan003_kernel_setup.py locally (both modes) + codex-review, then push CPU stage 2a.
 - Kaggle CPU session (no GPU quota): 2a UNFIXED on rich_3006 + fastapi_14986 -> WHY. If the cause is the competition's own harness/wheel ABI, STOP and report. 2b FIXED on 16 ids (eval/plans/004-setup-check-ids.txt). Gate: setup <= 30 s, editable rc 0 16/16, 0 Retrying. -> results/kaggle_setup_cpu_check.json; log in ops/budget/kaggle.md.
 - Only if 2b passes: ONE GPU re-time of v000 cap 5 on eval/plans/004-gpu-retime-ids.txt (not a ship candidate). If 2b fails: re-time v001 instead.
 - Ship cap = both (i) (cap+S)x125+30 <= 660 and (ii) (cap + 0.875 + 0.75S)x125+30 <= 660 -> ~4.0 min at S~10 s -> e4b-v002 after the re-time.
@@ -71,6 +73,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
 
 ## Next 3
-1. When codex-kernel-setup-check finishes: run eval/repro/plan003_kernel_setup.py locally (both modes), codex-review, push CPU stage 2a (record it in ops/budget/kaggle.md).
-2. sandbox-limits3-hosttest -> codex-review -> merge; codex-memguard-fix3 -> livetest -> review -> deploy (no overlap).
+1. kernel-setup-accept done -> read the acceptance JSON (setup durations, pip errors per mode), codex-review b21e400, push CPU stage 2a (log in ops/budget/kaggle.md).
+2. review-sandbox-limits3-light: no BLOCKING -> merge eval/ only; codex-memguard-fix3 -> livetest -> review -> deploy (no overlap).
 3. EV-1 + the cpu8 gold/null run after the sandbox-limits merge; plan 005 A/B needs GPU (ask in report 005).
