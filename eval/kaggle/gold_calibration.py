@@ -215,6 +215,14 @@ def patch_subprocess_deps(data_dir):
         docker.copy_to(container_id, setup_py, '/tmp/setup.py')
         flag = '--fast-path' if fast_path else ''
         docker.exec(container_id, f'python3 /tmp/setup.py {flag} {repo}'.strip(), timeout=280)
+        probe_log = os.environ.get('GOLD_PROBE_LOG')  # diagnostic: which copy of the repo package is imported
+        if probe_log:
+            pkg = {'Textualize/rich': 'rich', 'encode/httpx': 'httpx', 'fastapi/fastapi': 'fastapi',
+                   'psf/requests': 'requests'}.get(repo, repo.split('/')[-1])
+            out = docker.exec(container_id, f'cd /workspace && PYTHONSAFEPATH=1 PYTHONNOUSERSITE=1 python3 -s -c '
+                              f'"import {pkg};print({pkg}.__file__)"', timeout=60)
+            with open(probe_log, 'a') as fh:
+                fh.write(json.dumps({'container': str(container_id), 'repo': repo, 'probe': str(out)[:500]}) + '\n')
     cs.install_test_dependencies = install
     vf.install_test_dependencies = install
 
@@ -278,6 +286,9 @@ def worker(args):
         task = next(t for t in load_tasks(args.data_dir / 'tasks.jsonl')
                     if t.instance_id == args.worker)
         patch = raw.get('patch')
+        if os.environ.get('GOLD_NULL_PATCH'):  # control: no source change; tests should fail
+            patch = ('diff --git a/NULL_CONTROL.txt b/NULL_CONTROL.txt\nnew file mode 100644\n'
+                     '--- /dev/null\n+++ b/NULL_CONTROL.txt\n@@ -0,0 +1 @@\n+null\n')
         if not isinstance(patch, str) or not patch.strip():
             row['error'] = 'Missing or empty gold patch'
         else:
@@ -352,8 +363,10 @@ def main():
         worker(args)
         return
     tasks = load_inventory(args.data_dir)
-    if ONLY_IDS:
-        tasks = [t for t in tasks if t['instance_id'] in set(ONLY_IDS)]
+    ids = ONLY_IDS or ([l.strip() for l in open(os.environ['GOLD_IDS_FILE']) if l.strip()]
+                       if os.environ.get('GOLD_IDS_FILE') else None)
+    if ids:
+        tasks = [t for t in tasks if t['instance_id'] in set(ids)]
     args.working_dir.mkdir(parents=True, exist_ok=True)
     journal = args.working_dir / 'gold_results.jsonl'
     results = resume_journal(journal)

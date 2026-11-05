@@ -15,9 +15,9 @@ for rp,ids in by.items():
 dev.sort();hold.sort()
 for n,ids in(('clean',clean),('dev',dev),('holdout',hold)):
     open(f'eval/splits/{n}.txt','w').write('\n'.join(ids)+'\n')
-meta={'schema':'gold-calibration-splits-v1','n_total':len(rows),'n_clean':len(clean),'n_dev':len(dev),'n_holdout':len(hold),
+meta={'schema':'gold-calibration-splits-v2','n_total':len(rows),'n_clean':len(clean),'n_dev':len(dev),'n_holdout':len(hold),
  'sha256':{'clean':H(clean),'dev':H(dev),'holdout':H(hold)},
  'per_repo':{rp:{'total':sum(1 for r in rows if r['repo']==rp),'clean':len(by.get(rp,[])),'holdout':sum(1 for i in hold if repo[i]==rp)} for rp in sorted(set(repo.values()))},
- 'source':src,'note':'sandbox=subprocess on Kaggle CPU; failures not yet separated into env vs real'}
+ 'source':src,'note':(sys.argv[2] if len(sys.argv)>2 else '')}
 json.dump(meta,open('eval/splits/MANIFEST.json','w'),indent=1)
 print(json.dumps(meta,indent=1))
