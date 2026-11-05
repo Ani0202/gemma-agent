@@ -43,12 +43,19 @@ def bwrap_argv(command, workspace, hidden_paths, ro_paths):
         if path != '/tmp' and Path(path).is_relative_to('/tmp'):
             argv += ['--dir', path]
     argv += ['--bind', str(root), str(root)]
-    for path in sorted({str(Path(p).resolve()) for p in ro_paths}):
+    # Bind each asset at its resolved path and, when reached through a symlink
+    # (uv's cpython-3.13 -> cpython-3.13.18 alias under a masked $HOME), at the
+    # unresolved path too, so venv interpreter symlinks don't dangle in the sandbox.
+    binds = set()
+    for p in ro_paths:
+        src = str(Path(p).resolve())
+        binds |= {(src, src), (src, str(Path(p).absolute()))}
+    for path, dest in sorted(binds, key=lambda b: (len(Path(b[1]).parts), b)):
         # Only explicit runtime assets may be re-exposed, never inventory/artifacts.
-        if ({'tasks.jsonl', 'splits', 'runs', 'results'} & set(Path(path).parts)
+        if ({'tasks.jsonl', 'splits', 'runs', 'results'} & (set(Path(path).parts) | set(Path(dest).parts))
                 or (Path(path).is_dir() and (Path(path) / 'tasks.jsonl').exists())):
             raise ValueError('Forbidden read-only exposure')
-        argv += ['--ro-bind', path, path]
+        argv += ['--ro-bind', path, dest]
     argv += ['--chdir', str(workspace), *command]
     return argv
 
@@ -61,7 +68,8 @@ def runtime_ro_paths(workspace, ro_paths):
     prefix = Path(home).resolve().parent
     if prefix != Path(sys.base_prefix).resolve():
         raise ValueError('Sandbox python prefix differs from the scorer interpreter')
-    paths = {prefix, *(Path(p).resolve() for p in ro_paths)}
+    # Keep the unresolved alias too; bwrap_argv binds the resolved target there.
+    paths = {prefix, Path(home).absolute().parent, *(Path(p).resolve() for p in ro_paths)}
     def wheel_target(path):
         target = path.resolve()
         # Agent-created symlinks must not turn an arbitrary directory into a

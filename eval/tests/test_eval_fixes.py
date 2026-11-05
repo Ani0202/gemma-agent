@@ -355,3 +355,16 @@ def test_real_adk_parallel_tool_timings_and_concurrent_task_contexts(harness):
         assert 0.04 <= metrics['tool_seconds']['fast']['total'] <= 0.2
         assert 0.45 <= metrics['tool_seconds']['slow']['total'] <= 0.7
         assert sum(v['total'] for v in metrics['tool_seconds'].values()) <= wall
+
+
+def test_bwrap_binds_symlinked_ro_path_at_alias(tmp_path):
+    # uv's pyimg exposes cpython-3.13 -> cpython-3.13.18; venv symlinks use the alias.
+    real = tmp_path / 'cpython-3.13.18'
+    real.mkdir()
+    alias = tmp_path / 'cpython-3.13'
+    alias.symlink_to(real)
+    ws = tmp_path / 'sb' / 'workspace'
+    ws.mkdir(parents=True)
+    argv = env.bwrap_argv(['/bin/bash', '-c', 'true'], ws, [tmp_path], [alias])
+    pairs = {(argv[i + 1], argv[i + 2]) for i, a in enumerate(argv) if a == '--ro-bind'}
+    assert (str(real), str(real)) in pairs and (str(real), str(alias)) in pairs
