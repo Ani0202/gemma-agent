@@ -16,9 +16,9 @@ each correction in `ops/journal.md`.
 - Entry and team-merge deadline: **Nov 25**. Aniket must accept the rules before then; he's
   doing it Nov 4.
 - Final submission deadline: **Dec 2**. You select two finals.
-- One submission per day. The queue has taken more than 15 h, so the last score you can rely on
-  comes about 3 days before the end. **[verify]** the exact limit and whether there's a cap on
-  pending submissions.
+- One submission per day, **and only one pending at a time** (staff, thread 747519). Queues of
+  30–40 h+ are reported, so expect ~1 scored submission per 1.5–2 days; the last reliable new score
+  comes from a submission made about Nov 27–28. (Resolved 2026-11-05, dec 013.)
 
 ## Prizes
 - Main: $37k / $18k / $10k, by private leaderboard rank. Ties go to the earlier submission.
@@ -114,3 +114,13 @@ See docs/RULES_FINDINGS.md. Still [verify] (official pages unreadable by tooling
 - **Timeline:** entry/merge deadline Nov 25; final deadline Dec 2 23:59 UTC.
 - **Prizes:** main $37k/$18k/$10k; E2B/E4B bonus $10k; separate **Paper Submission Award $35k** (competition `gemma-4-developer-agent-paper`, deadline Nov 12 23:59 UTC; Aniket decides whether to enter, escalation E2).
 - Private-LB multiple runs: unknown; plan for one run.
+
+## Rules sweep update (2026-11-05; decision 013; details + confidence tags in docs/RULES_FINDINGS.md)
+- **M1** 1 submission/day, 2 finals; final score = better of the two private scores (host, 752220) [official + host-forum].
+- **M2** Pending-submission cap RESOLVED: one pending at a time (staff Dustin, 747519) [host-forum]; queues 30–40 h+ [participant].
+- **M3** 12 h overrun: no official ruling; participant report (752017) of a timeout with no partial score after adding only a test re-run step, and local public-repo timing underestimating hidden-repo test cost [participant]. Worst case stays.
+- **M4** Private-LB multiple runs: no answer (754295); plan for one run.
+- **M5** Hosted LLM APIs: no answer (755542); no new third-party services for task data.
+- **M6** Small-model bonus: E2B/E4B, must be a final (Prizes page, host 751104). E4B validator acceptance RESOLVED (E4B entries score); intermittent "incorrect format" reports OPEN (752128) [participant].
+- **M7** LoRA: mixed participant reports (755677); validate on exact base first.
+- **Reference:** official small-model standings notebook: https://www.kaggle.com/code/ryanholbrook/gemma-4-developer-agent-small-model-leaderboard
