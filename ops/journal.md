@@ -66,3 +66,5 @@
 2026-11-05T15:10Z | dec 016: E4B timing kernel push decoupled from eval-runner-fix/gold rerun; raw traces if tool_timing not merged; N2 already in fix spec | ops/decisions/016-20261105T150127-10712-from-builder.md
 2026-11-05T15:12Z | timing-kernel reviewed (APIs verified vs installed swegemma/adk_eval_core), 2 robustness fixes, merged; 382 tests pass | eval/kaggle/agent_timing.py
 2026-11-05T15:12Z | pushed Kaggle L4x4 aniket0202/gemma-e4b-timing v1 (E4B v000, 8 dev ids Random(1)); job e4b-timing-wait | eval/plans/001-timing-ids.txt
+2026-11-05T15:10Z | Kaggle timing v1 FAILED at 2 s: cp312 wheelhouse on default py3.13 GPU image; ~0 quota | runs/e4b-timing-v1-failed/gemma-e4b-timing.log
+2026-11-05T15:12Z | fix 8b200ca: pin starter docker_image (py3.12) + 'Other' model handle; pushed timing v2; job e4b-timing-wait2 | eval/kaggle/timing_push.sh, ops/budget/kaggle.md

@@ -7913,3 +7913,2604 @@ SKIPPED [1] eval/tests/test_eval_fixes.py:131: bubblewrap blocked by sandbox: bw
 SKIPPED [1] eval/tests/test_run_agent_eval.py:189: opt-in real harness smoke test
 1 failed, 52 passed, 2 skipped, 4 subtests passed in 5.01s
 
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/sandbox_env.py
+diff --git a/eval/kaggle/push.sh b/eval/kaggle/push.sh
+index dcb7211e5919d6ff80b2141d3dce8037d74022f0..af50ad5dd9d537f4e941651c92fde4197dfbc982
+--- a/eval/kaggle/push.sh
++++ b/eval/kaggle/push.sh
+@@ -8,7 +8,7 @@
+ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+ stage_dir=$(mktemp -d /tmp/gold-kernel-push.XXXXXX)
+ trap 'rm -rf -- "$stage_dir"' EXIT
+-cp -- "$script_dir/gold_calibration.py" "$stage_dir/gold_calibration.py"
++python3 "$script_dir/stage_kernel.py" "$stage_dir/gold_calibration.py"
+ python3 - "$script_dir/gold_calibration_metadata.json" "$stage_dir/kernel-metadata.json" "$1" <<'PY'
+ import json
+ import sys
+diff --git a/eval/kaggle/stage_kernel.py b/eval/kaggle/stage_kernel.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..abd8a1ef8e5a51229741b4a7adadd117d34b6e92
+--- /dev/null
++++ b/eval/kaggle/stage_kernel.py
+@@ -0,0 +1,23 @@
++"""Embed the shared scorer environment in Kaggle's single-file script artifact."""
++from pathlib import Path
++import sys
++
++
++def stage_kernel(destination):
++    here = Path(__file__).resolve().parent
++    source = (here / 'gold_calibration.py').read_text()
++    shared = (here.parent / 'sandbox_env.py').read_text()
++    start = source.index('# BEGIN SHARED ENV IMPORT')
++    end = source.index('# END SHARED ENV IMPORT') + len('# END SHARED ENV IMPORT')
++    embedded = ("import types\n"
++                "_shared_env = types.ModuleType('sandbox_env')\n"
++                "_shared_env.__file__ = __file__\n"
++                f"exec(compile({shared!r}, 'sandbox_env.py', 'exec'), _shared_env.__dict__)\n"
++                "patch_subprocess_deps = _shared_env.patch_subprocess_deps\n"
++                "setup_scorer_env = _shared_env.setup_scorer_env\n"
++                "gold_artifact_dir = _shared_env.gold_artifact_dir\n")
++    Path(destination).write_text(source[:start] + embedded + source[end:])
++
++
++if __name__ == '__main__':
++    stage_kernel(sys.argv[1])
+diff --git a/eval/run_agent_eval.py b/eval/run_agent_eval.py
+index 11885fab64e8f9468d3b9a7b0779ef04913f8789..8dab6eb1ab1af5452e793cb7e6bc4779bbfdbd30
+--- a/eval/run_agent_eval.py
++++ b/eval/run_agent_eval.py
+@@ -213,6 +213,110 @@
+             if line.strip() and not line.lstrip().startswith('#')}
+ 
+ 
++def decode_git_path(raw):
++    # Git C-quotes UTF-8 bytes using octal escapes, which JSON doesn't accept.
++    # literal_eval on bytes understands both octal and ordinary C escapes.
++    escaped = ''.join(c if ord(c) < 128 else ''.join(f'\\{b:03o}' for b in c.encode())
++                      for c in raw)
++    return ast.literal_eval('b' + escaped).decode('utf-8', errors='surrogateescape')
++
++
++def validate_inventory_ids(path):
++    seen = set()
++    with path.open() as stream:
++        for number, line in enumerate(stream, 1):
++            if not line.strip():
++                continue
++            iid = json.loads(line)['instance_id']
++            if iid in seen:
++                raise ValueError(f'Duplicate inventory IDs at line {number}')
++            seen.add(iid)
++
++
++def runner_revision():
++    return dict(git_sha=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
++                                               text=True).strip(),
++                git_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)))
++
++
++def wheels_listing_sha(path):
++    listing = []
++    if path:
++        for p in sorted(Path(path).rglob('*')):
++            listing.append((p.relative_to(path).as_posix(), p.stat().st_size,
++                            str(p.resolve()) if p.is_symlink() else None))
++    return hashlib.sha256(json.dumps(listing, sort_keys=True).encode()).hexdigest()
++
++
++def config_snapshot(value):
++    if dataclasses.is_dataclass(value):
++        return {f.name: config_snapshot(getattr(value, f.name)) for f in dataclasses.fields(value)
++                if f.name != 'models'}
++    if hasattr(value, 'model_dump'):
++        return value.model_dump(mode='json')
++    if isinstance(value, dict):
++        return {k: config_snapshot(v) for k, v in value.items()}
++    if isinstance(value, (list, tuple, set, frozenset)):
++        values = [config_snapshot(v) for v in value]
++        return sorted(values) if isinstance(value, (set, frozenset)) else values
++    if isinstance(value, Path):
++        return str(value)
++    return value
++
++
++def build_config(defaults, args, models, raw_dir, caps):
++    from swegemma import config as sc
++    from swegemma.budget import EvaluationBudget, HarnessLimits
++    names = {f.name for f in dataclasses.fields(sc.EvalConfig)}
++    for key in defaults.keys() - names:
++        logging.warning('Unknown EvalConfig key: %s', key)
++    options = {k: v for k, v in defaults.items() if k in names}
++    types = dict(budget=EvaluationBudget, harness=HarnessLimits,
++                 limits=sc.SubmissionLimits, generation_constraints=sc.GenerationConstraints,
++                 context_cache_config=sc.ContextCacheConfig,
++                 events_compaction_config=sc.EventsCompactionConfig,
++                 adapter_manifest=sc.AdapterManifest)
++    for key, cls in types.items():
++        if isinstance(options.get(key), dict):
++            options[key] = cls(**options[key])
++    paths = dict(tasks_path=args.data_dir / 'tasks.jsonl', snapshots_dir=args.data_dir / 'snapshots',
++                 wheels_dir=args.data_dir / 'wheels', results_dir=raw_dir, submission_dir=args.bundle)
++    # Explicit CLI runtime settings own these fields. Other bundle fields pass through.
++    options.update(paths, models=models, sandbox='subprocess', concurrency=args.concurrency,
++                   display_mode='quiet', **caps)
++    for key, fallback in [('graph_dir', 'graphs'), ('embeddings_dir', 'embeddings')]:
++        path = Path(options.get(key, fallback))
++        options[key] = str((path if path.is_absolute() else args.data_dir / path).resolve())
++    return sc.EvalConfig(**options)
++
++
++def task_diagnostics(trace, patch, repo, protected, test_files, data_dir):
++    out = dict(per_tool={}, prompt_tokens=None, completion_tokens=None,
++               patch_bytes=len(patch.encode()), patch_files=[], test_files_edited=[],
++               stray_files=[], empty_patch=not patch.strip(), leak_suspect=False, leak_hits=[],
++               diag_error=None)
++    errors = []
++    try:
++        out['per_tool'], tokens, _ = trace_counts(trace)
++        out.update(tokens)
++    except Exception as exc:
++        errors.append(type(exc).__name__)
++    try:
++        out.update(classify_patch(patch, repo, protected, test_files))
++    except Exception as exc:
++        errors.append(type(exc).__name__)
++    try:
++        tokens = (str(ROOT), str(data_dir), 'tasks.jsonl', 'test_patch', 'FAIL_TO_PASS')
++        arguments = [json.dumps(e.tool_args, ensure_ascii=False) for e in trace.entries
++                     if e.event_type == 'tool_call'] if trace else []
++        out['leak_hits'] = [t for t in dict.fromkeys(tokens) if any(t in a for a in arguments)]
++        out['leak_suspect'] = bool(out['leak_hits'])
++    except Exception as exc:
++        errors.append(type(exc).__name__)
++    out['diag_error'] = ','.join(errors) or None
++    return out
++
++
+ async def run(args):
+     from swegemma.cli import _build_cli_model_registry
+     from swegemma.config import EvalConfig
+diff --git a/eval/sandbox_env.py b/eval/sandbox_env.py
+index 98be80d6d77db34b9ff5ec0d24c6e78096fa1d75..0b2153aad85b495e2858cfcd53614f6d61a8aac3
+--- a/eval/sandbox_env.py
++++ b/eval/sandbox_env.py
+@@ -4,6 +4,7 @@
+ run_command, setup, and verification as well as agent commands.
+ """
+ from contextvars import ContextVar
++import base64
+ import json
+ import os
+ from pathlib import Path
+@@ -16,6 +17,166 @@
+ command_metrics = ContextVar('command_metrics', default=None)
+ gold_artifact_dir = ContextVar('gold_artifact_dir', default=None)
+ 
++BWRAP_TEMPLATE = [
++    'bwrap', '--die-with-parent', '--unshare-net', '--unshare-pid',
++    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
++    '--tmpfs', '<each hidden path>', '--tmpfs', '/tmp',
++    '--bind', '<sandbox_root>', '<sandbox_root>',
++    '--ro-bind', '<each ro path>', '<same>',
++    '--chdir', '<workspace>', '/bin/bash', '-c', '<translated_cmd>',
++]
++
++
++def bwrap_argv(command, workspace, hidden_paths, ro_paths):
++    workspace = Path(workspace).resolve()
++    root = workspace.parent
++    argv = BWRAP_TEMPLATE[:11]
++    # Mask parents first so nested masks don't get covered by their parents.
++    for path in sorted({str(Path(p).absolute()) for p in hidden_paths},
++                       key=lambda p: (len(Path(p).parts), p)):
++        argv += ['--tmpfs', path]
++    argv += ['--tmpfs', '/tmp', '--bind', str(root), str(root)]
++    for path in sorted({str(Path(p).resolve()) for p in ro_paths}):
++        # Only explicit runtime assets may be re-exposed, never inventory/artifacts.
++        if ({'tasks.jsonl', 'splits', 'runs', 'results'} & set(Path(path).parts)
++                or (Path(path).is_dir() and (Path(path) / 'tasks.jsonl').exists())):
++            raise ValueError('Forbidden read-only exposure')
++        argv += ['--ro-bind', path, path]
++    argv += ['--chdir', str(workspace), *command]
++    return argv
++
++
++def runtime_ro_paths(workspace, ro_paths):
++    root = Path(workspace).resolve().parent
++    cfg = (root / 'venv/pyvenv.cfg').read_text()
++    home = next(line.split('=', 1)[1].strip() for line in cfg.splitlines()
++                if line.startswith('home ='))
++    prefix = Path(home).resolve().parent
++    paths = {prefix, *(Path(p).resolve() for p in ro_paths)}
++    def wheel_target(path):
++        target = path.resolve()
++        # Agent-created symlinks must not turn an arbitrary directory into a
++        # new read-only exposure. Only wheel files or trusted wheelhouse subdirs
++        # can be reached through symlinks; a file mount cannot expose siblings.
++        if not (target.is_file() and target.suffix == '.whl') and not any(
++                target.is_relative_to(Path(p).resolve()) for p in ro_paths):
++            raise ValueError('Untrusted wheel symlink target')
++        paths.add(target)
++
++    wheels = root / 'wheels'
++    if wheels.is_symlink():
++        wheel_target(wheels)
++    for path in wheels.rglob('*'):
++        if path.is_symlink():
++            wheel_target(path)
++    return paths
++
++
++def apply_isolation(hidden_paths, ro_paths):
++    """Wrap the module executor, retaining the installed manager's translation/env.
++
++    Empty hidden_paths disables bwrap (explicit opt-out), but retains timeout
++    accounting. Repeated setup replaces this hook rather than stacking it.
++    """
++    import swegemma.sandbox.subprocess as sb
++    original = getattr(sb.execute_subprocess_command, '_unwrapped', sb.execute_subprocess_command)
++
++    def execute(command, cwd, env, **kwargs):
++        if ro_paths:
++            command = [*command[:2], re.sub(r'(?<![\w.-])/wheels(?![\w.-])',
++                                           str(Path(ro_paths[0]).resolve()), command[2])]
++        if hidden_paths:
++            if not isinstance(command, list) or command[:2] != ['/bin/bash', '-c']:
++                raise RuntimeError('Unsupported harness subprocess command')
++            # The harness's fallback wheel search doesn't include custom data dirs.
++            command = bwrap_argv(command, cwd, hidden_paths, runtime_ro_paths(cwd, ro_paths))
++        result = original(command=command, cwd=cwd, env=env, **kwargs)
++        metrics = command_metrics.get()
++        if metrics is not None and (result.status == 'timeout' or result.exit_code == 124):
++            metrics['cmd_timeouts'] = metrics.get('cmd_timeouts', 0) + 1
++        return result
++
++    execute._unwrapped = original
++    sb.execute_subprocess_command = execute
++    return BWRAP_TEMPLATE.copy()
++
++
++def probe_isolation(manager, inventory_path, data_dir):
++    """Fail closed on visibility, image imports, or broken workspace write-through."""
++    sid = manager.start()
++    try:
++        # Encode host paths to bypass swegemma's /tmp path translation in probes
++        # whose inventory is itself under /tmp. A failed ls must fail the probe.
++        encoded = lambda p: shlex.quote(base64.b64encode(str(p).encode()).decode())
++        cmd = (f'inventory=$(printf %s {encoded(inventory_path)} | base64 -d); '
++               f'data=$(printf %s {encoded(data_dir)} | base64 -d); '
++               'test ! -e "$inventory" && contents=$(ls -A "$data") && '
++               'test -z "$contents" && '
++               "python3 -c 'import pytest' && "
++               'echo probe > /workspace/x && echo probe > /tmp/y')
++        result = manager.exec(sid, cmd, timeout=60)
++        workspace = manager.sandboxes[sid]['workspace']
++        if result.exit_code != 0 or not (workspace / 'x').is_file():
++            raise RuntimeError('bubblewrap startup probe failed: ' + result.stderr[:500])
++    finally:
++        manager.cleanup_all()
++
++
++def isolate_gold_tempfiles():
++    """Route verification's temporary patch serialization to the caller's out dir."""
++    import tempfile
++    import swegemma.harness.verification as vf
++    if getattr(vf.tempfile, '_gold_redirect', False):
++        return
++
++    class Tempfiles:
++        _gold_redirect = True
++
++        def __getattr__(self, name):
++            return getattr(tempfile, name)
++
++        def NamedTemporaryFile(self, *args, **kwargs):
++            if gold_artifact_dir.get() is not None:
++                kwargs['dir'] = gold_artifact_dir.get()
++            return tempfile.NamedTemporaryFile(*args, **kwargs)
++
++    vf.tempfile = Tempfiles()
++
++
++def setup_scorer_env(data_dir, *, out_dir=None, repo_root=None, allow_unsandboxed=False):
++    """Common subprocess scorer setup for evaluation and gold calibration."""
++    from swegemma.sandbox import SubprocessManager
++    from swegemma.harness.container_setup import resolve_wheels_dir
++    from types import SimpleNamespace
++    data_dir = Path(data_dir).resolve()
++    repo_root = Path(repo_root or Path(__file__).resolve().parents[1]).resolve()
++    out_dir = Path(out_dir or data_dir.parent / 'gold-output').resolve()
++    isolate_host_packages()
++    patched = patch_subprocess_deps(data_dir)
++    isolate_gold_tempfiles()
++    hidden = [Path.home(), repo_root, data_dir, out_dir, Path('/home/ubuntu/work/gemma-wt')]
++    wheels = resolve_wheels_dir(SimpleNamespace(wheels_dir=data_dir / 'wheels',
++                                              tasks_path=data_dir / 'tasks.jsonl',
++                                              snapshots_dir=data_dir / 'snapshots'))
++    ro = [wheels.resolve()] if wheels else []
++    try:
++        if not shutil.which('bwrap'):
++            raise RuntimeError('bubblewrap is not installed')
++        template = apply_isolation(hidden, ro)
++        probe_isolation(SubprocessManager(), data_dir / 'tasks.jsonl', data_dir)
++        mode = 'bwrap'
++    except Exception:
++        # Never leave an unusable boundary or silently downgrade its protection.
++        apply_isolation([], ro)
++        if not allow_unsandboxed:
++            raise
++        mode, template = 'none', None
++        import logging
++        logging.warning('bubblewrap unavailable/probe failed; explicitly allowed unsandboxed run',
++                        exc_info=True)
++    return dict(sandbox=mode, bwrap_argv_template=template, patched=patched,
++                wheels_dir=wheels)
++
+ 
+ def isolate_host_packages():
+     """Keep pyimg system packages; remove swegemma's extra harness-venv .pth leak."""
+@@ -25,7 +186,13 @@
+         return
+ 
+     def start(self):
+-        sid = original(self)
++        base = getattr(self, 'base_dir', None)
++        if gold_artifact_dir.get() is not None:
++            self.base_dir = Path(gold_artifact_dir.get())
++        try:
++            sid = original(self)
++        finally:
++            self.base_dir = base
+         for pth in self.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'):
+             pth.unlink()
+         return sid
+@@ -51,7 +218,8 @@
+     import swegemma.evaluate
+     import swegemma.cli
+     import swegemma.harness.agent_runner
+-    orig = cs.install_test_dependencies
++    orig = getattr(cs.install_test_dependencies, '_scorer_original', cs.install_test_dependencies)
++    previous = cs.install_test_dependencies
+     wheels_src = Path(data_dir) / 'wheels'
+     if not wheels_src.is_dir():
+         wheels_src = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+@@ -82,8 +250,10 @@
+                               f'"import {pkg};print({pkg}.__file__)"', timeout=60)
+             with open(probe_log, 'a') as fh:
+                 fh.write(json.dumps({'container': str(container_id), 'repo': repo, 'probe': str(out)[:500]}) + '\n')
++    install._scorer_original = orig
+     for name, module in list(sys.modules.items()):
+-        if (name == 'swegemma' or name.startswith('swegemma.')) and getattr(module, 'install_test_dependencies', None) is orig:
++        if ((name == 'swegemma' or name.startswith('swegemma.'))
++                and getattr(module, 'install_test_dependencies', None) in (orig, previous)):
+             module.install_test_dependencies = install
+     return install
+ 
+diff --git a/eval/tests/test_eval_fixes.py b/eval/tests/test_eval_fixes.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1948867673d3e81735af8eb6debc8ca799224efd
+--- /dev/null
++++ b/eval/tests/test_eval_fixes.py
+@@ -0,0 +1,300 @@
++"""Offline isolation, protocol identity and real ADK execution contracts."""
++import asyncio
++import base64
++import importlib.util
++import json
++import os
++from pathlib import Path
++import shutil
++import subprocess
++import sys
++import time
++from types import SimpleNamespace
++
++import pytest
++
++ROOT = Path(__file__).resolve().parents[2]
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))
++from eval import run_agent_eval as runner, sandbox_env as env, tool_timing as timing
++from eval.kaggle.stage_kernel import stage_kernel
++
++
++@pytest.fixture
++def harness():
++    pytest.importorskip('swegemma')
++
++
++def test_bwrap_argv_masks_before_reexposing_runtime(tmp_path):
++    root = tmp_path / 'box'
++    workspace = root / 'workspace'
++    argv = env.bwrap_argv(['/bin/bash', '-c', 'true'], workspace,
++                          ['/home/ubuntu/repo', '/home/ubuntu'], ['/opt/python'])
++    assert argv[:11] == env.BWRAP_TEMPLATE[:11]
++    assert argv[11:15] == ['--tmpfs', '/home/ubuntu', '--tmpfs', '/home/ubuntu/repo']
++    assert argv[15:20] == ['--tmpfs', '/tmp', '--bind', str(root), str(root)]
++    assert argv[20:23] == ['--ro-bind', '/opt/python', '/opt/python']
++    assert argv[-5:] == ['--chdir', str(workspace), '/bin/bash', '-c', 'true']
++    for path in ['/x/tasks.jsonl', '/x/splits', '/x/runs', '/x/results']:
++        with pytest.raises(ValueError, match='Forbidden'):
++            env.bwrap_argv(['/bin/bash', '-c', 'true'], workspace, [], [path])
++
++
++def test_runtime_paths_include_prefix_and_wheel_symlink_targets(tmp_path):
++    root = tmp_path / 'box'
++    (root / 'venv').mkdir(parents=True)
++    (root / 'venv/pyvenv.cfg').write_text('home = /opt/pyimg/bin\n')
++    (root / 'wheels').mkdir()
++    wheel = tmp_path / 'wh/pkg.whl'
++    wheel.parent.mkdir()
++    wheel.touch()
++    (root / 'wheels/pkg.whl').symlink_to(wheel)
++    assert env.runtime_ro_paths(root / 'workspace', [wheel.parent]) == {
++        Path('/opt/pyimg'), wheel.parent, wheel}
++
++
++@pytest.mark.parametrize('exit_code,write,ok', [(0, True, True), (1, True, False), (0, False, False)])
++def test_probe_logic_fake_executor(tmp_path, exit_code, write, ok):
++    class Manager:
++        sandboxes = {'id': {'workspace': tmp_path}}
++        cleaned = False
++
++        def start(self):
++            return 'id'
++
++        def exec(self, sid, command, timeout):
++            assert base64.b64encode(b'/hidden/tasks.jsonl').decode() in command
++            assert 'test ! -e "$inventory"' in command
++            assert 'contents=$(ls -A "$data") && test -z "$contents"' in command
++            assert "import pytest" in command and '/tmp/y' in command and '/workspace/x' in command
++            if write:
++                (tmp_path / 'x').touch()
++            return SimpleNamespace(exit_code=exit_code, stderr='probe failure')
++
++        def cleanup_all(self):
++            self.cleaned = True
++
++    manager = Manager()
++    if ok:
++        env.probe_isolation(manager, Path('/hidden/tasks.jsonl'), Path('/hidden'))
++    else:
++        with pytest.raises(RuntimeError, match='probe failed'):
++            env.probe_isolation(manager, Path('/hidden/tasks.jsonl'), Path('/hidden'))
++    assert manager.cleaned
++
++
++@pytest.mark.parametrize('failure', ['missing', 'probe'])
++def test_setup_fails_closed_and_explicit_optout(monkeypatch, tmp_path, harness, failure):
++    calls = []
++    monkeypatch.setattr(env, 'isolate_host_packages', lambda: calls.append('pth'))
++    monkeypatch.setattr(env, 'isolate_gold_tempfiles', lambda: calls.append('gold'))
++    patched = object()
++    monkeypatch.setattr(env, 'patch_subprocess_deps', lambda p: patched)
++    monkeypatch.setattr(env.shutil, 'which', lambda p: None if failure == 'missing' else '/usr/bin/bwrap')
++    monkeypatch.setattr(env, 'apply_isolation', lambda hidden, ro: calls.append(list(hidden)))
++    monkeypatch.setattr(env, 'probe_isolation', lambda *args: (_ for _ in ()).throw(RuntimeError('probe failed')))
++    with pytest.raises(RuntimeError):
++        env.setup_scorer_env(tmp_path, out_dir=tmp_path / 'out')
++    result = env.setup_scorer_env(tmp_path, out_dir=tmp_path / 'out', allow_unsandboxed=True)
++    assert result['sandbox'] == 'none' and result['patched'] is patched
++    assert result['bwrap_argv_template'] is None and calls[-1] == []
++
++
++def test_executor_wraps_translated_commands_and_counts_timeouts(tmp_path, monkeypatch, harness):
++    import swegemma.sandbox.subprocess as sb
++    seen = []
++    def execute(**kwargs):
++        seen.append(kwargs)
++        return SimpleNamespace(status='timeout', exit_code=124)
++    monkeypatch.setattr(sb, 'execute_subprocess_command', execute)
++    monkeypatch.setattr(env, 'runtime_ro_paths', lambda *args: [Path('/opt/python')])
++    env.apply_isolation(['/home/ubuntu'], [])
++    state = {}
++    token = env.command_metrics.set(state)
++    try:
++        for _ in range(2):
++            sb.execute_subprocess_command(command=['/bin/bash', '-c', 'translated'],
++                                          cwd=tmp_path / 'workspace', env={}, timeout=3, shell=False)
++        assert state['cmd_timeouts'] == 2
++        assert seen[0]['command'][0] == 'bwrap'
++        assert seen[0]['command'][-1] == 'translated'
++        assert seen[0]['timeout'] == 3 and seen[0]['shell'] is False
++    finally:
++        env.command_metrics.reset(token)
++
++
++def test_real_bwrap_probe(tmp_path, monkeypatch, harness):
++    if not shutil.which('bwrap'):
++        pytest.skip('bubblewrap not installed')
++    preflight = subprocess.run(env.BWRAP_TEMPLATE[:11] + ['/bin/true'], capture_output=True, text=True)
++    if preflight.returncode:
++        pytest.skip('bubblewrap blocked by sandbox: ' + preflight.stderr.strip())
++    import swegemma.sandbox.subprocess as sb
++    monkeypatch.setattr(sb, 'execute_subprocess_command', sb.execute_subprocess_command)
++    (tmp_path / 'tasks.jsonl').write_text('hidden inventory')
++    env.isolate_host_packages()
++    env.apply_isolation([Path.home(), ROOT, tmp_path], [])
++    env.probe_isolation(sb.SubprocessManager(), tmp_path / 'tasks.jsonl', tmp_path)
++
++
++def test_config_forwards_fields_and_resolves_graph_paths(tmp_path, caplog, harness):
++    from swegemma.context import SwegemmaContext
++    args = SimpleNamespace(data_dir=tmp_path / 'other-data', bundle=tmp_path / 'bundle', concurrency=1)
++    config = runner.build_config(dict(verification_timeout_seconds=17, max_llm_calls=9,
++                                      enable_sandbox_testing=False, graph_dir='mygraphs',
++                                      embeddings_dir='myembeddings', future_option=42),
++                                 args, {}, tmp_path / 'out', {})
++    assert config.harness.verification_timeout_seconds == 17
++    assert config.max_llm_calls == 9 and not config.enable_sandbox_testing
++    assert 'Unknown EvalConfig key: future_option' in caplog.text
++    context = SwegemmaContext(docker_manager=None, container_id='',
++                             graph_dir=config.graph_dir, embeddings_dir=config.embeddings_dir)
++    assert context.graph_dir == str(args.data_dir / 'mygraphs')
++    assert context.embeddings_dir == str(args.data_dir / 'myembeddings')
++    assert runner.config_snapshot(config)['verification_timeout_seconds'] == 17
++    json.dumps(runner.config_snapshot(config))
++
++
++@pytest.mark.parametrize('key,value', [('git_sha', 'new-sha'), ('git_dirty', True),
++    ('tasks_sha256', 'new-inventory'), ('versions', {'swegemma': '99'}),
++    ('wheels_listing_sha256', 'new-wheels'), ('sandbox', 'none'), ('python_version', '99')])
++def test_resume_identity_refuses_changed_environment(tmp_path, key, value):
++    header = dict(_schema='agent_eval_v2', git_sha='old-sha', git_dirty=False,
++                  tasks_sha256='old-inventory', versions={'swegemma': '0.2.11'},
++                  wheels_listing_sha256='old-wheels', sandbox='bwrap', python_version='3.13')
++    path = tmp_path / 'run.jsonl'
++    runner.Journal(path, header).close()
++    with pytest.raises(ValueError, match='header mismatch') as exc:
++        runner.Journal(path, dict(header, **{key: value}))
++    assert key in str(exc.value) and '--force-new-out' in str(exc.value)
++
++
++def test_inventory_duplicate_scanned_before_harness_deduplication(tmp_path):
++    path = tmp_path / 'tasks.jsonl'
++    path.write_text('\n'.join(json.dumps(dict(instance_id=i, patch=p)) for i, p in
++                              [('one', 'A'), ('two', 'B'), ('one', 'C')]))
++    with pytest.raises(ValueError, match='Duplicate inventory IDs at line 3'):
++        runner.validate_inventory_ids(path)
++
++
++def test_git_c_quoted_utf8_octal_paths_and_diag_failure(monkeypatch):
++    patch = ('diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\n'
++             '--- "a/caf\\303\\251.py"\n+++ "b/caf\\303\\251.py"\n@@ -1 +1 @@\n-a\n+b\n')
++    assert runner.classify_patch(patch, 'org/pkg')['patch_files'] == ['café.py']
++    monkeypatch.setattr(runner, 'classify_patch', lambda *args: 1 / 0)
++    out = runner.task_diagnostics(None, patch, 'org/pkg', None, [], Path('/inventory'))
++    assert out['diag_error'] == 'ZeroDivisionError' and out['patch_bytes'] > 0
++
++
++def test_leak_scan_records_tokens_only():
++    trace = SimpleNamespace(entries=[SimpleNamespace(event_type='tool_call', tool_name='run_command',
++        usage=None, tool_args={'command': f'cat /inventory/tasks.jsonl # test_patch FAIL_TO_PASS {ROOT} secret contents'})])
++    out = runner.task_diagnostics(trace, '', 'org/pkg', None, [], Path('/inventory'))
++    assert out['leak_suspect']
++    assert out['leak_hits'] == [str(ROOT), '/inventory', 'tasks.jsonl', 'test_patch', 'FAIL_TO_PASS']
++    assert 'secret contents' not in json.dumps(out)
++
++
++def test_shared_module_embedded_in_kernel(tmp_path):
++    staged = tmp_path / 'gold_calibration.py'
++    stage_kernel(staged)
++    # Import the staged single file without the repo on sys.path or any harness.
++    result = subprocess.run([sys.executable, '-I', '-c',
++        "import runpy, sys; m=runpy.run_path(sys.argv[1]); "
++        "assert m['setup_scorer_env'].__module__ == 'sandbox_env'; "
++        "assert m['patch_subprocess_deps'].__globals__ is m['setup_scorer_env'].__globals__",
++        str(staged)], capture_output=True, text=True)
++    assert result.returncode == 0, result.stderr
++
++
++def test_gold_temp_patch_files_and_sandbox_roots_live_under_out(tmp_path, monkeypatch, harness):
++    import swegemma.harness.verification as vf
++    from swegemma.sandbox import SubprocessManager
++    monkeypatch.setattr(vf, 'tempfile', vf.tempfile)
++    env.isolate_gold_tempfiles()
++    env.isolate_host_packages()
++    token = env.gold_artifact_dir.set(tmp_path)
++    manager = SubprocessManager()
++    try:
++        with vf.tempfile.NamedTemporaryFile('w', suffix='.patch') as stream:
++            stream.write('synthetic gold patch')
++            assert Path(stream.name).is_relative_to(tmp_path)
++        sid = manager.start()
++        assert manager.sandboxes[sid]['root'].is_relative_to(tmp_path)
++        assert not list(manager.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'))
++    finally:
++        manager.cleanup_all()
++        env.gold_artifact_dir.reset(token)
++
++
++def test_timing_call_ids_errors_and_pending(monkeypatch):
++    now = iter([0, 0.1, 0.2, 0.5, 0.6])
++    monkeypatch.setattr(timing.time, 'monotonic', lambda: next(now))
++    state = timing.ToolTiming()
++    state.before('slow', 'same_name')
++    state.before('fast', 'same_name')
++    state.after('fast')
++    state.after('slow')
++    state.after('slow')  # error recovery's after callback doesn't count twice
++    state.before('pending', 'interrupted')
++    state.after('orphan')
++    assert state.seconds['same_name'] == dict(n=2, total=0.6, max=0.5)
++    assert state.metrics()['tool_seconds_unmatched'] == 2
++
++
++def test_real_adk_parallel_tool_timings_and_concurrent_task_contexts(harness):
++    from google.adk.agents import LlmAgent
++    from google.adk.apps import App
++    from google.adk.models.base_llm import BaseLlm
++    from google.adk.models.llm_response import LlmResponse
++    from google.adk.runners import Runner
++    from google.adk.sessions import InMemorySessionService
++    from google.genai import types
++
++    class StubModel(BaseLlm):
++        calls: int = 0
++
++        async def generate_content_async(self, llm_request, stream=False):
++            self.calls += 1
++            await asyncio.sleep(0.1)  # model overhead, included in agent wall time
++            if self.calls == 1:
++                parts = [types.Part(function_call=types.FunctionCall(id=n, name=n, args={}))
++                         for n in ('fast', 'slow')]
++            else:
++                parts = [types.Part(text='Done')]
++            yield LlmResponse(content=types.Content(role='model', parts=parts))
++
++    async def fast() -> dict:
++        await asyncio.sleep(0.05)
++        return {'ok': True}
++
++    async def slow() -> dict:
++        await asyncio.sleep(0.5)
++        return {'ok': True}
++
++    async def one(name):
++        state = timing.ToolTiming()
++        token = timing.current_timing.set(state)
++        service = InMemorySessionService()
++        session = await service.create_session(app_name=name, user_id='u')
++        app = App(name=name, root_agent=LlmAgent(name='agent', model=StubModel(model='stub'),
++                                                tools=[fast, slow]),
++                  plugins=[timing.make_timing_plugin()])
++        runner_ = Runner(app=app, session_service=service)
++        start = time.monotonic()
++        try:
++            async for _ in runner_.run_async(user_id='u', session_id=session.id,
++                                             new_message=types.Content(role='user', parts=[types.Part(text='Go')])):
++                pass
++        finally:
++            timing.current_timing.reset(token)
++        return state.metrics(), time.monotonic() - start
++
++    async def both():
++        return await asyncio.gather(one('first'), one('second'))
++
++    for metrics, wall in asyncio.run(both()):
++        assert metrics['tool_calls_timed'] == 2 and metrics['tool_seconds_unmatched'] == 0
++        assert 0.04 <= metrics['tool_seconds']['fast']['total'] <= 0.2
++        assert 0.45 <= metrics['tool_seconds']['slow']['total'] <= 0.7
++        assert sum(v['total'] for v in metrics['tool_seconds'].values()) <= wall
+diff --git a/eval/tool_timing.py b/eval/tool_timing.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..29594208efe489aded56384a093c6eb5468bb9c7
+--- /dev/null
++++ b/eval/tool_timing.py
+@@ -0,0 +1,95 @@
++"""Per-task monotonic ADK tool timing, usable by the Kaggle timing kernel.
++
++No harness dependencies are imported until installation. Call IDs, rather than
++names or merged trace response timestamps, identify overlapping executions.
++"""
++from contextvars import ContextVar
++from dataclasses import dataclass, field
++import time
++
++current_timing = ContextVar('current_tool_timing', default=None)
++
++
++@dataclass
++class ToolTiming:
++    pending: dict = field(default_factory=dict)
++    seconds: dict = field(default_factory=dict)
++    unmatched: int = 0
++    completed: set = field(default_factory=set)
++
++    def before(self, call_id, name):
++        if not call_id:
++            self.unmatched += 1
++            return
++        if call_id in self.pending or call_id in self.completed:
++            self.unmatched += 1
++            return
++        self.pending[call_id] = (name, time.monotonic())
++
++    def after(self, call_id):
++        # Error callbacks may be followed by after_tool_callback on recovery.
++        if call_id in self.completed:
++            return
++        item = self.pending.pop(call_id, None)
++        if item is None:
++            self.unmatched += 1
++            return
++        name, start = item
++        elapsed = time.monotonic() - start
++        stat = self.seconds.setdefault(name, dict(n=0, total=0.0, max=0.0))
++        stat['n'] += 1
++        stat['total'] += elapsed
++        stat['max'] = max(stat['max'], elapsed)
++        self.completed.add(call_id)
++
++    def metrics(self):
++        return dict(tool_seconds=self.seconds,
++                    tool_calls_timed=sum(s['n'] for s in self.seconds.values()),
++                    tool_seconds_unmatched=self.unmatched + len(self.pending))
++
++
++def make_timing_plugin():
++    from google.adk.plugins.base_plugin import BasePlugin
++
++    class TimingPlugin(BasePlugin):
++        def __init__(self):
++            super().__init__(name='eval_tool_timing')
++
++        async def before_tool_callback(self, *, tool, tool_args, tool_context):
++            state = current_timing.get()
++            if state is not None:
++                state.before(tool_context.function_call_id, tool.name)
++
++        async def after_tool_callback(self, *, tool, tool_args, tool_context, result):
++            state = current_timing.get()
++            if state is not None:
++                state.after(tool_context.function_call_id)
++
++        async def on_tool_error_callback(self, *, tool, tool_args, tool_context, error):
++            state = current_timing.get()
++            if state is not None:
++                state.after(tool_context.function_call_id)
++
++    return TimingPlugin()
++
++
++def install_harness_timing():
++    """Installed swegemma builds an App with plugins; prepend ours to that list.
++
++    Prepending ensures timing runs before any error-recovery callback short
++    circuits the plugin chain. It also covers MCP and agent_tool subclasses.
++    Returns a restoration function for callers embedding the runner.
++    """
++    import swegemma.harness.agent_runner as ar
++    original = ar.App
++
++    def app(*args, **kwargs):
++        kwargs['plugins'] = [make_timing_plugin(), *kwargs.get('plugins', [])]
++        return original(*args, **kwargs)
++
++    ar.App = app
++
++    def restore():
++        ar.App = original
++
++    return restore
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/tests/test_run_agent_eval.py');s=p.read_text().replace('import threading\\n','import threading\\nimport tarfile\\n')
+s=s.replace('    for name in runner.BINDINGS:\\n', \"    names = set(runner.BINDINGS) | {n for n, m in sys.modules.items()\\n        if n.startswith('swegemma.') and hasattr(m, 'install_test_dependencies')}\\n    for name in names:\\n\",1)
+a=s.index('    iid = sorted(',s.index('def test_e2e')); b=s.index('    script = tmp_path', a)
+s=s[:a]+'''    iid = sorted(runner.read_ids(ROOT / 'eval/splits/dev.txt'))[0]
+    name = 'stub-eval'
+    data = tmp_path / 'inventory'
+    (data / 'snapshots').mkdir(parents=True)
+    (data / 'wheels').mkdir()
+    (data / 'sandbox').mkdir()
+    (data / 'sandbox/setup.py').write_text('# Synthetic offline setup needs no dependencies.\\\\n')
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'module.py').write_text('VALUE = 0\\\\n')
+    with tarfile.open(data / 'snapshots' / (iid + '.tgz'), 'w:gz') as archive:
+        archive.add(source / 'module.py', arcname='module.py')
+    test_patch = diff('test_smoke.py', new='def test_smoke(): assert __import__(\"module\").VALUE == 1', added=True)
+    (data / 'tasks.jsonl').write_text(json.dumps(dict(instance_id=iid, repo='org/module',
+        base_commit='synthetic', problem_statement='Set VALUE to 1 in module.py.',
+        patch=diff('module.py', 'VALUE = 0', 'VALUE = 1'), test_patch=test_patch,
+        FAIL_TO_PASS=['test_smoke.py::test_smoke'])) + '\\\\n')
+    split = tmp_path / 'dev.txt'
+    split.write_text(iid + '\\\\n')
+    bundle = tmp_path / 'bundle'
+    bundle.mkdir()
+    (bundle / 'agent.yaml').write_text('name: smoke_agent\\\\nmodel: gemma-4-e4b-it-qat-w4a16-ct\\\\n'
+        'instruction: Fix the issue.\\\\ntools:\\\\n  - run_command\\\\n  - submit_patch\\\\n')
+    (bundle / 'eval_config.yaml').write_text('evaluation:\\\\n  verification_timeout_seconds: 30\\\\n')
+    out = tmp_path / 'out'
+''' + s[b:]
+s=s.replace(\"'printf \\\"# stub smoke\\\\\\\\n\\\" > stub_smoke.py'\", \"'printf \\\"VALUE = 1\\\\\\\\n\\\" > module.py'\")
+s=s.replace(\"'--bundle', str(ROOT / 'bundles/e4b/v000'), '--data-dir', str(ROOT / 'data/raw'),\\n                    '--split', str(ROOT / 'eval/splits/dev.txt'),\", \"'--bundle', str(bundle), '--data-dir', str(data), '--out', str(out),\\n                    '--split', str(split), '--allow-unsandboxed',\")
+s=s.replace(\"            path = ROOT / 'results' / f'{name}.jsonl'\", \"            path = out / f'{name}.jsonl'\")
+s=s.replace(\"            assert Path(ROOT / rows[1]['trace_path']).is_file()\", \"            assert Path(ROOT / rows[1]['trace_path']).is_file()\\n            assert rows[1]['resolved'] is True and rows[1]['exit_code'] == 0\\n            assert rows[1]['wall_seconds']['verification'] > 0\\n            assert rows[1]['tool_calls_timed'] >= 2\\n            assert rows[1]['sandbox'] == rows[0]['sandbox']\\n            assert rows[0]['effective_config']['verification_timeout_seconds'] == 30\")
+s=s.replace(\"            (ROOT / 'results' / f'{name}.jsonl').unlink(missing_ok=True)\", '')
+p.write_text(s)
+PY" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages RUN_AGENT_EVAL_E2E=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_run_agent_eval.py::test_e2e -q -rs' in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 124ms:
+s                                                                        [100%]
+=========================== short test summary info ============================
+SKIPPED [1] eval/tests/test_run_agent_eval.py:229: Sandbox denied localhost socket creation
+1 skipped in 0.11s
+
+exec
+/bin/bash -lc "rg -n 'acompletion|litellm' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/models* /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py | head -40; sed -n '200,265p' eval/tests/test_run_agent_eval.py; git status --short; rg -n 'isolation|timeout|tool_seconds' eval/tests/test_eval_fixes.py" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/models*: No such file or directory (os error 2)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:48:if not TYPE_CHECKING and importlib.util.find_spec("litellm") is None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:72:  import litellm
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:73:  from litellm import acompletion
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:74:  from litellm import ChatCompletionAssistantMessage
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:75:  from litellm import ChatCompletionMessageToolCall
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:76:  from litellm import ChatCompletionSystemMessage
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:77:  from litellm import ChatCompletionToolCallFunctionChunk
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:78:  from litellm import ChatCompletionToolMessage
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:79:  from litellm import ChatCompletionUserMessage
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:80:  from litellm import completion
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:81:  from litellm import CustomStreamWrapper
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:82:  from litellm import Message
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:83:  from litellm import ModelResponse
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:84:  from litellm import ModelResponseStream
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:85:  from litellm import OpenAIMessageContent
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:86:  from litellm.types.utils import Delta
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:90:  litellm = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:91:  acompletion = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:353:_PROXY_PROVIDER = "litellm_proxy"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:391:    "acompletion",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:396:def _ensure_litellm_imported() -> None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:408:  # https://github.com/BerriAI/litellm/blob/main/litellm/__init__.py#L80-L82
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:411:  import litellm as litellm_module
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:413:  litellm_module.add_function_to_prompt = True
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:415:  globals()["litellm"] = litellm_module
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:417:    globals()[symbol] = getattr(litellm_module, symbol)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:419:  _redirect_litellm_loggers_to_stdout()
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:457:  """Removes a leading ``litellm_proxy/`` routing prefix from a model string.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:459:  ``litellm_proxy`` selects the transport (a LiteLLM Proxy deployment), not the
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:461:  serves the request (e.g. ``litellm_proxy/azure/my-deployment`` is served by
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:466:  A bare ``litellm_proxy/<deployment>`` has no nested provider, so the
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:467:  prefix is not stripped and it is treated as the ``litellm_proxy`` provider.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:470:    model: The model string (e.g., "litellm_proxy/azure/gpt-4").
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:473:    The model string without the ``litellm_proxy/`` prefix if nested.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:508:  """Endpoint overrides to forward to `litellm.acreate_file`.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:551:    litellm_mod = sys.modules.get("litellm") or litellm
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:552:    if litellm_mod is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:555:          litellm_val = _normalize_endpoint_value(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:556:              key, getattr(litellm_mod, key, None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:558:          if litellm_val:
+    (data / 'sandbox/setup.py').write_text('# Synthetic offline setup needs no dependencies.\n')
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'module.py').write_text('VALUE = 0\n')
+    with tarfile.open(data / 'snapshots' / (iid + '.tgz'), 'w:gz') as archive:
+        archive.add(source / 'module.py', arcname='module.py')
+    test_patch = diff('test_smoke.py', new='def test_smoke(): assert __import__("module").VALUE == 1', added=True)
+    (data / 'tasks.jsonl').write_text(json.dumps(dict(instance_id=iid, repo='org/module',
+        base_commit='synthetic', problem_statement='Set VALUE to 1 in module.py.',
+        patch=diff('module.py', 'VALUE = 0', 'VALUE = 1'), test_patch=test_patch,
+        FAIL_TO_PASS=['test_smoke.py::test_smoke'])) + '\n')
+    split = tmp_path / 'dev.txt'
+    split.write_text(iid + '\n')
+    bundle = tmp_path / 'bundle'
+    bundle.mkdir()
+    (bundle / 'agent.yaml').write_text('name: smoke_agent\nmodel: gemma-4-e4b-it-qat-w4a16-ct\n'
+        'instruction: Fix the issue.\ntools:\n  - run_command\n  - submit_patch\n')
+    (bundle / 'eval_config.yaml').write_text('evaluation:\n  verification_timeout_seconds: 30\n')
+    out = tmp_path / 'out'
+    script = tmp_path / 'script.json'
+    # A harmless source addition exercises tool execution, patch fallback and verification.
+    script.write_text(json.dumps([
+        dict(content=None, tool_calls=[dict(id='call_1', type='function', function=dict(
+            name='run_command', arguments=json.dumps({'command': 'printf "VALUE = 1\\n" > module.py'})))]),
+        dict(content=None, tool_calls=[dict(id='call_2', type='function', function=dict(
+            name='submit_patch', arguments='{}'))]), dict(content='Done.')]))
+    try:
+        server = make_server(script)
+    except PermissionError:
+        pytest.skip('Sandbox denied localhost socket creation')
+    with server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with (tmp_path / 'runner.log').open('w') as log:
+                proc = subprocess.run([sys.executable, str(ROOT / 'eval/run_agent_eval.py'),
+                    '--bundle', str(bundle), '--data-dir', str(data), '--out', str(out),
+                    '--split', str(split), '--allow-unsandboxed', '--ids', iid, '--run-name', name,
+                    '--concurrency', '1', '--skip-selfcheck', '--max-turns', '4',
+                    '--session-minutes', '1', '--endpoint', f'http://127.0.0.1:{server.server_port}/v1'],
+                    cwd=ROOT, stdout=log, stderr=log, timeout=240)
+            assert proc.returncode == 0, (tmp_path / 'runner.log').read_text()[-2000:]
+            path = out / f'{name}.jsonl'
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            assert len(rows) == 2 and rows[1]['instance_id'] == iid
+            assert rows[1]['llm_turns'] >= 2 and rows[1]['patch_bytes'] > 0
+            assert Path(ROOT / rows[1]['trace_path']).is_file()
+            assert rows[1]['resolved'] is True and rows[1]['exit_code'] == 0
+            assert rows[1]['wall_seconds']['verification'] > 0
+            assert rows[1]['tool_calls_timed'] >= 2
+            assert rows[1]['sandbox'] == rows[0]['sandbox']
+            assert rows[0]['effective_config']['verification_timeout_seconds'] == 30
+        finally:
+            server.shutdown()
+            thread.join()
+
+
+
+def test_observe_patch_before_repeated_stripping():
+    from contextvars import ContextVar
+    state = ContextVar('test_state')
+    strip = runner.observe_patch_strip(lambda patch, **kw: patch.replace('TEST', ''), state)
+    assert strip('GOLDTEST') == 'GOLD'  # Self-check has no agent context.
+    current = {'agent_active': True}
+    state.set(current)
+    assert strip('SOURCETEST') == 'SOURCE'
+ M eval/kaggle/gold_calibration.py
+ M eval/kaggle/push.sh
+ M eval/run_agent_eval.py
+ M eval/tests/test_gold_calibration.py
+ M eval/tests/test_run_agent_eval.py
+?? eval/kaggle/stage_kernel.py
+?? eval/sandbox_env.py
+?? eval/tests/test_eval_fixes.py
+?? eval/tool_timing.py
+1:"""Offline isolation, protocol identity and real ADK execution contracts."""
+65:        def exec(self, sid, command, timeout):
+79:        env.probe_isolation(manager, Path('/hidden/tasks.jsonl'), Path('/hidden'))
+82:            env.probe_isolation(manager, Path('/hidden/tasks.jsonl'), Path('/hidden'))
+94:    monkeypatch.setattr(env, 'apply_isolation', lambda hidden, ro: calls.append(list(hidden)))
+95:    monkeypatch.setattr(env, 'probe_isolation', lambda *args: (_ for _ in ()).throw(RuntimeError('probe failed')))
+103:def test_executor_wraps_translated_commands_and_counts_timeouts(tmp_path, monkeypatch, harness):
+108:        return SimpleNamespace(status='timeout', exit_code=124)
+111:    env.apply_isolation(['/home/ubuntu'], [])
+117:                                          cwd=tmp_path / 'workspace', env={}, timeout=3, shell=False)
+118:        assert state['cmd_timeouts'] == 2
+121:        assert seen[0]['timeout'] == 3 and seen[0]['shell'] is False
+136:    env.apply_isolation([Path.home(), ROOT, tmp_path], [])
+137:    env.probe_isolation(sb.SubprocessManager(), tmp_path / 'tasks.jsonl', tmp_path)
+143:    config = runner.build_config(dict(verification_timeout_seconds=17, max_llm_calls=9,
+147:    assert config.harness.verification_timeout_seconds == 17
+154:    assert runner.config_snapshot(config)['verification_timeout_seconds'] == 17
+242:    assert state.metrics()['tool_seconds_unmatched'] == 2
+297:        assert metrics['tool_calls_timed'] == 2 and metrics['tool_seconds_unmatched'] == 0
+298:        assert 0.04 <= metrics['tool_seconds']['fast']['total'] <= 0.2
+299:        assert 0.45 <= metrics['tool_seconds']['slow']['total'] <= 0.7
+300:        assert sum(v['total'] for v in metrics['tool_seconds'].values()) <= wall
+
+exec
+/bin/bash -lc "rg -n 'await acompletion|_ensure_litellm_imported\\(' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py; sed -n '30,85p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/cli.py; sed -n '150,180p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/models/task.py; cat /home/ubuntu/gemma-local/venv/pyvenv.cfg" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+396:def _ensure_litellm_imported() -> None:
+1186:    _ensure_litellm_imported()
+1188:    return await acompletion(
+1215:    _ensure_litellm_imported()
+1598:  _ensure_litellm_imported()
+1819:  _ensure_litellm_imported()
+1904:  _ensure_litellm_imported()
+2211:  _ensure_litellm_imported()
+2325:  _ensure_litellm_imported()
+2403:  _ensure_litellm_imported()
+2780:  _ensure_litellm_imported()
+2934:  _ensure_litellm_imported()
+3015:  _ensure_litellm_imported()
+3368:  _ensure_litellm_imported()
+3986:    _ensure_litellm_imported()
+4075:    _ensure_litellm_imported()
+    if '/models' in url and not (
+        url.endswith('/openapi') or url.endswith('/v1') or url.endswith('/genai')
+    ):
+        return f'{url}/openapi'
+    return url
+
+
+def _build_cli_model_registry(
+    submission_dir: Path | str | None = None,
+    models_yaml_path: Path | str | None = None,
+) -> ModelRegistry:
+    """Build a ModelRegistry for CLI evaluation from models.yaml and/or declared submission models."""
+    endpoint = _normalize_api_endpoint(
+        os.environ.get('MODEL_PROXY_URL')
+        or os.environ.get('LITELLM_API_BASE')
+        or os.environ.get('LOCAL_INFERENCE_URL')
+        or os.environ.get('OPENAI_BASE_URL')
+        or 'http://localhost:8000/v1'
+    )
+    key = (
+        os.environ.get('MODEL_PROXY_API_KEY')
+        or os.environ.get('LITELLM_API_KEY')
+        or os.environ.get('LOCAL_API_KEY')
+        or os.environ.get('OPENAI_API_KEY')
+        or 'EMPTY'
+    )
+
+    models = ModelRegistry()
+    if submission_dir is not None and Path(submission_dir).is_dir():
+        with contextlib.suppress(Exception):
+            for raw_model in discover_declared_models(submission_dir):
+                clean = raw_model.strip()
+                target = (
+                    clean
+                    if clean.startswith(('openai/', 'hosted_vllm/', 'custom/'))
+                    else f'openai/{clean}'
+                )
+                models.register(
+                    clean,
+                    LiteLlm(
+                        model=target,
+                        api_base=endpoint,
+                        api_key=key,
+                        num_retries=5,
+                    ),
+                )
+        with contextlib.suppress(Exception):
+            manifest = discover_adapters(submission_dir)
+            if getattr(manifest, 'adapters', None):
+                def _make_adapter(info: Any) -> Any:
+                    name = getattr(info, 'name', str(info))
+                    return LiteLlm(
+                        model=f'openai/{name}',
+                        api_base=endpoint,
+                        api_key=key,
+                        num_retries=5,
+        """File paths modified by the test_patch."""
+        return extract_test_files_from_patch(self.test_patch)
+
+
+class TaskResult(BaseTaskResult):
+    """Result of evaluating a single task."""
+
+    model_config = ConfigDict(populate_by_name=True, extra='allow')
+
+    repo: str = Field(
+        default='', description="Repository identifier (e.g., 'fastapi/fastapi')."
+    )
+    agent_patch: str = Field(
+        default='', description='Diff / patch produced by the agent.'
+    )
+    test_output: str = Field(default='', description='Pytest stdout/stderr output.')
+    test_exit_code: int = Field(
+        default=0, description='Process exit code from running pytest.'
+    )
+    trace: Any = Field(default=None, description='SessionTrace instance if recorded.')
+    tool_calls: int = Field(
+        default=0, description='Total number of tool calls executed.'
+    )
+    task_index: int | None = Field(
+        default=None, description='Original 1-based task index.'
+    )
+
+    def __init__(
+        self,
+        task_id: str | None = None,
+        instance_id: str | None = None,
+home = /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin
+implementation = CPython
+uv = 0.13.6
+version_info = 3.13
+include-system-site-packages = false
+
+exec
+/bin/bash -lc 'PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q -rs' in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 9703ms:
+........s........................................................... [ 17%]
+........................................................................ [ 35%]
+........................................................................ [ 53%]
+........................................................................ [ 71%]
+........................................................................ [ 89%]
+............s.........................s..                                [100%]
+=========================== short test summary info ============================
+SKIPPED [1] eval/tests/test_eval_fixes.py:131: bubblewrap blocked by sandbox: bwrap: loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted
+SKIPPED [1] eval/tests/test_pack.py:578: aliases require PyYAML
+SKIPPED [1] eval/tests/test_run_agent_eval.py:192: opt-in real harness smoke test
+394 passed, 3 skipped, 4 subtests passed in 8.18s
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/tests/test_run_agent_eval.py');s=p.read_text()
+s=s.replace(\"@pytest.mark.skipif(os.environ.get('RUN_AGENT_EVAL_E2E') "'!= '"'1', reason='opt-in real harness smoke test')\\ndef test_e2e(tmp_path):\", \"@pytest.mark.skipif(os.environ.get('RUN_AGENT_EVAL_E2E') "'!= '"'1', reason='opt-in real harness smoke test')\\n@pytest.mark.parametrize('transport', ['http', 'in_memory'])\\ndef test_e2e(tmp_path, monkeypatch, transport):\")
+a=s.index('    try:\\n        server = make_server',s.index('def test_e2e'));b=s.index('\\n\\n\\ndef test_observe_patch',a)
+s=s[:a]+'''    argv = ['--bundle', str(bundle), '--data-dir', str(data), '--out', str(out),
+            '--split', str(split), '--allow-unsandboxed', '--ids', iid, '--run-name', name,
+            '--concurrency', '1', '--skip-selfcheck', '--max-turns', '4', '--session-minutes', '1']
+    if transport == 'in_memory':
+        from google.adk.models import lite_llm
+        import litellm
+        import swegemma.sandbox.subprocess as sb
+        lite_llm._ensure_litellm_imported()
+        # Drive the existing stub HTTP handler with streams when sockets are
+        # forbidden; keep the real ADK, subprocess setup and verification path.
+        monkeypatch.setattr('eval.stub_openai.ThreadingHTTPServer', lambda address, handler: handler)
+        handler_class = make_server(script)
+        async def completion(**kwargs):
+            handler = handler_class.__new__(handler_class)
+            handler.send_response = lambda code: None
+            handler.send_header = lambda *args: None
+            handler.end_headers = lambda: None
+            body = json.dumps({'model': kwargs['model']}).encode()
+            handler.path = '/v1/chat/completions'
+            handler.headers = {'Content-Length': str(len(body))}
+            handler.rfile, handler.wfile = io.BytesIO(body), io.BytesIO()
+            handler.do_POST()
+            payload = json.loads(handler.wfile.getvalue())
+            assert 'error' not in payload, payload
+            return litellm.ModelResponse(**payload)
+        monkeypatch.setattr(lite_llm, 'acompletion', completion)
+        monkeypatch.setattr(sb, 'execute_subprocess_command', sb.execute_subprocess_command)
+        runner.main(argv)
+    else:
+        try:
+            server = make_server(script)
+        except PermissionError:
+            pytest.skip('Sandbox denied localhost socket creation')
+        with server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with (tmp_path / 'runner.log').open('w') as log:
+                    proc = subprocess.run([sys.executable, str(ROOT / 'eval/run_agent_eval.py'), *argv,
+                        '--endpoint', f'http://127.0.0.1:{server.server_port}/v1'],
+                        cwd=ROOT, stdout=log, stderr=log, timeout=240)
+                assert proc.returncode == 0, (tmp_path / 'runner.log').read_text()[-2000:]
+            finally:
+                server.shutdown()
+                thread.join()
+    path = out / f'{name}.jsonl'
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(rows) == 2 and rows[1]['instance_id'] == iid
+    assert rows[1]['llm_turns'] >= 2 and rows[1]['patch_bytes'] > 0
+    assert Path(ROOT / rows[1]['trace_path']).is_file()
+    assert rows[1]['resolved'] is True and rows[1]['exit_code'] == 0
+    assert rows[1]['wall_seconds']['verification'] > 0
+    assert rows[1]['tool_calls_timed'] >= 2
+    assert rows[1]['sandbox'] == rows[0]['sandbox']
+    assert rows[0]['effective_config']['verification_timeout_seconds'] == 30
+''' + s[b:]
+p.write_text(s)
+PY" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages RUN_AGENT_EVAL_E2E=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_run_agent_eval.py::test_e2e -q -rs' in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/sandbox_env.py
+/home/ubuntu/work/gemma-wt/codex-eval-runner-fix/eval/tests/test_eval_fixes.py
+diff --git a/eval/kaggle/push.sh b/eval/kaggle/push.sh
+index dcb7211e5919d6ff80b2141d3dce8037d74022f0..af50ad5dd9d537f4e941651c92fde4197dfbc982
+--- a/eval/kaggle/push.sh
++++ b/eval/kaggle/push.sh
+@@ -8,7 +8,7 @@
+ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+ stage_dir=$(mktemp -d /tmp/gold-kernel-push.XXXXXX)
+ trap 'rm -rf -- "$stage_dir"' EXIT
+-cp -- "$script_dir/gold_calibration.py" "$stage_dir/gold_calibration.py"
++python3 "$script_dir/stage_kernel.py" "$stage_dir/gold_calibration.py"
+ python3 - "$script_dir/gold_calibration_metadata.json" "$stage_dir/kernel-metadata.json" "$1" <<'PY'
+ import json
+ import sys
+diff --git a/eval/kaggle/stage_kernel.py b/eval/kaggle/stage_kernel.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..abd8a1ef8e5a51229741b4a7adadd117d34b6e92
+--- /dev/null
++++ b/eval/kaggle/stage_kernel.py
+@@ -0,0 +1,23 @@
++"""Embed the shared scorer environment in Kaggle's single-file script artifact."""
++from pathlib import Path
++import sys
++
++
++def stage_kernel(destination):
++    here = Path(__file__).resolve().parent
++    source = (here / 'gold_calibration.py').read_text()
++    shared = (here.parent / 'sandbox_env.py').read_text()
++    start = source.index('# BEGIN SHARED ENV IMPORT')
++    end = source.index('# END SHARED ENV IMPORT') + len('# END SHARED ENV IMPORT')
++    embedded = ("import types\n"
++                "_shared_env = types.ModuleType('sandbox_env')\n"
++                "_shared_env.__file__ = __file__\n"
++                f"exec(compile({shared!r}, 'sandbox_env.py', 'exec'), _shared_env.__dict__)\n"
++                "patch_subprocess_deps = _shared_env.patch_subprocess_deps\n"
++                "setup_scorer_env = _shared_env.setup_scorer_env\n"
++                "gold_artifact_dir = _shared_env.gold_artifact_dir\n")
++    Path(destination).write_text(source[:start] + embedded + source[end:])
++
++
++if __name__ == '__main__':
++    stage_kernel(sys.argv[1])
+diff --git a/eval/run_agent_eval.py b/eval/run_agent_eval.py
+index 11885fab64e8f9468d3b9a7b0779ef04913f8789..8dab6eb1ab1af5452e793cb7e6bc4779bbfdbd30
+--- a/eval/run_agent_eval.py
++++ b/eval/run_agent_eval.py
+@@ -213,6 +213,110 @@
+             if line.strip() and not line.lstrip().startswith('#')}
+ 
+ 
++def decode_git_path(raw):
++    # Git C-quotes UTF-8 bytes using octal escapes, which JSON doesn't accept.
++    # literal_eval on bytes understands both octal and ordinary C escapes.
++    escaped = ''.join(c if ord(c) < 128 else ''.join(f'\\{b:03o}' for b in c.encode())
++                      for c in raw)
++    return ast.literal_eval('b' + escaped).decode('utf-8', errors='surrogateescape')
++
++
++def validate_inventory_ids(path):
++    seen = set()
++    with path.open() as stream:
++        for number, line in enumerate(stream, 1):
++            if not line.strip():
++                continue
++            iid = json.loads(line)['instance_id']
++            if iid in seen:
++                raise ValueError(f'Duplicate inventory IDs at line {number}')
++            seen.add(iid)
++
++
++def runner_revision():
++    return dict(git_sha=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
++                                               text=True).strip(),
++                git_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)))
++
++
++def wheels_listing_sha(path):
++    listing = []
++    if path:
++        for p in sorted(Path(path).rglob('*')):
++            listing.append((p.relative_to(path).as_posix(), p.stat().st_size,
++                            str(p.resolve()) if p.is_symlink() else None))
++    return hashlib.sha256(json.dumps(listing, sort_keys=True).encode()).hexdigest()
++
++
++def config_snapshot(value):
++    if dataclasses.is_dataclass(value):
++        return {f.name: config_snapshot(getattr(value, f.name)) for f in dataclasses.fields(value)
++                if f.name != 'models'}
++    if hasattr(value, 'model_dump'):
++        return value.model_dump(mode='json')
++    if isinstance(value, dict):
++        return {k: config_snapshot(v) for k, v in value.items()}
++    if isinstance(value, (list, tuple, set, frozenset)):
++        values = [config_snapshot(v) for v in value]
++        return sorted(values) if isinstance(value, (set, frozenset)) else values
++    if isinstance(value, Path):
++        return str(value)
++    return value
++
++
++def build_config(defaults, args, models, raw_dir, caps):
++    from swegemma import config as sc
++    from swegemma.budget import EvaluationBudget, HarnessLimits
++    names = {f.name for f in dataclasses.fields(sc.EvalConfig)}
++    for key in defaults.keys() - names:
++        logging.warning('Unknown EvalConfig key: %s', key)
++    options = {k: v for k, v in defaults.items() if k in names}
++    types = dict(budget=EvaluationBudget, harness=HarnessLimits,
++                 limits=sc.SubmissionLimits, generation_constraints=sc.GenerationConstraints,
++                 context_cache_config=sc.ContextCacheConfig,
++                 events_compaction_config=sc.EventsCompactionConfig,
++                 adapter_manifest=sc.AdapterManifest)
++    for key, cls in types.items():
++        if isinstance(options.get(key), dict):
++            options[key] = cls(**options[key])
++    paths = dict(tasks_path=args.data_dir / 'tasks.jsonl', snapshots_dir=args.data_dir / 'snapshots',
++                 wheels_dir=args.data_dir / 'wheels', results_dir=raw_dir, submission_dir=args.bundle)
++    # Explicit CLI runtime settings own these fields. Other bundle fields pass through.
++    options.update(paths, models=models, sandbox='subprocess', concurrency=args.concurrency,
++                   display_mode='quiet', **caps)
++    for key, fallback in [('graph_dir', 'graphs'), ('embeddings_dir', 'embeddings')]:
++        path = Path(options.get(key, fallback))
++        options[key] = str((path if path.is_absolute() else args.data_dir / path).resolve())
++    return sc.EvalConfig(**options)
++
++
++def task_diagnostics(trace, patch, repo, protected, test_files, data_dir):
++    out = dict(per_tool={}, prompt_tokens=None, completion_tokens=None,
++               patch_bytes=len(patch.encode()), patch_files=[], test_files_edited=[],
++               stray_files=[], empty_patch=not patch.strip(), leak_suspect=False, leak_hits=[],
++               diag_error=None)
++    errors = []
++    try:
++        out['per_tool'], tokens, _ = trace_counts(trace)
++        out.update(tokens)
++    except Exception as exc:
++        errors.append(type(exc).__name__)
++    try:
++        out.update(classify_patch(patch, repo, protected, test_files))
++    except Exception as exc:
++        errors.append(type(exc).__name__)
++    try:
++        tokens = (str(ROOT), str(data_dir), 'tasks.jsonl', 'test_patch', 'FAIL_TO_PASS')
++        arguments = [json.dumps(e.tool_args, ensure_ascii=False) for e in trace.entries
++                     if e.event_type == 'tool_call'] if trace else []
++        out['leak_hits'] = [t for t in dict.fromkeys(tokens) if any(t in a for a in arguments)]
++        out['leak_suspect'] = bool(out['leak_hits'])
++    except Exception as exc:
++        errors.append(type(exc).__name__)
++    out['diag_error'] = ','.join(errors) or None
++    return out
++
++
+ async def run(args):
+     from swegemma.cli import _build_cli_model_registry
+     from swegemma.config import EvalConfig
+diff --git a/eval/sandbox_env.py b/eval/sandbox_env.py
+index 98be80d6d77db34b9ff5ec0d24c6e78096fa1d75..9e9aafbc0568ea06830a5e957d8cca9e16dc4196
+--- a/eval/sandbox_env.py
++++ b/eval/sandbox_env.py
+@@ -4,6 +4,7 @@
+ run_command, setup, and verification as well as agent commands.
+ """
+ from contextvars import ContextVar
++import base64
+ import json
+ import os
+ from pathlib import Path
+@@ -16,7 +17,169 @@
+ command_metrics = ContextVar('command_metrics', default=None)
+ gold_artifact_dir = ContextVar('gold_artifact_dir', default=None)
+ 
++BWRAP_TEMPLATE = [
++    'bwrap', '--die-with-parent', '--unshare-net', '--unshare-pid',
++    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
++    '--tmpfs', '<each hidden path>', '--tmpfs', '/tmp',
++    '--bind', '<sandbox_root>', '<sandbox_root>',
++    '--ro-bind', '<each ro path>', '<same>',
++    '--chdir', '<workspace>', '/bin/bash', '-c', '<translated_cmd>',
++]
++
++
++def bwrap_argv(command, workspace, hidden_paths, ro_paths):
++    workspace = Path(workspace).resolve()
++    root = workspace.parent
++    argv = BWRAP_TEMPLATE[:11]
++    # Mask parents first so nested masks don't get covered by their parents.
++    for path in sorted({str(Path(p).absolute()) for p in hidden_paths},
++                       key=lambda p: (len(Path(p).parts), p)):
++        argv += ['--tmpfs', path]
++    argv += ['--tmpfs', '/tmp', '--bind', str(root), str(root)]
++    for path in sorted({str(Path(p).resolve()) for p in ro_paths}):
++        # Only explicit runtime assets may be re-exposed, never inventory/artifacts.
++        if ({'tasks.jsonl', 'splits', 'runs', 'results'} & set(Path(path).parts)
++                or (Path(path).is_dir() and (Path(path) / 'tasks.jsonl').exists())):
++            raise ValueError('Forbidden read-only exposure')
++        argv += ['--ro-bind', path, path]
++    argv += ['--chdir', str(workspace), *command]
++    return argv
++
++
++def runtime_ro_paths(workspace, ro_paths):
++    root = Path(workspace).resolve().parent
++    cfg = (root / 'venv/pyvenv.cfg').read_text()
++    home = next(line.split('=', 1)[1].strip() for line in cfg.splitlines()
++                if line.startswith('home ='))
++    prefix = Path(home).resolve().parent
++    if prefix != Path(sys.base_prefix).resolve():
++        raise ValueError('Sandbox python prefix differs from the scorer interpreter')
++    paths = {prefix, *(Path(p).resolve() for p in ro_paths)}
++    def wheel_target(path):
++        target = path.resolve()
++        # Agent-created symlinks must not turn an arbitrary directory into a
++        # new read-only exposure. Only wheel files or trusted wheelhouse subdirs
++        # can be reached through symlinks; a file mount cannot expose siblings.
++        if not (target.is_file() and target.suffix == '.whl') and not any(
++                target.is_relative_to(Path(p).resolve()) for p in ro_paths):
++            raise ValueError('Untrusted wheel symlink target')
++        paths.add(target)
++
++    wheels = root / 'wheels'
++    if wheels.is_symlink():
++        wheel_target(wheels)
++    for path in wheels.rglob('*'):
++        if path.is_symlink():
++            wheel_target(path)
++    return paths
++
++
++def apply_isolation(hidden_paths, ro_paths):
++    """Wrap the module executor, retaining the installed manager's translation/env.
++
++    Empty hidden_paths disables bwrap (explicit opt-out), but retains timeout
++    accounting. Repeated setup replaces this hook rather than stacking it.
++    """
++    import swegemma.sandbox.subprocess as sb
++    original = getattr(sb.execute_subprocess_command, '_unwrapped', sb.execute_subprocess_command)
++
++    def execute(command, cwd, env, **kwargs):
++        if ro_paths:
++            command = [*command[:2], re.sub(r'(?<![\w.-])/wheels(?![\w.-])',
++                                           str(Path(ro_paths[0]).resolve()), command[2])]
++        if hidden_paths:
++            if not isinstance(command, list) or command[:2] != ['/bin/bash', '-c']:
++                raise RuntimeError('Unsupported harness subprocess command')
++            # The harness's fallback wheel search doesn't include custom data dirs.
++            command = bwrap_argv(command, cwd, hidden_paths, runtime_ro_paths(cwd, ro_paths))
++        result = original(command=command, cwd=cwd, env=env, **kwargs)
++        metrics = command_metrics.get()
++        if metrics is not None and (result.status == 'timeout' or result.exit_code == 124):
++            metrics['cmd_timeouts'] = metrics.get('cmd_timeouts', 0) + 1
++        return result
++
++    execute._unwrapped = original
++    sb.execute_subprocess_command = execute
++    return BWRAP_TEMPLATE.copy()
++
++
++def probe_isolation(manager, inventory_path, data_dir):
++    """Fail closed on visibility, image imports, or broken workspace write-through."""
++    sid = manager.start()
++    try:
++        # Encode host paths to bypass swegemma's /tmp path translation in probes
++        # whose inventory is itself under /tmp. A failed ls must fail the probe.
++        encoded = lambda p: shlex.quote(base64.b64encode(str(p).encode()).decode())
++        cmd = (f'inventory=$(printf %s {encoded(inventory_path)} | base64 -d); '
++               f'data=$(printf %s {encoded(data_dir)} | base64 -d); '
++               'test ! -e "$inventory" && contents=$(ls -A "$data") && '
++               'test -z "$contents" && '
++               "python3 -c 'import pytest' && "
++               'echo probe > /workspace/x && echo probe > /tmp/y')
++        result = manager.exec(sid, cmd, timeout=60)
++        workspace = manager.sandboxes[sid]['workspace']
++        if result.exit_code != 0 or not (workspace / 'x').is_file():
++            raise RuntimeError('bubblewrap startup probe failed: ' + result.stderr[:500])
++    finally:
++        manager.cleanup_all()
++
+ 
++def isolate_gold_tempfiles():
++    """Route verification's temporary patch serialization to the caller's out dir."""
++    import tempfile
++    import swegemma.harness.verification as vf
++    if getattr(vf.tempfile, '_gold_redirect', False):
++        return
++
++    class Tempfiles:
++        _gold_redirect = True
++
++        def __getattr__(self, name):
++            return getattr(tempfile, name)
++
++        def NamedTemporaryFile(self, *args, **kwargs):
++            if gold_artifact_dir.get() is not None:
++                kwargs['dir'] = gold_artifact_dir.get()
++            return tempfile.NamedTemporaryFile(*args, **kwargs)
++
++    vf.tempfile = Tempfiles()
++
++
++def setup_scorer_env(data_dir, *, out_dir=None, repo_root=None, allow_unsandboxed=False):
++    """Common subprocess scorer setup for evaluation and gold calibration."""
++    from swegemma.sandbox import SubprocessManager
++    from swegemma.harness.container_setup import resolve_wheels_dir
++    from types import SimpleNamespace
++    data_dir = Path(data_dir).resolve()
++    repo_root = Path(repo_root or Path(__file__).resolve().parents[1]).resolve()
++    out_dir = Path(out_dir or data_dir.parent / 'gold-output').resolve()
++    isolate_host_packages()
++    patched = patch_subprocess_deps(data_dir)
++    isolate_gold_tempfiles()
++    hidden = [Path.home(), repo_root, data_dir, out_dir, Path('/home/ubuntu/work/gemma-wt')]
++    wheels = resolve_wheels_dir(SimpleNamespace(wheels_dir=data_dir / 'wheels',
++                                              tasks_path=data_dir / 'tasks.jsonl',
++                                              snapshots_dir=data_dir / 'snapshots'))
++    ro = [wheels.resolve()] if wheels else []
++    try:
++        if not shutil.which('bwrap'):
++            raise RuntimeError('bubblewrap is not installed')
++        template = apply_isolation(hidden, ro)
++        probe_isolation(SubprocessManager(), data_dir / 'tasks.jsonl', data_dir)
++        mode = 'bwrap'
++    except Exception:
++        # Never leave an unusable boundary or silently downgrade its protection.
++        apply_isolation([], ro)
++        if not allow_unsandboxed:
++            raise
++        mode, template = 'none', None
++        import logging
++        logging.warning('bubblewrap unavailable/probe failed; explicitly allowed unsandboxed run',
++                        exc_info=True)
++    return dict(sandbox=mode, bwrap_argv_template=template, patched=patched,
++                wheels_dir=wheels)
++
++
+ def isolate_host_packages():
+     """Keep pyimg system packages; remove swegemma's extra harness-venv .pth leak."""
+     from swegemma.sandbox import SubprocessManager
+@@ -25,7 +188,13 @@
+         return
+ 
+     def start(self):
+-        sid = original(self)
++        base = getattr(self, 'base_dir', None)
++        if gold_artifact_dir.get() is not None:
++            self.base_dir = Path(gold_artifact_dir.get())
++        try:
++            sid = original(self)
++        finally:
++            self.base_dir = base
+         for pth in self.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'):
+             pth.unlink()
+         return sid
+@@ -51,7 +220,8 @@
+     import swegemma.evaluate
+     import swegemma.cli
+     import swegemma.harness.agent_runner
+-    orig = cs.install_test_dependencies
++    orig = getattr(cs.install_test_dependencies, '_scorer_original', cs.install_test_dependencies)
++    previous = cs.install_test_dependencies
+     wheels_src = Path(data_dir) / 'wheels'
+     if not wheels_src.is_dir():
+         wheels_src = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+@@ -82,8 +252,10 @@
+                               f'"import {pkg};print({pkg}.__file__)"', timeout=60)
+             with open(probe_log, 'a') as fh:
+                 fh.write(json.dumps({'container': str(container_id), 'repo': repo, 'probe': str(out)[:500]}) + '\n')
++    install._scorer_original = orig
+     for name, module in list(sys.modules.items()):
+-        if (name == 'swegemma' or name.startswith('swegemma.')) and getattr(module, 'install_test_dependencies', None) is orig:
++        if ((name == 'swegemma' or name.startswith('swegemma.'))
++                and getattr(module, 'install_test_dependencies', None) in (orig, previous)):
+             module.install_test_dependencies = install
+     return install
+ 
+diff --git a/eval/tests/test_eval_fixes.py b/eval/tests/test_eval_fixes.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3043398260fa692cc814e7987e9b9fe5a3052779
+--- /dev/null
++++ b/eval/tests/test_eval_fixes.py
+@@ -0,0 +1,308 @@
++"""Offline isolation, protocol identity and real ADK execution contracts."""
++import asyncio
++import base64
++import importlib.util
++import json
++import os
++from pathlib import Path
++import shutil
++import subprocess
++import sys
++import time
++from types import SimpleNamespace
++
++import pytest
++
++ROOT = Path(__file__).resolve().parents[2]
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))
++from eval import run_agent_eval as runner, sandbox_env as env, tool_timing as timing
++from eval.kaggle.stage_kernel import stage_kernel
++
++
++@pytest.fixture
++def harness():
++    pytest.importorskip('swegemma')
++
++
++def test_bwrap_argv_masks_before_reexposing_runtime(tmp_path):
++    root = tmp_path / 'box'
++    workspace = root / 'workspace'
++    argv = env.bwrap_argv(['/bin/bash', '-c', 'true'], workspace,
++                          ['/home/ubuntu/repo', '/home/ubuntu'], ['/opt/python'])
++    assert argv[:11] == env.BWRAP_TEMPLATE[:11]
++    assert argv[11:15] == ['--tmpfs', '/home/ubuntu', '--tmpfs', '/home/ubuntu/repo']
++    assert argv[15:20] == ['--tmpfs', '/tmp', '--bind', str(root), str(root)]
++    assert argv[20:23] == ['--ro-bind', '/opt/python', '/opt/python']
++    assert argv[-5:] == ['--chdir', str(workspace), '/bin/bash', '-c', 'true']
++    for path in ['/x/tasks.jsonl', '/x/splits', '/x/runs', '/x/results']:
++        with pytest.raises(ValueError, match='Forbidden'):
++            env.bwrap_argv(['/bin/bash', '-c', 'true'], workspace, [], [path])
++
++
++def test_runtime_paths_include_prefix_and_wheel_symlink_targets(tmp_path, monkeypatch):
++    root = tmp_path / 'box'
++    (root / 'venv').mkdir(parents=True)
++    (root / 'venv/pyvenv.cfg').write_text('home = /opt/pyimg/bin\n')
++    monkeypatch.setattr(env.sys, 'base_prefix', '/opt/pyimg')
++    (root / 'wheels').mkdir()
++    wheel = tmp_path / 'wh/pkg.whl'
++    wheel.parent.mkdir()
++    wheel.touch()
++    (root / 'wheels/pkg.whl').symlink_to(wheel)
++    assert env.runtime_ro_paths(root / 'workspace', [wheel.parent]) == {
++        Path('/opt/pyimg'), wheel.parent, wheel}
++    (root / 'wheels/escape').symlink_to(Path.home(), target_is_directory=True)
++    with pytest.raises(ValueError, match='Untrusted wheel symlink'):
++        env.runtime_ro_paths(root / 'workspace', [wheel.parent])
++    (root / 'wheels/escape').unlink()
++    (root / 'venv/pyvenv.cfg').write_text('home = /home/ubuntu/bin\n')
++    with pytest.raises(ValueError, match='python prefix differs'):
++        env.runtime_ro_paths(root / 'workspace', [wheel.parent])
++
++
++@pytest.mark.parametrize('exit_code,write,ok', [(0, True, True), (1, True, False), (0, False, False)])
++def test_probe_logic_fake_executor(tmp_path, exit_code, write, ok):
++    class Manager:
++        sandboxes = {'id': {'workspace': tmp_path}}
++        cleaned = False
++
++        def start(self):
++            return 'id'
++
++        def exec(self, sid, command, timeout):
++            assert base64.b64encode(b'/hidden/tasks.jsonl').decode() in command
++            assert 'test ! -e "$inventory"' in command
++            assert 'contents=$(ls -A "$data") && test -z "$contents"' in command
++            assert "import pytest" in command and '/tmp/y' in command and '/workspace/x' in command
++            if write:
++                (tmp_path / 'x').touch()
++            return SimpleNamespace(exit_code=exit_code, stderr='probe failure')
++
++        def cleanup_all(self):
++            self.cleaned = True
++
++    manager = Manager()
++    if ok:
++        env.probe_isolation(manager, Path('/hidden/tasks.jsonl'), Path('/hidden'))
++    else:
++        with pytest.raises(RuntimeError, match='probe failed'):
++            env.probe_isolation(manager, Path('/hidden/tasks.jsonl'), Path('/hidden'))
++    assert manager.cleaned
++
++
++@pytest.mark.parametrize('failure', ['missing', 'probe'])
++def test_setup_fails_closed_and_explicit_optout(monkeypatch, tmp_path, harness, failure):
++    calls = []
++    monkeypatch.setattr(env, 'isolate_host_packages', lambda: calls.append('pth'))
++    monkeypatch.setattr(env, 'isolate_gold_tempfiles', lambda: calls.append('gold'))
++    patched = object()
++    monkeypatch.setattr(env, 'patch_subprocess_deps', lambda p: patched)
++    monkeypatch.setattr(env.shutil, 'which', lambda p: None if failure == 'missing' else '/usr/bin/bwrap')
++    monkeypatch.setattr(env, 'apply_isolation', lambda hidden, ro: calls.append(list(hidden)))
++    monkeypatch.setattr(env, 'probe_isolation', lambda *args: (_ for _ in ()).throw(RuntimeError('probe failed')))
++    with pytest.raises(RuntimeError):
++        env.setup_scorer_env(tmp_path, out_dir=tmp_path / 'out')
++    result = env.setup_scorer_env(tmp_path, out_dir=tmp_path / 'out', allow_unsandboxed=True)
++    assert result['sandbox'] == 'none' and result['patched'] is patched
++    assert result['bwrap_argv_template'] is None and calls[-1] == []
++
++
++def test_executor_wraps_translated_commands_and_counts_timeouts(tmp_path, monkeypatch, harness):
++    import swegemma.sandbox.subprocess as sb
++    seen = []
++    def execute(**kwargs):
++        seen.append(kwargs)
++        return SimpleNamespace(status='timeout', exit_code=124)
++    monkeypatch.setattr(sb, 'execute_subprocess_command', execute)
++    monkeypatch.setattr(env, 'runtime_ro_paths', lambda *args: [Path('/opt/python')])
++    env.apply_isolation(['/home/ubuntu'], [])
++    state = {}
++    token = env.command_metrics.set(state)
++    try:
++        for _ in range(2):
++            sb.execute_subprocess_command(command=['/bin/bash', '-c', 'translated'],
++                                          cwd=tmp_path / 'workspace', env={}, timeout=3, shell=False)
++        assert state['cmd_timeouts'] == 2
++        assert seen[0]['command'][0] == 'bwrap'
++        assert seen[0]['command'][-1] == 'translated'
++        assert seen[0]['timeout'] == 3 and seen[0]['shell'] is False
++    finally:
++        env.command_metrics.reset(token)
++
++
++def test_real_bwrap_probe(tmp_path, monkeypatch, harness):
++    if not shutil.which('bwrap'):
++        pytest.skip('bubblewrap not installed')
++    preflight = subprocess.run(env.BWRAP_TEMPLATE[:11] + ['/bin/true'], capture_output=True, text=True)
++    if preflight.returncode:
++        pytest.skip('bubblewrap blocked by sandbox: ' + preflight.stderr.strip())
++    import swegemma.sandbox.subprocess as sb
++    monkeypatch.setattr(sb, 'execute_subprocess_command', sb.execute_subprocess_command)
++    (tmp_path / 'tasks.jsonl').write_text('hidden inventory')
++    env.isolate_host_packages()
++    env.apply_isolation([Path.home(), ROOT, tmp_path], [])
++    env.probe_isolation(sb.SubprocessManager(), tmp_path / 'tasks.jsonl', tmp_path)
++
++
++def test_config_forwards_fields_and_resolves_graph_paths(tmp_path, caplog, harness):
++    from swegemma.context import SwegemmaContext
++    args = SimpleNamespace(data_dir=tmp_path / 'other-data', bundle=tmp_path / 'bundle', concurrency=1)
++    config = runner.build_config(dict(verification_timeout_seconds=17, max_llm_calls=9,
++                                      enable_sandbox_testing=False, graph_dir='mygraphs',
++                                      embeddings_dir='myembeddings', future_option=42),
++                                 args, {}, tmp_path / 'out', {})
++    assert config.harness.verification_timeout_seconds == 17
++    assert config.max_llm_calls == 9 and not config.enable_sandbox_testing
++    assert 'Unknown EvalConfig key: future_option' in caplog.text
++    context = SwegemmaContext(docker_manager=None, container_id='',
++                             graph_dir=config.graph_dir, embeddings_dir=config.embeddings_dir)
++    assert context.graph_dir == str(args.data_dir / 'mygraphs')
++    assert context.embeddings_dir == str(args.data_dir / 'myembeddings')
++    assert runner.config_snapshot(config)['verification_timeout_seconds'] == 17
++    json.dumps(runner.config_snapshot(config))
++
++
++@pytest.mark.parametrize('key,value', [('git_sha', 'new-sha'), ('git_dirty', True),
++    ('tasks_sha256', 'new-inventory'), ('versions', {'swegemma': '99'}),
++    ('wheels_listing_sha256', 'new-wheels'), ('sandbox', 'none'), ('python_version', '99')])
++def test_resume_identity_refuses_changed_environment(tmp_path, key, value):
++    header = dict(_schema='agent_eval_v2', git_sha='old-sha', git_dirty=False,
++                  tasks_sha256='old-inventory', versions={'swegemma': '0.2.11'},
++                  wheels_listing_sha256='old-wheels', sandbox='bwrap', python_version='3.13')
++    path = tmp_path / 'run.jsonl'
++    runner.Journal(path, header).close()
++    with pytest.raises(ValueError, match='header mismatch') as exc:
++        runner.Journal(path, dict(header, **{key: value}))
++    assert key in str(exc.value) and '--force-new-out' in str(exc.value)
++
++
++def test_inventory_duplicate_scanned_before_harness_deduplication(tmp_path):
++    path = tmp_path / 'tasks.jsonl'
++    path.write_text('\n'.join(json.dumps(dict(instance_id=i, patch=p)) for i, p in
++                              [('one', 'A'), ('two', 'B'), ('one', 'C')]))
++    with pytest.raises(ValueError, match='Duplicate inventory IDs at line 3'):
++        runner.validate_inventory_ids(path)
++
++
++def test_git_c_quoted_utf8_octal_paths_and_diag_failure(monkeypatch):
++    patch = ('diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\n'
++             '--- "a/caf\\303\\251.py"\n+++ "b/caf\\303\\251.py"\n@@ -1 +1 @@\n-a\n+b\n')
++    assert runner.classify_patch(patch, 'org/pkg')['patch_files'] == ['café.py']
++    monkeypatch.setattr(runner, 'classify_patch', lambda *args: 1 / 0)
++    out = runner.task_diagnostics(None, patch, 'org/pkg', None, [], Path('/inventory'))
++    assert out['diag_error'] == 'ZeroDivisionError' and out['patch_bytes'] > 0
++
++
++def test_leak_scan_records_tokens_only():
++    trace = SimpleNamespace(entries=[SimpleNamespace(event_type='tool_call', tool_name='run_command',
++        usage=None, tool_args={'command': f'cat /inventory/tasks.jsonl # test_patch FAIL_TO_PASS {ROOT} secret contents'})])
++    out = runner.task_diagnostics(trace, '', 'org/pkg', None, [], Path('/inventory'))
++    assert out['leak_suspect']
++    assert out['leak_hits'] == [str(ROOT), '/inventory', 'tasks.jsonl', 'test_patch', 'FAIL_TO_PASS']
++    assert 'secret contents' not in json.dumps(out)
++
++
++def test_shared_module_embedded_in_kernel(tmp_path):
++    staged = tmp_path / 'gold_calibration.py'
++    stage_kernel(staged)
++    # Import the staged single file without the repo on sys.path or any harness.
++    result = subprocess.run([sys.executable, '-I', '-c',
++        "import runpy, sys; m=runpy.run_path(sys.argv[1]); "
++        "assert m['setup_scorer_env'].__module__ == 'sandbox_env'; "
++        "assert m['patch_subprocess_deps'].__globals__ is m['setup_scorer_env'].__globals__",
++        str(staged)], capture_output=True, text=True)
++    assert result.returncode == 0, result.stderr
++
++
++def test_gold_temp_patch_files_and_sandbox_roots_live_under_out(tmp_path, monkeypatch, harness):
++    import swegemma.harness.verification as vf
++    from swegemma.sandbox import SubprocessManager
++    monkeypatch.setattr(vf, 'tempfile', vf.tempfile)
++    env.isolate_gold_tempfiles()
++    env.isolate_host_packages()
++    token = env.gold_artifact_dir.set(tmp_path)
++    manager = SubprocessManager()
++    try:
++        with vf.tempfile.NamedTemporaryFile('w', suffix='.patch') as stream:
++            stream.write('synthetic gold patch')
++            assert Path(stream.name).is_relative_to(tmp_path)
++        sid = manager.start()
++        assert manager.sandboxes[sid]['root'].is_relative_to(tmp_path)
++        assert not list(manager.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'))
++    finally:
++        manager.cleanup_all()
++        env.gold_artifact_dir.reset(token)
++
++
++def test_timing_call_ids_errors_and_pending(monkeypatch):
++    now = iter([0, 0.1, 0.2, 0.5, 0.6])
++    monkeypatch.setattr(timing.time, 'monotonic', lambda: next(now))
++    state = timing.ToolTiming()
++    state.before('slow', 'same_name')
++    state.before('fast', 'same_name')
++    state.after('fast')
++    state.after('slow')
++    state.after('slow')  # error recovery's after callback doesn't count twice
++    state.before('pending', 'interrupted')
++    state.after('orphan')
++    assert state.seconds['same_name'] == dict(n=2, total=0.6, max=0.5)
++    assert state.metrics()['tool_seconds_unmatched'] == 2
++
++
++def test_real_adk_parallel_tool_timings_and_concurrent_task_contexts(harness):
++    from google.adk.agents import LlmAgent
++    from google.adk.apps import App
++    from google.adk.models.base_llm import BaseLlm
++    from google.adk.models.llm_response import LlmResponse
++    from google.adk.runners import Runner
++    from google.adk.sessions import InMemorySessionService
++    from google.genai import types
++
++    class StubModel(BaseLlm):
++        calls: int = 0
++
++        async def generate_content_async(self, llm_request, stream=False):
++            self.calls += 1
++            await asyncio.sleep(0.1)  # model overhead, included in agent wall time
++            if self.calls == 1:
++                parts = [types.Part(function_call=types.FunctionCall(id=n, name=n, args={}))
++                         for n in ('fast', 'slow')]
++            else:
++                parts = [types.Part(text='Done')]
++            yield LlmResponse(content=types.Content(role='model', parts=parts))
++
++    async def fast() -> dict:
++        await asyncio.sleep(0.05)
++        return {'ok': True}
++
++    async def slow() -> dict:
++        await asyncio.sleep(0.5)
++        return {'ok': True}
++
++    async def one(name):
++        state = timing.ToolTiming()
++        token = timing.current_timing.set(state)
++        service = InMemorySessionService()
++        session = await service.create_session(app_name=name, user_id='u')
++        app = App(name=name, root_agent=LlmAgent(name='agent', model=StubModel(model='stub'),
++                                                tools=[fast, slow]),
++                  plugins=[timing.make_timing_plugin()])
++        runner_ = Runner(app=app, session_service=service)
++        start = time.monotonic()
++        try:
++            async for _ in runner_.run_async(user_id='u', session_id=session.id,
++                                             new_message=types.Content(role='user', parts=[types.Part(text='Go')])):
++                pass
++        finally:
++            timing.current_timing.reset(token)
++        return state.metrics(), time.monotonic() - start
++
++    async def both():
++        return await asyncio.gather(one('first'), one('second'))
++
++    for metrics, wall in asyncio.run(both()):
++        assert metrics['tool_calls_timed'] == 2 and metrics['tool_seconds_unmatched'] == 0
++        assert 0.04 <= metrics['tool_seconds']['fast']['total'] <= 0.2
++        assert 0.45 <= metrics['tool_seconds']['slow']['total'] <= 0.7
++        assert sum(v['total'] for v in metrics['tool_seconds'].values()) <= wall
+diff --git a/eval/tool_timing.py b/eval/tool_timing.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..29594208efe489aded56384a093c6eb5468bb9c7
+--- /dev/null
++++ b/eval/tool_timing.py
+@@ -0,0 +1,95 @@
++"""Per-task monotonic ADK tool timing, usable by the Kaggle timing kernel.
++
++No harness dependencies are imported until installation. Call IDs, rather than
++names or merged trace response timestamps, identify overlapping executions.
++"""
++from contextvars import ContextVar
++from dataclasses import dataclass, field
++import time
++
++current_timing = ContextVar('current_tool_timing', default=None)
++
++
++@dataclass
++class ToolTiming:
++    pending: dict = field(default_factory=dict)
++    seconds: dict = field(default_factory=dict)
++    unmatched: int = 0
++    completed: set = field(default_factory=set)
++
++    def before(self, call_id, name):
++        if not call_id:
++            self.unmatched += 1
++            return
++        if call_id in self.pending or call_id in self.completed:
++            self.unmatched += 1
++            return
++        self.pending[call_id] = (name, time.monotonic())
++
++    def after(self, call_id):
++        # Error callbacks may be followed by after_tool_callback on recovery.
++        if call_id in self.completed:
++            return
++        item = self.pending.pop(call_id, None)
++        if item is None:
++            self.unmatched += 1
++            return
++        name, start = item
++        elapsed = time.monotonic() - start
++        stat = self.seconds.setdefault(name, dict(n=0, total=0.0, max=0.0))
++        stat['n'] += 1
++        stat['total'] += elapsed
++        stat['max'] = max(stat['max'], elapsed)
++        self.completed.add(call_id)
++
++    def metrics(self):
++        return dict(tool_seconds=self.seconds,
++                    tool_calls_timed=sum(s['n'] for s in self.seconds.values()),
++                    tool_seconds_unmatched=self.unmatched + len(self.pending))
++
++
++def make_timing_plugin():
++    from google.adk.plugins.base_plugin import BasePlugin
++
++    class TimingPlugin(BasePlugin):
++        def __init__(self):
++            super().__init__(name='eval_tool_timing')
++
++        async def before_tool_callback(self, *, tool, tool_args, tool_context):
++            state = current_timing.get()
++            if state is not None:
++                state.before(tool_context.function_call_id, tool.name)
++
++        async def after_tool_callback(self, *, tool, tool_args, tool_context, result):
++            state = current_timing.get()
++            if state is not None:
++                state.after(tool_context.function_call_id)
++
++        async def on_tool_error_callback(self, *, tool, tool_args, tool_context, error):
++            state = current_timing.get()
++            if state is not None:
++                state.after(tool_context.function_call_id)
++
++    return TimingPlugin()
++
++
++def install_harness_timing():
++    """Installed swegemma builds an App with plugins; prepend ours to that list.
++
++    Prepending ensures timing runs before any error-recovery callback short
++    circuits the plugin chain. It also covers MCP and agent_tool subclasses.
++    Returns a restoration function for callers embedding the runner.
++    """
++    import swegemma.harness.agent_runner as ar
++    original = ar.App
++
++    def app(*args, **kwargs):
++        kwargs['plugins'] = [make_timing_plugin(), *kwargs.get('plugins', [])]
++        return original(*args, **kwargs)
++
++    ar.App = app
++
++    def restore():
++        ar.App = original
++
++    return restore
+
+codex
+The focused tests pass for timing parallel ADK calls, separating concurrent task metrics, rejecting resume mismatches, forwarding config, and preserving rows when diagnostics fail.
+
+Localhost socket creation is also blocked here. I’ve added an E2E variant that drives the existing `stub_openai` handler through in-memory streams while retaining the real ADK, patch capture, subprocess setup, and verification path.
+exec
+/bin/bash -lc 'ls -td /tmp/pytest-of-ubuntu/pytest-* | head -4; rg --files /tmp/pytest-of-ubuntu/pytest-current | head -15' in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+/tmp/pytest-of-ubuntu/pytest-522
+/tmp/pytest-of-ubuntu/pytest-current
+/tmp/pytest-of-ubuntu/pytest-521
+/tmp/pytest-of-ubuntu/pytest-520
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/source/module.py
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/inventory/sandbox/setup.py
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/inventory/tasks.jsonl
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/bundle/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/bundle/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/dev.txt
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/inventory/snapshots/fastapi_14258.tgz
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/script.json
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/out/stub-eval.jsonl
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/out/stub-eval/harness.log
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_http_0/source/module.py
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_http_0/bundle/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_http_0/bundle/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_http_0/dev.txt
+/tmp/pytest-of-ubuntu/pytest-current/test_e2e_http_0/inventory/sandbox/setup.py
+
+exec
+/bin/bash -lc "tail -50 /tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/out/stub-eval/harness.log; rg -n 'stream|run_async|acompletion' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py | tail -35; rg -n 'def setup_synthetic|git config|subprocess' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py | head -20" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+3090:  # A partial holds one chunk of a stream, and the finalizer reports the same
+3907:          and handler.stream is sys.stderr
+3909:        handler.stream = sys.stdout
+3959:    # and overriding messages, tools and stream which are managed internally
+3963:    # public api called from runner determines to stream or not
+3964:    self._additional_args.pop("stream", None)
+4064:      self, llm_request: LlmRequest, stream: bool = False
+4070:      stream: bool = False, whether to do streaming call.
+4198:    if stream:
+4201:      # the whole buffer on every streamed chunk.
+4211:      completion_args["stream"] = True
+4212:      completion_args["stream_options"] = {"include_usage": True}
+4227:        thought_parts = _aggregate_streaming_thought_parts(reasoning_parts)
+4240:        # substitutes "stop" when a provider ends a stream without sending
+4262:                    # downstream parse finds valid JSON and logs no second
+4272:            # Put the signature back where a non-streamed tool call carries
+4290:                    "Tool call arguments were truncated while streaming and"
+4303:                  " The stream carrying them most likely ended early."
+4352:      def _reset_stream_buffers() -> None:
+4363:      async for part in await self.llm_client.acompletion(**completion_args):
+4373:              "Multiple choices found in streaming response but only the first"
+4454:                  "path_tracker", streaming_utils._JsonPathTracker()
+4549:            # Assign to the single text slot so the later stream segment wins.
+4554:          _reset_stream_buffers()
+4560:          _reset_stream_buffers()
+4562:      # The in-loop finalizers only fire on the reasons known to end a stream,
+4564:      # end of the stream with the buffers still full. Finalize with the reason
+4566:      # filtered stream reports the same finish_reason and error_code that the
+4567:      # non-streaming path reports.
+4581:          # cut-off stream.
+4586:        _reset_stream_buffers()
+4593:        _reset_stream_buffers()
+4598:        # The stream ended without ever producing content or tool calls (an
+4608:      # waiting until streaming ends to yield the llm_response as litellm tends
+4631:      response = await self.llm_client.acompletion(**completion_args)
+238:    import subprocess
+289:            subprocess.run(
+543:            is_subprocess = (
+544:                getattr(config, 'sandbox', 'docker') == 'subprocess'
+547:            if config is not None and not is_subprocess:
+605:import os, sys, subprocess, re
+766:        r = subprocess.run(c, cwd=workspace, capture_output=True, text=True)
+814:            r_dry = subprocess.run(dry_cmd, cwd=workspace, capture_output=True, text=True)
+816:                r_apply = subprocess.run(c, cwd=workspace, capture_output=True, text=True)
+832:            r_dry = subprocess.run(dry_cmd, cwd=workspace, capture_output=True, text=True)
+834:                r_apply = subprocess.run(c, cwd=workspace, capture_output=True, text=True)
+859:def setup_synthetic_hardware(docker: BaseSandboxManager, container_id: str) -> None:
+980:    from swegemma.sandbox.subprocess import SubprocessManager
+
+exec
+/bin/bash -lc "sed -n '1168,1198p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py; sed -n '396,420p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py; sed -n '500,590p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py; sed -n '1,155p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+  async def acompletion(
+      self,
+      model: Any,
+      messages: Any,
+      tools: Any,
+      **kwargs: Any,
+  ) -> Union[ModelResponse, CustomStreamWrapper]:
+    """Asynchronously calls acompletion.
+
+    Args:
+      model: The model name.
+      messages: The messages to send to the model.
+      tools: The tools to use for the model.
+      **kwargs: Additional arguments to pass to acompletion.
+
+    Returns:
+      The model response as a message.
+    """
+    _ensure_litellm_imported()
+
+    return await acompletion(
+        model=model,
+        messages=messages,
+        tools=tools,
+        **kwargs,
+    )
+
+  def completion(
+      self,
+      model: Any,
+      messages: Any,
+def _ensure_litellm_imported() -> None:
+  """Imports LiteLLM with safe defaults.
+
+  LiteLLM defaults to DEV mode, which autoloads a local `.env` at import time.
+  ADK should not implicitly load `.env` just because LiteLLM is installed.
+
+  Users can opt into LiteLLM's default behavior by setting LITELLM_MODE=DEV.
+  """
+  global _LITELLM_IMPORTED
+  if _LITELLM_IMPORTED:
+    return
+
+  # https://github.com/BerriAI/litellm/blob/main/litellm/__init__.py#L80-L82
+  os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
+
+  import litellm as litellm_module
+
+  litellm_module.add_function_to_prompt = True
+
+  globals()["litellm"] = litellm_module
+  for symbol in _LITELLM_GLOBAL_SYMBOLS:
+    globals()[symbol] = getattr(litellm_module, symbol)
+
+  _redirect_litellm_loggers_to_stdout()
+  _LITELLM_IMPORTED = True
+    trace.start()
+
+    try:
+        # Set up per-task log file in <results_dir>/logs/<instance_id>.log
+        logs_dir = config.results_dir / 'logs'
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        safe_instance_id = task.instance_id.replace('/', '_')
+        log_path = logs_dir / f'{safe_instance_id}.log'
+        log_file = open(log_path, 'w', buffering=1, encoding='utf-8')  # noqa: SIM115
+        file_console = Console(file=log_file, force_terminal=True, width=120)
+
+        slots_map = getattr(dashboard, 'slots', None) if dashboard is not None else None
+        slot = (
+            slots_map.get(slot_id)
+            if isinstance(slots_map, dict) and slot_id is not None
+            else None
+        )
+        if context is None and slot is not None and slot.context is not None:
+            context = slot.context
+
+        if context is None:
+            context = SwegemmaContext(
+                docker_manager=docker,
+                container_id=sandbox_id,
+                problem_statement=task.problem_statement,
+                hints_text=getattr(task, 'hints_text', '') or '',
+                task=task,
+                repo=task.repo,
+                graph_dir=config.graph_dir,
+                embeddings_dir=config.embeddings_dir,
+                budget=config.budget,
+                harness=config.harness,
+            )
+            if (
+                dashboard is not None
+                and slot_id is not None
+                and hasattr(dashboard, 'attach_context')
+            ):
+                dashboard.attach_context(slot_id, context)
+        else:
+            context.docker = docker
+            context.container_id = sandbox_id
+            if (
+                dashboard is not None
+                and slot_id is not None
+                and hasattr(dashboard, 'attach_context')
+                and (slot is None or slot.context is not context)
+            ):
+                dashboard.attach_context(slot_id, context)
+
+        context.set_phase('Starting')
+        context.set_activity('Setting up container...')
+
+        # Setup wheels in container
+        await asyncio.to_thread(setup_container_wheels, docker, sandbox_id, config)
+
+        context.set_activity('Extracting snapshot...')
+
+        # Copy snapshot into sandbox container and extract (supports base + patch)
+        await asyncio.to_thread(
+            extract_snapshot,
+            docker,
+            sandbox_id,
+            snapshot_path,
+            patch_path=patch_path,
+            base_snapshot_path=base_snapshot_path,
+        )
+
+        # Configure git exclude to ignore bytecode and test cache artifacts
+        await asyncio.to_thread(setup_git_exclude, docker, sandbox_id)
+
+        # Install editable package using baked-in wheels
+        await asyncio.to_thread(install_editable_package, docker, sandbox_id)
+
+        # Install test dependencies
+        await asyncio.to_thread(
+            install_test_dependencies, docker, sandbox_id, task.repo, config=config
+        )
+
+        # Setup hermetic test configuration in workspace
+        await asyncio.to_thread(
+            setup_workspace_test_config, docker, sandbox_id, repo=task.repo
+        )
+
+        # Create clean baseline commit for git diff calculation
+        await asyncio.to_thread(setup_baseline_commit, docker, sandbox_id, 'baseline')
+
+        # Test runners are re-enabled in sandbox container for experiment
+        # Set enable_sandbox_testing to False to mask pytest and unittest
+        cfg_testing = getattr(config, 'enable_sandbox_testing', None)
+        enable_sandbox_testing = (
+"""SWE-bench evaluation orchestrator."""
+
+from __future__ import annotations
+
+import asyncio
+import csv
+import dataclasses
+import inspect
+import logging
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+from adk_eval_core.tracing import SessionTrace
+
+from swegemma.config import EvalConfig
+from swegemma.context import SwegemmaContext
+from swegemma.deduplication import resolve_task_snapshot_paths
+from swegemma.display import EvaluationDashboard
+from swegemma.harness.agent_runner import run_agent_sandbox
+from swegemma.harness.container_setup import (
+    install_test_dependencies,
+    resolve_wheels_dir,
+    setup_container_wheels,
+)
+from swegemma.harness.verification import save_trace_artifact, verify_task
+from swegemma.models import (
+    EvaluationResult,
+    Task,
+    TaskResult,
+    extract_test_files_from_patch,
+    load_tasks,
+)
+from swegemma.results import append_task_result, save_results
+from swegemma.sandbox import (
+    ContainerConfig,
+    ContainerManager,
+    SubprocessManager,
+)
+from swegemma.warnings import _suppress_warnings
+
+logger = logging.getLogger(__name__)
+
+# Suppress OpenTelemetry detach errors caused by async generator context isolation
+logging.getLogger('opentelemetry.context').setLevel(logging.CRITICAL)
+logging.getLogger('opentelemetry').setLevel(logging.CRITICAL)
+
+# Re-export for public API and backwards compatibility
+__all__ = [
+    'EvalConfig',
+    'Evaluator',
+    'extract_test_files_from_patch',
+]
+
+
+class Evaluator:
+    """Orchestrates evaluation of an agent submission on SWE-bench tasks."""
+
+    def __init__(self, config: EvalConfig) -> None:
+        _suppress_warnings()
+        self.config = config
+        self._secret_hydration_cache: tuple[dict[str, str], dict[str, str], Path | None] | None = None
+        cmd_timeout = (
+            config.harness.command_timeout_seconds
+            if config.harness.command_timeout_seconds is not None
+            else 300
+        )
+        if config.sandbox == 'docker':
+            container_config = ContainerConfig(
+                image=config.image,
+                timeout_seconds=cmd_timeout,
+            )
+            self.sandbox: Any = ContainerManager(container_config)
+        else:
+            self.sandbox = SubprocessManager(
+                timeout_seconds=cmd_timeout,
+            )
+        self.docker = self.sandbox
+
+    def _get_secret_bundle_data(
+        self,
+    ) -> tuple[dict[str, str], dict[str, str], Path | None]:
+        """Loads and caches (test_patch_map, patch_map, secret_dir) from the sibling secret data bundle."""
+        if self._secret_hydration_cache is not None:
+            return self._secret_hydration_cache
+
+        secret_dir: Path | None = None
+        roots = [
+            p for p in (self.config.tasks_path, self.config.snapshots_dir) if p is not None
+        ]
+        for root in roots:
+            try:
+                resolved = Path(root).resolve()
+            except Exception:
+                continue
+            for anc in [resolved, *resolved.parents]:
+                cand = anc / 'secret'
+                if (cand / 'solution.parquet').is_file() or (cand / 'solution.csv').is_file():
+                    secret_dir = cand
+                    break
+            if secret_dir is not None:
+                break
+
+        test_patch_map: dict[str, str] = {}
+        patch_map: dict[str, str] = {}
+        if secret_dir is not None:
+            sol_parquet = secret_dir / 'solution.parquet'
+            sol_csv = secret_dir / 'solution.csv'
+            if sol_parquet.is_file():
+                try:
+                    import pandas as pd
+
+                    sol_df = pd.read_parquet(sol_parquet)
+                    for row in sol_df.to_dict(orient='records'):
+                        iid = str(row.get('id') or row.get('instance_id') or '').strip()
+                        tp = str(row.get('test_patch') or '')
+                        if iid and tp:
+                            test_patch_map[iid] = tp
+                except Exception as e:
+                    logger.warning('Failed reading %s: %s', sol_parquet, e)
+            elif sol_csv.is_file():
+                try:
+                    csv.field_size_limit(sys.maxsize)
+                except OverflowError:
+                    csv.field_size_limit(2**31 - 1)
+                try:
+                    with open(sol_csv, encoding='utf-8') as f:
+                        for row in csv.DictReader(f):
+                            iid = (row.get('id') or row.get('instance_id') or '').strip()
+                            tp = row.get('test_patch') or ''
+                            if iid and tp:
+                                test_patch_map[iid] = tp
+                except Exception as e:
+                    logger.warning('Failed reading %s: %s', sol_csv, e)
+
+            perf_parquet = secret_dir / 'perfect_submission.parquet'
+            perf_csv = secret_dir / 'perfect_submission.csv'
+            if perf_parquet.is_file():
+                try:
+                    import pandas as pd
+
+                    perf_df = pd.read_parquet(perf_parquet)
+                    for row in perf_df.to_dict(orient='records'):
+                        iid = str(row.get('id') or row.get('instance_id') or '').strip()
+                        pred = str(row.get('prediction') or row.get('patch') or '')
+                        if iid and pred:
+                            patch_map[iid] = pred
+                except Exception as e:
+                    logger.warning('Failed reading %s: %s', perf_parquet, e)
+            elif perf_csv.is_file():
+                try:
+                    with open(perf_csv, encoding='utf-8') as f:
+                        for row in csv.DictReader(f):
+                            iid = (row.get('id') or row.get('instance_id') or '').strip()
+
+exec
+/bin/bash -lc "sed -n '233,298p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py; rg -n 'async def evaluate_task|sandbox_start|install_test_dependencies' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+def _build_unpacked_wheels_tar(
+    selected_wheels: list[Path], cache_name: str, marker_name: str
+) -> Path:
+    """Unpacks selected_wheels into a cached uncompressed tar archive with a marker file."""
+    import shutil
+    import subprocess
+    import tempfile
+    import uuid
+    import zipfile
+    from concurrent.futures import ThreadPoolExecutor
+
+    cache_dir = Path(tempfile.gettempdir()) / 'swegemma_sp_cache_v8'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    tar_path = cache_dir / f'{cache_name}.tar'
+    if tar_path.exists() and tar_path.stat().st_size > 0:
+        return tar_path
+
+    with _WHEELS_TAR_LOCK:
+        if tar_path.exists() and tar_path.stat().st_size > 0:
+            return tar_path
+
+        uid = uuid.uuid4().hex[:8]
+        staging_dir = cache_dir / f'staging_{cache_name}_{os.getpid()}_{uid}'
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        staging_dir.mkdir(parents=True, exist_ok=True)
+
+        def _extract_one(w_path: Path) -> None:
+            try:
+                with zipfile.ZipFile(w_path, 'r') as zf:
+                    members = [
+                        m
+                        for m in zf.infolist()
+                        if not m.filename.endswith(('.pyc', '/RECORD'))
+                    ]
+                    zf.extractall(staging_dir, members=members)
+            except Exception as e:
+                logger.debug('Skipping wheel %s during staging: %s', w_path.name, e)
+
+        try:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(_extract_one, selected_wheels))
+
+            for data_dir in list(staging_dir.glob('*.data')):
+                for sub_name in ('purelib', 'platlib'):
+                    sub_dir = data_dir / sub_name
+                    if sub_dir.is_dir():
+                        for item in sub_dir.iterdir():
+                            dest = staging_dir / item.name
+                            if not dest.exists():
+                                shutil.move(str(item), str(dest))
+                shutil.rmtree(data_dir, ignore_errors=True)
+
+            (staging_dir / marker_name).write_text('ok\n', encoding='utf-8')
+
+            tmp_tar = cache_dir / f'{cache_name}_{os.getpid()}_{uid}.tar.tmp'
+            subprocess.run(
+                ['tar', '-cf', str(tmp_tar), '-C', str(staging_dir), '.'],
+                check=True,
+            )
+            tmp_tar.replace(tar_path)
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    return tar_path
+
+23:    install_test_dependencies,
+188:    def _install_test_dependencies(self, container_id: str, repo: str = '') -> None:
+190:        install_test_dependencies(
+221:    async def evaluate_task(
+
+exec
+/bin/bash -lc "sed -n '221,340p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py; rg --files /tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/out; ls -td /tmp/swegemma_sandbox* | head -4" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+    async def evaluate_task(
+        self,
+        task: Task,
+        task_index: int = 1,
+        total_tasks: int = 1,
+        slot_id: int | None = None,
+        dashboard: EvaluationDashboard | None = None,
+        context: SwegemmaContext | None = None,
+    ) -> TaskResult:
+        """Evaluate a single task using the two-container pipeline."""
+        task = self._hydrate_task_from_secret(task)
+        logger.debug('Evaluating task %s (%s)', task.instance_id, task.repo)
+        start_time = time.perf_counter()
+
+        slots_map = getattr(dashboard, 'slots', None) if dashboard is not None else None
+        slot = (
+            slots_map.get(slot_id)
+            if isinstance(slots_map, dict) and slot_id is not None
+            else None
+        )
+        if context is None and slot is not None and slot.context is not None:
+            context = slot.context
+
+        if context is None:
+            context = SwegemmaContext(
+                docker_manager=self.docker,
+                container_id='',
+                problem_statement=task.problem_statement,
+                hints_text=getattr(task, 'hints_text', '') or '',
+                task=task,
+                repo=task.repo,
+                graph_dir=self.config.graph_dir,
+                embeddings_dir=self.config.embeddings_dir,
+                budget=self.config.budget,
+                harness=self.config.harness,
+            )
+            if (
+                dashboard is not None
+                and slot_id is not None
+                and hasattr(dashboard, 'attach_context')
+            ):
+                dashboard.attach_context(slot_id, context)
+        elif (
+            dashboard is not None
+            and slot_id is not None
+            and hasattr(dashboard, 'attach_context')
+            and (slot is None or slot.context is not context)
+        ):
+            dashboard.attach_context(slot_id, context)
+
+        snapshot_path, base_snapshot_path, patch_path = resolve_task_snapshot_paths(
+            self.config.snapshots_dir, task.instance_id, task.repo
+        )
+        if not snapshot_path.exists():
+            _, _, secret_dir = self._get_secret_bundle_data()
+            if secret_dir is not None and (secret_dir / 'sandbox' / 'snapshots').is_dir():
+                snapshot_path, base_snapshot_path, patch_path = resolve_task_snapshot_paths(
+                    secret_dir / 'sandbox' / 'snapshots', task.instance_id, task.repo
+                )
+        if not snapshot_path.exists():
+            err_msg = f'Snapshot file not found: {self.config.snapshots_dir / f"{task.instance_id}.tar.gz"} or .tgz'
+            duration = time.perf_counter() - start_time
+            if dashboard is not None and slot_id is not None:
+                dashboard.task_completed(slot_id, False, duration, err_msg)
+            return TaskResult(
+                instance_id=task.instance_id,
+                repo=task.repo,
+                resolved=False,
+                agent_patch='',
+                test_output='',
+                test_exit_code=-1,
+                duration_seconds=duration,
+                error=err_msg,
+                task_index=task_index,
+            )
+
+        # -------------------------------------------------------------------
+        # Phase 1: Sandbox Execution (Container A)
+        # -------------------------------------------------------------------
+        if self.config.skip_agent_patch:
+            agent_patch = ''
+            agent_error = None
+            trace: SessionTrace | None = SessionTrace()
+        else:
+            run_kwargs: dict[str, Any] = {
+                'slot_id': slot_id,
+                'dashboard': dashboard,
+                'context': context,
+            }
+            sig = inspect.signature(self._run_agent_sandbox)
+            if 'base_snapshot_path' in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            ):
+                run_kwargs['base_snapshot_path'] = base_snapshot_path
+                run_kwargs['patch_path'] = patch_path
+            agent_patch, agent_error, trace = await self._run_agent_sandbox(
+                task,
+                snapshot_path,
+                task_index,
+                total_tasks,
+                **run_kwargs,
+            )
+
+        if agent_error and not agent_patch:
+            json_path = save_trace_artifact(
+                trace, self.config.results_dir, task.instance_id
+            )
+            duration = time.perf_counter() - start_time
+            llm_calls = context.llm_calls_used
+            if dashboard is not None and slot_id is not None:
+                dashboard.task_completed(
+                    slot_id,
+                    False,
+                    duration,
+                    agent_error,
+                    agent_duration=context.agent_elapsed_seconds if context else None,
+                )
+            return TaskResult(
+                instance_id=task.instance_id,
+                repo=task.repo,
+rg: /tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/out: IO error for operation on /tmp/pytest-of-ubuntu/pytest-current/test_e2e_in_memory_0/out: No such file or directory (os error 2)
+/tmp/swegemma_sandbox_8a2dd882-2fe_azrppg34
+/tmp/swegemma_sandbox_e222148a-a2c_6r5ll4qc
+
+exec
+/bin/bash -lc 'tail -40 /tmp/pytest-of-ubuntu/pytest-522/test_e2e_in_memory_0/out/stub-eval/harness.log; ls /tmp/pytest-of-ubuntu/pytest-522/test_e2e_in_memory_0/out/stub-eval; ls /tmp/swegemma_sandbox_8a2dd882-2fe_azrppg34' in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 0ms:
+harness.log
+tmp
+venv
+wheels
+workspace
+
+exec
+/bin/bash -lc "rg -n 'def sandbox_start' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages -g '*.py' -g '"'!litellm/**'"' | head -10; sed -n '475,505p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py; ls /tmp/swegemma_sandbox_8a2dd882-2fe_azrppg34/venv/lib/python3.13/site-packages; rg -n 'def _run_agent_sandbox|initialize' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ succeeded in 1087ms:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/base.py:214:async def sandbox_start(docker: Any) -> str:
+    return '\n'.join(prompt_parts)
+
+
+async def run_agent_sandbox(
+    docker: BaseSandboxManager,
+    config: EvalConfig,
+    task: Task,
+    snapshot_path: Path,
+    *,
+    base_snapshot_path: Path | None = None,
+    patch_path: Path | None = None,
+    task_index: int = 1,
+    total_tasks: int = 1,
+    slot_id: int | None = None,
+    dashboard: EvaluationDashboard | None = None,
+    context: SwegemmaContext | None = None,
+) -> tuple[str, str | None, SessionTrace]:
+    """Runs the agent in the sandbox container to generate a patch."""
+    sandbox_id = await sandbox_start(docker)
+    agent_patch = ''
+    agent_error: str | None = None
+    log_file = None
+    file_display_mgr: EventDisplayManager | None = None
+
+    trace = SessionTrace()
+    trace.start()
+
+    try:
+        # Set up per-task log file in <results_dir>/logs/<instance_id>.log
+        logs_dir = config.results_dir / 'logs'
+        logs_dir.mkdir(parents=True, exist_ok=True)
+pip
+pip-26.2.2.dist-info
+194:    async def _run_agent_sandbox(
+
+exec
+/bin/bash -lc "pkill -INT -f '"'^/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_run_agent_eval.py::test_e2e'"'" in /home/ubuntu/work/gemma-wt/codex-eval-runner-fix
+ exited 1 in 0ms:

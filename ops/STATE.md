@@ -1,4 +1,10 @@
-# STATE (2026-11-05, cycle 49 / Phase 0) — Builder on Opus (dec 010 local-first, two-strike)
+# STATE (2026-11-05, cycle 50 / Phase 0) — Builder on Opus (dec 010 local-first, two-strike)
+Cycle 50: e4b-timing v1 FAILED at 2 s: default Kaggle GPU image is py3.13, wheelhouse binaries cp312 (pip 'not a supported wheel').
+  Starter notebook pins docker_image gcr.io/kaggle-private-byod/python@sha256:37c64f7d... (py3.12.13; from kaggle kernels pull -m).
+  Fix 8b200ca: timing_push.sh pins that image + model handle casing 'Other' (starter); kernel prints python version. 11 timing tests pass.
+  PUSHED v2 (same 8 ids, budget 10800). Job e4b-timing-wait2 -> runs/e4b-timing (v1 artifacts moved to runs/e4b-timing-v1-failed).
+  On finish: same steps as cycle 49 below. Note for local env: scorer host python is 3.12 (starter), sandbox image per Dockerfile.public.
+  Generic lesson: any future Kaggle GPU kernel (31B timing, eval) must pin the starter docker_image.
 Cycle 49: timing-kernel REVIEWED (APIs verified vs swegemma 0.2.11/adk_eval_core source: context.llm_calls_used, SessionTrace.to_dict(format='legacy'),
   TaskResult pydantic, context kwarg). Raw traces (timestamps) + agent.patch + result.json saved per task to /kaggle/working/runs/<iid>/ (dec 016 OK).
   Builder fixes: None-usage guard; row-build/trace-parse exceptions can't kill the run. Merged to main (conflict: kept main gold_calibration, no diag). 382 tests pass.
@@ -51,15 +57,11 @@ Cycle 37: LOCAL gold repro built: /home/ubuntu/gemma-local (outside repo): pyimg
   Finding: with faithful emulation, starlette-1.6.0 fastapi failures (on_startup) and requests httpbin recursion PERSIST, clean tasks pass => these fail in the public docker env too; legit exclusions. ONLY_IDS cleared; full local gold job gold-local -> runs/gold-local (129 tasks, conc 2, ~15-25 min).
   Caveat for agent eval later: agent_runner/evaluate import install_test_dependencies by name (not patched by our cs/vf monkeypatch) and host python must be image-clean; handle when building eval runner.
   gold-diag4-wait (Kaggle v8) still running; now redundant — results only as cross-check.
-Cycle 36: gold-diag3 recovered 0 more (httpx1+requests2 only): fastapi 57 still crash on langsmith plugin (PYTEST_ADDOPTS not reaching sandbox pytest). Fix: pip uninstall langsmith at kernel start; kernel v8 pushed; job gold-diag4-wait -> runs/gold-diag4. Next: bucket; if fastapi recovers, clear ONLY_IDS, rerun full gold, rebuild splits; E4B timing kernel; report 002. Remaining 8 requests (httpbin fixture) + 9 rich still unexplained.
-Cycle 34: gold-diag2 recovered only 3/77 (httpx1, requests2). Remaining: fastapi 57 = Kaggle system-python langsmith pytest plugin autoload imports requests, shadowed by fastapi/requests.py (env artifact, not in scorer docker); requests 8 = httpbin fixture recursion (pytest-httpbin?); rich 9 real-looking fails (6+1 failed, rich_3486 exit0 harness err). Fix: PYTEST_ADDOPTS='-p no:langsmith_plugin' in gold_calibration.py; kernel v7 pushed, job gold-diag3-wait -> runs/gold-diag3. Next: bucket; if fastapi recovers clear ONLY_IDS & rerun full gold, rebuild splits; E4B timing kernel; report 002.
-Cycle 33: gold-diag DONE. All 77 failures are ENV: fastapi missing inline_snapshot(25)/dirty_equals(9) [NOT in wheelhouse -> genuinely unfixable, also fails in scorer docker], starlette too new ('Router on_startup', ~22), requests 'httpbin' fixture recursion (8), rich test_failure 7, rich_3486 exit0 harness error. Causes: results/gold_failure_causes.jsonl. Fix: patch_subprocess_deps() in eval/kaggle/gold_calibration.py (symlink py313 wheels to sandbox /wheels, run competition setup.py --no-fast-path inside venv; mimics docker path). Kernel v6 pushed with ONLY_IDS=77, job gold-diag2-wait -> runs/gold-diag2. Next: if fixes work (requests/starlette/rich recover), clear ONLY_IDS and rerun full gold, rebuild splits (dec 009 provisional), codex-review the adapter; then E4B timing kernel (plan 001), report 002. Splits provisional, holdout uses=0.
-Cycle 32 (dec 009): splits now PROVISIONAL (env-suspect), holdout uses=0, no comparisons. ROOT CAUSE found by source read (swegemma 0.2.11 wheel, unpacked in /tmp/wh/x): our Kaggle CPU gold run used SubprocessManager; setup_container_wheels/_ensure_container_site_packages inject the /wheels set into site-packages ONLY for docker managers (extract_archive_to_container); subprocess venv has no task deps -> exit 2 collection errors. Diagnostic rerun of 77 failing ids (kernel v5, ONLY_IDS + row['diag'] raw lines) job gold-diag-wait -> runs/gold-diag. Next: bucket causes -> results/gold_failure_causes.jsonl; fix env (inject wheels into subprocess venv, or subclass SubprocessManager with extract_archive_to_container); rerun full gold; rebuild splits; explain rich_3486 (exit 0, 'Harness verification error'); then E4B timing kernel (plan 001) + report 002.
 Best bundles: none validated. v000 packed + static PASS + codex static OK (repo SHA a12f0b7):
  31b dist/31b-v000.zip sha256=4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161
  e4b dist/e4b-v000.zip sha256=cc647bfb28bc6d2db0e3ec816df084f23a91230786d8fea177e2d63d2a6940e2
 Remaining codex BLOCKING: runtime budget/timing unverified (needs concurrency-1 timing on L4x4/Kaggle).
-Env: x86_64 VM. GCP project gemma-agent-839566, spend $0. Kaggle quota: gemma-e4b-timing v1 running (est ≤3.2 quota-h). Owner GPU policy (dec 001): Kaggle first.
+Env: x86_64 VM. GCP project gemma-agent-839566, spend $0. Kaggle quota: timing v1 failed (~0.1 quota-h est), v2 running (est ≤3.2 quota-h). Owner GPU policy (dec 001): Kaggle first.
 GCP quota (dec 003): only l4x1 spot + cpu8 usable; multi-GPU -> Kaggle.
 Rules (dec 004-002-001, 013): docs/RULES_FINDINGS.md; no repo overlap with hidden set; LORO mandatory for ship decisions; no partial credit on timeout (participant evidence 752017); one pending submission at a time.
 Open: (1) E2 resolved (dec 005): paper session owns paper/, do not edit; keep results/ files self-describing (schema + header line). (2) Director reminder due 2026-11-06T23:02Z: GCP quota re-request line to Aniket; keep until decision marks done. (3) Hosted-LLM-API data question OPEN; no new third-party services.
@@ -67,7 +69,7 @@ Dec 012 FYI: paper §4.1 cites only the committed gold-local v2 results file -> 
 Paper evidence (dec 007, due Nov 9 23:59Z, no extra compute): commit schema-headed results/ files for (a) gold calibration per-task outcomes+exclusion causes, (b) timing per task from Kaggle E4B smoke (31B if run), (c) failure taxonomy via trace-analyst once. Not yet produced; flag here if any won't exist by Nov 9.
 
 
-Running jobs: codex-eval-runner-fix (critical path), e4b-timing-wait (Kaggle), gold-diag4-wait (cross-check, redundant).
-Next 3 (dec 016: 1 and 2 in PARALLEL): (1) on e4b-timing-wait: timing_summary + post-hoc test-run share -> results/, plan-001 rule;
+Running jobs: codex-eval-runner-fix (critical path), e4b-timing-wait2 (Kaggle v2), gold-diag4-wait (cross-check, redundant).
+Next 3 (dec 016: 1 and 2 in PARALLEL): (1) on e4b-timing-wait2: timing_summary + post-hoc test-run share -> results/, plan-001 rule;
   (2) review+merge eval-runner-fix (real-bwrap tests, N2 check), rerun gold-local+gold-null shared env, compare vs v2 (change => short report);
   (3) report 002 with first-submission candidate + LORO caveat.
