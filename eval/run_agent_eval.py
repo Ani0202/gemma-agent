@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from eval.kaggle.gold_calibration import verify_gold
 from eval.sandbox_env import (isolate_host_packages, patch_subprocess_deps,
-                              setup_scorer_env, command_metrics)
+                              setup_scorer_env, setup_script_identity, command_metrics)
 from eval.tool_timing import ToolTiming, current_timing, install_harness_timing
 
 FIELDS = dict(instance_id='Task ID', repo='Repository', resolved='Harness verdict (bool)',
@@ -308,6 +308,21 @@ def resolve_caps(defaults, args):
     return caps
 
 
+def validate_caps(values):
+    for v in values:
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+            raise ValueError(f'Caps must be positive finite numbers (got {v!r})')
+
+
+def validate_effective_caps(config):
+    """Nested bundle caps bypass resolve_caps (None there), so validate the merged values."""
+    validate_caps([getattr(config, 'max_time_minutes', None), getattr(config, 'timeout_seconds', None),
+                   getattr(getattr(config, 'budget', None), 'time_minutes', None),
+                   getattr(getattr(config, 'harness', None), 'command_timeout_seconds', None)])
+
+
 def build_config(defaults, args, models, raw_dir, caps):
     from swegemma import config as sc
     from swegemma.budget import EvaluationBudget, HarnessLimits
@@ -386,8 +401,7 @@ async def run(args):
     settings = args.bundle / 'eval_config.yaml'
     defaults = (yaml.safe_load(settings.read_text()) or {}).get('evaluation', {}) if settings.exists() else {}
     caps = resolve_caps(defaults, args)
-    if any(v is not None and (not math.isfinite(v) or v <= 0) for v in caps.values()):
-        raise ValueError('Caps must be positive finite numbers')
+    validate_caps(caps.values())
     if args.models_yaml and not args.models_yaml.is_file():
         raise ValueError('models.yaml missing')
     models = _build_cli_model_registry(args.bundle, args.models_yaml)
@@ -398,12 +412,14 @@ async def run(args):
     raw_dir = args.out / args.run_name
     raw_dir.mkdir(parents=True, exist_ok=True)
     config = build_config(defaults, args, models, raw_dir, caps)
+    validate_effective_caps(config)
     environment = setup_scorer_env(args.data_dir, out_dir=args.out, repo_root=ROOT,
                                    allow_unsandboxed=args.allow_unsandboxed)
     patched = environment['patched']
     assert_dependency_bindings(patched)
     header = dict(_schema='agent_eval_v2', fields=FIELDS, bundle=str(args.bundle),
                   bundle_sha256=bundle_sha(args.bundle), **runner_revision(),
+                  setup_script=setup_script_identity(args.data_dir),
                   tasks_sha256=sha_file(args.data_dir / 'tasks.jsonl'),
                   split=dict(path=str(args.split), sha256=sha_file(args.split)), caps=caps,
                   versions={name: importlib.metadata.version(name) for name in

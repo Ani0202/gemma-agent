@@ -445,3 +445,56 @@ def test_caps_precedence_cli_flat_fallback():
     flat = dict(max_time_minutes=3, budget=dict(time_minutes=2))
     assert runner.resolve_caps(flat, _cap_args())['max_time_minutes'] == 3
     assert runner.resolve_caps(flat, _cap_args(session_minutes=4))['max_time_minutes'] == 4
+
+
+def test_setup_script_identity_tracks_selected_script(tmp_path):
+    from eval import sandbox_env
+    script = tmp_path / 'sandbox' / 'setup.py'
+    script.parent.mkdir()
+    script.write_text('print(1)\n')
+    first = sandbox_env.setup_script_identity(tmp_path)
+    assert first['path'] == str(script.resolve()) and first['sha256']
+    assert sandbox_env.setup_script_path(tmp_path) == script
+    script.write_text('print(2)\n')
+    second = sandbox_env.setup_script_identity(tmp_path)
+    assert second['sha256'] != first['sha256']
+    header = dict(_schema='agent_eval_v2', runner_source_sha256='src', setup_script=first)
+    path = tmp_path / 'run.jsonl'
+    runner.Journal(path, header).close()
+    with pytest.raises(ValueError, match='setup_script'):
+        runner.Journal(path, dict(header, setup_script=second))
+    runner.Journal(path, dict(header)).close()  # unchanged script resumes
+
+
+def test_setup_script_fallback_is_recursive_and_hashed(tmp_path):
+    from eval import sandbox_env
+    script = tmp_path / 'x' / 'sandbox' / 'setup.py'
+    script.parent.mkdir(parents=True)
+    script.write_text('a')
+    assert sandbox_env.setup_script_identity(tmp_path)['path'] == str(script.resolve())
+    assert sandbox_env.setup_script_identity(tmp_path / 'missing')['sha256'] is None
+
+
+@pytest.mark.parametrize('section,key,value', [('budget', 'time_minutes', 0),
+    ('harness', 'command_timeout_seconds', -7), ('budget', 'time_minutes', float('inf')),
+    ('harness', 'command_timeout_seconds', 'abc')])
+def test_nested_caps_are_validated_after_merge(harness, section, key, value):
+    defaults = {section: {key: value}}
+    caps = runner.resolve_caps(defaults, _cap_args())
+    runner.validate_caps(caps.values())  # flat caps fine; nested left to config
+    args = SimpleNamespace(data_dir=Path('/d'), bundle=Path('/b'), concurrency=1)
+    try:
+        config = runner.build_config(defaults, args, None, Path('/r'), caps)
+    except (TypeError, ValueError):
+        return  # rejected at construction is also acceptable
+    with pytest.raises(ValueError, match='positive finite'):
+        runner.validate_effective_caps(config)
+
+
+def test_valid_nested_and_flat_caps_pass_validation(harness):
+    defaults = dict(budget=dict(time_minutes=2), harness=dict(command_timeout_seconds=7))
+    caps = runner.resolve_caps(defaults, _cap_args())
+    args = SimpleNamespace(data_dir=Path('/d'), bundle=Path('/b'), concurrency=1)
+    runner.validate_effective_caps(runner.build_config(defaults, args, None, Path('/r'), caps))
+    with pytest.raises(ValueError):
+        runner.validate_caps([True])

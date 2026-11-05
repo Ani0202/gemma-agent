@@ -223,6 +223,22 @@ def isolate_host_packages():
     SubprocessManager.start = start
 
 
+def setup_script_path(data_dir):
+    """The dependency setup script the subprocess installer copies and executes."""
+    setup_py = Path(data_dir) / 'sandbox' / 'setup.py'
+    if not setup_py.exists():
+        setup_py = next(iter(sorted(Path(data_dir).rglob('setup.py'))), setup_py)  # competition sandbox/setup.py
+    return setup_py
+
+
+def setup_script_identity(data_dir):
+    """Resolved path + content hash of the setup script (part of resume identity)."""
+    import hashlib
+    path = setup_script_path(data_dir)
+    return dict(path=str(path.resolve()),
+                sha256=hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None)
+
+
 def patch_subprocess_deps(data_dir):
     """Emulate the docker-only dependency setup for the subprocess sandbox (swegemma skips it).
 
@@ -246,9 +262,7 @@ def patch_subprocess_deps(data_dir):
     wheels_src = Path(data_dir) / 'wheels'
     if not wheels_src.is_dir():
         wheels_src = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
-    setup_py = Path(data_dir) / 'sandbox' / 'setup.py'
-    if not setup_py.exists():
-        setup_py = next(iter(Path(data_dir).rglob('setup.py')), setup_py)  # competition sandbox/setup.py
+    setup_py = setup_script_path(data_dir)
 
     def install(docker, container_id, repo='', *, fast_path=True, config=None):
         if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
