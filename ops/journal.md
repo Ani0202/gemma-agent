@@ -24,3 +24,4 @@
 23:42Z | dec 006 read (paper track, builder FYI only, no action) | ops/decisions/006-*
 2026-11-04T23:53:29Z | ack decision 007: paper evidence files (gold outcomes, timing, taxonomy) to results/ by Nov 9 | ops/decisions/007-*.md
 2026-11-04T23:55:23Z | dec 008 applied: overrun claim corrected in RULES_FINDINGS/COMPETITION | docs/RULES_FINDINGS.md
+2026-11-05T00:05Z | cycle 21: gold-wait still running, no action | ops/jobs/gold-wait.log
