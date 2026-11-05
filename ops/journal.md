@@ -35,3 +35,4 @@
 2026-11-05T00:53Z | smoke7: still missing snapshot_path; adapter uses resolve_task_snapshot_paths, smoke v10, job gold-smoke-wait8 | runs/gold-smoke7
 2026-11-05T00:58Z | smoke8 adapter works (1 pass/3 unresolved); pushed full gold kernel v4, job gold-full-wait | runs/gold-smoke8, ops/jobs/gold-full-wait
 2026-11-05T02:08:40Z | gold-full done: 52/129 clean, splits frozen (dev36/hold16) | eval/splits/MANIFEST.json, results/gold_calibration_per_task.jsonl
+2026-11-05T02:15Z | splits marked provisional; root cause: no wheel injection in subprocess sandbox; diag rerun launched | eval/kaggle/gold_calibration.py, ops/jobs/gold-diag-wait

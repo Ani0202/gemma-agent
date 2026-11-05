@@ -1,0 +1,1 @@
+bash -c sleep\ 30\;\ while\ true\;\ do\ s=\$\(kaggle\ kernels\ status\ aniket0202/gemma-gold-patch-calibration\ 2\>\&1\)\;\ echo\ \"\$s\"\|tail\ -1\;\ echo\ \"\$s\"\|grep\ -qE\ \"COMPLETE\|ERROR\|CANCEL\"\ \&\&\ break\;\ sleep\ 60\;\ done\;\ kaggle\ kernels\ output\ aniket0202/gemma-gold-patch-calibration\ -p\ runs/gold-diag 

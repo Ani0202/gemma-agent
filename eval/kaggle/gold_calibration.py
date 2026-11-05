@@ -19,6 +19,7 @@ DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
 WORKING_DIR = Path('/kaggle/working')
 WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
 CONCURRENCY = 2
+ONLY_IDS = ['fastapi_15030', 'fastapi_14962', 'fastapi_14964', 'fastapi_15023', 'fastapi_14978', 'requests_7505', 'requests_7502', 'requests_7433', 'requests_7328', 'requests_7205', 'rich_4070', 'rich_4079', 'fastapi_13920', 'fastapi_14794', 'fastapi_14786', 'fastapi_14492', 'fastapi_14479', 'fastapi_12942', 'fastapi_14463', 'fastapi_14099', 'fastapi_14609', 'fastapi_14349', 'fastapi_14512', 'fastapi_14487', 'fastapi_11355', 'fastapi_14485', 'fastapi_14306', 'fastapi_14482', 'fastapi_14459', 'fastapi_14458', 'fastapi_14448', 'fastapi_14455', 'fastapi_9753', 'fastapi_14430', 'fastapi_5077', 'fastapi_9555', 'fastapi_13207', 'fastapi_14361', 'fastapi_14360', 'fastapi_14356', 'fastapi_14419', 'fastapi_5624', 'fastapi_14301', 'fastapi_14262', 'fastapi_14246', 'fastapi_14266', 'fastapi_9425', 'fastapi_14186', 'fastapi_14077', 'fastapi_13713', 'httpx_3672', 'fastapi_14791', 'fastapi_14371', 'fastapi_15785', 'fastapi_14605', 'fastapi_15763', 'fastapi_14583', 'fastapi_15745', 'fastapi_14303', 'fastapi_14297', 'fastapi_13537', 'fastapi_14953', 'fastapi_14616', 'fastapi_13786', 'fastapi_11194', 'requests_6757', 'requests_6644', 'requests_6629', 'requests_6589', 'requests_6592', 'rich_3486', 'rich_3782', 'rich_3296', 'rich_3472', 'rich_3469', 'rich_3130', 'rich_3064']  # diagnostic rerun of previously failing tasks; None = all
 
 
 def finished_results(text):
@@ -244,6 +245,12 @@ def worker(args):
                 raise TypeError('Unsupported verification result')
             row.update(resolved=resolved, exit_code=exit_code)
             if not resolved:
+                import re as _re
+                _out = get('test_output', '') or ''
+                _pat = _re.compile(r'ModuleNotFoundError|ImportError|fixture .* not found|unrecognized arguments|PluginValidationError|INTERNALERROR|^E  |^ERROR|error:|Error:|passed|failed', _re.M)
+                row['diag'] = dict(err=(get('error_message', None) or get('error', None) or '')[:300],
+                                   lines=[l[:200] for l in _out.splitlines() if _pat.search(l)][:25],
+                                   tail=_out[-600:])
                 # Harness exception/error text can embed patches or task source. Never copy it.
                 row['error'] = ('Harness verification error' if get('error') else
                                 f'Phase 2 unresolved (exit_code={exit_code}; includes JUnit validation)')
@@ -297,6 +304,8 @@ def main():
         worker(args)
         return
     tasks = load_inventory(args.data_dir)
+    if ONLY_IDS:
+        tasks = [t for t in tasks if t['instance_id'] in set(ONLY_IDS)]
     args.working_dir.mkdir(parents=True, exist_ok=True)
     journal = args.working_dir / 'gold_results.jsonl'
     results = resume_journal(journal)
