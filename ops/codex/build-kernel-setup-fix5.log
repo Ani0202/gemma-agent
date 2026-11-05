@@ -4883,3 +4883,131 @@ c4c9528 codex-build: kernel-setup-fix4
 399:            pip_wheel = fallback_wheel(wheels, 'pip')
 467:                        'Retrying' in line for line in (result.stdout + '\n' + result.stderr).splitlines())
 
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-kernel-setup-fix5/eval/kaggle/agent_timing.py
+diff --git a/eval/kaggle/agent_timing.py b/eval/kaggle/agent_timing.py
+index b6540f74c6e6b38db401b607fb01c5449c1e795f..920d8af3f101dc7eb501db57d1d65ecc04e87790
+--- a/eval/kaggle/agent_timing.py
++++ b/eval/kaggle/agent_timing.py
+@@ -26,6 +26,7 @@
+ BUNDLE_B64 = ""  # embedded by timing_push.sh
+ TASK_IDS = []
+ SETUP_ONLY = False
++SKIP_VERIFICATION = True
+ SETUP_FIX = 1
+ GIT_SHA = ""
+ KERNEL_BUDGET_SECONDS = 3 * 3600
+@@ -621,6 +622,111 @@
+ def should_stop(elapsed, cap_minutes, verification_timeout, observed_max, budget):
+     return elapsed + 1.5 * max(cap_minutes * 60 + verification_timeout, observed_max) > budget
+ 
++
++class AsyncioTimingProxy:
++    """Observe only agent_runner's timeout context, without changing asyncio itself."""
++    def __init__(self, original, state):
++        self._original, self._state = original, state
++
++    def __getattr__(self, name):
++        return getattr(self._original, name)
++
++    def timeout(self, *args, **kwargs):
++        cm = self._original.timeout(*args, **kwargs)
++        state = self._state
++        delay = args[0] if args else kwargs.get('delay')
++
++        class ObservedTimeout:
++            async def __aenter__(self):
++                self.current = state.get(None)
++                if self.current is not None:
++                    self.current.update(agent_timeout_seconds=delay, timeout_enter=time.perf_counter())
++                return await cm.__aenter__()
++
++            async def __aexit__(self, *exc_info):
++                exit_exc = exc_info[1]
++                try:
++                    return await cm.__aexit__(*exc_info)
++                except BaseException as exc:
++                    exit_exc = exc
++                    raise
++                finally:
++                    if self.current is not None:
++                        self.current.update(timeout_exit=time.perf_counter(),
++                            agent_timeout_fired=bool(getattr(cm, 'expired', lambda: False)())
++                                or isinstance(exit_exc, TimeoutError))
++
++        return ObservedTimeout()
++
++
++def observe_sandbox(original, state, name):
++    """Forward identical arguments/results/exceptions and time sandbox boundaries."""
++    async def observed(*args, **kwargs):
++        current = state.get(None)
++        start = time.perf_counter()
++        row = None
++        if current is not None:
++            if name == 'sandbox_start':
++                current['sandbox_start_begin'] = start
++            elif name == 'sandbox_exec' and current.get('timeout_exit') is not None:
++                cmd = args[2] if len(args) > 2 else kwargs.get('command', kwargs.get('cmd', ''))
++                row = dict(cmd=str(cmd)[:40], duration_s=None, rc=None)
++                current.setdefault('finalization_exec', []).append(row)
++        try:
++            result = await original(*args, **kwargs)
++            if row is not None:
++                row['rc'] = getattr(result, 'exit_code', None)
++            return result
++        except BaseException as exc:
++            if row is not None:
++                row['exception'] = type(exc).__name__
++            raise
++        finally:
++            end = time.perf_counter()
++            if current is not None:
++                if name in ('sandbox_start', 'sandbox_stop'):
++                    current[name + '_end'] = end
++                    current[name + '_duration'] = end - start
++                if row is not None:
++                    row['duration_s'] = end - start
++    return observed
++
++
++async def skip_verification(docker, config, task, snapshot_path, *, agent_patch='',
++                            agent_error=None, trace=None, start_time=0.0, **kwargs):
++    """Return the harness result type without starting Container B or running tests."""
++    from swegemma.models import TaskResult
++    result = TaskResult(instance_id=task.instance_id, repo=task.repo, resolved=False,
++        agent_patch=agent_patch, test_output='', test_exit_code=0,
++        duration_seconds=time.perf_counter() - start_time, error=agent_error, trace=trace)
++    # swegemma 0.2.11 annotates this field int, with assignment validation disabled.
++    result.test_exit_code = None
++    return result
++
++
++def phase1_fields(current, run_seconds, total, context, patch):
++    def difference(end, start):
++        return current[end] - current[start] if current.get(end) is not None and current.get(start) is not None else None
++    phase1 = difference('sandbox_stop_end', 'sandbox_start_begin')
++    source = 'sandbox_wrappers' if phase1 is not None else 'run_agent_sandbox'
++    phase1 = run_seconds if phase1 is None else phase1
++    submitted = bool(context.patch_submitted) if context is not None else None
++    return dict(agent_timeout_seconds=current.get('agent_timeout_seconds'),
++        agent_clock_seconds=difference('timeout_exit', 'timeout_enter'),
++        agent_timeout_fired=current.get('agent_timeout_fired'),
++        finalization_seconds=difference('sandbox_stop_end', 'timeout_exit'),
++        finalization_exec=current.get('finalization_exec', []),
++        teardown_seconds=current.get('sandbox_stop_duration'),
++        phase1_wall_seconds=phase1, phase1_source=source,
++        pre_agent_seconds=difference('timeout_enter', 'sandbox_start_begin'),
++        post_phase1_seconds=total - phase1, patch_submitted=submitted,
++        fallback_patch_used=(not submitted and bool(patch.strip())) if submitted is not None else None,
++        verification_skipped=SKIP_VERIFICATION)
++
++
++def harness_error(result, agent_error):
++    return 'Harness task failure' if (result is not None and result.error) or agent_error else None
++
+ def distribution(values):
+     values = sorted(values)
+     def percentile(q):
+
