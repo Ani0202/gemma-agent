@@ -40,8 +40,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Item 7: plan eval/plans/006.md pre-registered (31B timing, cap from e4b-v001 S/F, <= 4 quota-h, same 8 ids). After report 005.
 - NOTE: bin/codex-build always branches from main HEAD; for follow-up rounds create the worktree on the previous commit manually,
   write the spec, sed the previous build-*.sh, and bin/job start codex-<name>.
-
-
 ## bin/job, memguard, owner patch (cycles 62-66)
 - Linger=yes since ~18:05Z (dec 025): the scope path (MemoryMax=5G) is normal; Codex works under it.
 - Owner patch v2 = ONE diff (dec 024 item 3; dec 026: HOLD for Aniket, low urgency, after the critical path; keep the RLIMIT_DATA comment): ops/patches/bin-job-fallback.diff. v2 review ops/codex/review-20261105T180811.md: 3 BLOCKING (grep regex marker -> use grep -F; PID reuse between scan and signal plus cached group_ok -> bind identities (pidfd); legacy 3/4-field records -> refuse destructive signalling without identity evidence). Plan v3: a small Python helper using pidfds (like memguard) called from bin/job kill. NOT started (low urgency).
@@ -53,7 +51,6 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Item 6 / dec 022 item 4 scoped (ops/codex/ask-20261105T181222.md): harness fallback diff covers caps when submit_patch not called;
   empty submit loses everything; draft prompt bundles/drafts/item4-system.md; plan 005 (paired A/B at v002 cap, needs GPU: ask in report 005).
 
-## 2a CLOSED (dec 028; cause: harness RECORD strip, see journal). OOM incident (dec 020/021): suspect unbounded memory in null-patch rich tests (no local per-sandbox cap); sandbox-limits fix covers it. Details: ops/history/STATE-archive.md.
 
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
