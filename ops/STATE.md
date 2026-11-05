@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 20:02Z (cycle 88, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 20:13Z (cycle 88, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
@@ -20,11 +20,12 @@ Builder on Opus (dec 010: local-first, two-strike).
   ("No offline pytest-timeout 2.1.0 source"; wheelhouse lacks 2.1.0; local acceptance used imgrt-stub). vLLM 319 s, 4x L4 OK.
   Cost 0.25 quota-h (week 3.73). Raw: runs/e4b-v001-timing/. Reviews (dec 029/030): ops/reviews/claude-review-fix5.md (BLOCKING ->
   fixed ef72e7e+9ec991f), claude-rereview-fix5.md (NO BLOCKING), both verbatim.
-  FIX 9d386bc: vendored official PyPI wheel (sha f6f50101..., ATTRIBUTION logged) embedded via EXTRA_WHEELS; check_tool_sources()
-  before vLLM. 107 tests pass. RUNNING: setup-nostub-check (plan003 repro WITHOUT imgrt-stub -> scratchpad nostub/; the stub also
-  supplied pathspec/shellingham/trove_classifiers: look for missing_tool_deps). NEXT: Claude re-review of 9d386bc -> report 007
-  NEEDS_DECISION (re-push v5 = 2nd run; dec 028 said ONE) -> push. Codex fix5c 23:08Z: update cmd HEAD to final SHA before then.
-  Codex prompt must stay independent (dec 030 item 2). Report 005 only after Codex clean + merge + gate.
+  FIX chain on codex/kernel-setup-fix5: 9d386bc (embed pytest-timeout 2.1.0) -> 1c13123 (pathspec/shellingham/trove-classifiers)
+  -> 87001e4 (Claude review vendor-fix BLOCKING: preflight rejected Kaggle runtime pip; exact closure walk; annotated-doc). Vendored
+  official PyPI wheels pinned eval/kaggle/vendor/SHA256SUMS (ATTRIBUTION logged). 111 tests; no-stub repro OK
+  (results/plan003_kernel_setup_nostub_vendored.json). RUNNING: Claude re-review of 87001e4 -> ops/reviews/claude-rereview-vendor-fix.md.
+  NO BLOCKING -> send report 007 (drafted, ops/reports/007-v4-failed-repush.md) NEEDS_DECISION re-push v5 from 87001e4.
+  Codex fix5c 23:08Z: update cmd HEAD to the pushed SHA (independent prompt, dec 030 item 2) before then.
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
 - DEC 028 (report 005-prelim, option A APPROVED): 2a STOP met; artifact branch closed, 2b moot, no v000 re-time. CPU 2a dropped.
   Item 1-3: kernel-setup-fix5 BUILT aa116cb (branch codex/kernel-setup-fix5 on round-4 c4c9528; Codex 80 offline pass). Builder dry run

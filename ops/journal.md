@@ -160,4 +160,8 @@
 2026-11-05T19:50Z | Codex fix5 review cmd updated to HEAD 9ec991f and "already pushed"; relaunch script serializes fix5 -> fix6 | ops/jobs/review-kernel-setup-fix5-light.cmd
 2026-11-05T19:55Z | Dec 030 (approve): Codex fix5 prompt rewritten without Claude findings/fixes (diff main...9ec991f + dec 027/028; asks measurement vs summary-only per BLOCKING); both Claude review files now hold raw subagent output verbatim + separate Builder sections; times corrected (re-review ~19:45Z, not ~20:10Z) | ops/decisions/030-20261105T194942-13210-from-builder.md
 2026-11-05T19:54Z | Kernel v4 FAILED: 8/8 Harness task failure at pytest_timeout_source (no offline pytest-timeout 2.1.0 on Kaggle); vLLM 319 s; 0.25 quota-h | runs/e4b-v001-timing/timing.jsonl
-2026-11-05T20:00Z | Fix 9d386bc on fix5 branch: embed official pytest-timeout 2.1.0 wheel + pre-vLLM tool-source check; 107 tests; setup-nostub-check running | docs/ATTRIBUTION.md
+2026-11-05T19:59Z | Fix 9d386bc on fix5 branch: embed official pytest-timeout 2.1.0 wheel + pre-vLLM tool-source check; 107 tests; setup-nostub-check running | docs/ATTRIBUTION.md
+2026-11-05T19:59Z | No-stub local repro (plan003, no imgrt-stub) reproduces the v4 failure | results/plan003_kernel_setup_nostub_unvendored.json
+2026-11-05T20:03Z | 1c13123: vendor pathspec/shellingham/trove-classifiers (missing in the no-stub repro), closure preflight | eval/kaggle/vendor/SHA256SUMS
+2026-11-05T20:08Z | Claude review of 9ec991f..1c13123: BLOCKING (preflight would reject Kaggle's runtime pip) + annotated-doc unvendored | ops/reviews/claude-review-vendor-fix.md
+2026-11-05T20:11Z | 87001e4: preflight mirrors setup (runtime pip, exact closure), annotated-doc vendored; 111 tests; no-stub repro all deps from embedded wheels; re-review running | results/plan003_kernel_setup_nostub_vendored.json

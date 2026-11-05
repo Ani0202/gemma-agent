@@ -1,0 +1,1 @@
+bash -c cd\ /home/ubuntu/work/gemma-wt/codex-kernel-setup-fix5\ \&\&\ env\ -u\ PYTHONPATH\ /home/ubuntu/gemma-local/venv/bin/python\ eval/repro/plan003_kernel_setup.py\ --output\ /tmp/claude-1001/-home-ubuntu-work-gemma/0e683d5c-58e5-45c9-9cd7-61f212a9ec32/scratchpad/nostub3/plan003_nostub3.json 
