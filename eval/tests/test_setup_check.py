@@ -36,9 +36,11 @@ assert r.returncode == 7 and len(r.stdout) == 6001
     subprocess.run([sys.executable, str(wrapper), str(script), '--fast-path', 'example/repo'], check=True)
     call, = json.loads((tmp_path / 'setup_subprocesses.json').read_text())
     assert call['rc'] == 7 and call['retrying_lines'] == 1
-    assert len(call['stdout_full']) == 6001
+    full, = [json.loads(line) for line in (tmp_path / 'setup_subprocesses_full.jsonl').read_text().splitlines()]
+    assert len(full['stdout']) == 6001
+    assert 'stdout_full' not in call and 'stderr_full' not in call
     assert len(call['stdout'].encode()) == 2048
-    assert 'No module named pip' in call['stderr_full']
+    assert 'No module named pip' in full['stderr']
     assert call['duration_s'] >= 0 and call['start_offset_s'] >= 0
 
 
@@ -52,10 +54,13 @@ def test_original_injector_has_only_base_and_observed_setup(tmp_path, monkeypatc
     base.touch()
     cs._inspect_wheels_dir = lambda path: ([base], {}, {}, {})
     archive = tmp_path / 'base.tar'
-    with tarfile.open(archive, 'w'):
-        pass
+    with tarfile.open(archive, 'w') as tf:
+        import io
+        info = tarfile.TarInfo('package.py')
+        info.size = 1
+        tf.addfile(info, io.BytesIO(b'x'))
     def build(paths, key, marker):
-        assert paths == [base] and key == 'sp_base_local'
+        assert paths == [base] and key == timing.base_cache_key([base], '0.2.11')
         return archive
     cs._build_unpacked_wheels_tar = build
     for name in ('swegemma', 'swegemma.harness'):
@@ -72,16 +77,22 @@ def test_original_injector_has_only_base_and_observed_setup(tmp_path, monkeypatc
             pass
         def exec(self, sid, command, **kw):
             commands.append(command)
+            if 'PackageNotFoundError' in command:
+                return SimpleNamespace(exit_code=0, stdout='{}', stderr='')
             (scratch / 'setup_subprocesses.json').write_text(json.dumps([
                 dict(argv=['python3', '-m', 'pip', '-e', '/workspace'], rc=1,
-                     stderr_full='No module named pip', retrying_lines=0, interpreter_version='3.13')]))
+                     stderr='No module named pip', retrying_lines=0, interpreter_version='3.13')]))
             return SimpleNamespace(exit_code=0, stdout='', stderr='')
     state = contextvars.ContextVar('test')
     current = dict(started=timing.time.perf_counter(), setup_calls=[], setup_failed=False)
     state.set(current)
     timing.patch_subprocess_deps(tmp_path, state)(SubprocessManager(), 'sid', 'example/repo')
     assert [c['step'] for c in current['setup_calls']] == ['base_tar_extraction', 'setup.py']
-    assert commands == ['python3 /tmp/setup_observer.py /tmp/setup.py --fast-path example/repo']
+    assert len(commands) == 3
+    assert commands[1] == 'python3 /tmp/setup_observer.py /tmp/setup.py --fast-path example/repo'
+    assert current['setup_failed'] and current['editable_failed']
+    assert current['setup_calls'][0]['tar_member_count'] == 1
+    assert current['setup_calls'][0]['selected_wheels'] == [base.name]
     assert current['editable_rc'] == 1 and current['interpreter_version'] == '3.13'
     assert current['setup_calls'][-1]['subprocesses'] == current['setup_subprocesses']
 
@@ -204,9 +215,83 @@ def test_setup_task_uses_harness_creation_sequence_and_always_tears_down(tmp_pat
             raise RuntimeError('offline failure')
     monkeypatch.setattr(timing, 'patch_subprocess_deps', lambda *a: install)
     state = contextvars.ContextVar('sequence')
+    monkeypatch.setenv('SETUP_FIX', '0')
+    monkeypatch.setattr(timing, 'WORK', tmp_path)
     row = timing.setup_task(tmp_path, tmp_path / 'wheels', 'rich_3006', 'Textualize/rich', state)
     assert calls == ['start', 'setup_container_wheels', 'extract_snapshot', 'setup_git_exclude',
                      'install_editable_package', 'install', 'cleanup']
     assert row['setup_failed'] == fail_install
     assert 'started' not in row and row['setup_s_total'] >= 0
     assert row['setup_calls'][-1]['step'] == 'teardown'
+
+
+def test_cache_identity_and_stale_marker_tar_rejected(tmp_path):
+    a, b = tmp_path / 'a.whl', tmp_path / 'b.whl'
+    a.write_bytes(b'a')
+    b.write_bytes(b'b')
+    key = timing.base_cache_key([a], 'v1')
+    assert key != timing.base_cache_key([a, b], 'v1')
+    assert timing.base_cache_key([a, b], 'v1') == timing.base_cache_key([b, a], 'v1')
+    assert key != timing.base_cache_key([a], 'v2')
+    a.write_bytes(b'aa')
+    assert key != timing.base_cache_key([a], 'v1')
+    archive = tmp_path / 'stale.tar'
+    with tarfile.open(archive, 'w') as tf:
+        tf.addfile(tarfile.TarInfo('.'))
+        tf.addfile(tarfile.TarInfo('.swegemma_base_injected'))
+    cs = SimpleNamespace(_build_unpacked_wheels_tar=lambda *a: archive)
+    current = dict(started=timing.time.perf_counter(), setup_calls=[], setup_failed=False)
+    with pytest.raises(RuntimeError, match='only marker'):
+        timing.setup_step(current, 'base_tar_extraction',
+                          lambda: timing.inject_base(cs, [a], tmp_path / 'site', current))
+    assert current['setup_failed']
+    assert current['setup_calls'][0]['selected_wheels'] == ['a.whl']
+    assert current['setup_calls'][0]['tar_member_count'] == 2
+
+
+@pytest.mark.parametrize('field,value', [('missing_tool_deps', ['child']), ('editable_failed', True)])
+def test_summary_rejects_explicit_failure_flags(tmp_path, field, value):
+    path = tmp_path / 'journal'
+    row = dict(instance_id='a', setup_fix=1, setup_s_total=1, editable_rc=0,
+               setup_failed=False, retrying_lines=0)
+    header = dict(_schema='kaggle_setup_cpu_check_v1', task_ids=['a'])
+    records = [header, row, dict(_done=dict(n=1))]
+    path.write_text('\n'.join(map(json.dumps, records)))
+    assert summary.summarize(path)['decision'] == 'PASS'
+    row[field] = value
+    path.write_text('\n'.join(map(json.dumps, records)))
+    assert summary.summarize(path)['decision'] == 'FAIL'
+
+
+def test_acceptance_control_only_is_diagnostic(tmp_path, monkeypatch):
+    monkeypatch.setenv('SETUP_FIX', '0')
+    spec = importlib.util.spec_from_file_location('acceptance', ROOT / 'eval/repro/plan003_kernel_setup.py')
+    acceptance = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(acceptance)
+    # No sandbox bypass: stub only task execution for this CLI/status unit test.
+    fake_timing = SimpleNamespace(setup_task=lambda *a: dict(instance_id=a[2], setup_fix=0,
+        setup_calls=[], editable_rc=1, retrying_lines=5, setup_failed=True, setup_s_total=1))
+    monkeypatch.setattr(acceptance.importlib.util, 'module_from_spec', lambda spec: fake_timing)
+    monkeypatch.setattr(acceptance.importlib.util, 'spec_from_file_location',
+                        lambda *a: SimpleNamespace(loader=SimpleNamespace(exec_module=lambda m: None)))
+    output = tmp_path / 'result.json'
+    monkeypatch.setattr(sys, 'argv', ['acceptance', '--inside-bwrap', '--setup-fix', '0',
+                                     '--output', str(output), '--data-dir', str(tmp_path)])
+    assert acceptance.main() == 0
+    assert json.loads(output.read_text())['status'] == 'diagnostic'
+
+
+def test_full_artifact_has_only_task_id_filename_and_bounded_journal(tmp_path, monkeypatch):
+    monkeypatch.setattr(timing, 'WORK', tmp_path)
+    current = dict(instance_id='rich_3006', setup_fix=1, started=timing.time.perf_counter(),
+                   setup_calls=[], setup_failed=False)
+    timing.setup_step(current, 'command', lambda: SimpleNamespace(exit_code=1,
+        stdout='x' * 8000, stderr='Retrying\n' + 'é' * 8000))
+    path = Path(current['setup_output_artifact'])
+    assert path.name == 'rich_3006.jsonl'
+    full = json.loads(path.read_text())
+    assert len(full['stdout']) == 8000
+    assert len(full['stderr']) > 8000
+    call, = current['setup_calls']
+    assert all(len(call[k].encode()) <= 2048 for k in ('stdout', 'stderr'))
+    assert call['retrying_lines'] == 1

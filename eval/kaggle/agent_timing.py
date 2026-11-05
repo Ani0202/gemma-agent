@@ -110,6 +110,67 @@ def compatible_wheels(wheels, tags, requirement=None):
     return {name: item[1] for name, item in selected.items()}
 
 
+def setup_artifact(current, payload):
+    """Full diagnostics live outside the journal, with only a task ID in the filename."""
+    iid = current.get('instance_id')
+    if iid is None or not (payload.get('stdout') or payload.get('stderr')):
+        return
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+', iid):
+        raise ValueError('Unsafe task ID')
+    path = WORK / 'setup_artifacts' / str(current.get('setup_fix', SETUP_FIX)) / (iid + '.jsonl')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if 'setup_output_artifact' not in current:
+        path.write_text('')
+    with path.open('a') as stream:
+        stream.write(json.dumps(payload) + '\n')
+    current['setup_output_artifact'] = str(path)
+
+
+def base_cache_key(wheels, harness_version):
+    identity = (str(harness_version), sorted((p.name, p.stat().st_size) for p in wheels))
+    return 'timing_' + hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:24]
+
+
+def inject_base(cs, wheels, destination, current):
+    from importlib.metadata import version
+    harness_version = version('swegemma')
+    row = current['setup_calls'][-1]
+    row.update(selected_wheels=sorted(p.name for p in wheels), harness_version=harness_version,
+               cache_key=base_cache_key(wheels, harness_version))
+    archive = cs._build_unpacked_wheels_tar(wheels, row['cache_key'], '.swegemma_base_injected')
+    with tarfile.open(archive) as tf:
+        members = tf.getmembers()
+        row['tar_member_count'] = len(members)
+        payload = [m for m in members if m.isfile() and
+                   Path(m.name).name not in ('', '.swegemma_base_injected')]
+        if wheels and not payload:
+            raise RuntimeError('Selected wheels but base tar contains only marker/empty entries')
+        tf.extractall(destination, filter='data')
+
+
+def record_distributions(docker, container_id, repo, row):
+    # Query the same interpreter and metadata selection pip uses, never host metadata.
+    package = repo.rsplit('/', 1)[-1].lower()
+    probe = """import json
+from importlib.metadata import distribution, PackageNotFoundError
+names = NAMES
+result = {}
+for name in names:
+    try:
+        d = distribution(name)
+        result[name] = dict(location=str(d.locate_file('')), version=d.version,
+                            metadata_location=str(d._path), record_exists=d.read_text('RECORD') is not None)
+    except PackageNotFoundError:
+        result[name] = dict(location=None, version=None, metadata_location=None, record_exists=False)
+print(json.dumps(result))
+""".replace('NAMES', repr([package]))
+    result = docker.exec(container_id, 'python3 -c ' + shlex.quote(probe), timeout=30)
+    row['dist_probe_rc'] = result.exit_code
+    if result.exit_code != 0:
+        raise RuntimeError('Sandbox distribution probe failed')
+    row['distributions'] = json.loads(result.stdout)
+
+
 def setup_step(current, name, action, *, fatal=True):
     """Time setup steps and retain bounded output plus retry counts."""
     start = time.perf_counter()
@@ -119,6 +180,8 @@ def setup_step(current, name, action, *, fatal=True):
     try:
         result = action()
         row['rc'] = getattr(result, 'exit_code', getattr(result, 'returncode', 0))
+        setup_artifact(current, dict(step=name, stdout=getattr(result, 'stdout', '') or '',
+                                     stderr=getattr(result, 'stderr', '') or ''))
         for field in ('stdout', 'stderr'):
             value = getattr(result, field, '') or ''
             row['retrying_lines'] += sum('Retrying' in line for line in value.splitlines())
@@ -131,6 +194,7 @@ def setup_step(current, name, action, *, fatal=True):
             raise
     finally:
         row['duration_s'] = round(time.perf_counter()-start, 6)
+        current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
         if fatal and row['rc'] != 0:
             current['setup_failed'] = True
 
@@ -185,7 +249,7 @@ def close_tool_dependencies(roots, wheels, tags, environment, destination, insta
 
     Existing sandbox metadata describes base wheels and copied tools. Each requirement
     edge is checked, while each installed distribution/version is expanded only once.
-    Missing edges remain diagnostic and never prevent installing the tools themselves.
+    Missing edges are returned to the caller, which must fail setup.
     """
     from importlib.metadata import distributions, distribution, PackageNotFoundError
     from packaging.requirements import Requirement
@@ -258,6 +322,8 @@ original = subprocess.run
 calls = []
 log = Path(__file__).with_name('setup_subprocesses.json')
 log.write_text('[]')
+full_log = log.with_name('setup_subprocesses_full.jsonl')
+full_log.write_text('')
 def run(*args, **kwargs):
     start = time.perf_counter()
     argv = args[0] if args else kwargs.get('args')
@@ -272,10 +338,12 @@ def run(*args, **kwargs):
         def decode(value):
             return value.decode(errors='replace') if isinstance(value, bytes) else (value or '')
         out, err = decode(getattr(result, 'stdout', '')), decode(getattr(result, 'stderr', ''))
+        with full_log.open('a') as stream:
+            stream.write(json.dumps(dict(argv=argv, stdout=out, stderr=err)) + '\n')
         calls.append(dict(argv=argv, duration_s=time.perf_counter()-start,
             start_offset_s=start-origin, rc=getattr(result, 'returncode', None),
             stdout=out.encode()[-2048:].decode(errors='ignore'),
-            stderr=err.encode()[-2048:].decode(errors='ignore'), stdout_full=out, stderr_full=err,
+            stderr=err.encode()[-2048:].decode(errors='ignore'),
             retrying_lines=sum('Retrying' in line for line in (out+'\n'+err).splitlines()),
             interpreter_version=sys.version))
         log.write_text(json.dumps(calls))
@@ -314,10 +382,9 @@ def patch_subprocess_deps(data_dir, state=None):
                 if large:
                     raise RuntimeError('large wheels present; workspace-import scan not emulated')
                 current['wheel_tags_chosen'] = [p.name for p in base]
-                with tarfile.open(cs._build_unpacked_wheels_tar(
-                        base, 'sp_base_local', '.swegemma_base_injected')) as tf:
-                    tf.extractall(sp, filter='data')
+                inject_base(cs, base, sp, current)
             setup_step(current, 'base_tar_extraction', original_base)
+            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
         else:
             # A subprocess venv otherwise exposes every kernel package via _host_env.pth.
             # Only the scorer's image tools and public base wheels belong here.
@@ -361,19 +428,11 @@ def patch_subprocess_deps(data_dir, state=None):
                 if {str(t) for t in parse_wheel_filename(path.name)[3]} & set(identity['tags']):
                     selected['pytest-timeout'] = path
             current['wheel_tags_chosen'] = [p.name for p in selected.values()]
-            def extract_base():
+            def validate_tools():
                 missing = [n for n in SCORER_TOOLS if n not in selected and n not in ('pip', 'pytest-timeout')]
                 if missing:
                     raise RuntimeError('Required compatible tools missing: ' + ', '.join(missing))
-                base = [p for name, p in selected.items() if name not in BASE_SKIP]
-                if any(p.stat().st_size >= cs._LARGE_WHEEL_THRESHOLD_BYTES for p in base):
-                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
-                key = hashlib.sha256(json.dumps([(str(p.resolve()), p.stat().st_size,
-                        p.stat().st_mtime_ns) for p in base]).encode()).hexdigest()[:24]
-                with tarfile.open(cs._build_unpacked_wheels_tar(base, 'timing_' + key,
-                                                              '.swegemma_base_injected')) as tf:
-                    tf.extractall(sp, filter='data')
-            setup_step(current, 'base_tar_extraction', extract_base)
+            setup_step(current, 'tool_sources', validate_tools)
             def timeout_source():
                 source = selected.get('pytest-timeout')
                 current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
@@ -399,16 +458,39 @@ def patch_subprocess_deps(data_dir, state=None):
                              and d.metadata['Name'].lower() not in selected)
                 def install_dependency(path):
                     docker.copy_to(container_id, path, '/wheels/' + path.name)
-                    return docker.exec(container_id,
+                    result = docker.exec(container_id,
                         'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
                         shlex.quote('/wheels/' + path.name), timeout=60)
+                    setup_artifact(current, dict(step='tool_deps', wheel=path.name,
+                        stdout=result.stdout, stderr=result.stderr))
+                    current['setup_calls'][-1]['retrying_lines'] += sum(
+                        'Retrying' in line for line in (result.stdout + '\n' + result.stderr).splitlines())
+                    return result
                 entries, missing = close_tool_dependencies(
                     roots, wheels, identity['tags'], identity['environment'], sp, install_dependency)
                 current['setup_calls'][-1]['dependencies'] = entries
                 current['missing_tool_deps'] = missing
+                if missing:
+                    current.update(status='failed', reason='missing_tool_deps')
+                    raise RuntimeError('missing_tool_deps: ' + ', '.join(missing))
             setup_step(current, 'tool_deps', tool_deps)
             setup_step(current, 'pip_check', lambda: docker.exec(
                 container_id, 'python3 -m pip check', timeout=30), fatal=False)
+            # Docker's hook ignores failure, but observe the real pip rc and both streams.
+            setup_step(current, 'workspace_editable', lambda: docker.exec(container_id,
+                'python3 -m pip install --no-index --find-links=/wheels --no-build-isolation --no-deps -e /workspace',
+                timeout=280), fatal=False)
+            current['workspace_editable_rc'] = current['setup_calls'][-1]['rc']
+            current['editable_failed'] = current['workspace_editable_rc'] != 0
+            current['setup_failed'] |= current['editable_failed']
+            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+            def extract_base():
+                base = [p for name, p in selected.items() if name not in BASE_SKIP]
+                if any(p.stat().st_size >= cs._LARGE_WHEEL_THRESHOLD_BYTES for p in base):
+                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+                inject_base(cs, base, sp, current)
+            setup_step(current, 'base_tar_extraction', extract_base)
+            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
         def run_setup():
             docker.copy_to(container_id, setup, '/tmp/setup.py')
             # All observer files are scratch files, never workspace patch inputs.
@@ -420,6 +502,10 @@ def patch_subprocess_deps(data_dir, state=None):
         finally:
             log = docker.sandboxes[container_id]['tmp'] / 'setup_subprocesses.json'
             calls = json.loads(log.read_text()) if log.exists() else []
+            full_log = log.with_name('setup_subprocesses_full.jsonl')
+            if full_log.exists():
+                for line in full_log.read_text().splitlines():
+                    setup_artifact(current, dict(step='setup.py', **json.loads(line)))
             current['setup_subprocesses'] = calls
             setup_row = next(c for c in reversed(current['setup_calls']) if c['step'] == 'setup.py')
             setup_row['subprocesses'] = calls
@@ -428,10 +514,14 @@ def patch_subprocess_deps(data_dir, state=None):
             editable = [c for c in calls if isinstance(c['argv'], list) and '-e' in c['argv']]
             current['editable_rc'] = editable[0]['rc'] if editable else None
             current['editable_final_rc'] = editable[-1]['rc'] if editable else None
+            current['editable_failed'] = any(c['rc'] != 0 for c in editable) or current.get('workspace_editable_rc', 0) != 0
+            current['setup_failed'] |= current['editable_failed']
+            record_distributions(docker, container_id, repo, setup_row)
             if calls:
                 current['interpreter_version'] = calls[0]['interpreter_version']
             else:
                 current.setdefault('interpreter_version', None)
+        current['status'] = 'failed' if current['setup_failed'] else 'passed'
         return current
     install._timing_original = orig
     for name, module in list(sys.modules.items()):
@@ -595,7 +685,7 @@ async def evaluate(config, journal, started, caps, totals):
                 append(journal, {'_stopped': 'insufficient remaining budget for next task'})
                 break
             task = dataclasses.replace(inventory[iid], patch='')
-            times = dict(verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+            times = dict(instance_id=task.instance_id, verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
             state.set(times)
             evaluator, result, error = TimingEvaluator(config), None, None
             original_start = evaluator.docker.start
@@ -625,6 +715,8 @@ async def evaluate(config, journal, started, caps, totals):
               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
                 wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
                 setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                editable_failed=times.get('editable_failed', False),
+                setup_output_artifact=times.get('setup_output_artifact'),
                 missing_tool_deps=times.get('missing_tool_deps', []),
                 setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
                 editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
@@ -637,6 +729,8 @@ async def evaluate(config, journal, started, caps, totals):
                 append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
                                      wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
                                      setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                editable_failed=times.get('editable_failed', False),
+                setup_output_artifact=times.get('setup_output_artifact'),
                 missing_tool_deps=times.get('missing_tool_deps', []),
                 setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
                 editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
@@ -712,10 +806,11 @@ def setup_task(data_dir, wheels_dir, iid, repo, state):
         setup_step(current, 'extract_snapshot', lambda: cs.extract_snapshot(
             manager, sid, snapshot, base_snapshot_path=base, patch_path=patch))
         setup_step(current, 'setup_git_exclude', lambda: cs.setup_git_exclude(manager, sid))
-        setup_step(current, 'install_editable_package', lambda: cs.install_editable_package(manager, sid))
+        if current['setup_fix'] == 0:
+            setup_step(current, 'install_editable_package', lambda: cs.install_editable_package(manager, sid))
         install_deps(manager, sid, repo)
     except Exception as exc:
-        current.update(setup_failed=True, error=type(exc).__name__ + ': ' + str(exc)[:2048])
+        current.update(setup_failed=True, status='failed', error=type(exc).__name__ + ': ' + str(exc)[:2048])
     finally:
         current['setup_s_total'] = round(time.perf_counter()-current['started'], 6)
         try:

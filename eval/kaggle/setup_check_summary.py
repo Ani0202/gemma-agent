@@ -46,6 +46,8 @@ def summarize(path):
                                           0 <= r['setup_s_total'] <= 30 for r in rows),
                  editable_rc_zero=all(r.get('editable_rc') == 0 for r in rows),
                  zero_retrying_lines=all(r.get('retrying_lines') == 0 for r in rows),
+                 no_missing_tool_deps=all(not r.get('missing_tool_deps') for r in rows),
+                 no_editable_failures=all(not r.get('editable_failed', False) for r in rows),
                  no_setup_failures=all(not r.get('setup_failed', True) for r in rows))
     return dict(_schema='kaggle_setup_cpu_check_v1', task_ids=expected, n=len(rows),
                 rows=rows, gates=gates, decision='PASS' if all(gates.values()) else 'FAIL')

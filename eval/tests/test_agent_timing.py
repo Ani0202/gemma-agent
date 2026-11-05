@@ -167,7 +167,10 @@ def test_wheels_follow_sandbox_abi(tmp_path):
 
 
 @pytest.mark.parametrize('setup_rc', [0, 7])
-def test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch, setup_rc):
+@pytest.mark.parametrize('missing_dep', [False, True])
+@pytest.mark.parametrize('workspace_rc', [0, 9])
+def test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch, setup_rc, missing_dep, workspace_rc):
+    monkeypatch.setenv('SETUP_FIX', '1')
     import contextvars
     import sys
     import tarfile
@@ -177,8 +180,11 @@ def test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch, 
     cs.install_test_dependencies = lambda *a, **k: None
     cs._LARGE_WHEEL_THRESHOLD_BYTES = 20 * 1024 * 1024
     archive = tmp_path / 'base.tar'
-    with tarfile.open(archive, 'w'):
-        pass
+    with tarfile.open(archive, 'w') as tf:
+        import io
+        info = tarfile.TarInfo('package.py')
+        info.size = 1
+        tf.addfile(info, io.BytesIO(b'x'))
     selections = []
     def build(wheels, key, marker):
         selections.extend(wheels)
@@ -205,23 +211,41 @@ def test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch, 
             pass
         def exec(self, sid, command, **kw):
             commands.append(command)
+            if 'PackageNotFoundError' in command:
+                return SimpleNamespace(exit_code=0, stdout=json.dumps({'repo': dict(location='/sandbox/site', version='1', record_exists=True)}), stderr='')
             if 'sys_tags' in command:
                 return SimpleNamespace(exit_code=0, stdout=json.dumps(dict(version='3.12', tags=['py3-none-any'], environment=sandbox_markers())), stderr='')
-            return SimpleNamespace(exit_code=setup_rc if '/tmp/setup.py' in command else (1 if 'pip check' in command else 0),
+            return SimpleNamespace(exit_code=setup_rc if '/tmp/setup.py' in command else (workspace_rc if '-e /workspace' in command else (1 if 'pip check' in command else 0)),
                                    stdout='x' * 5000, stderr='é' * 5000)
     current = dict(started=timing.time.perf_counter(), setup_calls=[], setup_failed=False)
     state = contextvars.ContextVar('test_setup')
     state.set(current)
     install = timing.patch_subprocess_deps(tmp_path, state)
+    if missing_dep:
+        monkeypatch.setattr(timing, 'close_tool_dependencies', lambda *a: ([], ['required-child']))
+        with pytest.raises(RuntimeError, match='missing_tool_deps'):
+            install(SubprocessManager(), 'id', 'example/repo')
+        assert current['setup_failed'] and current['status'] == 'failed'
+        assert current['reason'] == 'missing_tool_deps'
+        assert current['missing_tool_deps'] == ['required-child']
+        assert not selections
+        assert current['setup_calls'][-1]['step'] == 'tool_deps'
+        return
     install(SubprocessManager(), 'id', 'example/repo')
-    assert current['setup_failed'] == bool(setup_rc)
+    assert current['setup_failed'] == bool(setup_rc or workspace_rc)
+    assert current['editable_failed'] == bool(workspace_rc)
     assert current['setup_calls'][-1]['rc'] == setup_rc
     assert [r['step'] for r in current['setup_calls']] == [
-        'venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'base_tar_extraction',
-        'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check', 'setup.py']
+        'venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'tool_sources',
+        'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check',
+        'workspace_editable', 'base_tar_extraction', 'setup.py']
     assert all(len(r['stdout'].encode()) <= 2048 and len(r['stderr'].encode()) <= 2048
                and r['duration_s'] >= 0 and r['start_offset_s'] >= 0 for r in current['setup_calls'])
-    assert commands[-1].startswith('python3 /tmp/setup_observer.py /tmp/setup.py')
+    assert commands[-2].startswith('python3 /tmp/setup_observer.py /tmp/setup.py')
+    for step in ('workspace_editable', 'base_tar_extraction', 'setup.py'):
+        row = next(c for c in current['setup_calls'] if c['step'] == step)
+        assert row['distributions']['repo']['record_exists'] is True
+    assert next(i for i,c in enumerate(commands) if 'install --ignore-installed' in c) < next(i for i,c in enumerate(commands) if '-e /workspace' in c)
     assert any('--no-index --find-links=/wheels --no-deps' in c for c in commands)
     assert current['missing_tool_deps'] == []
     assert next(r for r in current['setup_calls'] if r['step'] == 'pip_check')['rc'] == 1

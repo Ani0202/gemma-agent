@@ -6,7 +6,7 @@ Builder command OUTSIDE the Codex sandbox (runs BOTH SETUP_FIX=0 and =1):
 Optional --setup-fix 0|1 selects a single mode. Defaults use the main checkout's
 public data/wheelhouse; override with --data-dir and --wheels-dir. Output defaults
 to results/plan003_kernel_setup_acceptance.json, including per-step durations and
-full observed pip errors. bwrap --unshare-net is mandatory; no PIP_* overrides,
+bounded pip errors; full output is stored in per-task artifacts. bwrap --unshare-net is mandatory; no PIP_* overrides,
 venv monkeypatching, model, agent, verification, downloads, or holdout access.
 """
 import argparse
@@ -48,6 +48,7 @@ def main():
     spec = importlib.util.spec_from_file_location('timing', Path(__file__).parents[1] / 'kaggle/agent_timing.py')
     timing = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(timing)
+    timing.WORK = args.output.parent / (args.output.stem + '_artifacts')
     state = ContextVar('acceptance')
     rows = []
     with tempfile.TemporaryDirectory(prefix='kernel-setup-') as temp:
@@ -63,13 +64,17 @@ def main():
                 rows.append(row)
                 print(json.dumps(dict(instance_id=iid, setup_fix=int(mode),
                     steps={c['step']: c['duration_s'] for c in row['setup_calls']},
-                    editable_rc=row['editable_rc'], retrying_lines=row['retrying_lines'])), flush=True)
+                    editable_rc=row['editable_rc'], workspace_editable_rc=row.get('workspace_editable_rc'),
+                    retrying_lines=row['retrying_lines'], setup_s_total=row['setup_s_total'],
+                    distributions={c['step']: c['distributions'] for c in row['setup_calls']
+                                   if 'distributions' in c})), flush=True)
     # The unfixed mode is diagnostic; only fixed rows must pass the setup gate.
     fixed = [r for r in rows if r['setup_fix'] == 1]
-    passed = all(not r['setup_failed'] and r['editable_rc'] == 0 and
+    passed = bool(fixed) and all(not r['setup_failed'] and not r.get('editable_failed') and
+                 not r.get('missing_tool_deps') and r['editable_rc'] == 0 and
                  r['retrying_lines'] == 0 and r['setup_s_total'] <= 30 for r in fixed)
-    args.output.write_text(json.dumps(dict(**identity, status='passed' if passed else 'failed', rows=rows), indent=2) + '\n')
-    return int(not passed)
+    args.output.write_text(json.dumps(dict(**identity, status=('passed' if passed else 'failed') if fixed else 'diagnostic', rows=rows), indent=2) + '\n')
+    return int(bool(fixed) and not passed)
 
 
 if __name__ == '__main__':
