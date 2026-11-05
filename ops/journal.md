@@ -10,12 +10,9 @@
 2026-11-04T23:05Z | scout done: RULES_FINDINGS.md, PRIOR_ART.md written (secondary sources only) | docs/RULES_FINDINGS.md
 2026-11-04T23:15Z | report 001 written; COMPLIANCE/COMPETITION updated | ops/reports/001-v000-baseline-runtime-gate.md
 2026-11-04T23:30Z | decision 002 read; Kaggle CLI access OK; plan 001 written; dl-data job (snapshots 21.5GB + wheels) started | eval/plans/001.md
-<<<<<<< HEAD
 2026-11-04T23:05Z | data downloaded; no docker/swegemma locally -> gold calibration via Kaggle CPU kernel; codex-build gold-kernel launched | ops/codex/build-gold-kernel.spec
 2026-11-04T23:15Z | decision 003: GCP quota 1 GPU; l4x2\/l4x4\/a100 marked unavailable in config; bin\/gpu edit blocked by classifier (rates null already refuse); PLAN.md LoRA lines updated | config/gpu_profiles.json
-=======
 2026-11-04 23:07 UTC | Codex implemented CPU Kaggle gold calibration kernel; 13 offline tests, compile, shell syntax, fake-CLI staging PASS; remote API assumptions unverified; no push/run | docs/GOLD_CALIBRATION.md
->>>>>>> codex/gold-kernel
 2026-11-04T23:25Z | merged codex gold-kernel; pushed Kaggle CPU kernel aniket0202/gemma-gold-patch-calibration (running) | eval/kaggle/
 2026-11-04T23:30Z | gold kernel v1 failed (wheel install, filename +cu128 fix missing); fixed per starter, pushed v2 | eval/kaggle/gold_calibration.py
 2026-11-04T23:35Z | gold kernel v2 failed (cp312 wheels on py3.13 CPU image); v3 installs pure wheels only | eval/kaggle/gold_calibration.py
@@ -40,3 +37,4 @@
 2026-11-05T07:33Z | diag2: 3/77 recovered; fastapi blocked by langsmith pytest plugin; PYTEST_ADDOPTS fix, kernel v7, job gold-diag3-wait | runs/gold-diag2, eval/kaggle/gold_calibration.py
 2026-11-05T10:35Z | router nudge; gold-diag3-wait still running, no action | ops/jobs
 2026-11-05T12:04Z | diag3 no fastapi recovery (plugin env not propagated); uninstall langsmith, kernel v8, job gold-diag4-wait | eval/kaggle/gold_calibration.py
+2026-11-05T14:06Z | owner: BUILDER_MODEL sonnet->opus, config.env conflict resolved, builder restarted | config.env
