@@ -17,6 +17,9 @@ import time
 
 # Kaggle's system python autoloads a langsmith pytest plugin that the scorer docker image lacks; it breaks on repo-local requests.py shadowing.
 os.environ['PYTEST_ADDOPTS'] = (os.environ.get('PYTEST_ADDOPTS', '') + ' -p no:langsmith_plugin').strip()
+# PYTEST_ADDOPTS did not reach the sandbox pytest (diag3: still crashed); remove the package that provides the plugin.
+_r = subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 'langsmith'], capture_output=True, text=True)
+print('langsmith uninstall rc=%s %s' % (_r.returncode, (_r.stdout + _r.stderr)[-200:]), flush=True)
 DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
 WORKING_DIR = Path('/kaggle/working')
 WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')

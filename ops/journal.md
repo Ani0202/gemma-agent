@@ -39,3 +39,4 @@
 2026-11-05T02:57Z | gold-diag causes bucketed (all env; inline_snapshot/dirty_equals absent from wheelhouse); subprocess dep-setup patch, kernel v6, job gold-diag2-wait | results/gold_failure_causes.jsonl, eval/kaggle/gold_calibration.py
 2026-11-05T07:33Z | diag2: 3/77 recovered; fastapi blocked by langsmith pytest plugin; PYTEST_ADDOPTS fix, kernel v7, job gold-diag3-wait | runs/gold-diag2, eval/kaggle/gold_calibration.py
 2026-11-05T10:35Z | router nudge; gold-diag3-wait still running, no action | ops/jobs
+2026-11-05T12:04Z | diag3 no fastapi recovery (plugin env not propagated); uninstall langsmith, kernel v8, job gold-diag4-wait | eval/kaggle/gold_calibration.py
