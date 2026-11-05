@@ -83,3 +83,5 @@
 2026-11-05T15:58Z | codex re-review of ac94b91 clean (1 non-blocking: count caps unvalidated); fixed d13ceac (budget.tool_calls/turns/total_tokens, max_llm_calls int-only) 421 pass; merged codex/eval-runner-fix to main | ops/codex/review-20261105T155357.md, 70c0d9f
 2026-11-05T15:59Z | launched gold-rerun-b5 (pre-reg B5: gold-local2 + gold-null2 in shared env) | ops/jobs/gold-rerun-b5.cmd
 2026-11-05T16:01Z | router swap verified (dec 018 item 1): router.log 'router started (pid 2601754)' 15:57:54Z, 'clear builder' logged 16:00:15Z before delivery; bin/.router.new gone | ops/logs/router.log
+2026-11-05T16:40Z | gold-diag4 done: 3/77 on Kaggle (inline_snapshot; env not scorer-faithful); Kaggle gold-diag line closed | runs/gold-diag4
+2026-11-05T16:55Z | gold-rerun-b5 gold phase: 43 vs 52 pass; 9 fastapi lost (typing_inspection missing once _host_env leak removed); report 002 | results/gold_rerun_b5_compare.json, ops/reports/002-gold-rerun-b5-fastapi-env.md

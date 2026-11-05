@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 ~16:01Z (cycle 58, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 ~16:55Z (cycle 59, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -17,7 +17,8 @@ Builder on Opus (dec 010: local-first, two-strike).
   (v2 failed: got T4 x2 because 'NvidiaL4X4' isn't a valid shape. If v3 aborts with WrongAccelerator, NvidiaL4 = L4 x1: find the right shape name and ask the Director.)
 - gold-rerun-b5 (started 15:59Z): pre-registered B5 rerun in shared env -> runs/gold-local2 (all 77) then runs/gold-null2 (null patch, 52 ids).
   e4b-timing-wait3 was still RUNNING at 15:59Z (~40 min in, so no fast WrongAccelerator abort).
-- gold-diag4-wait: Kaggle cross-check only, redundant
+- gold-rerun-b5: gold phase DONE (43/129 vs 52; 9 fastapi lost, typing_inspection missing; report 002). Null phase -> runs/gold-null2 still running.
+- gold-diag4-wait DONE: 3/77 on Kaggle (not scorer-faithful); line closed.
 
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
@@ -43,7 +44,12 @@ Builder on Opus (dec 010: local-first, two-strike).
 - gold-rerun-b5: compare pass set of runs/gold-local2 vs gold-local (52/77, results/gold_calibration_*) and null control vs results/gold_null_control.jsonl.
   Identical pass set + null control => splits v2 stand (journal it, write results file); any change => short report to Director.
 
+## Open decision
+- Report 002 (ops/reports/002-gold-rerun-b5-fastapi-env.md): splits v2 vs v3 after B5 showed that fastapi gold fails without
+  typing_inspection (wheelhouse and Dockerfile.public both lack it). Recommended C: keep v2, add an eval-only typing_inspection,
+  report a scorer-faithful sub-score, and do a scout check. No protocol change until decided.
+
 ## Next 3
-1. Wait for jobs (gold-rerun-b5, e4b-timing-wait3); router swap done.
-2. e4b-timing results -> results/ + plan-001 p90 rule (parallel with 3).
-3. gold-rerun-b5 verdict -> report 002 (first-submission candidate + LORO caveat).
+1. When gold-null2 finishes: compare with results/gold_null_control.jsonl and send the Director an FYI addendum for report 002.
+2. e4b-timing results -> results/ + plan-001 p90 rule.
+3. After the dec on 002: first-submission candidate report (003) + LORO caveat.
