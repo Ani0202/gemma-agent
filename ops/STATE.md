@@ -21,7 +21,7 @@ Builder on Opus (dec 010: local-first, two-strike).
   pass; Claude re-review NO BLOCKING ops/reviews/claude-rereview-fix5.md. e4b-v001 re-time PUSHED 19:46Z = kernel v4 (budget 3900 s,
   -t 5700). Waiter e4b-v001-timing-wait-light -> output in runs/e4b-v001-timing. Then: timing_summary.py runs/e4b-v001-timing/timing.jsonl
   --output results/kaggle_timing_e4b_v001.json; check provenance agent_yaml_sha256 == zip's agent.yaml, n_expected 8, verification_skipped.
-  Codex (limit resets ~23:04Z): review-kernel-setup-fix5c-light 23:08Z medium, alone (cmd updated: HEAD 9ec991f, run already pushed);
+  Codex (limit resets ~23:04Z): review-kernel-setup-fix5c-light 23:08Z medium, alone (cmd: diff main...9ec991f + dec 027/028 only, NO Claude findings, dec 030);
   review-memguard-fix6c-light waits for it. Nothing from v4 goes into report 005/SUBMIT until the Codex fix5 review is clean + merged +
   gate (a)-(e) passes. If Codex BLOCKING affects the measurement -> discard + redo; summary-only -> re-summarize.
   Report 005 must note: subprocess sandbox has no 2vCPU/4GiB cap (underestimate risk); image_emulation diag excludes probes.
