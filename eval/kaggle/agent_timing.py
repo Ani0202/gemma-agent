@@ -92,13 +92,15 @@ def setup_command(repo, fast_path=True):
             ('--fast-path ' if fast_path else '') + shlex.quote(repo))
 
 
-def compatible_wheels(wheels, tags):
+def compatible_wheels(wheels, tags, requirement=None):
     """Highest version per distribution, with sandbox PEP 425 tags (never host tags)."""
-    from packaging.utils import parse_wheel_filename
+    from packaging.utils import canonicalize_name, parse_wheel_filename
     rank = {tag: i for i, tag in enumerate(tags)}
     selected = {}
     for path in sorted(Path(wheels).glob('*.whl')):
         name, version, build, wheel_tags = parse_wheel_filename(path.name)
+        if requirement is not None and (name != canonicalize_name(requirement.name) or version not in requirement.specifier):
+            continue
         matches = [rank[str(tag)] for tag in wheel_tags if str(tag) in rank]
         if not matches:
             continue
@@ -108,7 +110,7 @@ def compatible_wheels(wheels, tags):
     return {name: item[1] for name, item in selected.items()}
 
 
-def setup_step(current, name, action):
+def setup_step(current, name, action, *, fatal=True):
     """Time setup steps and retain bounded output plus retry counts."""
     start = time.perf_counter()
     row = dict(step=name, start_offset_s=round(start-current['started'], 6),
@@ -124,11 +126,12 @@ def setup_step(current, name, action):
         return result
     except Exception as exc:
         row.update(rc=-1, stderr=type(exc).__name__)
-        current['setup_failed'] = True
-        raise
+        if fatal:
+            current['setup_failed'] = True
+            raise
     finally:
         row['duration_s'] = round(time.perf_counter()-start, 6)
-        if row['rc'] != 0:
+        if fatal and row['rc'] != 0:
             current['setup_failed'] = True
 
 
@@ -154,16 +157,97 @@ def copy_runtime_package(name, destination):
         return 'missing'
     if name == 'pytest-timeout' and dist.version != '2.1.0':
         return 'missing'
-    module = 'pytest_timeout' if name == 'pytest-timeout' else name
-    files = [p for p in dist.files or [] if p.parts[0] in (module, module + '.py')
-             or p.parts[0].endswith('.dist-info')]
-    if not files or any(str(p).endswith(('.so', '.pyd')) for p in files):
+    # Distribution names need not match import names (trove-classifiers, PyYAML).
+    files = list(dist.files or [])
+    if not files or any(str(p).endswith(('.so', '.pyd', '.dll', '.dylib')) for p in files):
+        return 'missing'
+    files = [p for p in files if '..' not in p.parts and not p.is_absolute()
+             and not p.parts[0].endswith('.data')]
+    if not any(str(p).endswith('.py') and not p.parts[0].endswith('.dist-info') for p in files):
         return 'missing'
     for entry in files:
         target = destination / entry
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(dist.locate_file(entry), target)
     return 'runtime-site-packages:' + str(dist.locate_file(''))
+
+
+def wheel_metadata(path):
+    from email.parser import BytesParser
+    import zipfile
+    with zipfile.ZipFile(path) as archive:
+        name = next(n for n in archive.namelist() if n.endswith('.dist-info/METADATA'))
+        return BytesParser().parsebytes(archive.read(name))
+
+
+def close_tool_dependencies(roots, wheels, tags, environment, destination, install_wheel):
+    """Walk runtime requirements only, using sandbox markers and no pip resolver.
+
+    Existing sandbox metadata describes base wheels and copied tools. Each requirement
+    edge is checked, while each installed distribution/version is expanded only once.
+    Missing edges remain diagnostic and never prevent installing the tools themselves.
+    """
+    from importlib.metadata import distributions, distribution, PackageNotFoundError
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name, parse_wheel_filename
+    installed = {canonicalize_name(d.metadata['Name']): d.metadata
+                 for d in distributions(path=[str(destination)])}
+    queue = list(roots)
+    installed.update({canonicalize_name(m['Name']): m for m in queue})
+    sources = {name: 'runtime-site-packages:' + str(destination) for name in installed}
+    for path in compatible_wheels(wheels, tags).values():
+        name, version, _, _ = parse_wheel_filename(path.name)
+        if name in installed and installed[name]['Version'] == str(version):
+            sources[name] = str(path)
+    visited, entries, missing = set(), [], []
+    while queue:
+        metadata = queue.pop(0)
+        key = (canonicalize_name(metadata['Name']), metadata['Version'])
+        if key in visited:
+            continue
+        visited.add(key)
+        for raw in metadata.get_all('Requires-Dist', []):
+            req = Requirement(raw)
+            if req.marker and not req.marker.evaluate(dict(environment, extra='')):
+                continue
+            name = canonicalize_name(req.name)
+            current = installed.get(name)
+            row = dict(name=name, required_spec=str(req.specifier), requirement=raw,
+                       source='missing', version_installed=None)
+            if current is not None and current['Version'] in req.specifier:
+                row.update(source=sources.get(name, 'sandbox metadata'),
+                           version_installed=current['Version'])
+            else:
+                candidate = compatible_wheels(wheels, tags, req).get(name)
+                current = None
+                if candidate:
+                    result = install_wheel(candidate)
+                    row['rc'] = result.exit_code
+                    for field in ('stdout', 'stderr'):
+                        row[field] = (getattr(result, field, '') or '').encode()[-2048:].decode(errors='ignore')
+                    if result.exit_code == 0:
+                        current = wheel_metadata(candidate)
+                        row['source'] = str(candidate)
+                else:
+                    try:
+                        runtime = distribution(name)
+                    except PackageNotFoundError:
+                        runtime = None
+                    if runtime is not None and runtime.version in req.specifier:
+                        source = copy_runtime_package(name, destination)
+                        if source != 'missing':
+                            current = runtime.metadata
+                            row['source'] = source
+                if current is not None:
+                    installed[name] = current
+                    sources[name] = row['source']
+                    row['version_installed'] = current['Version']
+            entries.append(row)
+            if current is not None:
+                queue.append(current)
+            elif name not in missing:
+                missing.append(name)
+    return entries, missing
 
 
 # Capture setup.py's otherwise discarded subprocess output without changing setup.py.
@@ -261,7 +345,9 @@ def patch_subprocess_deps(data_dir, state=None):
             if result.exit_code != 0:
                 raise RuntimeError('Sandbox pip bootstrap failed')
             probe = ("import sys,json;from pip._vendor.packaging.tags import sys_tags;"
-                     "print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()]}))")
+                     "from pip._vendor.packaging.markers import default_environment;"
+                     "print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()],"
+                     "'environment':default_environment()}))")
             result = setup_step(current, 'interpreter_probe', lambda: docker.exec(
                 container_id, 'python3 -c ' + shlex.quote(probe), timeout=30))
             if result.exit_code != 0:
@@ -291,6 +377,8 @@ def patch_subprocess_deps(data_dir, state=None):
             def timeout_source():
                 source = selected.get('pytest-timeout')
                 current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
+                if current['setup_calls'][-1]['source'] == 'missing':
+                    raise RuntimeError('No offline pytest-timeout 2.1.0 source available')
             setup_step(current, 'pytest_timeout_source', timeout_source)
             def install_tools():
                 for path in selected.values():
@@ -298,11 +386,29 @@ def patch_subprocess_deps(data_dir, state=None):
                 tools = ['/wheels/' + selected[n].name for n in SCORER_TOOLS
                          if n in selected and n != 'pip']
                 return docker.exec(container_id,
-                    'python3 -m pip install --ignore-installed --no-index --find-links=/wheels ' +
+                    'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
                     ' '.join(shlex.quote(n) for n in tools), timeout=60)
             result = setup_step(current, 'tool_install', install_tools)
             if result.exit_code != 0:
                 raise RuntimeError('Offline scorer tool installation failed')
+            def tool_deps():
+                from importlib.metadata import distributions
+                roots = [wheel_metadata(selected[n]) for n in SCORER_TOOLS if n in selected]
+                roots.extend(d.metadata for d in distributions(path=[str(sp)])
+                             if d.metadata['Name'].lower() in ('pip', 'pytest-timeout')
+                             and d.metadata['Name'].lower() not in selected)
+                def install_dependency(path):
+                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+                    return docker.exec(container_id,
+                        'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
+                        shlex.quote('/wheels/' + path.name), timeout=60)
+                entries, missing = close_tool_dependencies(
+                    roots, wheels, identity['tags'], identity['environment'], sp, install_dependency)
+                current['setup_calls'][-1]['dependencies'] = entries
+                current['missing_tool_deps'] = missing
+            setup_step(current, 'tool_deps', tool_deps)
+            setup_step(current, 'pip_check', lambda: docker.exec(
+                container_id, 'python3 -m pip check', timeout=30), fatal=False)
         def run_setup():
             docker.copy_to(container_id, setup, '/tmp/setup.py')
             # All observer files are scratch files, never workspace patch inputs.
@@ -519,6 +625,7 @@ async def evaluate(config, journal, started, caps, totals):
               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
                 wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
                 setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                missing_tool_deps=times.get('missing_tool_deps', []),
                 setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
                 editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
                 llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
@@ -530,6 +637,7 @@ async def evaluate(config, journal, started, caps, totals):
                 append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
                                      wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
                                      setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                missing_tool_deps=times.get('missing_tool_deps', []),
                 setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
                 editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
             raw = WORK / 'runs' / iid

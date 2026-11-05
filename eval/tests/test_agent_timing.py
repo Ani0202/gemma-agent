@@ -192,8 +192,7 @@ def test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch, 
     wheels.mkdir()
     for tool in timing.SCORER_TOOLS:
         version = '2.1.0' if tool == 'pytest-timeout' else '1.0'
-        with zipfile.ZipFile(wheels / f'{tool.replace("-", "_")}-{version}-py3-none-any.whl', 'w'):
-            pass
+        make_wheel(wheels, tool, version)
     (tmp_path / 'sandbox').mkdir()
     (tmp_path / 'sandbox/setup.py').touch()
     sp = tmp_path / 'venv/lib/python3.12/site-packages'
@@ -207,8 +206,8 @@ def test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch, 
         def exec(self, sid, command, **kw):
             commands.append(command)
             if 'sys_tags' in command:
-                return SimpleNamespace(exit_code=0, stdout=json.dumps(dict(version='3.12', tags=['py3-none-any'])), stderr='')
-            return SimpleNamespace(exit_code=setup_rc if '/tmp/setup.py' in command else 0,
+                return SimpleNamespace(exit_code=0, stdout=json.dumps(dict(version='3.12', tags=['py3-none-any'], environment=sandbox_markers())), stderr='')
+            return SimpleNamespace(exit_code=setup_rc if '/tmp/setup.py' in command else (1 if 'pip check' in command else 0),
                                    stdout='x' * 5000, stderr='é' * 5000)
     current = dict(started=timing.time.perf_counter(), setup_calls=[], setup_failed=False)
     state = contextvars.ContextVar('test_setup')
@@ -219,11 +218,13 @@ def test_injected_install_bootstraps_and_retains_failure(tmp_path, monkeypatch, 
     assert current['setup_calls'][-1]['rc'] == setup_rc
     assert [r['step'] for r in current['setup_calls']] == [
         'venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'base_tar_extraction',
-        'pytest_timeout_source', 'tool_install', 'setup.py']
+        'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check', 'setup.py']
     assert all(len(r['stdout'].encode()) <= 2048 and len(r['stderr'].encode()) <= 2048
                and r['duration_s'] >= 0 and r['start_offset_s'] >= 0 for r in current['setup_calls'])
     assert commands[-1].startswith('python3 /tmp/setup_observer.py /tmp/setup.py')
-    assert any('--no-index --find-links=/wheels' in c for c in commands)
+    assert any('--no-index --find-links=/wheels --no-deps' in c for c in commands)
+    assert current['missing_tool_deps'] == []
+    assert next(r for r in current['setup_calls'] if r['step'] == 'pip_check')['rc'] == 1
     assert 'pip' not in [p.name.split('-')[0] for p in selections]
     (wheels / 'hatchling-1.0-py3-none-any.whl').unlink()
     with pytest.raises(RuntimeError, match='hatchling'):
@@ -237,3 +238,129 @@ def test_gold_single_file_staging_still_compiles(tmp_path):
     compile(generated.read_text(), str(generated), 'exec')
     assert '_shared_env = types.ModuleType' in generated.read_text()
     assert '# BEGIN SHARED ENV IMPORT' not in generated.read_text()
+
+
+def sandbox_markers():
+    from packaging.markers import default_environment
+    return dict(default_environment(), python_version='3.12', python_full_version='3.12.0')
+
+
+def make_wheel(directory, name, version='1.0', requires=()):
+    import zipfile
+    normalized = name.replace('-', '_')
+    path = directory / f'{normalized}-{version}-py3-none-any.whl'
+    with zipfile.ZipFile(path, 'w') as archive:
+        archive.writestr(f'{normalized}-{version}.dist-info/METADATA',
+                         f'Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n' +
+                         ''.join(f'Requires-Dist: {req}\n' for req in requires))
+    return path
+
+
+def test_dependency_closure_markers_extras_and_cycles(tmp_path, monkeypatch):
+    root = make_wheel(tmp_path, 'root', requires=[
+        'dep>=1; python_version < "3.13"', 'wrong; python_version >= "3.13"',
+        'optional; extra == "test"'])
+    dep = make_wheel(tmp_path, 'dep', requires=['root', 'leaf[optional]'])
+    make_wheel(tmp_path, 'leaf', requires=['excluded; extra == "optional"'])
+    calls = []
+    def install(path):
+        calls.append(path.name)
+        return Entry(exit_code=0, stdout='', stderr='')
+    def no_runtime(*args):
+        pytest.fail('wheelhouse must be preferred')
+    monkeypatch.setattr(timing, 'copy_runtime_package', no_runtime)
+    entries, missing = timing.close_tool_dependencies(
+        [timing.wheel_metadata(root)], tmp_path, ['py3-none-any'], sandbox_markers(),
+        tmp_path / 'site', install)
+    assert not missing
+    assert [e['name'] for e in entries] == ['dep', 'root', 'leaf']
+    assert entries[0]['source'] == str(dep)
+    assert entries[0]['version_installed'] == '1.0'
+    assert len(calls) == 2
+
+
+def test_dependency_closure_runtime_and_missing(tmp_path, monkeypatch):
+    import importlib.metadata
+    root = make_wheel(tmp_path, 'root', requires=['runtime-package>=2', 'absent', 'old>=2'])
+    runtime = timing.wheel_metadata(make_wheel(tmp_path, 'metadata', requires=['transitive']))
+    runtime.replace_header('Name', 'runtime-package')
+    runtime.replace_header('Version', '2.0')
+    from importlib.metadata import PackageNotFoundError
+    def distribution(name):
+        if name == 'runtime-package':
+            return Entry(version='2.0', metadata=runtime)
+        if name == 'old':
+            return Entry(version='1.0', metadata=runtime)
+        raise PackageNotFoundError(name)
+    monkeypatch.setattr(importlib.metadata, 'distribution', distribution)
+    copies = []
+    def copy(name, destination):
+        copies.append(name)
+        return 'runtime-site-packages:/image'
+    monkeypatch.setattr(timing, 'copy_runtime_package', copy)
+    entries, missing = timing.close_tool_dependencies(
+        [timing.wheel_metadata(root)], tmp_path, ['py3-none-any'], sandbox_markers(),
+        tmp_path / 'site', lambda path: pytest.fail('no matching wheel'))
+    assert copies == ['runtime-package']
+    assert missing == ['absent', 'old', 'transitive']
+    assert entries[0]['source'] == 'runtime-site-packages:/image'
+    assert entries[0]['version_installed'] == '2.0'
+    assert entries[1]['source'] == 'missing' and entries[1]['version_installed'] is None
+
+
+def test_dependency_closure_selects_satisfying_wheel(tmp_path):
+    root = make_wheel(tmp_path, 'root', requires=['dep<2'])
+    expected = make_wheel(tmp_path, 'dep')
+    make_wheel(tmp_path, 'dep', '2.0')
+    calls = []
+    def install(path):
+        calls.append(path)
+        return Entry(exit_code=0, stdout='', stderr='')
+    entries, missing = timing.close_tool_dependencies(
+        [timing.wheel_metadata(root)], tmp_path, ['py3-none-any'], sandbox_markers(),
+        tmp_path / 'site', install)
+    assert calls == [expected] and not missing
+    assert entries[0]['required_spec'] == '<2'
+
+
+def test_copy_runtime_package_handles_distribution_import_names(tmp_path, monkeypatch):
+    import importlib.metadata
+    source = tmp_path / 'image'
+    (source / 'trove_classifiers').mkdir(parents=True)
+    (source / 'trove_classifiers/__init__.py').write_text('')
+    (source / 'trove_classifiers-1.dist-info').mkdir()
+    (source / 'trove_classifiers-1.dist-info/METADATA').write_text('Name: trove-classifiers')
+    files = [importlib.metadata.PackagePath(str(p.relative_to(source)))
+             for p in source.rglob('*') if p.is_file()]
+    monkeypatch.setattr(importlib.metadata, 'distribution', lambda name: Entry(
+        version='1', files=files, locate_file=lambda path: source / path))
+    dest = tmp_path / 'site'
+    assert timing.copy_runtime_package('trove-classifiers', dest).startswith('runtime-site-packages:')
+    assert (dest / 'trove_classifiers/__init__.py').exists()
+    files.append(importlib.metadata.PackagePath('native.so'))
+    assert timing.copy_runtime_package('trove-classifiers', dest) == 'missing'
+
+
+def test_diagnostic_step_exception_is_nonfatal():
+    current = dict(started=timing.time.perf_counter(), setup_calls=[], setup_failed=False)
+    def fail():
+        raise TimeoutError('private output')
+    timing.setup_step(current, 'pip_check', fail, fatal=False)
+    assert not current['setup_failed']
+    assert current['setup_calls'][0]['rc'] == -1
+    assert current['setup_calls'][0]['stderr'] == 'TimeoutError'
+
+
+def test_dependency_closure_expands_already_installed_base_wheel(tmp_path):
+    import zipfile
+    root = make_wheel(tmp_path, 'root', requires=['base-package>=1'])
+    base = make_wheel(tmp_path, 'base-package', requires=['missing-child'])
+    site = tmp_path / 'site'
+    with zipfile.ZipFile(base) as archive:
+        archive.extractall(site)
+    entries, missing = timing.close_tool_dependencies(
+        [timing.wheel_metadata(root)], tmp_path, ['py3-none-any'], sandbox_markers(), site,
+        lambda path: pytest.fail('satisfied base wheel should not be installed again'))
+    assert entries[0]['source'] == str(base)
+    assert entries[0]['version_installed'] == '1.0'
+    assert missing == ['missing-child']
