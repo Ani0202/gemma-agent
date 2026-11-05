@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 ~15:50Z (cycle 55, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 ~15:55Z (cycle 56, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -14,8 +14,9 @@ Builder on Opus (dec 010: local-first, two-strike).
 ## Running jobs
 - e4b-timing-wait3: Kaggle aniket0202/gemma-e4b-timing v3 (E4B v000, 8 dev ids eval/plans/001-timing-ids.txt, py3.12 image, machine_shape NvidiaL4, repo 178e273) -> runs/e4b-timing
   (v2 failed: got T4 x2 because 'NvidiaL4X4' isn't a valid shape. If v3 aborts with WrongAccelerator, NvidiaL4 = L4 x1: find the right shape name and ask the Director.)
-- review-eval-runner-fix2: codex re-review of worktree commit f3e63ca (fixes review-20261105T153456 B4 resume identity ->
-  runner_source_sha256 content hash, git sha/dirty -> header.provenance; N2 nested caps no longer overridden). 404 pass + 2 E2E pass.
+- review-eval-runner-fix3: codex re-review of worktree commit ac94b91 (fixes review-20261105T154832: BLOCKING setup.py not in
+  resume identity -> header.setup_script {resolved path, sha256} shared with installer; N1 nested caps now validated on merged config).
+  411 pass, 3 skipped (run: venv python3 + pyimg site-packages appended to sys.path for pytest).
 - gold-diag4-wait: Kaggle cross-check only, redundant
 
 ## Quota / spend
@@ -41,7 +42,7 @@ Builder on Opus (dec 010: local-first, two-strike).
 - e4b-timing-wait3: FIRST confirm from kernel log that the guard saw 4 L4 devices (dec 018). If it aborted as 1xL4, find the valid
   4xL4 shape string from the starter notebook or the Kaggle API and report it; don't retry blind. Log every push in kaggle.md. Then: python3 eval/kaggle/timing_summary.py runs/e4b-timing/timing.jsonl results/kaggle_timing_e4b_v000.json;
   test-run share post-hoc from raw traces (exec-boundary, not FIFO-per-name); check header mcp_import_ok; fill ops/budget/kaggle.md actual hours.
-- review-eval-runner-fix2: if clean (or only non-blocking), merge codex/eval-runner-fix into main (real-bwrap/E2E/N2 already verified cycle 54).
+- review-eval-runner-fix3: if clean (or only non-blocking), merge codex/eval-runner-fix into main (real-bwrap/E2E/N2 already verified cycle 54).
   Then rerun gold-local + gold-null in shared env (B5). Pre-registered: identical pass set + null control => splits v2 stand; any change => short report.
 
 ## Next 3
