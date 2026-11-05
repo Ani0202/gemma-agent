@@ -6191,3 +6191,35 @@ PY" in /home/ubuntu/work/gemma-wt/codex-eval-runner
  succeeded in 0ms:
 merged_batch_metrics: {'read_file': {'n': 1, 'total': 10.0, 'max': 10}, 'run_command': {'n': 1, 'total': 10.0, 'max': 10}}
 
+codex
+**BLOCKING — these numbers are not ready for ship decisions.**
+
+1. **Gold data remains accessible through `run_command`.** [run_agent_eval.py:290](/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/run_agent_eval.py:290) selects the subprocess backend, whose commands execute on the host without filesystem isolation. Clearing `task` and disabling secret hydration protects the object boundary, but the agent can still read the host inventory containing `patch`, `test_patch`, and `FAIL_TO_PASS`. Self-check outputs also serialize gold patches at [line 387](/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/run_agent_eval.py:387). I confirmed unrestricted access using a harmless `AGENTS.md` outside the synthetic workspace: exit 0, read succeeded. An enforced filesystem boundary must hide inventory and verification artifacts from agent commands.
+
+2. **The supplied context loses the resolved graph and embedding paths.** [run_agent_eval.py:336](/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/run_agent_eval.py:336) constructs `SwegemmaContext` without `graph_dir=config.graph_dir` or `embeddings_dir=config.embeddings_dir`. `EvalConfig` can resolve these under `--data-dir`, but the context retains relative `data/graphs` and `data/embeddings`. Because the harness reuses this context, graph tools search the wrong location. This can systematically depress quality scores and invalidate comparisons involving graph tools.
+
+3. **`tool_seconds` does not measure individual tool execution.** [run_agent_eval.py:201](/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/run_agent_eval.py:201) subtracts trace event timestamps. Installed ADK gathers batch results and merges their responses; `SessionTrace` timestamps those responses when the merged event is recorded. A 0.1-second read batched with a 10-second command can therefore receive approximately 10 seconds too. Summed tool time can exceed agent wall time and distort test-time share. FIFO additionally cannot identify overlapping same-name calls: reordered responses corrupt individual durations and `max`, although a fully matched batch’s aggregate subtraction can remain unchanged. Instrument execution boundaries with call IDs and monotonic timestamps; trace pairing alone cannot repair merged timestamps.
+
+4. **Resume silently mixes runner implementations.** [run_agent_eval.py:109](/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/run_agent_eval.py:109) excludes `git_sha` from header identity despite recording it. I reproduced acceptance of a changed SHA. After a runner or dependency-emulation fix, remaining tasks can use new behavior while completed rows—and the header’s provenance—remain old. Inventory contents and harness/environment versions are also unpinned. Refuse incompatible resumes using an evaluation-protocol identity and input/environment fingerprints.
+
+5. **Runner and gold calibration now use different package environments.** [run_agent_eval.py:62](/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/run_agent_eval.py:62) removes `_host_env.pth`; standalone [gold_calibration.py:178](/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/kaggle/gold_calibration.py:178) does not apply that isolation. Removing harness packages is consistent with the intended Docker-image emulation; I would keep that correction. However, the existing gold clean list was calibrated with a different import environment. Share isolation setup between both entrypoints and rerun calibration/control checks before relying on exclusions. Two startup passers cannot validate the entire clean list.
+
+**Non-blocking**
+
+1. **Valid Git-quoted filenames can abort result recording.** [run_agent_eval.py:155](/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/run_agent_eval.py:155) decodes Git C-style quoting using JSON. Git’s octal escapes—for example `caf\303\251.py`—produce `JSONDecodeError`; reproduced. Classification occurs outside the evaluation exception handler at [line 370](/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/run_agent_eval.py:370), so a completed evaluation gets no journal row and can terminate the run. Use a Git-compatible decoder and preserve outcomes when diagnostics fail.
+
+2. **Bundle verification timeout settings are ignored.** [run_agent_eval.py:262](/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/run_agent_eval.py:262) forwards only four settings. A configured `verification_timeout_seconds` has no effect; verification keeps the harness default of 300 seconds. Current v000 uses that default, but other bundles can diverge from their scorer configuration.
+
+3. **The duplicate-inventory check is ineffective.** [run_agent_eval.py:252](/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/run_agent_eval.py:252) calls harness `load_tasks`, which already discards duplicate IDs. The subsequent length comparison cannot detect conflicting duplicate records.
+
+Within the inspected call chain, **no direct object-level gold leak was found**: `LocalEvaluator`, `context.task`, and secret-hydration overrides clear the sensitive agent fields while verification receives the original test specification. `resolved` comes from the harness verdict, preserving JUnit checks. Phase timing surrounds the actual calls. The `ContextVar` capture design is appropriate for task separation, though the tests lack concurrent harness coverage. Results rows explicitly select metrics and contain no direct task-body or patch serialization.
+
+**Questions**
+
+- Which exact scorer artifact/version is the parity reference? The inspected installed `swegemma 0.2.11` path supports the verification assessment, but does not establish full scorer parity.
+- Should `timed_out` include recovered command timeouts? Its current implementation detects session/verification timeouts, matching its field description.
+
+Validation: **8 selected offline tests passed**; reproduced resume acceptance, quoted-path failure, and host filesystem access. No files changed. The read-only sandbox prevented a full test/E2E rerun; your reported 371-test and stub-E2E results remain separate evidence.
+2026-11-05T14:58:21.008561Z ERROR codex_core::session: failed to record rollout items: thread 01a1ac30-60b2-7920-a917-8598907865ad not found
+tokens used
+116,169

@@ -1873,3 +1873,628 @@ print(
     f'{subgraph.number_of_nodes()} nodes, {subgraph.number_of_edges()} edges'
 )
 
+codex
+The starter uses a 5-minute agent cap and a separate verification timeout. I’ll record both, include verification in the budget guard, and keep sandbox setup time null because the current runner includes it in agent time. With network access prohibited, the wrapper will use the requested model-handle fallback and note the metadata assumption.
+exec
+/bin/bash -lc "/home/ubuntu/gemma-local/venv/bin/python - <<'PY'
+import inspect
+from swegemma.evaluate import Evaluator
+from adk_eval_core import __file__
+print(inspect.getsource(Evaluator._run_agent_sandbox)); print(inspect.getsource(Evaluator.evaluate_task))
+PY" in /home/ubuntu/work/gemma-wt/codex-timing-kernel
+ succeeded in 3142ms:
+14:57:08 - LiteLLM:WARNING: get_model_cost_map.py:327 - LiteLLM: model cost map fetch attempt 1/3 failed (ConnectError fetching https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: [Errno -3] Temporary failure in name resolution); retrying in 2.4s
+14:57:08 - LiteLLM:WARNING: get_model_cost_map.py:705 - LiteLLM: Failed to fetch remote model cost map from https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: ConnectError fetching https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: [Errno -3] Temporary failure in name resolution. Falling back to local backup.
+    async def _run_agent_sandbox(
+        self,
+        task: Task,
+        snapshot_path: Path,
+        task_index: int,
+        total_tasks: int,
+        slot_id: int | None = None,
+        dashboard: EvaluationDashboard | None = None,
+        context: SwegemmaContext | None = None,
+        base_snapshot_path: Path | None = None,
+        patch_path: Path | None = None,
+    ) -> tuple[str, str | None, SessionTrace]:
+        """Runs the agent in the sandbox container to generate a patch."""
+        return await run_agent_sandbox(
+            self.docker,
+            self.config,
+            task,
+            snapshot_path,
+            base_snapshot_path=base_snapshot_path,
+            patch_path=patch_path,
+            task_index=task_index,
+            total_tasks=total_tasks,
+            slot_id=slot_id,
+            dashboard=dashboard,
+            context=context,
+        )
+
+    async def evaluate_task(
+        self,
+        task: Task,
+        task_index: int = 1,
+        total_tasks: int = 1,
+        slot_id: int | None = None,
+        dashboard: EvaluationDashboard | None = None,
+        context: SwegemmaContext | None = None,
+    ) -> TaskResult:
+        """Evaluate a single task using the two-container pipeline."""
+        task = self._hydrate_task_from_secret(task)
+        logger.debug('Evaluating task %s (%s)', task.instance_id, task.repo)
+        start_time = time.perf_counter()
+
+        slots_map = getattr(dashboard, 'slots', None) if dashboard is not None else None
+        slot = (
+            slots_map.get(slot_id)
+            if isinstance(slots_map, dict) and slot_id is not None
+            else None
+        )
+        if context is None and slot is not None and slot.context is not None:
+            context = slot.context
+
+        if context is None:
+            context = SwegemmaContext(
+                docker_manager=self.docker,
+                container_id='',
+                problem_statement=task.problem_statement,
+                hints_text=getattr(task, 'hints_text', '') or '',
+                task=task,
+                repo=task.repo,
+                graph_dir=self.config.graph_dir,
+                embeddings_dir=self.config.embeddings_dir,
+                budget=self.config.budget,
+                harness=self.config.harness,
+            )
+            if (
+                dashboard is not None
+                and slot_id is not None
+                and hasattr(dashboard, 'attach_context')
+            ):
+                dashboard.attach_context(slot_id, context)
+        elif (
+            dashboard is not None
+            and slot_id is not None
+            and hasattr(dashboard, 'attach_context')
+            and (slot is None or slot.context is not context)
+        ):
+            dashboard.attach_context(slot_id, context)
+
+        snapshot_path, base_snapshot_path, patch_path = resolve_task_snapshot_paths(
+            self.config.snapshots_dir, task.instance_id, task.repo
+        )
+        if not snapshot_path.exists():
+            _, _, secret_dir = self._get_secret_bundle_data()
+            if secret_dir is not None and (secret_dir / 'sandbox' / 'snapshots').is_dir():
+                snapshot_path, base_snapshot_path, patch_path = resolve_task_snapshot_paths(
+                    secret_dir / 'sandbox' / 'snapshots', task.instance_id, task.repo
+                )
+        if not snapshot_path.exists():
+            err_msg = f'Snapshot file not found: {self.config.snapshots_dir / f"{task.instance_id}.tar.gz"} or .tgz'
+            duration = time.perf_counter() - start_time
+            if dashboard is not None and slot_id is not None:
+                dashboard.task_completed(slot_id, False, duration, err_msg)
+            return TaskResult(
+                instance_id=task.instance_id,
+                repo=task.repo,
+                resolved=False,
+                agent_patch='',
+                test_output='',
+                test_exit_code=-1,
+                duration_seconds=duration,
+                error=err_msg,
+                task_index=task_index,
+            )
+
+        # -------------------------------------------------------------------
+        # Phase 1: Sandbox Execution (Container A)
+        # -------------------------------------------------------------------
+        if self.config.skip_agent_patch:
+            agent_patch = ''
+            agent_error = None
+            trace: SessionTrace | None = SessionTrace()
+        else:
+            run_kwargs: dict[str, Any] = {
+                'slot_id': slot_id,
+                'dashboard': dashboard,
+                'context': context,
+            }
+            sig = inspect.signature(self._run_agent_sandbox)
+            if 'base_snapshot_path' in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            ):
+                run_kwargs['base_snapshot_path'] = base_snapshot_path
+                run_kwargs['patch_path'] = patch_path
+            agent_patch, agent_error, trace = await self._run_agent_sandbox(
+                task,
+                snapshot_path,
+                task_index,
+                total_tasks,
+                **run_kwargs,
+            )
+
+        if agent_error and not agent_patch:
+            json_path = save_trace_artifact(
+                trace, self.config.results_dir, task.instance_id
+            )
+            duration = time.perf_counter() - start_time
+            llm_calls = context.llm_calls_used
+            if dashboard is not None and slot_id is not None:
+                dashboard.task_completed(
+                    slot_id,
+                    False,
+                    duration,
+                    agent_error,
+                    agent_duration=context.agent_elapsed_seconds if context else None,
+                )
+            return TaskResult(
+                instance_id=task.instance_id,
+                repo=task.repo,
+                resolved=False,
+                agent_patch='',
+                test_output='',
+                test_exit_code=-1,
+                duration_seconds=duration,
+                error=agent_error,
+                trace_json_path=json_path,
+                total_llm_calls=llm_calls,
+                tool_calls=context.tool_calls_used,
+                task_index=task_index,
+            )
+
+        # -------------------------------------------------------------------
+        # Phase 2: Evaluation Container (Container B)
+        # -------------------------------------------------------------------
+        context.set_phase('Verifying')
+        context.set_activity('Running test suite...')
+
+        verify_kwargs: dict[str, Any] = {
+            'agent_patch': agent_patch,
+            'agent_error': agent_error,
+            'trace': trace,
+            'start_time': start_time,
+        }
+        verify_sig = inspect.signature(verify_task)
+        if 'base_snapshot_path' in verify_sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in verify_sig.parameters.values()
+        ):
+            verify_kwargs['base_snapshot_path'] = base_snapshot_path
+            verify_kwargs['patch_path'] = patch_path
+
+        res = await verify_task(
+            self.docker,
+            self.config,
+            task,
+            snapshot_path,
+            **verify_kwargs,
+        )
+        llm_calls = context.llm_calls_used
+        res.total_llm_calls = llm_calls
+        res.tool_calls = context.tool_calls_used
+        res.task_index = task_index
+        if dashboard is not None and slot_id is not None:
+            dashboard.task_completed(
+                slot_id,
+                res.resolved,
+                res.duration_seconds,
+                res.error,
+                agent_duration=context.agent_elapsed_seconds if context else None,
+            )
+        return res
+
+
+exec
+/bin/bash -lc "cat > /tmp/build_timing.py <<'PY'
+from pathlib import Path
+import ast,json
+runner=Path('/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/run_agent_eval.py').read_text()
+def fn(source,name):
+ t=ast.parse(source); n=next(n for n in t.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name==name)
+ return '\\n'.join(source.splitlines()[n.lineno-1:n.end_lineno])+'\\n\\n'
+p=Path('eval/kaggle/agent_timing.py')
+p.write_text('''\"\"\"Self-contained Kaggle timing script; starter notebook cells 2/8/10, swegemma 0.2.11.
+Trace/patch classification copied from codex/eval-runner; no repository imports.
+Build using timing_push.sh. Raw task artifacts stay in /kaggle/working/runs.
+\"\"\"
+import asyncio
+import base64
+from collections import Counter
+import dataclasses
+from datetime import datetime, timezone
+import glob
+import hashlib
+import importlib
+import io
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+
+BUNDLE_B64 = \"\"  # embedded by timing_push.sh
+TASK_IDS = []
+GIT_SHA = \"\"
+KERNEL_BUDGET_SECONDS = 3 * 3600
+DATA = Path('/kaggle/input/competitions/gemma-4-developer-agent')
+WORK = Path('/kaggle/working')
+BUNDLE = WORK / 'bundle'
+WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+
+
+def install():
+    env = dict(TRANSFORMERS_NO_TF='1', TRANSFORMERS_NO_FLAX='1', TRANSFORMERS_OFFLINE='1',
+               VLLM_NO_USAGE_STATS='1', VLLM_WORKER_MULTIPROC_METHOD='spawn',
+               VLLM_ENGINE_READY_TIMEOUT_S='1200', VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS='1',
+               NCCL_DEBUG='WARN', LITELLM_LOCAL_MODEL_COST_MAP='True', LITELLM_TELEMETRY='False',
+               LITELLM_LOG='WARNING', PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True',
+               OTEL_SDK_DISABLED='true', OTEL_PYTHON_DISABLED='true', PIP_NO_INDEX='1')
+    os.environ.update(env)
+    for key in ('OPENAI_API_KEY', 'LOCAL_API_KEY'):
+        os.environ.setdefault(key, 'EMPTY')
+    for pattern in ('/usr/local/lib/python*/dist-packages/*cutlass*.pth',
+                    '/usr/local/lib/python*/site-packages/*cutlass*.pth'):
+        for pth in glob.glob(pattern):
+            try:
+                os.unlink(pth)
+            except OSError:
+                pass
+    staged = Path('/tmp/wheelhouse')
+    staged.mkdir(exist_ok=True)
+    for w in WHEELHOUSE.glob('*.whl'):
+        if 'cutlass' in w.name.lower():
+            continue
+        name = w.name.replace('cu128', '+cu128') if 'cu128' in w.name and '+' not in w.name else w.name
+        target = staged / name
+        if not target.exists():
+            try:
+                target.symlink_to(w)
+            except OSError:
+                shutil.copyfile(w, target)
+    wheels = sorted(map(str, staged.glob('*.whl')))
+    if not wheels:
+        raise RuntimeError('No wheelhouse wheels')
+    subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '--no-deps',
+                    '--force-reinstall', *wheels], check=True)
+    importlib.invalidate_caches()
+    os.environ['PYTEST_ADDOPTS'] = (os.environ.get('PYTEST_ADDOPTS', '') + ' -p no:langsmith_plugin').strip()
+    result = subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 'langsmith'], capture_output=True)
+    print('langsmith uninstall rc=', result.returncode, flush=True)
+    for name in ('LiteLLM', 'LiteLLM Router', 'LiteLLM Proxy', 'litellm', 'httpx', 'httpcore',
+                 'openai', 'urllib3', 'opentelemetry', 'opentelemetry.context'):
+        lg = logging.getLogger(name)
+        lg.setLevel(logging.WARNING)
+        if 'litellm' in name.lower():
+            lg.propagate = False
+            lg.handlers.clear()
+
+
+def patch_subprocess_deps(data_dir):
+    \"\"\"Minimal gold_calibration.patch_subprocess_deps, including imported bindings.\"\"\"
+    import swegemma.harness.container_setup as cs
+    orig = cs.install_test_dependencies
+    wheels = data_dir / 'wheels'
+    if not wheels.is_dir():
+        wheels = WHEELHOUSE
+    setup = data_dir / 'sandbox' / 'setup.py'
+    if not setup.exists():
+        setup = next(iter(data_dir.rglob('setup.py')), setup)
+    def install(docker, container_id, repo='', *, fast_path=True, config=None):
+        if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
+            return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+        sp = next(iter(sorted(docker.sandboxes[container_id]['venv'].glob('lib/python3*/site-packages'))))
+        base, large, _, _ = cs._inspect_wheels_dir(wheels)
+        if large:
+            raise RuntimeError('large wheels present; workspace-import scan not emulated')
+        with tarfile.open(cs._build_unpacked_wheels_tar(list(base), 'sp_base_local', '.swegemma_base_injected')) as tf:
+            tf.extractall(sp, filter='data')
+        docker.copy_to(container_id, setup, '/tmp/setup.py')
+        docker.exec(container_id, f\"python3 /tmp/setup.py {'--fast-path' if fast_path else ''} {repo}\".strip(), timeout=280)
+    # All consumers must see the replacement, even if imported before this call.
+    for name, module in list(sys.modules.items()):
+        if name.startswith('swegemma.') and hasattr(module, 'install_test_dependencies'):
+            module.install_test_dependencies = install
+
+
+'''+fn(runner,'classify_patch')+fn(runner,'trace_counts')+fn(runner,'tool_seconds')+fn(runner,'observe_patch_strip'))
+with p.open('a') as f: f.write('''def test_run_stats(trace, agent_seconds):
+    pending, n, total = {}, 0, 0.0
+    for e in trace.entries if trace else []:
+        if e.event_type == 'tool_call':
+            command = (e.tool_args or {}).get('command', '')
+            is_test = e.tool_name == 'run_command' and any(s in command for s in ('pytest', 'unittest', 'tox', 'nox', 'run_tests'))
+            n += int(is_test)
+            pending.setdefault(e.tool_name, []).append((e.timestamp, is_test))
+        elif e.event_type == 'tool_response' and pending.get(e.tool_name):
+            start, is_test = pending[e.tool_name].pop(0)
+            if is_test:
+                total += max(0.0, e.timestamp - start)
+    return dict(n=n, total_seconds=total, share_of_agent_seconds=total / agent_seconds if agent_seconds else None)
+
+
+def should_stop(elapsed, cap_minutes, verification_timeout, observed_max, budget):
+    return elapsed + 1.5 * max(cap_minutes * 60 + verification_timeout, observed_max) > budget
+
+
+def distribution(values):
+    values = sorted(values)
+    def percentile(q):
+        x = (len(values) - 1) * q
+        lo = int(x)
+        return values[lo] + (values[min(lo + 1, len(values)-1)] - values[lo]) * (x-lo)
+    return dict(mean=sum(values)/len(values), p50=percentile(.5), p90=percentile(.9), max=max(values)) if values else dict.fromkeys(('mean', 'p50', 'p90', 'max'))
+
+
+def extract_bundle(encoded, destination):
+    payload = base64.b64decode(encoded, validate=True)
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as tf:
+        tf.extractall(destination, filter='data')
+    return hashlib.sha256(payload).hexdigest(), hashlib.sha256((destination / 'agent.yaml').read_bytes()).hexdigest()
+
+
+def append(stream, row):
+    stream.write(json.dumps(row, allow_nan=False) + '\\\\n')
+    stream.flush()
+    os.fsync(stream.fileno())
+
+
+async def evaluate(config, journal, started, caps, totals):
+    from contextvars import ContextVar
+    from swegemma.evaluate import Evaluator
+    from swegemma.models import load_tasks
+    from swegemma.harness.verification import _is_protected_test_or_config_path
+    import swegemma.evaluate as ev
+    import swegemma.harness.verification as vf
+    state = ContextVar('timing')
+    original_verify, original_strip = ev.verify_task, vf.strip_protected_files_from_patch
+    vf.strip_protected_files_from_patch = observe_patch_strip(original_strip, state)
+    async def verify(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return await original_verify(*args, **kwargs)
+        finally:
+            state.get()['verification'] = time.perf_counter() - start
+    ev.verify_task = verify
+    class TimingEvaluator(Evaluator):
+        agent_seconds, patch, trace, agent_error = 0.0, '', None, ''
+        def _hydrate_task_from_secret(self, task):
+            return task
+        def _get_secret_bundle_data(self):
+            return {}, {}, None
+        async def _run_agent_sandbox(self, task, *args, **kwargs):
+            safe = dataclasses.replace(task, patch='', test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=())
+            kwargs['context'].task = safe
+            start = time.perf_counter()
+            state.get()['agent_active'] = True
+            try:
+                self.patch, self.agent_error, self.trace = await super()._run_agent_sandbox(safe, *args, **kwargs)
+                return self.patch, self.agent_error, self.trace
+            finally:
+                self.agent_seconds = time.perf_counter() - start
+                state.get()['agent_active'] = False
+    try:
+        inventory = {t.instance_id: t for t in load_tasks(config.tasks_path)}
+        if len(set(TASK_IDS)) "'!= len(TASK_IDS) or set(TASK_IDS) - inventory.keys():
+            raise ValueError('"'Duplicate or missing task IDs')
+        patch_subprocess_deps(DATA)
+        for iid in TASK_IDS:
+            if should_stop(time.monotonic()-started, caps['max_time_minutes'], caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
+                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+                break
+            task = dataclasses.replace(inventory[iid], patch='')
+            times = dict(verification=0.0)
+            state.set(times)
+            evaluator, result, error = TimingEvaluator(config), None, None
+            start = time.perf_counter()
+            try:
+                result = await evaluator.evaluate_task(task)
+                error = 'Harness task failure' if result.error else None
+            except Exception as exc:
+                error = 'Evaluation exception (' + type(exc).__name__ + ')'
+            finally:
+                evaluator.docker.cleanup_all()
+            total = time.perf_counter() - start
+            totals.append(total)
+            patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch) or ''
+            raw = WORK / 'runs' / iid
+            raw.mkdir(parents=True, exist_ok=True)
+            (raw / 'agent.patch').write_text(patch)
+            (raw / 'trace.json').write_text(json.dumps(evaluator.trace.to_dict(format='legacy') if evaluator.trace else {}, default=str))
+            (raw / 'result.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result else {'error': error}, default=str))
+            counts, tokens, seconds = trace_counts(evaluator.trace)
+            code = result.test_exit_code if result else None
+            raw_error = (result.error or '') if result else error or ''
+            append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=None,
+                llm_turns=result.total_llm_calls if result else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
+                tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
+                completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
+                **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+                timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+    finally:
+        ev.verify_task, vf.strip_protected_files_from_patch = original_verify, original_strip
+
+
+''')
+# Use the official VllmConfig literally, with local names.
+n=json.load(open('docs/starter_notebook.ipynb'))
+s=''.join(n['cells'][8]['source'])
+s=s[s.index('MODEL_VLLM_EXTRA_ARGS ='):s.index(\"print(f'vLLM server started\")]
+s=s.replace('AGENT_DIR','BUNDLE').replace(\"ALLOWED_MODEL_NAMES\", \"frozenset('gemma-4-' + x + '-it-qat-w4a16-ct' for x in ('31b', '12b', 'e4b', 'e2b'))\")
+s=s.replace(\"if 'server_instance' in globals() and server_instance is not None:\\n    server_instance.stop()\\n\",'')
+s=s.replace('server_instance.start()', \"start = time.perf_counter()\\nserver_instance.start()\\nstartup = time.perf_counter() - start\\nreturn server_instance, adapters, declared_model, startup\")
+s='\\n'.join(l for l in s.splitlines() if l.strip() and not l.lstrip().startswith('#'))
+with p.open('a') as f:
+ f.write('def start_server(holder):\\n    import torch\\n    from adk_submission import VllmConfig, VllmServer, discover_adapters\\n    from adk_submission.discovery import discover_declared_models\\n    from swegemma.config import ALLOWED_ADAPTER_EXTENSIONS\\n')
+ s=s.replace('start = time.perf_counter()', 'holder.append(server_instance)\\nstart = time.perf_counter()')
+ f.write('\\n'.join('    '+l for l in s.splitlines())+'\\n\\n')
+PY
+python3 /tmp/build_timing.py" in /home/ubuntu/work/gemma-wt/codex-timing-kernel
+ succeeded in 0ms:
+exec
+/bin/bash -lc "cat >> eval/kaggle/agent_timing.py <<'PY'
+def main():
+    started, totals, servers, startup = time.monotonic(), [], [], None
+    WORK.mkdir(exist_ok=True, parents=True)
+    with (WORK / 'timing.jsonl').open('w') as journal:
+        header = dict(_schema='kaggle_timing_v1', git_sha=GIT_SHA, task_ids=TASK_IDS, concurrency=1,
+                      created_utc=datetime.now(timezone.utc).isoformat(), caps=None,
+                      bundle_sha256=None, agent_yaml_sha256=None, gpu_names=[], gpu_count=0,
+                      mcp_import_ok=None, vllm_startup_seconds=None,
+                      fields=dict(instance_id='Task ID', repo='Repository', wall_seconds='Agent (including setup), verification, total wall seconds',
+                          sandbox_setup_seconds='Null: not separable', resolved='Harness verdict', exit_code='Verification exit code or null',
+                          error='Sanitized failure category or null', llm_turns='LLM calls or null', tool_calls='Total and per_tool requests',
+                          tool_seconds='Per-tool n,total,max call->response seconds, FIFO per name', test_run='Test requests n, matched total_seconds, share_of_agent_seconds',
+                          prompt_tokens='Trace usage or null', completion_tokens='Trace usage or null', completion_tokens_per_second='Completion usage / agent seconds or null',
+                          patch_bytes='UTF-8 diff bytes before stripping', patch_files='Diff paths', test_files_edited='Protected/test target paths',
+                          stray_files='New files outside package Python source', empty_patch='Blank diff', timed_out='Timeout error or exit 124'))
+        # Write the header even if installation or extraction fails; enrich before startup.
+        try:
+            header['bundle_sha256'], header['agent_yaml_sha256'] = extract_bundle(BUNDLE_B64, BUNDLE)
+            print('bundle_sha256=', header['bundle_sha256'], 'agent_yaml_sha256=', header['agent_yaml_sha256'], flush=True)
+            install()
+            try:
+                import mcp  # noqa: F401
+                header['mcp_import_ok'] = True
+            except Exception:
+                header['mcp_import_ok'] = False
+            print('import mcp:', header['mcp_import_ok'], flush=True)
+            import torch
+            import yaml
+            import litellm
+            from google.adk.agents.context_cache_config import ContextCacheConfig
+            from google.adk.apps._configs import EventsCompactionConfig
+            from swegemma.config import EvalConfig, build_submission_limits
+            litellm.drop_params = True
+            header.update(gpu_count=torch.cuda.device_count(), gpu_names=[torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])
+            cfg_file = next((BUNDLE / n for n in ('eval_config.yaml', 'eval_config.yml') if (BUNDLE / n).is_file()), None)
+            raw = (yaml.safe_load(cfg_file.read_text()) or {}) if cfg_file else {}
+            section = raw.get('evaluation', raw)
+            turns = section.get('max_turns', section.get('max_llm_calls'))
+            caps = dict(timeout_seconds=int(section.get('timeout_seconds', 300)), verification_timeout_seconds=int(section.get('verification_timeout_seconds', 300)),
+                        max_tool_calls=int(section.get('max_tool_calls', 100)), max_time_minutes=float(section.get('max_time_minutes', 60.0)), max_turns=int(turns) if turns is not None else None)
+            header['caps'] = caps
+            append(journal, header)
+            server, adapters, model, startup = start_server(servers)
+            append(journal, {'_vllm': dict(startup_seconds=startup)})
+            models = server.create_model_registry(aliases=[model], model_prefix='openai/', api_key=[REDACTED_SECRET]'LOCAL_API_KEY', 'EMPTY'))
+            limits, constraints = build_submission_limits()
+            config = EvalConfig(tasks_path=DATA / 'tasks.jsonl', snapshots_dir=DATA / 'snapshots', results_dir=WORK / 'runs', submission_dir=BUNDLE,
+                models=models, sandbox='subprocess', **caps, limits=limits, generation_constraints=constraints, adapter_manifest=adapters,
+                context_cache_config=ContextCacheConfig(min_tokens=2048, ttl_seconds=1800, cache_intervals=10),
+                events_compaction_config=EventsCompactionConfig(compaction_interval=15, overlap_size=2, token_threshold=14336, event_retention_size=5),
+                graph_dir=str(DATA / 'graphs'), embeddings_dir=str(DATA / 'embeddings'), wheels_dir=DATA / 'wheels', verbose=False)
+            asyncio.run(evaluate(config, journal, started, caps, totals))
+        except BaseException as exc:
+            if journal.tell() == 0:
+                append(journal, header)
+            append(journal, {'_stopped': 'Kernel exception (' + type(exc).__name__ + ')'})
+            raise
+        finally:
+            try:
+                for server in servers:
+                    server.stop()
+            finally:
+                append(journal, {'_done': dict(n=len(totals), total_seconds=distribution(totals), startup_seconds=startup)})
+
+
+if __name__ == '__main__':
+    main()
+PY
+cat > eval/kaggle/timing_push.sh <<'SH'
+#"'!/usr/bin/env bash
+# Stage a self-contained private GPU timing kernel. --dry-run never invokes Kaggle.
+set -euo pipefail
+dry_run=false
+if [[ ${1:-} == --dry-run ]]; then dry_run=true; shift; fi
+if [[ $# -lt 3 || $# -gt 4 || ! $1 =~ ''^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]]; then
+  echo "Usage: $0 [--dry-run] KAGGLE_USER/SLUG BUNDLE_DIR IDS_FILE [BUDGET_SECONDS]" >&2
+  exit 2
+fi
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+stage_dir=$(mktemp -d /tmp/timing-kernel-push.XXXXXX)
+# Dry runs retain the generated artifact for inspection.
+if ! $dry_run; then trap '"'rm -rf -- \""'$stage_dir"'"' EXIT; fi
+budget="'${4:-10800}
+python3 - "$script_dir" "$stage_dir" "$1" "$2" "$3" "$budget" <<'"'PY'
+import ast
+import base64
+import gzip
+import io
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tarfile
+
+source, stage = map(Path, sys.argv[1:3])
+kernel_id, bundle_arg, ids_arg, budget_arg = sys.argv[3:]
+bundle, ids_file = Path(bundle_arg).resolve(), Path(ids_arg)
+budget = int(budget_arg)
+if budget <= 0:
+    raise ValueError('Budget must be positive')
+ids = [s.strip() for s in ids_file.read_text().splitlines() if s.strip() and not s.lstrip().startswith('#')]
+if not ids or len(ids) "'!= len(set(ids)) or any(not re.fullmatch(r'"'[A-Za-z0-9_.-]+', s) for s in ids):
+    raise ValueError('Nonempty unique safe task IDs required')
+# PyYAML is not required on the push host. agent.yaml uses a scalar model declaration.
+models = set()
+for path in [bundle / 'agent.yaml', *sorted((bundle / 'sub_agents').rglob('*.yaml')), *sorted((bundle / 'sub_agents').rglob('*.yml'))]:
+    for line in path.read_text().splitlines():
+        match = re.fullmatch(r'\\s*model:\\s*[\\'\"]?(gemma-4-(?:31b|12b|e4b|e2b)-it-qat-w4a16-ct)[\\'\"]?\\s*(?:#.*)?', line)
+        if match:
+            models.add(match[1])
+if len(models) "'!= 1:
+    raise ValueError('"'Expected one allowed scalar model declaration')
+model = models.pop()
+buf = io.BytesIO()
+with gzip.GzipFile(fileobj=buf, mode='wb', mtime=0) as gz:
+    with tarfile.open(fileobj=gz, mode='w') as tf:
+        for path in sorted(bundle.rglob('*')):
+            if path.is_symlink() or not (path.is_file() or path.is_dir()):
+                raise ValueError('Bundle contains symlink or special file')
+            tf.add(path, arcname=path.relative_to(bundle).as_posix(), recursive=False)
+constants = dict(BUNDLE_B64=base64.b64encode(buf.getvalue()).decode(), TASK_IDS=ids,
+                 GIT_SHA=subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip(),
+                 KERNEL_BUDGET_SECONDS=budget)
+text = (source / 'agent_timing.py').read_text()
+lines = text.splitlines(keepends=True)
+for node in reversed(ast.parse(text).body):
+    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id in constants:
+        key = node.targets[0].id
+        lines[node.lineno-1:node.end_lineno] = [f'{key} = {constants.pop(key)"'!r}'"\\n']
+if constants:
+    raise ValueError('Missing template constants')
+generated = ''.join(lines)
+compile(generated, 'agent_timing.py', 'exec')
+(stage / 'agent_timing.py').write_text(generated)
+# No network per task constraint. Assumption: Kaggle model_sources accepts versioned model handles.
+metadata = dict(id=kernel_id, title=kernel_id.split('/')[1], code_file='agent_timing.py', language='python',
+                kernel_type='script', is_private=True, enable_gpu=True, enable_internet=False,
+                dataset_sources=['metric/gemma-4-developer-agent-wheelhouse'],
+                competition_sources=['gemma-4-developer-agent'], model_sources=[f'google/gemma-4/other/{model}/2'], kernel_sources=[])
+(stage / 'kernel-metadata.json').write_text(json.dumps(metadata, indent=2) + '\\n')
+print(json.dumps(metadata, indent=2))
+print(f'Generated script: {len(generated.encode())} bytes; stage: {stage}')
+print('Metadata assumption (offline): model_sources uses google/gemma-4/other/<model>/2')
+PY
+if "'$dry_run; then
+  echo "Dry run: no push. Staged: $stage_dir"
+else
+  kaggle kernels push -p "$stage_dir" --accelerator NvidiaL4X4 -t "$((budget + 1800))"
+fi
+SH
+chmod +x eval/kaggle/timing_push.sh
+wc -l eval/kaggle/agent_timing.py' in /home/ubuntu/work/gemma-wt/codex-timing-kernel
+ succeeded in 0ms:
+426 eval/kaggle/agent_timing.py
+
+codex
+The core script is in place: it embeds the bundle, uses the starter’s vLLM configuration, runs tasks sequentially, and writes durable metrics and raw artifacts. I also found that the runner captures the patch before protected-file stripping; I copied that behavior so test-file edits remain visible in the timing results. Next I’ll check the generated script and summary boundary logic.
