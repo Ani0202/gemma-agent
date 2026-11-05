@@ -9504,3 +9504,432 @@ exec
  succeeded in 3615ms:
 Installed harness: all dependency bindings patched
 
+exec
+/bin/bash -lc "cat > eval/README_AGENT_EVAL.md <<'MD'
+Run a local bundle with the image-mirror interpreter base:
+
+"'```sh
+/home/ubuntu/gemma-local/venv/bin/python eval/run_agent_eval.py '"\\
+  --bundle bundles/e4b/v000 --data-dir data/raw --split eval/splits/dev.txt \\
+  --run-name baseline-local --concurrency 1 --endpoint http://localhost:8000/v1
+"'```
+
+The runner uses swegemma 0.2.11 programmatically with the subprocess sandbox. Caps
+come from the bundle'"'s "'`eval_config.yaml`, with CLI overrides taking precedence.
+It checks two clean tasks with gold patches before inference. `--selfcheck-ids a,b`
+chooses the two checks; `--skip-selfcheck` explicitly bypasses them. Only IDs in the
+frozen dev split are accepted. `--ids a,b` limits the agent run, not the default
+self-check selection. Concurrent durations are throughput measurements, not scorer
+timing measurements.
+
+`results/<run-name>.jsonl` contains a metadata header and sanitized task metrics.
+Completed attempts, including failures, are skipped on resume. Changing the bundle,
+caps, split, model registry, data directory, endpoint or concurrency requires a new
+name or `--force-new`, which **replaces the results journal**. Raw traces, logs,
+pre-stripping agent diffs, and harness outputs remain in `runs/<run-name>/`.
+`patch_bytes` and file classifications describe the agent diff before protected-file
+stripping; `output.json` includes the diff actually passed to verification.
+
+The offline stub accepts a JSON array of assistant messages, including OpenAI
+`tool_calls`, or full completion responses. Responses are consumed in order;
+exhaustion returns HTTP 409. It supports non-streaming chat completions and models:
+
+```sh
+python eval/stub_openai.py --script /tmp/responses.json --port 8000
+```
+
+No packages need installing for tests. The harness venv currently lacks pytest, so
+expose the existing pyimg copy when running the requested command:
+
+```sh
+export PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages
+export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+export LITELLM_LOCAL_MODEL_COST_MAP=True
+/home/ubuntu/gemma-local/venv/bin/python -m pytest eval/tests -q
+RUN_AGENT_EVAL_E2E=1 /home/ubuntu/gemma-local/venv/bin/python -m pytest eval/tests/test_run_agent_eval.py -q -rs
+```
+
+The integration test needs localhost socket permission and existing clean dev data;
+it uses the stub without a GPU. `--allow-foreign-python` is a unit-test escape hatch.
+MD
+ git diff --check' in /home/ubuntu/work/gemma-wt/codex-eval-runner
+ succeeded in 0ms:
+codex
+The updated suite passes: 370 tests, with two skipped. All dependency bindings also pass the assertion against the installed harness. The runner is 421 lines, and I’ve documented usage, resume behavior, and the existing pyimg pytest setup. Full E2E verification remains blocked by localhost socket permissions.
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/kaggle/gold_calibration.py
+/home/ubuntu/work/gemma-wt/codex-eval-runner/eval/run_agent_eval.py
+diff --git a/eval/kaggle/gold_calibration.py b/eval/kaggle/gold_calibration.py
+index 07de648b150434cf765ada2fc1c2c096e08e01e3..d06af7a29e19ad1ed33fb34d4129c26ca8777817
+--- a/eval/kaggle/gold_calibration.py
++++ b/eval/kaggle/gold_calibration.py
+@@ -17,9 +17,6 @@
+ 
+ # Kaggle's system python autoloads a langsmith pytest plugin that the scorer docker image lacks; it breaks on repo-local requests.py shadowing.
+ os.environ['PYTEST_ADDOPTS'] = (os.environ.get('PYTEST_ADDOPTS', '') + ' -p no:langsmith_plugin').strip()
+-# PYTEST_ADDOPTS did not reach the sandbox pytest (diag3: still crashed); remove the package that provides the plugin.
+-_r = subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 'langsmith'], capture_output=True, text=True)
+-print('langsmith uninstall rc=%s %s' % (_r.returncode, (_r.stdout + _r.stderr)[-200:]), flush=True)
+ DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
+ WORKING_DIR = Path('/kaggle/working')
+ WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+@@ -192,6 +189,10 @@
+     import tarfile
+     import swegemma.harness.container_setup as cs
+     import swegemma.harness.verification as vf
++    import swegemma.harness.sample_verification  # load all known by-name bindings
++    import swegemma.evaluate
++    import swegemma.cli
++    import swegemma.harness.agent_runner
+     orig = cs.install_test_dependencies
+     wheels_src = Path(data_dir) / 'wheels'
+     if not wheels_src.is_dir():
+@@ -215,8 +216,10 @@
+         docker.copy_to(container_id, setup_py, '/tmp/setup.py')
+         flag = '--fast-path' if fast_path else ''
+         docker.exec(container_id, f'python3 /tmp/setup.py {flag} {repo}'.strip(), timeout=280)
+-    cs.install_test_dependencies = install
+-    vf.install_test_dependencies = install
++    for name, module in list(sys.modules.items()):
++        if (name == 'swegemma' or name.startswith('swegemma.')) and getattr(module, 'install_test_dependencies', None) is orig:
++            module.install_test_dependencies = install
++    return install
+ 
+ 
+ async def verify_gold(task, patch, data_dir, sandbox):
+@@ -293,12 +296,6 @@
+                 raise TypeError('Unsupported verification result')
+             row.update(resolved=resolved, exit_code=exit_code)
+             if not resolved:
+-                import re as _re
+-                _out = get('test_output', '') or ''
+-                _pat = _re.compile(r'ModuleNotFoundError|ImportError|fixture .* not found|unrecognized arguments|PluginValidationError|INTERNALERROR|^E  |^ERROR|error:|Error:|passed|failed', _re.M)
+-                row['diag'] = dict(err=(get('error_message', None) or get('error', None) or '')[:300],
+-                                   lines=[l[:200] for l in _out.splitlines() if _pat.search(l)][:25],
+-                                   tail=_out[-600:])
+                 # Harness exception/error text can embed patches or task source. Never copy it.
+                 row['error'] = ('Harness verification error' if get('error') else
+                                 f'Phase 2 unresolved (exit_code={exit_code}; includes JUnit validation)')
+@@ -339,6 +336,10 @@
+ 
+ 
+ def main():
++    # Kaggle-only cleanup belongs at execution time, never on library import.
++    if Path('/kaggle/working').is_dir():
++        subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 'langsmith'],
++                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument('--data-dir', type=Path, default=DATA_DIR)
+     parser.add_argument('--working-dir', type=Path, default=WORKING_DIR)
+diff --git a/eval/run_agent_eval.py b/eval/run_agent_eval.py
+index 629fae45973b88dd01d7a10027d3ea2cdd92a83d..b214d374ad5cce22bc9721ac8e073f9cffde1560
+--- a/eval/run_agent_eval.py
++++ b/eval/run_agent_eval.py
+@@ -2,6 +2,7 @@
+ import argparse
+ import asyncio
+ from collections import Counter
++from contextvars import ContextVar
+ import dataclasses
+ from datetime import datetime, timezone
+ import fcntl
+@@ -15,6 +16,7 @@
+ import subprocess
+ import sys
+ import time
++from urllib.parse import urlparse
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ if str(ROOT) not in sys.path:
+@@ -26,10 +28,11 @@
+               error='Sanitized failure category; details only in runs/',
+               wall_seconds='agent (includes Container A setup), verification, total seconds',
+               llm_turns='Harness LLM call count',
+-              tool_calls='total executed (harness), per_tool requested (trace)',
++              tool_calls='total and per_tool requested (trace); harness total if no trace',
+               prompt_tokens='Recorded trace prompt usage, or null',
+               completion_tokens='Recorded trace completion usage, or null',
+-              patch_bytes='UTF-8 size', patch_files='All changed paths, including deletions',
++              patch_bytes='UTF-8 size before harness stripping',
++              patch_files='All agent diff paths before stripping, including deletions',
+               test_files_edited='Harness protected paths and verification test targets',
+               stray_files='New files outside package Python source', empty_patch='Blank diff',
+               timed_out='Session or verification timeout observed', trace_path='Raw trace path')
+@@ -47,7 +50,8 @@
+ 
+ def assert_dependency_bindings(patched):
+     names = set(BINDINGS) | {n for n, m in sys.modules.items()
+-                            if n.startswith('swegemma.') and hasattr(m, 'install_test_dependencies')}
++                            if (n == 'swegemma' or n.startswith('swegemma.'))
++                            and hasattr(m, 'install_test_dependencies')}
+     bad = [n for n in sorted(names)
+            if getattr(sys.modules.get(n), 'install_test_dependencies', None) is not patched]
+     if bad:
+@@ -193,6 +197,19 @@
+     return dict(counts), tokens
+ 
+ 
++def observe_patch_strip(original, state):
++    """Retain the agent's diff before the harness removes protected edits."""
++    def strip(patch, *pos, **kw):
++        current = state.get(None)
++        filtered = original(patch, *pos, **kw)
++        if current is not None and current.get('agent_active'):
++            if patch != current.get('filtered_patch'):
++                current['raw_patch'] = patch
++            current['filtered_patch'] = filtered
++        return filtered
++    return strip
++
++
+ def read_ids(path):
+     return {line.strip() for line in path.read_text().splitlines()
+             if line.strip() and not line.lstrip().startswith('#')}
+@@ -216,7 +233,10 @@
+     selected = split_ids & set(args.ids.split(',')) if args.ids else split_ids
+     if not selected:
+         raise ValueError('No selected tasks')
+-    tasks = {t.instance_id: t for t in load_tasks(args.data_dir / 'tasks.jsonl')}
++    inventory = load_tasks(args.data_dir / 'tasks.jsonl')
++    tasks = {t.instance_id: t for t in inventory}
++    if len(tasks) != len(inventory):
++        raise ValueError('Duplicate inventory IDs')
+     if not split_ids <= tasks.keys():
+         raise ValueError('Split IDs missing from inventory')
+     if any(not re.fullmatch(r'[A-Za-z0-9_.-]+', i) for i in split_ids):
+@@ -232,9 +252,9 @@
+         raise ValueError('models.yaml missing')
+     models = _build_cli_model_registry(args.bundle, args.models_yaml)
+     # Force every alias to the one recorded endpoint (including models.yaml aliases).
+-    for name in models:
++    for name in models.list_available():
+         model = models.get(name)
+-        model.api_base = args.endpoint
++        model._additional_args['api_base'] = args.endpoint
+     header = dict(_schema='agent_eval_v1', fields=FIELDS, bundle=str(args.bundle),
+                   bundle_sha256=bundle_sha(args.bundle), git_sha=subprocess.check_output(
+                       ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+@@ -243,6 +263,9 @@
+                   models_yaml=sha_file(args.models_yaml) if args.models_yaml else None,
+                   data_dir=str(args.data_dir), created_utc=datetime.now(timezone.utc).isoformat())
+     journal = Journal(ROOT / 'results' / f'{args.run_name}.jsonl', header, args.force_new)
++    if not journal.finished <= split_ids:
++        journal.close()
++        raise ValueError('Resume records contain IDs outside the split')
+     raw_dir = ROOT / 'runs' / args.run_name
+     raw_dir.mkdir(parents=True, exist_ok=True)
+     logging.getLogger().addHandler(logging.FileHandler(raw_dir / 'harness.log'))
+@@ -250,6 +273,20 @@
+                         wheels_dir=args.data_dir / 'wheels', results_dir=raw_dir,
+                         submission_dir=args.bundle, models=models, sandbox='subprocess',
+                         concurrency=args.concurrency, display_mode='quiet', **caps)
++    import swegemma.evaluate as evaluate_module
++    original_verify = evaluate_module.verify_task
++    phase_times = ContextVar('phase_times')
++    import swegemma.harness.verification as verification_module
++    original_strip = verification_module.strip_protected_files_from_patch
++    verification_module.strip_protected_files_from_patch = observe_patch_strip(original_strip, phase_times)
++
++    async def timed_verify(*pos, **kw):
++        start = time.perf_counter()
++        try:
++            return await original_verify(*pos, **kw)
++        finally:
++            phase_times.get()['verification'] = time.perf_counter() - start
++    evaluate_module.verify_task = timed_verify
+ 
+     class LocalEvaluator(Evaluator):
+         agent_seconds = 0.0
+@@ -259,17 +296,25 @@
+         def _hydrate_task_from_secret(self, task):
+             return task  # Explicit inventory only; no implicit sibling secret discovery.
+ 
++        def _get_secret_bundle_data(self):
++            return {}, {}, None
++
+         async def _run_agent_sandbox(self, task, *pos, **kw):
+             safe = dataclasses.replace(task, patch='', test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=())
+             kw['context'].task = safe
+             start = time.perf_counter()
++            phase_times.get()['agent_active'] = True
+             try:
+                 self.patch, error, self.trace = await super()._run_agent_sandbox(safe, *pos, **kw)
++                self.agent_error = error or ''
+                 return self.patch, error, self.trace
+             finally:
+                 self.agent_seconds = time.perf_counter() - start
++                phase_times.get()['agent_active'] = False
+ 
+     async def one(iid):
++        times = dict(verification=0.0)
++        phase_times.set(times)
+         evaluator = LocalEvaluator(config)
+         task = dataclasses.replace(tasks[iid], patch='')
+         context = SwegemmaContext(docker_manager=evaluator.docker, container_id='',
+@@ -289,7 +334,7 @@
+         finally:
+             evaluator.docker.cleanup_all()
+         total = time.perf_counter() - start
+-        patch = result.agent_patch if result else evaluator.patch
++        patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch)
+         task_dir = raw_dir / iid
+         task_dir.mkdir(exist_ok=True)
+         (task_dir / 'agent.patch').write_text(patch)
+@@ -302,11 +347,13 @@
+         raw_error = result.error or '' if result else error or ''
+         row = dict(instance_id=iid, repo=task.repo, resolved=resolved, exit_code=code, error=error,
+                    wall_seconds=dict(agent=evaluator.agent_seconds,
+-                                     verification=max(0, total - evaluator.agent_seconds) if result and code != -1 else 0,
++                                     verification=times['verification'],
+                                      total=total), llm_turns=context.llm_calls_used,
+-                   tool_calls=dict(total=context.tool_calls_used, per_tool=per_tool), **tokens,
++                   tool_calls=dict(total=sum(per_tool.values()) if trace else context.tool_calls_used,
++                                   per_tool=per_tool), **tokens,
+                    **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+-                   timed_out=bool(re.search(r'timeout|timed out', raw_error, re.I)) or code == 124,
++                   timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' +
++                                           getattr(evaluator, 'agent_error', ''), re.I)) or code == 124,
+                    trace_path=str(trace_path.relative_to(ROOT)))
+         journal.append(row)
+         print(f'{iid}: resolved={resolved}', flush=True)
+@@ -332,6 +379,8 @@
+                 await one(queue.get_nowait())
+         await asyncio.gather(*(worker() for _ in range(args.concurrency)))
+     finally:
++        evaluate_module.verify_task = original_verify
++        verification_module.strip_protected_files_from_patch = original_strip
+         journal.close()
+ 
+ 
+@@ -353,6 +402,8 @@
+         parser.add_argument('--' + name, action='store_true')
+     args = parser.parse_args(argv)
+     guard_python(args.allow_foreign_python)
++    if urlparse(args.endpoint).hostname not in {'localhost', '127.0.0.1', '::1'}:
++        parser.error('Only localhost inference endpoints are permitted')
+     if args.concurrency < 1 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', args.run_name):
+         parser.error('Positive concurrency and a safe run name required')
+     for name in ('bundle', 'data_dir', 'split'):
+diff --git a/eval/tests/test_gold_calibration.py b/eval/tests/test_gold_calibration.py
+index 7107fcea5e54f92dc08b03b1c7fd4b3ee59f134e..cbb2607ca3f584cbb09bd2e3cbb7bf31b37ff669
+--- a/eval/tests/test_gold_calibration.py
++++ b/eval/tests/test_gold_calibration.py
+@@ -119,6 +119,7 @@
+                                       sandbox='subprocess', result=Path(directory) / 'result.json')
+             with patch.object(gold, 'load_inventory', return_value=[raw]), \
+                     patch.dict('sys.modules', {'swegemma.models': models}), \
++                    patch.object(gold, 'patch_subprocess_deps'), \
+                     patch.object(gold, 'verify_gold', side_effect=verifier):
+                 gold.worker(args)
+             return json.loads(args.result.read_text())
+diff --git a/eval/tests/test_run_agent_eval.py b/eval/tests/test_run_agent_eval.py
+index 7cc3adc0356da305bcee6d69c0f823bea346ab16..bea99036d8ee4e70f7c14e05dd26d04df699ad0d
+--- a/eval/tests/test_run_agent_eval.py
++++ b/eval/tests/test_run_agent_eval.py
+@@ -1,7 +1,5 @@
+ """Fast offline contracts; the real harness smoke test is explicitly opt-in."""
+-import asyncio
+-import dataclasses
+-import importlib.util
++import io
+ import json
+ import os
+ from pathlib import Path
+@@ -9,7 +7,6 @@
+ import sys
+ import threading
+ import types
+-from urllib.request import Request, urlopen
+ import uuid
+ 
+ import pytest
+@@ -155,24 +152,32 @@
+     runner.guard_python(True)
+ 
+ 
+-def test_stub_tool_calls_and_models(tmp_path):
++def test_stub_tool_calls_and_models(tmp_path, monkeypatch):
+     script = tmp_path / 'script.json'
+     call = dict(id='call_1', type='function', function=dict(name='get_status', arguments='{}'))
+     script.write_text(json.dumps([dict(content=None, tool_calls=[call]), dict(content='Done')]))
+-    with make_server(script) as server:
+-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+-        thread.start()
+-        url = f'http://127.0.0.1:{server.server_port}/v1'
+-        try:
+-            assert json.load(urlopen(url + '/models'))['object'] == 'list'
+-            for expected in ('tool_calls', 'stop'):
+-                req = Request(url + '/chat/completions', data=b'{"model":"stub"}',
+-                              headers={'Content-Type': 'application/json'})
+-                payload = json.load(urlopen(req))
+-                assert payload['choices'][0]['finish_reason'] == expected
+-        finally:
+-            server.shutdown()
+-            thread.join()
++    # Exercise the actual HTTP handlers with in-memory streams; no socket permissions needed.
++    monkeypatch.setattr('eval.stub_openai.ThreadingHTTPServer', lambda address, handler: handler)
++    handler_class = make_server(script)
++    handler = handler_class.__new__(handler_class)
++    handler.send_response = lambda status: None
++    handler.send_header = lambda *args: None
++    handler.end_headers = lambda: None
++    handler.wfile = io.BytesIO()
++    handler.path = '/v1/models'
++    handler.do_GET()
++    assert json.loads(handler.wfile.getvalue())['object'] == 'list'
++    for expected in ('tool_calls', 'stop'):
++        body = b'{"model":"stub"}'
++        handler.path = '/v1/chat/completions'
++        handler.headers = {'Content-Length': str(len(body))}
++        handler.rfile, handler.wfile = io.BytesIO(body), io.BytesIO()
++        handler.do_POST()
++        payload = json.loads(handler.wfile.getvalue())
++        assert payload['choices'][0]['finish_reason'] == expected
++        if expected == 'tool_calls':
++            assert payload['choices'][0]['message']['tool_calls'] == [call]
++        assert 'usage' not in payload  # Never invent token counts.
+ 
+ 
+ @pytest.mark.skipif(os.environ.get('RUN_AGENT_EVAL_E2E') != '1', reason='opt-in real harness smoke test')
+@@ -187,7 +192,11 @@
+             name='run_command', arguments=json.dumps({'command': 'printf "# stub smoke\\n" > stub_smoke.py'})))]),
+         dict(content=None, tool_calls=[dict(id='call_2', type='function', function=dict(
+             name='submit_patch', arguments='{}'))]), dict(content='Done.')]))
+-    with make_server(script) as server:
++    try:
++        server = make_server(script)
++    except PermissionError:
++        pytest.skip('Sandbox denied localhost socket creation')
++    with server:
+         thread = threading.Thread(target=server.serve_forever, daemon=True)
+         thread.start()
+         try:
+
+exec
+/bin/bash -lc 'bash /tmp/run-eval-tests.sh && git diff --check && git status --short' in /home/ubuntu/work/gemma-wt/codex-eval-runner
+ succeeded in 4459ms:
+.................................................................... [ 18%]
+........................................................................ [ 37%]
+........................................................................ [ 56%]
+........................................................................ [ 76%]
+............................................................s........... [ 95%]
+.............s..                                                         [100%]
+370 passed, 2 skipped, 4 subtests passed in 4.25s
+ M eval/kaggle/gold_calibration.py
+ M eval/tests/test_gold_calibration.py
+?? eval/README_AGENT_EVAL.md
+?? eval/run_agent_eval.py
+?? eval/stub_openai.py
+?? eval/tests/test_run_agent_eval.py
+
+codex
+Implemented the runner, scripted OpenAI stub, offline tests, and usage documentation. Extended calibration binding patching and captured agent diffs before test edits are stripped.
+
+Tests: `370 passed, 2 skipped, 4 subtests passed`. Used the existing pyimg pytest via `PYTHONPATH`; the harness venv lacks pytest.
+
+Open issue: full E2E remains unverified because the sandbox denied localhost socket creation. The opt-in test was attempted and skipped.
+
+No commits made.
+tokens used
+93,643
