@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 21:38Z (cycle 97, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 22:58Z (cycle 98, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - 31b: dist/31b-v000.zip sha256=4a23e14a1aae077161cb137b5ff72afe91ee2acb1d1fdbaf2e322abb6efae161 (repo a12f0b7; static+codex static OK)
@@ -20,16 +20,14 @@ History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Build
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
-## Running jobs (21:36Z): review-kernel-setup-fix5c-light + review-e4b-v002-light (start 23:08/23:09Z), review-kernel-probes-light
-  (waits for both; reviews 63127c8 with the OLD minus-image prompt; bin/job stop was denied by the permission classifier),
+## Running jobs (22:58Z): fix5c + v002 reviews sleeping to Codex-limit reset (~23:08Z), review-kernel-probes-light (waits for both; reviews 63127c8 with the OLD minus-image prompt; bin/job stop was denied by the permission classifier),
   review-memguard-fix6e-light (waits for probes), review-kernel-probes-gate-light (waits for probes; dec 036 delta), memguard 7933 (0 kills).
 - KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
   dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
 - fix5 branch codex/kernel-setup-fix5 @87001e4: merge after fix5c review clean, then host eval/tests on main. Item 6 docker-order
   MERGED 8c55985; main eval/tests 469p/3s/1f (stale test_memguard oom_score_adj; fixed by the fix6 merge).
 - memguard-fix6 eedf84b+0f5de3d livetest GREEN. Review clean -> merge + full eval/tests + deploy (stop 7933, start memguard-light). BLOCKING -> short report.
-- NOTE: bin/codex-build always branches from main HEAD; for follow-up rounds create the worktree on the previous commit manually,
-  write the spec, sed the previous build-*.sh, and bin/job start codex-<name>.
+- NOTE: codex-build branches from main HEAD; follow-ups: manual worktree on prev commit + sed prev build-*.sh + bin/job start.
 ## bin/job, memguard, owner patch (cycles 62-66)
 - Linger=yes since ~18:05Z (dec 025): scope path (MemoryMax=5G) is normal; Codex works under it. Owner patch v2 (ops/patches/bin-job-fallback.diff): HOLD for Aniket (dec 026), 3 BLOCKING in ops/codex/review-20261105T180811.md; plan v3 = pidfd helper. NOT started.
 - sandbox-limits round 3 9d610b5 (wait4 ru_maxrss peak; Codex 459 pass/4 skip). Host test job sandbox-limits3-hosttest; if green -> codex-review -> merge eval/ only.
@@ -43,7 +41,9 @@ History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Build
 ## Live caveats
 - Job naming (dec 024): waiters, codex-ask and codex-review jobs end in -light; builds, test suites and evals never do.
 - LORO with only 2 repos (rich, fastapi) is weak; report 002 must say so (dec 014 item 3).
-- Paper evidence due Nov 9 23:59Z (dec 007): gold calib (done), E4B timing + trace-analyst taxonomy (pending). Never edit paper/.
+- DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) taxonomy results/failure_taxonomy_e4b_v001_v5.json (trace-analyst, once);
+  (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
+  results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
 - Director reminder due 2026-11-06T23:02Z: GCP quota re-request line to Aniket; keep until a decision marks it done.
 - Any Kaggle GPU kernel must pin the starter docker_image (py3.12, cp312 wheelhouse). Hosted-LLM-API data question OPEN; no new 3rd-party services.
 - One pending Kaggle submission at a time; no partial credit on timeout (docs/RULES_FINDINGS.md).
