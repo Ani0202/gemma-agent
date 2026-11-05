@@ -41,7 +41,7 @@ History: ops/journal.md; pre-cycle-51 STATE: ops/history/STATE-archive.md. Build
 ## Live caveats
 - Job naming (dec 024): waiters, codex-ask and codex-review jobs end in -light; builds, test suites and evals never do.
 - LORO with only 2 repos (rich, fastapi) is weak; report 002 must say so (dec 014 item 3).
-- DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) taxonomy results/failure_taxonomy_e4b_v001_v5.json (trace-analyst, once);
+- DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
   (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
   results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
 - Director reminder due 2026-11-06T23:02Z: GCP quota re-request line to Aniket; keep until a decision marks it done.
