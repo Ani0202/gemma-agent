@@ -288,7 +288,7 @@ def patch_subprocess_deps(data_dir):
     Contract (swegemma 0.2.11 container_setup): Docker workspace setup first attempts
     the workspace editable install; _ensure_container_site_packages then unpacks every deduplicated
     (highest-version, py313-compatible) wheel from wheels_dir that is
-    < 16 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
+    < 20 MiB (harness _LARGE_WHEEL_THRESHOLD_BYTES) and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
     site-packages, no resolver; large wheels are added only if imported by the workspace; then
     sandbox/setup.py runs with --fast-path. We replicate exactly that inside the sandbox venv.
     The sandbox venv uses system_site_packages=True, so the HOST python must mirror the image
