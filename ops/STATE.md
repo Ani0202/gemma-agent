@@ -32,8 +32,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   on main. fix5c NON-BLOCKING 4: add the 5 vendored wheels to docs/ATTRIBUTION.md before merge. Item 6 docker-order
   MERGED 8c55985; main eval/tests 469p/3s/1f (stale test_memguard oom_score_adj; fixed by the fix6 merge).
 - memguard-fix6 eedf84b+0f5de3d livetest GREEN. Review clean -> merge + full eval/tests + deploy (stop 7933, start memguard-light). BLOCKING -> short report.
-- NOTE: codex-build branches from main HEAD; follow-ups: manual worktree on prev commit + sed prev build-*.sh + bin/job start.
-- bin/job owner patch v2 (ops/patches/bin-job-fallback.diff): HOLD for Aniket (dec 026), 3 BLOCKING in ops/codex/review-20261105T180811.md; plan v3 = pidfd helper. NOT started.
+- codex-build branches from main HEAD (follow-ups: manual worktree). bin/job owner patch v2: HOLD (dec 026), pidfd v3 NOT started.
 - DEC 027 FIDELITY: kernel reproduces Dockerfile.public only (pip + line-9 tools, offline); NO PIP_* prefixes; setup_calls logging mandatory.
 - Dec 022 item 4 = plan 005 (ops/codex/ask-20261105T181222.md; draft bundles/drafts/item4-system.md; empty submit loses all; needs GPU).
 ## Quota / spend
@@ -76,6 +75,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   pass-rate evals start, pre-register which environment the local sandbox models and why. Don't act on it before then.
 - Dec 032 item 5: decision_note is in timing_summary (probes branch); add the same note field to results/kaggle_timing_e4b_v001.json at merge.
 ## Next 3
-1. Director authorizes v002 -> bin/kaggle-submit; log submit/complete/runtime (ops/budget/kaggle.md); LB score -> results file (dec 038 item 3).
+1. guard v4 clean -> Aniket applies -> dry checks -> submit v002 after 00:00Z Nov 6; log (ops/budget/kaggle.md); LB -> results/lb_e4b_v002.json.
 2. probes + probes-gate reviews clean -> push codex/kernel-probes-gate (cap 4.0) -> timing_summary from finfix branch --gate-mode stock-path -> report 010.
 3. finfix + fix6e reviews -> merge stack / deploy memguard-light. Then plan 005 (dec 022 item 4) + plan 007 (dec 039) = first quality levers.
