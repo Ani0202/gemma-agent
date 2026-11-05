@@ -84,4 +84,4 @@
 2026-11-05T15:59Z | launched gold-rerun-b5 (pre-reg B5: gold-local2 + gold-null2 in shared env) | ops/jobs/gold-rerun-b5.cmd
 2026-11-05T16:01Z | router swap verified (dec 018 item 1): router.log 'router started (pid 2601754)' 15:57:54Z, 'clear builder' logged 16:00:15Z before delivery; bin/.router.new gone | ops/logs/router.log
 2026-11-05T16:40Z | gold-diag4 done: 3/77 on Kaggle (inline_snapshot; env not scorer-faithful); Kaggle gold-diag line closed | runs/gold-diag4
-2026-11-05T16:55Z | gold-rerun-b5 gold phase: 43 vs 52 pass; 9 fastapi lost (typing_inspection missing once _host_env leak removed); report 002 | results/gold_rerun_b5_compare.json, ops/reports/002-gold-rerun-b5-fastapi-env.md
+2026-11-05T16:44Z | gold-rerun-b5 gold phase: 43 vs 52 pass; 9 fastapi lost (typing_inspection missing once _host_env leak removed); report 002 | results/gold_rerun_b5_compare.json, ops/reports/002-gold-rerun-b5-fastapi-env.md
