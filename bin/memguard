@@ -8,19 +8,19 @@ Every --interval seconds (default 2):
           descendants, including orphans re-parented away from their wrapper; or
      (ii) cwd under /home/ubuntu/work/gemma or /tmp, RSS > 3G, and comm not a session process
           (claude/node/codex/tmux, or a bash/sh whose parent is one of those).
-     Nothing else is ever signalled. memguard's own job group is never a target.
+     Session processes are excluded from both sets. Nothing else is ever signalled. memguard's own job group is never a target.
   2. Raise oom_score_adj to 1000 on every target (unprivileged), so the kernel picks us first.
-  3. Group targets into JOBS: a marked process's job root is its topmost marked ancestor; an
-     unmarked (ii) process is its own root. Job RSS = sum of targeted RSS in that tree.
-  4. If MemAvailable < --min-available (2.5G) or total targeted RSS > --max-total (6G), SIGKILL
-     the whole tree of the largest job: every descendant, then the root if still alive 3 s later
-     (so a bin/job wrapper gets to record "failed 137" first). Re-scan until there are no survivors.
-     Log to ops/logs/memguard.log, append to ops/jobs/<name>.log, and mail the builder.
-Reads only /proc/<pid>/{status,stat,environ,cwd,cmdline} of our own uid. Python stdlib only.
+  3. Group marked members by marker value and bin/job's recorded wrapper/process group.
+     Marked orphans outside running groups remain targets in an orphan job.
+  4. On memory pressure, kill eligible members of the largest job, allowing its wrapper
+     3 seconds to record failure. Re-inventory for up to 5 seconds, including new forks.
+Reads only /proc/<pid>/{status,stat,environ,cwd} of our own uid; writes oom_score_adj.
+Python stdlib only. No process-group signals: every recipient must pass the allowlist.
 Usage: bin/memguard [--once] [--dry-run] [--interval S] [--min-available G] [--max-total G]
                     [--unmarked-rss G] [--marker NAME] [--roots DIR,DIR] [--log PATH] [--no-mail]
 """
-import argparse, os, signal, subprocess, sys, time
+import argparse, errno, os, signal, subprocess, sys, threading, time
+from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GIB = 1024 ** 3
@@ -45,43 +45,59 @@ def mem_available():
     return None
 
 
-def proc_info(pid):
-    """Return dict(pid, ppid, uid, comm, rss) for one pid, or None if gone/not readable."""
-    st = read(f"/proc/{pid}/status")
-    if st is None:
+def proc_stat(pid):
+    raw = read(f"/proc/{pid}/stat")
+    if not raw:
         return None
-    d = {"pid": pid, "rss": 0, "uid": None, "ppid": 0, "comm": ""}
+    try:
+        fields = raw.rsplit(") ", 1)[1].split()
+        return {"state": fields[0], "ppid": int(fields[1]),
+                "pgid": int(fields[2]), "starttime": int(fields[19])}
+    except (IndexError, ValueError):
+        return None
+
+
+def proc_info(pid):
+    """Read only our uid's processes, binding status to a stable stat identity."""
+    try:
+        if os.stat(f"/proc/{pid}").st_uid != UID:
+            return None
+    except OSError:
+        return None
+    before = proc_stat(pid)
+    st = read(f"/proc/{pid}/status")
+    after = proc_stat(pid)
+    if not before or not after or before["starttime"] != after["starttime"] or st is None:
+        return None
+    d = {"pid": pid, "rss": 0, "uid": None, "comm": "", **after}
     for line in st.splitlines():
         k, _, v = line.partition(":")
         if k == "Name":
             d["comm"] = v.strip()
-        elif k == "PPid":
-            d["ppid"] = int(v)
         elif k == "Uid":
             d["uid"] = int(v.split()[0])
         elif k == "VmRSS":
             d["rss"] = int(v.split()[0]) * 1024
-    return d
+    return d if d["uid"] == UID else None
 
 
 def snapshot():
-    """All processes of our uid: {pid: info}. Others are skipped after reading only their status uid."""
     procs = {}
     for name in os.listdir("/proc"):
-        if not name.isdigit():
-            continue
-        d = proc_info(int(name))
-        if d and d["uid"] == UID:
-            procs[d["pid"]] = d
+        if name.isdigit():
+            d = proc_info(int(name))
+            if d:
+                procs[d["pid"]] = d
     return procs
 
 
-def has_marker(pid, marker):
-    env = read(f"/proc/{pid}/environ", "rb")
-    if not env:
-        return False
+def marker_value(pid, marker):
+    env = read(f"/proc/{pid}/environ", "rb") or b""
     key = marker.encode() + b"="
-    return any(e.startswith(key) for e in env.split(b"\0"))
+    for entry in env.split(b"\0"):
+        if entry.startswith(key):
+            return entry[len(key):]  # Empty marker values still count as marked.
+    return None
 
 
 def cwd_of(pid):
@@ -117,106 +133,162 @@ def descendants(root, procs):
 
 def is_session(pid, procs):
     d = procs[pid]
-    if d["comm"] in SESSION_COMMS:
-        return True
-    if d["comm"] in SHELL_COMMS:
-        par = procs.get(d["ppid"])
-        return bool(par and par["comm"] in SESSION_COMMS)
-    return False
+    return (d["comm"] in SESSION_COMMS or
+            (d["comm"] in SHELL_COMMS and
+             any(procs[a]["comm"] in SESSION_COMMS for a in ancestors(pid, procs))))
 
 
-def find_jobs(procs, args, self_pids):
-    """Return (targets set, jobs dict root -> {'pids': [...], 'rss': int})."""
-    marked = {p for p in procs if has_marker(p, args.marker)}
-    targets = set()
-    for p, d in procs.items():
-        if p in self_pids:
+def running_jobs():
+    """Both current four-field and legacy three-field status records."""
+    records = []
+    for path in sorted(Path(REPO, "ops/jobs").glob("*.status")):
+        fields = (read(path) or "").split()
+        if len(fields) not in (3, 4) or fields[0] != "running":
             continue
-        if p in marked:
-            targets.add(p)
-        elif (d["rss"] > args.unmarked_rss and not is_session(p, procs)
-              and under(cwd_of(p), args.roots)):
-            targets.add(p)
-    jobs = {}
-    for p in targets:
-        if p in marked:
-            root = p
-            for a in ancestors(p, procs):
-                if a in marked:
-                    root = a
-        else:
-            root = p
-        j = jobs.setdefault(root, {"pids": [], "rss": 0})
-        j["pids"].append(p); j["rss"] += procs[p]["rss"]
-    # Never touch our own job (memguard runs under bin/job and carries the marker).
-    for root in list(jobs):
-        if root in self_pids or (set(descendants(root, procs)) | {root}) & self_pids:
-            del jobs[root]
-            targets -= set(descendants(root, procs)) | {root}
-    return targets, jobs
+        try:
+            pid = int(fields[1])
+            pgid = int(fields[3]) if len(fields) == 4 else None
+        except ValueError:
+            continue
+        records.append({"name": path.stem, "pid": pid, "pgid": pgid})
+    return records
 
 
-def job_name(root):
-    """bin/job wrapper cmdline is: bash -c '<script>' _ <name> ...  -> <name>; else None."""
-    raw = read(f"/proc/{root}/cmdline", "rb") or b""
-    argv = [a.decode(errors="replace") for a in raw.split(b"\0")]
-    if len(argv) >= 5 and argv[1] == "-c" and "ops/jobs/" in argv[2] and argv[3] == "_":
-        return argv[4]
+def job_name(root, procs, records):
+    """Use status metadata only; never inspect a process command line."""
+    pgid = procs.get(root, {}).get("pgid")
+    for record in records:
+        if (record["pid"] == root or record["pgid"] == root or
+                (pgid is not None and pgid in (record["pid"], record["pgid"]))):
+            return record["name"]
     return None
 
 
-def raise_oom_adj(pids, dry):
-    n = 0
-    for p in pids:
-        cur = read(f"/proc/{p}/oom_score_adj")
-        if cur is None or cur.strip() == "1000":
+def find_jobs(procs, args, self_pids, records=None):
+    """Classify every recipient independently; ancestry only associates eligible members."""
+    records = running_jobs() if records is None else records
+    marked = {p: marker_value(p, args.marker) for p in procs}
+    jobs = {}
+    for p, d in procs.items():
+        if d["uid"] != UID or d["state"] in {"Z", "X"} or is_session(p, procs):
             continue
-        if not dry:
+        value = marked[p]
+        if value is None and not (d["rss"] > args.unmarked_rss and under(cwd_of(p), args.roots)):
+            continue
+        record = None
+        if value is not None:
+            lineage = [p] + ancestors(p, procs)
+            record = next((r for r in records if
+                           (r["pgid"] is not None and d["pgid"] == r["pgid"]) or
+                           (r["pgid"] is None and r["pid"] in lineage)), None)
+            key = (("job", value, record["pid"], record["pgid"]) if record else
+                   ("orphan", value))
+        else:
+            key = ("unmarked", p, d["starttime"])
+        root = record["pid"] if record else p
+        j = jobs.setdefault(key, {"key": key, "root": root, "name": job_name(root, procs, records),
+                                  "pids": [], "members": {}, "rss": 0, "records": records})
+        j["pids"].append(p)
+        j["members"][p] = d
+        j["rss"] += d["rss"]
+    # Exclude the watchdog's whole job, including siblings, rather than only its pid.
+    for key, j in list(jobs.items()):
+        if (set(j["pids"]) & self_pids or j["root"] in self_pids):
+            del jobs[key]
+    targets = {p: d for j in jobs.values() for p, d in j["members"].items()}
+    return targets, jobs
+
+
+def same_process(d):
+    current = proc_stat(d["pid"])
+    return bool(current and current["starttime"] == d["starttime"] and
+                current["state"] not in {"Z", "X"})
+
+
+def send_kill(d, log):
+    """Pin a pidfd before the final identity check; never signal a recycled pid."""
+    fd = None
+    try:
+        if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
             try:
-                with open(f"/proc/{p}/oom_score_adj", "w") as f:
+                fd = os.pidfd_open(d["pid"])
+            except OSError as exc:
+                if exc.errno not in (errno.ENOSYS, errno.EINVAL, errno.EPERM):
+                    raise
+        if not same_process(d):
+            return False
+        if fd is not None:
+            signal.pidfd_send_signal(fd, signal.SIGKILL)
+        else:
+            os.kill(d["pid"], signal.SIGKILL)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError as exc:
+        log(f"  cannot kill {d['pid']}: {exc}")
+        return False
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def raise_oom_adj(targets, dry):
+    n = 0
+    if dry:
+        return n
+    for p, d in targets.items():
+        # Opening first pins the proc file to this process, even if its numeric pid is reused.
+        try:
+            with open(f"/proc/{p}/oom_score_adj", "w") as f:
+                if same_process(d):
                     f.write("1000")
-                n += 1
-            except OSError:
-                pass
+                    n += 1
+        except OSError:
+            pass
     return n
 
 
-def kill_tree(root, known, self_pids, log):
-    """SIGKILL every descendant of root plus the job's known target pids (re-scanning until none
-    are left), then root itself. Return (killed, survivors)."""
+def inventory(job, args, self_pids):
+    # Keep the original wrapper/pgid association even after it records done or exits.
+    _, jobs = find_jobs(snapshot(), args, self_pids, job["records"])
+    return jobs.get(job["key"], {}).get("members", {})
+
+
+def kill_tree(job, args, self_pids, log):
+    """Two empty scans, bounded by five seconds, then an independent survivor inventory."""
     killed = set()
-    for _ in range(20):
-        procs = snapshot()
-        tree = [p for p in set(descendants(root, procs)) | ({k for k in known if k in procs} - {root} - killed)
-                if p not in self_pids]
-        if not tree:
+    started = time.monotonic()
+    deadline = started + 5
+    root_identity = job["members"].get(job["root"])
+    empty_scans = 0
+    while time.monotonic() < deadline:
+        members = inventory(job, args, self_pids)
+        # The wrapper gets a grace period to record the child's failure. A new process
+        # with the same numeric pid does not inherit this special treatment.
+        grace = (root_identity and time.monotonic() < started + 3 and
+                 any(p != job["root"] for p in job["members"]))
+        for p, d in members.items():
+            if grace and p == job["root"] and d["starttime"] == root_identity["starttime"]:
+                continue
+            if send_kill(d, log):
+                killed.add(p)
+        empty_scans = empty_scans + 1 if not members else 0
+        if empty_scans >= 2 and not grace:
             break
-        for p in tree:
-            try:
-                os.kill(p, signal.SIGKILL); killed.add(p)
-            except ProcessLookupError:
-                pass
-            except PermissionError:
-                log(f"  cannot kill {p} (permission)")
         time.sleep(0.2)
-    # Give a bin/job wrapper time to record its exit status, then make sure the root is gone too.
-    deadline = time.time() + 3
-    while time.time() < deadline and os.path.exists(f"/proc/{root}"):
-        time.sleep(0.2)
-    d = proc_info(root)
-    if d and d["uid"] == UID and root not in self_pids:
-        try:
-            os.kill(root, signal.SIGKILL); killed.add(root)
-        except ProcessLookupError:
-            pass
-        time.sleep(0.2)
-    survivors = []
-    for p in killed:
-        d = proc_info(p)
-        stat = read(f"/proc/{p}/stat") if d and d["uid"] == UID else None
-        if stat and stat.rsplit(") ", 1)[-1][:1] != "Z":
-            survivors.append(p)
+    survivors = sorted(inventory(job, args, self_pids))
     return sorted(killed), survivors
+
+
+def send_mail(msg, log):
+    try:
+        result = subprocess.run([os.path.join(REPO, "bin/send"), "builder", msg],
+                                env={**os.environ, "SEND_FROM": "memguard", "GEMMA_ROLE": "memguard"},
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        if result.returncode:
+            log(f"  mail failed: exit {result.returncode}")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"  mail failed: {exc}")
 
 
 def main():
@@ -253,6 +325,10 @@ def main():
         self_pids = {os.getpid()} | set(ancestors(os.getpid(), procs))
         # Our ancestors include the bin/job wrapper and maybe a Claude shell; they're never targets.
         targets, jobs = find_jobs(procs, args, self_pids)
+        if args.dry_run:
+            log(f"targets={sorted(targets)} jobs=" + repr([
+                {"name": j["name"], "root": j["root"], "pids": sorted(j["pids"])}
+                for j in jobs.values()]))
         raise_oom_adj(targets, args.dry_run)
         avail = mem_available() or 0
         total = sum(j["rss"] for j in jobs.values())
@@ -265,16 +341,17 @@ def main():
         elif avail < args.min_available:
             reason = f"MemAvailable {avail/GIB:.2f}G < {args.min_available/GIB:.2f}G"
         if reason and jobs:
-            root, j = max(jobs.items(), key=lambda kv: kv[1]["rss"])
+            _, j = max(jobs.items(), key=lambda kv: kv[1]["rss"])
+            root = j["root"]
             if total <= args.max_total and j["rss"] < args.min_kill_rss:
                 reason = None  # pressure is not ours to fix by killing a tiny job
         if reason and jobs:
-            name = job_name(root)
+            name = j["name"]
             comm = procs.get(root, {}).get("comm", "?")
             log(f"KILL job={name or '-'} root={root} comm={comm} rss={j['rss']/GIB:.2f}G reason: {reason}"
                 + (" [dry-run]" if args.dry_run else ""))
             if not args.dry_run:
-                killed, surv = kill_tree(root, j["pids"], self_pids, log)
+                killed, surv = kill_tree(j, args, self_pids, log)
                 log(f"  killed {len(killed)} pids; survivors={surv}")
                 msg = (f"memguard killed job {name or '(unmarked pid %d %s)' % (root, comm)}: "
                        f"{j['rss']/GIB:.2f}G, {reason}. Survivors: {surv or 'none'}. See ops/logs/memguard.log.")
@@ -286,9 +363,8 @@ def main():
                     except OSError:
                         pass
                 if not args.no_mail:
-                    subprocess.run([os.path.join(REPO, "bin/send"), "builder", msg],
-                                   env={**os.environ, "SEND_FROM": "memguard", "GEMMA_ROLE": "memguard"},
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    # Mail may take up to ten seconds; keep polling while it completes.
+                    threading.Thread(target=send_mail, args=(msg, log)).start()
         if args.once:
             return 0
         time.sleep(args.interval)
