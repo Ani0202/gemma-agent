@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 ~15:25Z (cycle 52, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 ~15:30Z (cycle 53, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -32,16 +32,18 @@ Builder on Opus (dec 010: local-first, two-strike).
 ## Dec 017 (context clears): in progress
 - Done: CLAUDE.md top line; this STATE trim + archive.
 - Router: review done; BLOCKING fixed in bin/.router.new (clear gated on tmux success). Swap DENIED by the permission system
-  for the Builder; escalated to Director. Someone with permission runs: mv bin/.router.new bin/router &&
-  tmux respawn-window -k -c ~/work/gemma -t gemma:router bin/router; then check ops/logs/router.log for the next delivery.
+  for the Builder. Dec 018: Director asked Aniket to do the swap himself; leave bin/.router.new untouched. He runs: mv bin/.router.new bin/router &&
+  tmux respawn-window -k -c ~/work/gemma -t gemma:router bin/router; then check ops/logs/router.log for a 'clear <role>'/'no clear' line on the next delivery and journal it.
+- Dec 018 policy: owner activity keeps precedence over the 2 h clear valve.
 
 ## On job finish
-- e4b-timing-wait3: python3 eval/kaggle/timing_summary.py runs/e4b-timing/timing.jsonl results/kaggle_timing_e4b_v000.json;
+- e4b-timing-wait3: FIRST confirm from kernel log that the guard saw 4 L4 devices (dec 018). If it aborted as 1xL4, find the valid
+  4xL4 shape string from the starter notebook or the Kaggle API and report it; don't retry blind. Log every push in kaggle.md. Then: python3 eval/kaggle/timing_summary.py runs/e4b-timing/timing.jsonl results/kaggle_timing_e4b_v000.json;
   test-run share post-hoc from raw traces (exec-boundary, not FIFO-per-name); check header mcp_import_ok; fill ops/budget/kaggle.md actual hours.
 - codex-eval-runner-fix: review diff, real-bwrap tests + stub E2E, confirm N2 (verification_timeout_seconds forwarded), codex-review, merge.
   Then rerun gold-local + gold-null in shared env (B5). Pre-registered: identical pass set + null control => splits v2 stand; any change => short report.
 
 ## Next 3
-1. Router swap: waiting on Director/owner (permission denied to Builder).
+1. Router swap: waiting on Aniket (dec 018); verify router.log afterwards.
 2. e4b-timing results -> results/ + plan-001 p90 rule (parallel with 3).
 3. eval-runner-fix review/merge -> gold rerun -> report 002 (first-submission candidate + LORO caveat).
