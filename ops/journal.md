@@ -97,3 +97,6 @@
 2026-11-05T17:52Z | relaunched review-memguard, codex-sandbox-limits, ask-setup-210s under the systemd scope cap | ops/jobs/
 2026-11-05T17:53Z | dec 022 item 3: e4b-v001 (cap 1.4) packed sha256=4d07af92...; codex-review queued; re-time held | bundles/e4b/v001/MANIFEST.md
 2026-11-05T17:53Z | dec 022 item 2c: scout report in | ops/scout/2026-11-05-timing-caps.md
+2026-11-05T17:56Z | dec 023 item 1a: ops/patches/bin-job-fallback.diff drafted (linger-gated scope, ulimit -d); scratch smoke OK; codex-review queued | ops/patches/bin-job-fallback.diff
+2026-11-05T17:57Z | dec 023 item 3: starter + "[0.10]" notebook caps recorded (starter defaults 60 min; sample 1 min; [0.10] 4.5 min) | docs/RULES_FINDINGS.md
+2026-11-05T17:58Z | dec 023 items 1b/4: bus+pid check and the 2026-11-09T15:00Z linger reminder added to STATE | ops/STATE.md

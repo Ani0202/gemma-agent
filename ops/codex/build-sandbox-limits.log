@@ -2055,3 +2055,1214 @@ def test_runtime_paths_include_prefix_and_wheel_symlink_targets(tmp_path, monkey
     (root / 'wheels/escape').unlink()
     (root / 'venv/pyvenv.cfg').write_text('home = /home/ubuntu/bin\n')
 
+exec
+/bin/bash -lc "cat > eval/proctree.py <<'PY'
+\"\"\"Linux process identities and RSS, restricted to our uid (stdlib only).\"\"\"
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import signal
+
+
+@dataclass(frozen=True)
+class Process:
+    pid: int
+    ppid: int
+    pgid: int
+    sid: int
+    rss: int
+    starttime: int
+    state: str
+
+
+def snapshot():
+    processes = {}
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            if entry.stat().st_uid "'!= os.getuid():
+                continue
+            # comm may contain spaces and parentheses.
+            fields = (entry / '"'stat').read_text().rsplit(')', 1)[1].split()
+            pid = int(entry.name)
+            processes[pid] = Process(pid, int(fields[1]), int(fields[2]),
+                                     int(fields[3]), int(fields[21]) * os.sysconf('SC_PAGE_SIZE'),
+                                     int(fields[19]), fields[0])
+        except (OSError, ValueError, IndexError):
+            continue  # Process exited during the scan.
+    return processes
+
+
+def descendants(pids, processes=None):
+    processes = snapshot() if processes is None else processes
+    found = {pids} if isinstance(pids, int) else set(pids)
+    while True:
+        children = {p.pid for p in processes.values() if p.ppid in found}
+        if children <= found:
+            return found
+        found.update(children)
+
+
+def survivors(pids, processes=None):
+    \"\"\"Return live identities from a pid -> Process mapping, excluding zombies.\"\"\"
+    processes = snapshot() if processes is None else processes
+    return {pid: p for pid, old in pids.items()
+            if (p := processes.get(pid)) is not None
+            and p.starttime == old.starttime and p.state not in ('Z', 'X')}
+
+
+def tree_rss(pids, processes=None):
+    return sum(p.rss for p in survivors(pids, processes).values())
+
+
+def kill_tree(pids):
+    \"\"\"SIGKILL verified identities; never signal a recycled pid or unrelated group.\"\"\"
+    live = survivors(pids)
+    for p in live.values():
+        # Only a verified group leader licenses a group signal.
+        if p.pid == p.pgid:
+            try:
+                os.killpg(p.pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    for pid, p in live.items():
+        # Recheck immediately before individual signals, including detached children.
+        if pid in survivors({pid: p}):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    return len(live)
+PY
+python3 - <<'PY'
+p='eval/sandbox_env.py'
+s=open(p).read().replace('import sys\\n','import sys\\nimport time\\nimport uuid\\n\\nfrom eval import proctree\\n')
+pos=s.index('\\ndef apply_isolation(')
+s=s[:pos]+'''
+def execute_limited(command, cwd, env, timeout=300, *, shell=None,
+                    max_output_chars=10 * 1024 * 1024):
+    \"\"\"Installed executor contract, with host process-tree limits and cleanup.\"\"\"
+    from adk_eval_core.errors import EvalCoreError
+    from adk_eval_core.sandbox.base import ExecutionResult
+
+    start = time.perf_counter()
+    metrics = command_metrics.get()
+    tracked = {}
+    peak = 0
+    marker = ('GEMMA_SANDBOX_TREE=' + uuid.uuid4().hex).encode()
+    child_env = dict(env)
+    child_env['GEMMA_SANDBOX_TREE'] = marker.decode().split('=', 1)[1]
+    if shell is None:
+        shell = isinstance(command, str)
+    try:
+        limit = int(os.environ.get('GEMMA_SANDBOX_MEM_BYTES', 4 * 1024**3))
+        as_limit = int(os.environ.get('GEMMA_SANDBOX_AS_BYTES', 8 * 1024**3))
+        prlimit = shutil.which('prlimit')
+        if prlimit:
+            # Preserve Popen's string/list shell semantics inside the backstop.
+            if shell:
+                command = ['/bin/sh', '-c', command] if isinstance(command, str) else ['/bin/sh', '-c', *command]
+            elif isinstance(command, str):
+                command = [command]
+            command = [prlimit, f'--as={as_limit}', '--', *command]
+            shell = False
+        proc = subprocess.Popen(command, shell=shell, cwd=str(cwd), env=child_env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding='utf-8', errors='replace',
+                                start_new_session=True)
+    except (RuntimeError, OSError, ValueError, EvalCoreError) as exc:
+        return ExecutionResult(status='error', stdout='', stderr=str(exc), exit_code=-1,
+                               duration_seconds=round(time.perf_counter() - start, 3))
+
+    def scan():
+        nonlocal peak
+        processes = proctree.snapshot()
+        roots = set(proctree.survivors(tracked, processes)) | {proc.pid}
+        selected = proctree.descendants(roots, processes)
+        for p in processes.values():
+            if p.pgid == proc.pid or p.sid == proc.pid:
+                selected.add(p.pid)
+            elif p.pid not in selected:
+                # A child can setsid + reparent between polls. The inherited unique
+                # marker catches it without relying on namespace-local pids (bwrap).
+                try:
+                    if marker in Path(f'/proc/{p.pid}/environ').read_bytes().split(b'\\\\0'):
+                        selected.add(p.pid)
+                except OSError:
+                    pass
+        selected = proctree.descendants(selected, processes)
+        for pid in selected:
+            if pid in processes:
+                tracked.setdefault(pid, processes[pid])
+        peak = max(peak, proctree.tree_rss(tracked, processes))
+        return proctree.survivors(tracked, processes)
+
+    def cleanup():
+        live = scan()
+        count = len(live)
+        deadline = time.monotonic() + 2
+        while live:
+            proctree.kill_tree(live)
+            proc.poll()  # Reap our direct child; zombies aren't running survivors.
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Sandbox processes survived SIGKILL')
+            time.sleep(0.025)
+            live = scan()
+        return count
+
+    status, code = None, None
+    stdout, stderr = '', ''
+    try:
+        while True:
+            scan()
+            if peak > limit:
+                status, code = 'error', 137
+                if metrics is not None:
+                    metrics['mem_kills'] = metrics.get('mem_kills', 0) + 1
+                cleanup()
+                break
+            if timeout is not None and time.perf_counter() - start >= timeout:
+                status, code = 'timeout', 124
+                cleanup()
+                break
+            if proc.poll() is not None:
+                count = cleanup()
+                if metrics is not None:
+                    metrics['orphan_kills'] = metrics.get('orphan_kills', 0) + count
+                break
+            wait = 0.25 if timeout is None else max(0.001, min(0.25, timeout - (time.perf_counter() - start)))
+            try:
+                stdout, stderr = proc.communicate(timeout=wait)
+            except subprocess.TimeoutExpired:
+                continue
+            # Scan and clean up even if detached daemons closed their pipe fds.
+            count = cleanup()
+            if metrics is not None:
+                metrics['orphan_kills'] = metrics.get('orphan_kills', 0) + count
+            break
+        try:
+            stdout, stderr = proc.communicate(timeout=1)
+        except Exception:
+            stdout, stderr = '', ''
+        if status is None:
+            status, code = ('ok' if proc.returncode == 0 else 'error'), proc.returncode
+        if status "'!= '"'timeout':
+            if max_output_chars and len(stdout) > max_output_chars:
+                stdout = stdout[:max_output_chars] + '\\\\n...[Output truncated at 10MB limit]\\\\n'
+            if max_output_chars and len(stderr) > max_output_chars:
+                stderr = stderr[:max_output_chars] + '\\\\n...[Output truncated at 10MB limit]\\\\n'
+        if code == 137:
+            stderr += '\\\\nkilled: sandbox memory limit\\\\n'
+    except (RuntimeError, OSError, ValueError, EvalCoreError) as exc:
+        status, code, stdout, stderr = 'error', 1, '', str(exc)
+    finally:
+        cleanup()  # Fail closed if a process cannot be killed.
+        proc.stdout.close()
+        proc.stderr.close()
+        if metrics is not None:
+            metrics['peak_rss_bytes'] = max(metrics.get('peak_rss_bytes', 0), peak)
+            for key in ('mem_kills', 'orphan_kills'):
+                metrics.setdefault(key, 0)
+    return ExecutionResult(status=status, stdout=stdout or '', stderr=stderr or '',
+                           exit_code=code, duration_seconds=round(time.perf_counter() - start, 3))
+
+''' + s[pos:]
+s=s.replace('result = original(command=command, cwd=cwd, env=env, **kwargs)', 'result = execute_limited(command=command, cwd=cwd, env=env, **kwargs)')
+open(p,'w').write(s)
+p='eval/kaggle/gold_calibration.py';s=open(p).read().replace('CONCURRENCY = 2', \"CONCURRENCY = int(os.environ.get('GOLD_CONCURRENCY', '2'))\\nif CONCURRENCY < 1:\\n    raise ValueError('GOLD_CONCURRENCY must be positive')\")
+s=s.replace('    start = time.monotonic()\\n    raw = next', \"    from eval.sandbox_env import command_metrics\\n    metrics = dict(peak_rss_bytes=0, mem_kills=0, orphan_kills=0)\\n    metrics_token = command_metrics.set(metrics)\\n    start = time.monotonic()\\n    raw = next\")
+s=s.replace(\"    row['duration_seconds'] = round(time.monotonic() - start, 3)\", \"    command_metrics.reset(metrics_token)\\n    row.update({key: int(metrics[key]) for key in ('peak_rss_bytes', 'mem_kills', 'orphan_kills')})\\n    row['duration_seconds'] = round(time.monotonic() - start, 3)\")
+s=s.replace('f\"resolved={row[\\'resolved\\']} exit_code=', 'f\"peak_rss_bytes={row.get(\\'peak_rss_bytes\\', 0)} mem_kills={row.get(\\'mem_kills\\', 0)} orphan_kills={row.get(\\'orphan_kills\\', 0)} \"\\n                      f\"resolved={row[\\'resolved\\']} exit_code=')
+open(p,'w').write(s)
+PY" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+exec
+/bin/bash -lc "sed -n '130,157p' eval/tests/test_eval_fixes.py; rg -n 'sys.path|sandbox_env|return dict|duration_seconds' eval/kaggle/gold_calibration.py; ls -l bin/memguard; bin/job status" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+    assert result['sandbox'] == 'bwrap' and result['bwrap_argv_template'] == env.BWRAP_TEMPLATE
+
+
+def test_executor_wraps_translated_commands_and_counts_timeouts(tmp_path, monkeypatch, harness):
+    import swegemma.sandbox.subprocess as sb
+    seen = []
+    def execute(**kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(status='timeout', exit_code=124)
+    monkeypatch.setattr(sb, 'execute_subprocess_command', execute)
+    monkeypatch.setattr(env, 'runtime_ro_paths', lambda *args: [Path('/opt/python')])
+    env.apply_isolation(['/home/ubuntu'], [])
+    state = {}
+    token = env.command_metrics.set(state)
+    try:
+        for _ in range(2):
+            sb.execute_subprocess_command(command=['/bin/bash', '-c', 'translated'],
+                                          cwd=tmp_path / 'workspace', env={}, timeout=3, shell=False)
+        assert state['cmd_timeouts'] == 2
+        assert seen[0]['command'][0] == 'bwrap'
+        assert seen[0]['command'][-1] == 'translated'
+        assert seen[0]['timeout'] == 3 and seen[0]['shell'] is False
+    finally:
+        env.command_metrics.reset(token)
+
+
+def test_real_bwrap_probe(tmp_path, monkeypatch, harness):
+    if not shutil.which('bwrap'):
+50:                or type(row.get('duration_seconds')) not in (float, int)
+51:                or not math.isfinite(row['duration_seconds']) or row['duration_seconds'] < 0):
+92:    return dict(total=len(tasks), finished=len(results), passed=len(passing),
+183:    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
+185:    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+186:    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
+244:    from eval.sandbox_env import command_metrics
+250:               exit_code=None, duration_seconds=0.0, error=None, sandbox=args.sandbox)
+292:    row['duration_seconds'] = round(time.monotonic() - start, 3)
+317:    return dict(instance_id=task['instance_id'], repo=task['repo'], resolved=False,
+318:                exit_code=None, duration_seconds=round(time.monotonic() - start, 3),
+ls: cannot access 'bin/memguard': No such file or directory
+ask-shadowing: done 0 2026-11-05T14:55:15Z
+codex-eval-runner-fix: done 0 2026-11-05T15:29:41Z
+codex-eval-runner: done 0 2026-11-05T14:34:34Z
+codex-gold-kernel: done 0 2026-11-04T23:08:04Z
+codex-pack-harden: done 0 2026-11-04T22:28:41Z
+codex-pack: done 0 2026-11-04T22:20:58Z
+codex-review-v000: done 0 2026-11-04T22:22:34Z
+codex-timing-kernel: done 0 2026-11-05T15:05:43Z
+dl-data: done 0 2026-11-04T23:00:39Z
+e4b-timing-wait: done 0 2026-11-05T15:09:25Z
+e4b-timing-wait2: done 0 2026-11-05T15:17:36Z
+e4b-timing-wait3: failed 255 2026-11-05T17:30:00Z
+gold-diag-wait: done 0 2026-11-05T02:54:23Z
+gold-diag2-wait: done 0 2026-11-05T07:30:54Z
+gold-diag3-wait: done 0 2026-11-05T12:02:42Z
+gold-diag4-wait: done 0 2026-11-05T16:39:39Z
+gold-full-wait: done 0 2026-11-05T02:07:35Z
+gold-local: done 0 2026-11-05T14:27:49Z
+gold-null: done 0 2026-11-05T14:47:33Z
+gold-rerun-b5: failed 255 2026-11-05T17:30:00Z
+gold-smoke-wait: done 0 2026-11-05T00:10:58Z
+gold-smoke-wait2: done 0 2026-11-05T00:12:57Z
+gold-smoke-wait3: done 0 2026-11-05T00:34:15Z
+gold-smoke-wait4: done 0 2026-11-05T00:39:32Z
+gold-smoke-wait5: done 0 2026-11-05T00:43:47Z
+gold-smoke-wait6: done 0 2026-11-05T00:48:01Z
+gold-smoke-wait7: done 0 2026-11-05T00:51:59Z
+gold-smoke-wait8: done 0 2026-11-05T00:57:41Z
+gold-wait: done 0 2026-11-05T00:06:14Z
+review-eval-runner-fix: done 0 2026-11-05T15:44:51Z
+review-eval-runner-fix2: done 0 2026-11-05T15:51:45Z
+review-eval-runner-fix3: done 0 2026-11-05T15:56:31Z
+review-eval-runner: done 0 2026-11-05T14:58:21Z
+review-router: done 0 2026-11-05T15:15:55Z
+review-v000: done 0 2026-11-04T22:36:18Z
+
+exec
+/bin/bash -lc "cat > eval/tests/test_sandbox_limits.py <<'PY'
+\"\"\"Offline, bounded process-tree regression tests; no competition tasks.\"\"\"
+import os
+from pathlib import Path
+import shlex
+import sys
+import time
+from dataclasses import replace
+
+import pytest
+
+from eval import proctree, sandbox_env
+from adk_eval_core.sandbox.subprocess_sandbox import execute_subprocess_command as original
+
+
+@pytest.fixture
+def execute(tmp_path, monkeypatch):
+    import swegemma.sandbox.subprocess as sb
+    monkeypatch.setattr(sb, 'execute_subprocess_command', original)
+    sandbox_env.apply_isolation([], [])
+    metrics = {}
+    token = [REDACTED_SECRET]
+    def run(command, **kwargs):
+        return sb.execute_subprocess_command(command=command, cwd=tmp_path,
+                                             env=dict(os.environ), **kwargs)
+    yield run, metrics
+    sandbox_env.command_metrics.reset(token)
+
+
+def python(code):
+    return [sys.executable, '-c', code]
+
+
+def assert_dead(path):
+    pid = int(path.read_text())
+    p = proctree.snapshot().get(pid)
+    assert p is None or p.state in ('Z', 'X')
+
+
+@pytest.mark.parametrize('detach', [False, True])
+def test_timeout_orphans(execute, tmp_path, detach):
+    run, metrics = execute
+    if detach:
+        code = (\"import os,time; p=os.fork(); \"
+                \"os._exit(0) if p else None; os.setsid(); \"
+                \"open('child.pid','w').write(str(os.getpid())); time.sleep(600)\")
+        cmd = ['/bin/bash', '-c', shlex.join(python(code)) + '; sleep 600']
+    else:
+        cmd = ['/bin/bash', '-c', '(sleep 600 & echo "'$! > child.pid); sleep 600'"']
+    start = time.monotonic()
+    result = run(cmd, timeout=1)
+    assert result.status == 'timeout' and result.exit_code == 124
+    assert metrics['cmd_timeouts'] == 1
+    assert_dead(tmp_path / 'child.pid')
+    assert time.monotonic() - start < 5
+
+
+def test_memory_tree(execute, monkeypatch):
+    run, metrics = execute
+    monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(300 * 1024**2))
+    code = (\"import time; chunks=[]\\nfor _ in range(60):\\n\"
+            \" chunks.append(bytearray(10*1024**2)); time.sleep(.04)\\ntime.sleep(600)\")
+    # Allocate in a child, so accounting must include descendants.
+    result = run(['/bin/bash', '-c', shlex.join(python(code)) + ' & wait'], timeout=8)
+    assert result.status == 'error' and result.exit_code == 137
+    assert 'killed: sandbox memory limit' in result.stderr
+    assert metrics['mem_kills'] == 1
+    assert metrics['peak_rss_bytes'] > 300 * 1024**2
+
+
+@pytest.mark.parametrize('command,kwargs', [
+    (['/bin/bash', '-c', 'echo hello'], {}),
+    (['/bin/bash', '-c', 'exit 3'], {}),
+    (['/bin/bash', '-c', 'echo err >&2'], {}),
+    ('printf hello', {}),
+    (['/bin/bash', '-c', 'printf abcdef'], {'max_output_chars': 3}),
+    (python(\"import os; os.write(1, b'\\\\xff')\"), {}),
+])
+def test_original_output_contract(execute, tmp_path, command, kwargs):
+    run, metrics = execute
+    expected = original(command, tmp_path, dict(os.environ), **kwargs)
+    actual = run(command, **kwargs)
+    assert type(actual) is type(expected)
+    assert (actual.status, actual.exit_code, actual.stdout, actual.stderr) == (
+        expected.status, expected.exit_code, expected.stdout, expected.stderr)
+    assert metrics['peak_rss_bytes'] > 0
+
+
+def test_normal_exit_daemon(execute, tmp_path):
+    run, metrics = execute
+    result = run(['/bin/bash', '-c', 'sleep 600 >/dev/null 2>&1 & echo "'$! > child.pid'"'], timeout=3)
+    assert result.status == 'ok' and result.exit_code == 0
+    assert metrics['orphan_kills'] >= 1
+    assert_dead(tmp_path / 'child.pid')
+
+
+def test_pid_reuse_is_not_a_survivor():
+    p = proctree.snapshot()[os.getpid()]
+    stale = replace(p, starttime=p.starttime - 1)
+    assert proctree.survivors({p.pid: stale}) == {}
+    assert proctree.kill_tree({p.pid: stale}) == 0
+    assert proctree.tree_rss({p.pid: p}) > 0
+PY
+python3 - <<'PY'
+p='eval/tests/test_eval_fixes.py';s=open(p).read();s=s.replace(\"monkeypatch.setattr(sb, 'execute_subprocess_command', execute)\\n\", \"monkeypatch.setattr(env, 'execute_limited', execute)\\n\")
+open(p,'w').write(s)
+p='eval/kaggle/gold_calibration.py';s=open(p).read();s=s.replace(\"exit_code=None, duration_seconds=round(time.monotonic() - start, 3),\", \"exit_code=None, peak_rss_bytes=0, mem_kills=0, orphan_kills=0,\\n                duration_seconds=round(time.monotonic() - start, 3),\")
+open(p,'w').write(s)
+p='eval/tests/test_gold_calibration.py';s=open(p).read().replace(\"        self.assertGreaterEqual(row['duration_seconds'], 0)\", \"        self.assertGreaterEqual(row['duration_seconds'], 0)\\n        for key in ('peak_rss_bytes', 'mem_kills', 'orphan_kills'):\\n            self.assertIs(type(row[key]), int)\")
+open(p,'w').write(s)
+PY
+cat > /tmp/gemma-sandbox-limits-tests.py <<'PY'
+import sys
+sys.path.append('/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages')
+sys.path.insert(0, '/home/ubuntu/work/gemma-wt/codex-sandbox-limits')
+import pytest
+raise SystemExit(pytest.main(['-q', 'eval/tests/test_sandbox_limits.py', 'eval/tests/test_eval_fixes.py', 'eval/tests/test_gold_calibration.py']))
+PY
+bin/job start sandbox-limits-tests-light -- /home/ubuntu/gemma-local/venv/bin/python3 /tmp/gemma-sandbox-limits-tests.py" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 917ms:
+started sandbox-limits-tests-light: running 11 2026-11-05T17:54:57Z [memory cap: ulimit -v 5G per process (no systemd user manager)]
+
+codex
+The executor now polls host PIDs, enforces the tree RSS limit, cleans up after timeouts and normal exits, and records the new metrics. Calibration rows include those metrics, and `GOLD_CONCURRENCY` defaults to 2. The requested tests are running under `bin/job`; no calibration run has been started.
+exec
+/bin/bash -lc "bin/job tail sandbox-limits-tests-light 65; git diff --stat; sed -n '295,325p' eval/kaggle/gold_calibration.py; git diff --check" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+[bin/job] memory cap: ulimit -v 5G per process (no systemd user manager)
+ eval/kaggle/gold_calibration.py     |  13 +++-
+ eval/sandbox_env.py                 | 134 +++++++++++++++++++++++++++++++++++-
+ eval/tests/test_eval_fixes.py       |   2 +-
+ eval/tests/test_gold_calibration.py |   2 +
+ 4 files changed, 147 insertions(+), 4 deletions(-)
+
+def run_one(task, data_dir, sandbox, allow_unsandboxed=False):
+    start = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix='gold-worker-', dir='/tmp') as scratch:
+        output = Path(scratch) / 'result.json'
+        command = [sys.executable, str(Path(__file__).resolve()), '--worker', task['instance_id'],
+                   '--data-dir', str(data_dir), '--sandbox', sandbox, '--result', str(output)]
+        if allow_unsandboxed:
+            command.append('--allow-unsandboxed')
+        try:
+            proc = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  timeout=3600)
+            if proc.returncode == 0 and output.exists():
+                row = next(iter(finished_results(output.read_text(encoding='utf-8')).values()))
+                if row['instance_id'] != task['instance_id'] or row['repo'] != task['repo']:
+                    raise ValueError('Worker result identity mismatch')
+                return row
+            error = f'Worker exited ({proc.returncode})'
+        except subprocess.TimeoutExpired:
+            error = 'Worker timed out after 3600s (setup and verification)'
+        except Exception as exc:
+            error = f'Worker failure ({type(exc).__name__})'
+    return dict(instance_id=task['instance_id'], repo=task['repo'], resolved=False,
+                exit_code=None, peak_rss_bytes=0, mem_kills=0, orphan_kills=0,
+                duration_seconds=round(time.monotonic() - start, 3),
+                error=error, sandbox=sandbox)
+
+
+def main():
+    # Kaggle-only cleanup belongs at execution time, never on library import.
+    if Path('/kaggle/working').is_dir():
+
+exec
+/bin/bash -lc "bin/job status sandbox-limits-tests-light; bin/job tail sandbox-limits-tests-light 90; sed -n '178,190p' eval/kaggle/gold_calibration.py; git status --short" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+running 11 2026-11-05T17:54:57Z
+[bin/job] memory cap: ulimit -v 5G per process (no systemd user manager)
+
+
+# push.sh embeds this module here when staging the single-file Kaggle kernel.
+# BEGIN SHARED ENV IMPORT
+try:
+    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
+# END SHARED ENV IMPORT
+
+
+async def verify_gold(task, patch, data_dir, sandbox, out_dir=None):
+ M eval/kaggle/gold_calibration.py
+ M eval/sandbox_env.py
+ M eval/tests/test_eval_fixes.py
+ M eval/tests/test_gold_calibration.py
+?? eval/proctree.py
+?? eval/tests/test_sandbox_limits.py
+?? ops/jobs/sandbox-limits-tests-light.cmd
+?? ops/jobs/sandbox-limits-tests-light.status
+
+exec
+/bin/bash -lc "rg -n 'sandbox_env|SHARED ENV|proctree' eval/kaggle; sed -n '1,160p' eval/kaggle/stage_kernel.py; cat /proc/11/stat 2>/dev/null; bin/job tail sandbox-limits-tests-light 100" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+eval/kaggle/stage_kernel.py:9:    shared = (here.parent / 'sandbox_env.py').read_text()
+eval/kaggle/stage_kernel.py:10:    start = source.index('# BEGIN SHARED ENV IMPORT')
+eval/kaggle/stage_kernel.py:11:    end = source.index('# END SHARED ENV IMPORT') + len('# END SHARED ENV IMPORT')
+eval/kaggle/stage_kernel.py:13:                "_shared_env = types.ModuleType('sandbox_env')\n"
+eval/kaggle/stage_kernel.py:15:                f"exec(compile({shared!r}, 'sandbox_env.py', 'exec'), _shared_env.__dict__)\n"
+eval/kaggle/gold_calibration.py:181:# BEGIN SHARED ENV IMPORT
+eval/kaggle/gold_calibration.py:183:    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
+eval/kaggle/gold_calibration.py:186:    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
+eval/kaggle/gold_calibration.py:187:# END SHARED ENV IMPORT
+eval/kaggle/gold_calibration.py:244:    from eval.sandbox_env import command_metrics
+"""Embed the shared scorer environment in Kaggle's single-file script artifact."""
+from pathlib import Path
+import sys
+
+
+def stage_kernel(destination):
+    here = Path(__file__).resolve().parent
+    source = (here / 'gold_calibration.py').read_text()
+    shared = (here.parent / 'sandbox_env.py').read_text()
+    start = source.index('# BEGIN SHARED ENV IMPORT')
+    end = source.index('# END SHARED ENV IMPORT') + len('# END SHARED ENV IMPORT')
+    embedded = ("import types\n"
+                "_shared_env = types.ModuleType('sandbox_env')\n"
+                "_shared_env.__file__ = __file__\n"
+                f"exec(compile({shared!r}, 'sandbox_env.py', 'exec'), _shared_env.__dict__)\n"
+                "patch_subprocess_deps = _shared_env.patch_subprocess_deps\n"
+                "setup_scorer_env = _shared_env.setup_scorer_env\n"
+                "gold_artifact_dir = _shared_env.gold_artifact_dir\n")
+    Path(destination).write_text(source[:start] + embedded + source[end:])
+
+
+if __name__ == '__main__':
+    stage_kernel(sys.argv[1])
+[bin/job] memory cap: ulimit -v 5G per process (no systemd user manager)
+
+exec
+/bin/bash -lc "ps -eo pid,ppid,stat,args | rg 'gemma-sandbox-limits-tests|sandbox-limits-tests-light|pytest'" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+      1       0 SNs  codex-linux-sandbox --sandbox-policy-cwd /home/ubuntu/work/gemma-wt/codex-sandbox-limits --command-cwd /home/ubuntu/work/gemma-wt/codex-sandbox-limits --permission-profile {"type":"managed","file_system":{"type":"restricted","entries":[{"path":{"type":"special","value":{"kind":"root"}},"access":"read"},{"path":{"type":"path","path":"/home/ubuntu/work/gemma-wt/codex-sandbox-limits"},"access":"write"},{"path":{"type":"special","value":{"kind":"slash_tmp"}},"access":"write"},{"path":{"type":"special","value":{"kind":"tmpdir"}},"access":"write"},{"path":{"type":"path","path":"/home/ubuntu/work/gemma-wt/codex-sandbox-limits/.git"},"access":"read","missing_path_behavior":"skip"},{"path":{"type":"path","path":"/home/ubuntu/work/gemma-wt/codex-sandbox-limits/.agents"},"access":"read","missing_path_behavior":"skip"},{"path":{"type":"path","path":"/home/ubuntu/work/gemma-wt/codex-sandbox-limits/.codex"},"access":"read","missing_path_behavior":"skip"},{"path":{"type":"path","path":"/home/ubuntu/work/gemma-wt/codex-sandbox-limits/.aws"},"access":"read","missing_path_behavior":"skip"}]},"network":"restricted"} --apply-seccomp-then-exec -- /bin/bash -c __CODEX_SNAPSHOT_OVERRIDE_SET_0="${CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS+x}" __CODEX_SNAPSHOT_OVERRIDE_0="${CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS-}" __CODEX_SNAPSHOT_OVERRIDE_SET_1="${CODEX_PERMISSION_PROFILE+x}" __CODEX_SNAPSHOT_OVERRIDE_1="${CODEX_PERMISSION_PROFILE-}" __CODEX_SNAPSHOT_OVERRIDE_SET_2="${CODEX_PLUGIN_METRICS_OUTPUT+x}" __CODEX_SNAPSHOT_OVERRIDE_2="${CODEX_PLUGIN_METRICS_OUTPUT-}" __CODEX_SNAPSHOT_OVERRIDE_SET_3="${CODEX_SESSION_ID+x}" __CODEX_SNAPSHOT_OVERRIDE_3="${CODEX_SESSION_ID-}" __CODEX_SNAPSHOT_OVERRIDE_SET_4="${CODEX_THREAD_ID+x}" __CODEX_SNAPSHOT_OVERRIDE_4="${CODEX_THREAD_ID-}" __CODEX_SNAPSHOT_OVERRIDE_SET_5="${CODEX_TOOL_CALL_ID+x}" __CODEX_SNAPSHOT_OVERRIDE_5="${CODEX_TOOL_CALL_ID-}" __CODEX_SNAPSHOT_OVERRIDE_SET_6="${CODEX_VERSION+x}" __CODEX_SNAPSHOT_OVERRIDE_6="${CODEX_VERSION-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_0="${ALL_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_0="${ALL_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_1="${BUNDLE_HTTPS_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_1="${BUNDLE_HTTPS_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_2="${BUNDLE_HTTP_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_2="${BUNDLE_HTTP_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_3="${BUNDLE_NO_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_3="${BUNDLE_NO_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_4="${BUNDLE_SSL_CA_CERT+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_4="${BUNDLE_SSL_CA_CERT-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_5="${CARGO_HTTP_CAINFO+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_5="${CARGO_HTTP_CAINFO-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_6="${CODEX_CA_CERTIFICATE+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_6="${CODEX_CA_CERTIFICATE-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_7="${CODEX_NETWORK_ALLOW_LOCAL_BINDING+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_7="${CODEX_NETWORK_ALLOW_LOCAL_BINDING-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_8="${CODEX_NETWORK_PROXY_ACTIVE+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_8="${CODEX_NETWORK_PROXY_ACTIVE-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_9="${CODEX_NETWORK_PROXY_ATTRIBUTION+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_9="${CODEX_NETWORK_PROXY_ATTRIBUTION-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_10="${CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_10="${CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_11="${CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_11="${CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_12="${CURL_CA_BUNDLE+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_12="${CURL_CA_BUNDLE-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_13="${DOCKER_HTTPS_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_13="${DOCKER_HTTPS_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_14="${DOCKER_HTTP_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_14="${DOCKER_HTTP_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_15="${ELECTRON_GET_USE_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_15="${ELECTRON_GET_USE_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_16="${FTP_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_16="${FTP_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_17="${GIT_SSL_CAINFO+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_17="${GIT_SSL_CAINFO-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_18="${HTTPS_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_18="${HTTPS_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_19="${HTTP_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_19="${HTTP_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_20="${NODE_EXTRA_CA_CERTS+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_20="${NODE_EXTRA_CA_CERTS-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_21="${NODE_USE_ENV_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_21="${NODE_USE_ENV_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_22="${NO_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_22="${NO_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_23="${NPM_CONFIG_CAFILE+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_23="${NPM_CONFIG_CAFILE-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_24="${NPM_CONFIG_HTTPS_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_24="${NPM_CONFIG_HTTPS_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_25="${NPM_CONFIG_HTTP_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_25="${NPM_CONFIG_HTTP_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_26="${NPM_CONFIG_NOPROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_26="${NPM_CONFIG_NOPROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_27="${NPM_CONFIG_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_27="${NPM_CONFIG_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_28="${PIP_CERT+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_28="${PIP_CERT-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_29="${PIP_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_29="${PIP_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_30="${REQUESTS_CA_BUNDLE+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_30="${REQUESTS_CA_BUNDLE-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_31="${SSL_CERT_FILE+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_31="${SSL_CERT_FILE-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_32="${WSS_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_32="${WSS_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_33="${WS_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_33="${WS_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_34="${YARN_HTTPS_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_34="${YARN_HTTPS_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_35="${YARN_HTTP_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_35="${YARN_HTTP_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_36="${YARN_NO_PROXY+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_36="${YARN_NO_PROXY-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_37="${all_proxy+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_37="${all_proxy-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_38="${ftp_proxy+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_38="${ftp_proxy-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_39="${http_proxy+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_39="${http_proxy-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_40="${https_proxy+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_40="${https_proxy-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_41="${no_proxy+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_41="${no_proxy-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_42="${npm_config_cafile+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_42="${npm_config_cafile-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_43="${npm_config_http_proxy+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_43="${npm_config_http_proxy-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_44="${npm_config_https_proxy+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_44="${npm_config_https_proxy-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_45="${npm_config_noproxy+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_45="${npm_config_noproxy-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_46="${npm_config_proxy+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_46="${npm_config_proxy-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_47="${ws_proxy+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_47="${ws_proxy-}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_48="${wss_proxy+x}" __CODEX_SNAPSHOT_PROXY_OVERRIDE_48="${wss_proxy-}" __CODEX_SNAPSHOT_PROXY_ENV_SET="${CODEX_NETWORK_PROXY_ACTIVE+x}"  if . '/home/ubuntu/.codex/shell_snapshots/01a1acd7-96fc-7201-a5ee-fe8454ae1783.1793901172486517885.sh' >/dev/null 2>&1; then :; fi  if [ -n "${__CODEX_SNAPSHOT_OVERRIDE_SET_0}" ]; then   if [ -z "${CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS+x}" ] || [ "${CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS-}" != "${__CODEX_SNAPSHOT_OVERRIDE_0}" ]; then export CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS="${__CODEX_SNAPSHOT_OVERRIDE_0}"; else export CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS; fi else builtin unset CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS 2>/dev/null || command unset CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS; fi builtin unset __CODEX_SNAPSHOT_OVERRIDE_SET_0 __CODEX_SNAPSHOT_OVERRIDE_0 2>/dev/null || command unset __CODEX_SNAPSHOT_OVERRIDE_SET_0 __CODEX_SNAPSHOT_OVERRIDE_0 if [ -n "${__CODEX_SNAPSHOT_OVERRIDE_SET_1}" ]; then   if [ -z "${CODEX_PERMISSION_PROFILE+x}" ] || [ "${CODEX_PERMISSION_PROFILE-}" != "${__CODEX_SNAPSHOT_OVERRIDE_1}" ]; then export CODEX_PERMISSION_PROFILE="${__CODEX_SNAPSHOT_OVERRIDE_1}"; else export CODEX_PERMISSION_PROFILE; fi else builtin unset CODEX_PERMISSION_PROFILE 2>/dev/null || command unset CODEX_PERMISSION_PROFILE; fi builtin unset __CODEX_SNAPSHOT_OVERRIDE_SET_1 __CODEX_SNAPSHOT_OVERRIDE_1 2>/dev/null || command unset __CODEX_SNAPSHOT_OVERRIDE_SET_1 __CODEX_SNAPSHOT_OVERRIDE_1 if [ -n "${__CODEX_SNAPSHOT_OVERRIDE_SET_2}" ]; then   if [ -z "${CODEX_PLUGIN_METRICS_OUTPUT+x}" ] || [ "${CODEX_PLUGIN_METRICS_OUTPUT-}" != "${__CODEX_SNAPSHOT_OVERRIDE_2}" ]; then export CODEX_PLUGIN_METRICS_OUTPUT="${__CODEX_SNAPSHOT_OVERRIDE_2}"; else export CODEX_PLUGIN_METRICS_OUTPUT; fi else builtin unset CODEX_PLUGIN_METRICS_OUTPUT 2>/dev/null || command unset CODEX_PLUGIN_METRICS_OUTPUT; fi builtin unset __CODEX_SNAPSHOT_OVERRIDE_SET_2 __CODEX_SNAPSHOT_OVERRIDE_2 2>/dev/null || command unset __CODEX_SNAPSHOT_OVERRIDE_SET_2 __CODEX_SNAPSHOT_OVERRIDE_2 if [ -n "${__CODEX_SNAPSHOT_OVERRIDE_SET_3}" ]; then   if [ -z "${CODEX_SESSION_ID+x}" ] || [ "${CODEX_SESSION_ID-}" != "${__CODEX_SNAPSHOT_OVERRIDE_3}" ]; then export CODEX_SESSION_ID="${__CODEX_SNAPSHOT_OVERRIDE_3}"; else export CODEX_SESSION_ID; fi else builtin unset CODEX_SESSION_ID 2>/dev/null || command unset CODEX_SESSION_ID; fi builtin unset __CODEX_SNAPSHOT_OVERRIDE_SET_3 __CODEX_SNAPSHOT_OVERRIDE_3 2>/dev/null || command unset __CODEX_SNAPSHOT_OVERRIDE_SET_3 __CODEX_SNAPSHOT_OVERRIDE_3 if [ -n "${__CODEX_SNAPSHOT_OVERRIDE_SET_4}" ]; then   if [ -z "${CODEX_THREAD_ID+x}" ] || [ "${CODEX_THREAD_ID-}" != "${__CODEX_SNAPSHOT_OVERRIDE_4}" ]; then export CODEX_THREAD_ID="${__CODEX_SNAPSHOT_OVERRIDE_4}"; else export CODEX_THREAD_ID; fi else builtin unset CODEX_THREAD_ID 2>/dev/null || command unset CODEX_THREAD_ID; fi builtin unset __CODEX_SNAPSHOT_OVERRIDE_SET_4 __CODEX_SNAPSHOT_OVERRIDE_4 2>/dev/null || command unset __CODEX_SNAPSHOT_OVERRIDE_SET_4 __CODEX_SNAPSHOT_OVERRIDE_4 if [ -n "${__CODEX_SNAPSHOT_OVERRIDE_SET_5}" ]; then   if [ -z "${CODEX_TOOL_CALL_ID+x}" ] || [ "${CODEX_TOOL_CALL_ID-}" != "${__CODEX_SNAPSHOT_OVERRIDE_5}" ]; then export CODEX_TOOL_CALL_ID="${__CODEX_SNAPSHOT_OVERRIDE_5}"; else export CODEX_TOOL_CALL_ID; fi else builtin unset CODEX_TOOL_CALL_ID 2>/dev/null || command unset CODEX_TOOL_CALL_ID; fi builtin unset __CODEX_SNAPSHOT_OVERRIDE_SET_5 __CODEX_SNAPSHOT_OVERRIDE_5 2>/dev/null || command unset __CODEX_SNAPSHOT_OVERRIDE_SET_5 __CODEX_SNAPSHOT_OVERRIDE_5 if [ -n "${__CODEX_SNAPSHOT_OVERRIDE_SET_6}" ]; then   if [ -z "${CODEX_VERSION+x}" ] || [ "${CODEX_VERSION-}" != "${__CODEX_SNAPSHOT_OVERRIDE_6}" ]; then export CODEX_VERSION="${__CODEX_SNAPSHOT_OVERRIDE_6}"; else export CODEX_VERSION; fi else builtin unset CODEX_VERSION 2>/dev/null || command unset CODEX_VERSION; fi builtin unset __CODEX_SNAPSHOT_OVERRIDE_SET_6 __CODEX_SNAPSHOT_OVERRIDE_6 2>/dev/null || command unset __CODEX_SNAPSHOT_OVERRIDE_SET_6 __CODEX_SNAPSHOT_OVERRIDE_6 if [ -n "$__CODEX_SNAPSHOT_PROXY_ENV_SET" ] || [ -n "${CODEX_NETWORK_PROXY_ACTIVE+x}" ]; then if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_0}" ]; then   if [ -z "${ALL_PROXY+x}" ] || [ "${ALL_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_0}" ]; then export ALL_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_0}"; else export ALL_PROXY; fi else builtin unset ALL_PROXY 2>/dev/null || command unset ALL_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_0 __CODEX_SNAPSHOT_PROXY_OVERRIDE_0 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_0 __CODEX_SNAPSHOT_PROXY_OVERRIDE_0 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_1}" ]; then   if [ -z "${BUNDLE_HTTPS_PROXY+x}" ] || [ "${BUNDLE_HTTPS_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_1}" ]; then export BUNDLE_HTTPS_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_1}"; else export BUNDLE_HTTPS_PROXY; fi else builtin unset BUNDLE_HTTPS_PROXY 2>/dev/null || command unset BUNDLE_HTTPS_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_1 __CODEX_SNAPSHOT_PROXY_OVERRIDE_1 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_1 __CODEX_SNAPSHOT_PROXY_OVERRIDE_1 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_2}" ]; then   if [ -z "${BUNDLE_HTTP_PROXY+x}" ] || [ "${BUNDLE_HTTP_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_2}" ]; then export BUNDLE_HTTP_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_2}"; else export BUNDLE_HTTP_PROXY; fi else builtin unset BUNDLE_HTTP_PROXY 2>/dev/null || command unset BUNDLE_HTTP_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_2 __CODEX_SNAPSHOT_PROXY_OVERRIDE_2 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_2 __CODEX_SNAPSHOT_PROXY_OVERRIDE_2 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_3}" ]; then   if [ -z "${BUNDLE_NO_PROXY+x}" ] || [ "${BUNDLE_NO_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_3}" ]; then export BUNDLE_NO_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_3}"; else export BUNDLE_NO_PROXY; fi else builtin unset BUNDLE_NO_PROXY 2>/dev/null || command unset BUNDLE_NO_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_3 __CODEX_SNAPSHOT_PROXY_OVERRIDE_3 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_3 __CODEX_SNAPSHOT_PROXY_OVERRIDE_3 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_4}" ]; then   if [ -z "${BUNDLE_SSL_CA_CERT+x}" ] || [ "${BUNDLE_SSL_CA_CERT-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_4}" ]; then export BUNDLE_SSL_CA_CERT="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_4}"; else export BUNDLE_SSL_CA_CERT; fi else builtin unset BUNDLE_SSL_CA_CERT 2>/dev/null || command unset BUNDLE_SSL_CA_CERT; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_4 __CODEX_SNAPSHOT_PROXY_OVERRIDE_4 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_4 __CODEX_SNAPSHOT_PROXY_OVERRIDE_4 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_5}" ]; then   if [ -z "${CARGO_HTTP_CAINFO+x}" ] || [ "${CARGO_HTTP_CAINFO-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_5}" ]; then export CARGO_HTTP_CAINFO="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_5}"; else export CARGO_HTTP_CAINFO; fi else builtin unset CARGO_HTTP_CAINFO 2>/dev/null || command unset CARGO_HTTP_CAINFO; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_5 __CODEX_SNAPSHOT_PROXY_OVERRIDE_5 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_5 __CODEX_SNAPSHOT_PROXY_OVERRIDE_5 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_6}" ]; then   if [ -z "${CODEX_CA_CERTIFICATE+x}" ] || [ "${CODEX_CA_CERTIFICATE-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_6}" ]; then export CODEX_CA_CERTIFICATE="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_6}"; else export CODEX_CA_CERTIFICATE; fi else builtin unset CODEX_CA_CERTIFICATE 2>/dev/null || command unset CODEX_CA_CERTIFICATE; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_6 __CODEX_SNAPSHOT_PROXY_OVERRIDE_6 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_6 __CODEX_SNAPSHOT_PROXY_OVERRIDE_6 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_7}" ]; then   if [ -z "${CODEX_NETWORK_ALLOW_LOCAL_BINDING+x}" ] || [ "${CODEX_NETWORK_ALLOW_LOCAL_BINDING-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_7}" ]; then export CODEX_NETWORK_ALLOW_LOCAL_BINDING="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_7}"; else export CODEX_NETWORK_ALLOW_LOCAL_BINDING; fi else builtin unset CODEX_NETWORK_ALLOW_LOCAL_BINDING 2>/dev/null || command unset CODEX_NETWORK_ALLOW_LOCAL_BINDING; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_7 __CODEX_SNAPSHOT_PROXY_OVERRIDE_7 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_7 __CODEX_SNAPSHOT_PROXY_OVERRIDE_7 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_8}" ]; then   if [ -z "${CODEX_NETWORK_PROXY_ACTIVE+x}" ] || [ "${CODEX_NETWORK_PROXY_ACTIVE-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_8}" ]; then export CODEX_NETWORK_PROXY_ACTIVE="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_8}"; else export CODEX_NETWORK_PROXY_ACTIVE; fi else builtin unset CODEX_NETWORK_PROXY_ACTIVE 2>/dev/null || command unset CODEX_NETWORK_PROXY_ACTIVE; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_8 __CODEX_SNAPSHOT_PROXY_OVERRIDE_8 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_8 __CODEX_SNAPSHOT_PROXY_OVERRIDE_8 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_9}" ]; then   if [ -z "${CODEX_NETWORK_PROXY_ATTRIBUTION+x}" ] || [ "${CODEX_NETWORK_PROXY_ATTRIBUTION-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_9}" ]; then export CODEX_NETWORK_PROXY_ATTRIBUTION="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_9}"; else export CODEX_NETWORK_PROXY_ATTRIBUTION; fi else builtin unset CODEX_NETWORK_PROXY_ATTRIBUTION 2>/dev/null || command unset CODEX_NETWORK_PROXY_ATTRIBUTION; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_9 __CODEX_SNAPSHOT_PROXY_OVERRIDE_9 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_9 __CODEX_SNAPSHOT_PROXY_OVERRIDE_9 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_10}" ]; then   if [ -z "${CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS+x}" ] || [ "${CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_10}" ]; then export CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_10}"; else export CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS; fi else builtin unset CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS 2>/dev/null || command unset CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_10 __CODEX_SNAPSHOT_PROXY_OVERRIDE_10 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_10 __CODEX_SNAPSHOT_PROXY_OVERRIDE_10 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_11}" ]; then   if [ -z "${CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE+x}" ] || [ "${CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_11}" ]; then export CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_11}"; else export CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE; fi else builtin unset CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE 2>/dev/null || command unset CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_11 __CODEX_SNAPSHOT_PROXY_OVERRIDE_11 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_11 __CODEX_SNAPSHOT_PROXY_OVERRIDE_11 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_12}" ]; then   if [ -z "${CURL_CA_BUNDLE+x}" ] || [ "${CURL_CA_BUNDLE-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_12}" ]; then export CURL_CA_BUNDLE="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_12}"; else export CURL_CA_BUNDLE; fi else builtin unset CURL_CA_BUNDLE 2>/dev/null || command unset CURL_CA_BUNDLE; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_12 __CODEX_SNAPSHOT_PROXY_OVERRIDE_12 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_12 __CODEX_SNAPSHOT_PROXY_OVERRIDE_12 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_13}" ]; then   if [ -z "${DOCKER_HTTPS_PROXY+x}" ] || [ "${DOCKER_HTTPS_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_13}" ]; then export DOCKER_HTTPS_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_13}"; else export DOCKER_HTTPS_PROXY; fi else builtin unset DOCKER_HTTPS_PROXY 2>/dev/null || command unset DOCKER_HTTPS_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_13 __CODEX_SNAPSHOT_PROXY_OVERRIDE_13 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_13 __CODEX_SNAPSHOT_PROXY_OVERRIDE_13 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_14}" ]; then   if [ -z "${DOCKER_HTTP_PROXY+x}" ] || [ "${DOCKER_HTTP_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_14}" ]; then export DOCKER_HTTP_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_14}"; else export DOCKER_HTTP_PROXY; fi else builtin unset DOCKER_HTTP_PROXY 2>/dev/null || command unset DOCKER_HTTP_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_14 __CODEX_SNAPSHOT_PROXY_OVERRIDE_14 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_14 __CODEX_SNAPSHOT_PROXY_OVERRIDE_14 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_15}" ]; then   if [ -z "${ELECTRON_GET_USE_PROXY+x}" ] || [ "${ELECTRON_GET_USE_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_15}" ]; then export ELECTRON_GET_USE_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_15}"; else export ELECTRON_GET_USE_PROXY; fi else builtin unset ELECTRON_GET_USE_PROXY 2>/dev/null || command unset ELECTRON_GET_USE_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_15 __CODEX_SNAPSHOT_PROXY_OVERRIDE_15 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_15 __CODEX_SNAPSHOT_PROXY_OVERRIDE_15 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_16}" ]; then   if [ -z "${FTP_PROXY+x}" ] || [ "${FTP_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_16}" ]; then export FTP_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_16}"; else export FTP_PROXY; fi else builtin unset FTP_PROXY 2>/dev/null || command unset FTP_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_16 __CODEX_SNAPSHOT_PROXY_OVERRIDE_16 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_16 __CODEX_SNAPSHOT_PROXY_OVERRIDE_16 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_17}" ]; then   if [ -z "${GIT_SSL_CAINFO+x}" ] || [ "${GIT_SSL_CAINFO-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_17}" ]; then export GIT_SSL_CAINFO="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_17}"; else export GIT_SSL_CAINFO; fi else builtin unset GIT_SSL_CAINFO 2>/dev/null || command unset GIT_SSL_CAINFO; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_17 __CODEX_SNAPSHOT_PROXY_OVERRIDE_17 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_17 __CODEX_SNAPSHOT_PROXY_OVERRIDE_17 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_18}" ]; then   if [ -z "${HTTPS_PROXY+x}" ] || [ "${HTTPS_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_18}" ]; then export HTTPS_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_18}"; else export HTTPS_PROXY; fi else builtin unset HTTPS_PROXY 2>/dev/null || command unset HTTPS_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_18 __CODEX_SNAPSHOT_PROXY_OVERRIDE_18 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_18 __CODEX_SNAPSHOT_PROXY_OVERRIDE_18 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_19}" ]; then   if [ -z "${HTTP_PROXY+x}" ] || [ "${HTTP_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_19}" ]; then export HTTP_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_19}"; else export HTTP_PROXY; fi else builtin unset HTTP_PROXY 2>/dev/null || command unset HTTP_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_19 __CODEX_SNAPSHOT_PROXY_OVERRIDE_19 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_19 __CODEX_SNAPSHOT_PROXY_OVERRIDE_19 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_20}" ]; then   if [ -z "${NODE_EXTRA_CA_CERTS+x}" ] || [ "${NODE_EXTRA_CA_CERTS-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_20}" ]; then export NODE_EXTRA_CA_CERTS="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_20}"; else export NODE_EXTRA_CA_CERTS; fi else builtin unset NODE_EXTRA_CA_CERTS 2>/dev/null || command unset NODE_EXTRA_CA_CERTS; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_20 __CODEX_SNAPSHOT_PROXY_OVERRIDE_20 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_20 __CODEX_SNAPSHOT_PROXY_OVERRIDE_20 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_21}" ]; then   if [ -z "${NODE_USE_ENV_PROXY+x}" ] || [ "${NODE_USE_ENV_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_21}" ]; then export NODE_USE_ENV_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_21}"; else export NODE_USE_ENV_PROXY; fi else builtin unset NODE_USE_ENV_PROXY 2>/dev/null || command unset NODE_USE_ENV_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_21 __CODEX_SNAPSHOT_PROXY_OVERRIDE_21 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_21 __CODEX_SNAPSHOT_PROXY_OVERRIDE_21 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_22}" ]; then   if [ -z "${NO_PROXY+x}" ] || [ "${NO_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_22}" ]; then export NO_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_22}"; else export NO_PROXY; fi else builtin unset NO_PROXY 2>/dev/null || command unset NO_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_22 __CODEX_SNAPSHOT_PROXY_OVERRIDE_22 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_22 __CODEX_SNAPSHOT_PROXY_OVERRIDE_22 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_23}" ]; then   if [ -z "${NPM_CONFIG_CAFILE+x}" ] || [ "${NPM_CONFIG_CAFILE-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_23}" ]; then export NPM_CONFIG_CAFILE="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_23}"; else export NPM_CONFIG_CAFILE; fi else builtin unset NPM_CONFIG_CAFILE 2>/dev/null || command unset NPM_CONFIG_CAFILE; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_23 __CODEX_SNAPSHOT_PROXY_OVERRIDE_23 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_23 __CODEX_SNAPSHOT_PROXY_OVERRIDE_23 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_24}" ]; then   if [ -z "${NPM_CONFIG_HTTPS_PROXY+x}" ] || [ "${NPM_CONFIG_HTTPS_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_24}" ]; then export NPM_CONFIG_HTTPS_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_24}"; else export NPM_CONFIG_HTTPS_PROXY; fi else builtin unset NPM_CONFIG_HTTPS_PROXY 2>/dev/null || command unset NPM_CONFIG_HTTPS_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_24 __CODEX_SNAPSHOT_PROXY_OVERRIDE_24 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_24 __CODEX_SNAPSHOT_PROXY_OVERRIDE_24 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_25}" ]; then   if [ -z "${NPM_CONFIG_HTTP_PROXY+x}" ] || [ "${NPM_CONFIG_HTTP_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_25}" ]; then export NPM_CONFIG_HTTP_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_25}"; else export NPM_CONFIG_HTTP_PROXY; fi else builtin unset NPM_CONFIG_HTTP_PROXY 2>/dev/null || command unset NPM_CONFIG_HTTP_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_25 __CODEX_SNAPSHOT_PROXY_OVERRIDE_25 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_25 __CODEX_SNAPSHOT_PROXY_OVERRIDE_25 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_26}" ]; then   if [ -z "${NPM_CONFIG_NOPROXY+x}" ] || [ "${NPM_CONFIG_NOPROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_26}" ]; then export NPM_CONFIG_NOPROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_26}"; else export NPM_CONFIG_NOPROXY; fi else builtin unset NPM_CONFIG_NOPROXY 2>/dev/null || command unset NPM_CONFIG_NOPROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_26 __CODEX_SNAPSHOT_PROXY_OVERRIDE_26 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_26 __CODEX_SNAPSHOT_PROXY_OVERRIDE_26 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_27}" ]; then   if [ -z "${NPM_CONFIG_PROXY+x}" ] || [ "${NPM_CONFIG_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_27}" ]; then export NPM_CONFIG_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_27}"; else export NPM_CONFIG_PROXY; fi else builtin unset NPM_CONFIG_PROXY 2>/dev/null || command unset NPM_CONFIG_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_27 __CODEX_SNAPSHOT_PROXY_OVERRIDE_27 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_27 __CODEX_SNAPSHOT_PROXY_OVERRIDE_27 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_28}" ]; then   if [ -z "${PIP_CERT+x}" ] || [ "${PIP_CERT-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_28}" ]; then export PIP_CERT="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_28}"; else export PIP_CERT; fi else builtin unset PIP_CERT 2>/dev/null || command unset PIP_CERT; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_28 __CODEX_SNAPSHOT_PROXY_OVERRIDE_28 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_28 __CODEX_SNAPSHOT_PROXY_OVERRIDE_28 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_29}" ]; then   if [ -z "${PIP_PROXY+x}" ] || [ "${PIP_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_29}" ]; then export PIP_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_29}"; else export PIP_PROXY; fi else builtin unset PIP_PROXY 2>/dev/null || command unset PIP_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_29 __CODEX_SNAPSHOT_PROXY_OVERRIDE_29 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_29 __CODEX_SNAPSHOT_PROXY_OVERRIDE_29 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_30}" ]; then   if [ -z "${REQUESTS_CA_BUNDLE+x}" ] || [ "${REQUESTS_CA_BUNDLE-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_30}" ]; then export REQUESTS_CA_BUNDLE="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_30}"; else export REQUESTS_CA_BUNDLE; fi else builtin unset REQUESTS_CA_BUNDLE 2>/dev/null || command unset REQUESTS_CA_BUNDLE; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_30 __CODEX_SNAPSHOT_PROXY_OVERRIDE_30 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_30 __CODEX_SNAPSHOT_PROXY_OVERRIDE_30 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_31}" ]; then   if [ -z "${SSL_CERT_FILE+x}" ] || [ "${SSL_CERT_FILE-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_31}" ]; then export SSL_CERT_FILE="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_31}"; else export SSL_CERT_FILE; fi else builtin unset SSL_CERT_FILE 2>/dev/null || command unset SSL_CERT_FILE; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_31 __CODEX_SNAPSHOT_PROXY_OVERRIDE_31 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_31 __CODEX_SNAPSHOT_PROXY_OVERRIDE_31 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_32}" ]; then   if [ -z "${WSS_PROXY+x}" ] || [ "${WSS_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_32}" ]; then export WSS_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_32}"; else export WSS_PROXY; fi else builtin unset WSS_PROXY 2>/dev/null || command unset WSS_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_32 __CODEX_SNAPSHOT_PROXY_OVERRIDE_32 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_32 __CODEX_SNAPSHOT_PROXY_OVERRIDE_32 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_33}" ]; then   if [ -z "${WS_PROXY+x}" ] || [ "${WS_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_33}" ]; then export WS_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_33}"; else export WS_PROXY; fi else builtin unset WS_PROXY 2>/dev/null || command unset WS_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_33 __CODEX_SNAPSHOT_PROXY_OVERRIDE_33 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_33 __CODEX_SNAPSHOT_PROXY_OVERRIDE_33 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_34}" ]; then   if [ -z "${YARN_HTTPS_PROXY+x}" ] || [ "${YARN_HTTPS_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_34}" ]; then export YARN_HTTPS_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_34}"; else export YARN_HTTPS_PROXY; fi else builtin unset YARN_HTTPS_PROXY 2>/dev/null || command unset YARN_HTTPS_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_34 __CODEX_SNAPSHOT_PROXY_OVERRIDE_34 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_34 __CODEX_SNAPSHOT_PROXY_OVERRIDE_34 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_35}" ]; then   if [ -z "${YARN_HTTP_PROXY+x}" ] || [ "${YARN_HTTP_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_35}" ]; then export YARN_HTTP_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_35}"; else export YARN_HTTP_PROXY; fi else builtin unset YARN_HTTP_PROXY 2>/dev/null || command unset YARN_HTTP_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_35 __CODEX_SNAPSHOT_PROXY_OVERRIDE_35 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_35 __CODEX_SNAPSHOT_PROXY_OVERRIDE_35 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_36}" ]; then   if [ -z "${YARN_NO_PROXY+x}" ] || [ "${YARN_NO_PROXY-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_36}" ]; then export YARN_NO_PROXY="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_36}"; else export YARN_NO_PROXY; fi else builtin unset YARN_NO_PROXY 2>/dev/null || command unset YARN_NO_PROXY; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_36 __CODEX_SNAPSHOT_PROXY_OVERRIDE_36 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_36 __CODEX_SNAPSHOT_PROXY_OVERRIDE_36 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_37}" ]; then   if [ -z "${all_proxy+x}" ] || [ "${all_proxy-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_37}" ]; then export all_proxy="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_37}"; else export all_proxy; fi else builtin unset all_proxy 2>/dev/null || command unset all_proxy; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_37 __CODEX_SNAPSHOT_PROXY_OVERRIDE_37 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_37 __CODEX_SNAPSHOT_PROXY_OVERRIDE_37 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_38}" ]; then   if [ -z "${ftp_proxy+x}" ] || [ "${ftp_proxy-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_38}" ]; then export ftp_proxy="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_38}"; else export ftp_proxy; fi else builtin unset ftp_proxy 2>/dev/null || command unset ftp_proxy; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_38 __CODEX_SNAPSHOT_PROXY_OVERRIDE_38 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_38 __CODEX_SNAPSHOT_PROXY_OVERRIDE_38 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_39}" ]; then   if [ -z "${http_proxy+x}" ] || [ "${http_proxy-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_39}" ]; then export http_proxy="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_39}"; else export http_proxy; fi else builtin unset http_proxy 2>/dev/null || command unset http_proxy; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_39 __CODEX_SNAPSHOT_PROXY_OVERRIDE_39 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_39 __CODEX_SNAPSHOT_PROXY_OVERRIDE_39 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_40}" ]; then   if [ -z "${https_proxy+x}" ] || [ "${https_proxy-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_40}" ]; then export https_proxy="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_40}"; else export https_proxy; fi else builtin unset https_proxy 2>/dev/null || command unset https_proxy; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_40 __CODEX_SNAPSHOT_PROXY_OVERRIDE_40 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_40 __CODEX_SNAPSHOT_PROXY_OVERRIDE_40 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_41}" ]; then   if [ -z "${no_proxy+x}" ] || [ "${no_proxy-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_41}" ]; then export no_proxy="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_41}"; else export no_proxy; fi else builtin unset no_proxy 2>/dev/null || command unset no_proxy; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_41 __CODEX_SNAPSHOT_PROXY_OVERRIDE_41 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_41 __CODEX_SNAPSHOT_PROXY_OVERRIDE_41 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_42}" ]; then   if [ -z "${npm_config_cafile+x}" ] || [ "${npm_config_cafile-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_42}" ]; then export npm_config_cafile="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_42}"; else export npm_config_cafile; fi else builtin unset npm_config_cafile 2>/dev/null || command unset npm_config_cafile; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_42 __CODEX_SNAPSHOT_PROXY_OVERRIDE_42 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_42 __CODEX_SNAPSHOT_PROXY_OVERRIDE_42 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_43}" ]; then   if [ -z "${npm_config_http_proxy+x}" ] || [ "${npm_config_http_proxy-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_43}" ]; then export npm_config_http_proxy="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_43}"; else export npm_config_http_proxy; fi else builtin unset npm_config_http_proxy 2>/dev/null || command unset npm_config_http_proxy; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_43 __CODEX_SNAPSHOT_PROXY_OVERRIDE_43 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_43 __CODEX_SNAPSHOT_PROXY_OVERRIDE_43 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_44}" ]; then   if [ -z "${npm_config_https_proxy+x}" ] || [ "${npm_config_https_proxy-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_44}" ]; then export npm_config_https_proxy="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_44}"; else export npm_config_https_proxy; fi else builtin unset npm_config_https_proxy 2>/dev/null || command unset npm_config_https_proxy; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_44 __CODEX_SNAPSHOT_PROXY_OVERRIDE_44 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_44 __CODEX_SNAPSHOT_PROXY_OVERRIDE_44 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_45}" ]; then   if [ -z "${npm_config_noproxy+x}" ] || [ "${npm_config_noproxy-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_45}" ]; then export npm_config_noproxy="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_45}"; else export npm_config_noproxy; fi else builtin unset npm_config_noproxy 2>/dev/null || command unset npm_config_noproxy; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_45 __CODEX_SNAPSHOT_PROXY_OVERRIDE_45 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_45 __CODEX_SNAPSHOT_PROXY_OVERRIDE_45 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_46}" ]; then   if [ -z "${npm_config_proxy+x}" ] || [ "${npm_config_proxy-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_46}" ]; then export npm_config_proxy="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_46}"; else export npm_config_proxy; fi else builtin unset npm_config_proxy 2>/dev/null || command unset npm_config_proxy; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_46 __CODEX_SNAPSHOT_PROXY_OVERRIDE_46 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_46 __CODEX_SNAPSHOT_PROXY_OVERRIDE_46 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_47}" ]; then   if [ -z "${ws_proxy+x}" ] || [ "${ws_proxy-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_47}" ]; then export ws_proxy="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_47}"; else export ws_proxy; fi else builtin unset ws_proxy 2>/dev/null || command unset ws_proxy; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_47 __CODEX_SNAPSHOT_PROXY_OVERRIDE_47 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_47 __CODEX_SNAPSHOT_PROXY_OVERRIDE_47 if [ -n "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_48}" ]; then   if [ -z "${wss_proxy+x}" ] || [ "${wss_proxy-}" != "${__CODEX_SNAPSHOT_PROXY_OVERRIDE_48}" ]; then export wss_proxy="${__CODEX_SNAPSHOT_PROXY_OVERRIDE_48}"; else export wss_proxy; fi else builtin unset wss_proxy 2>/dev/null || command unset wss_proxy; fi builtin unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_48 __CODEX_SNAPSHOT_PROXY_OVERRIDE_48 2>/dev/null || command unset __CODEX_SNAPSHOT_PROXY_OVERRIDE_SET_48 __CODEX_SNAPSHOT_PROXY_OVERRIDE_48 fi if [ -n "${PATH:-}" ]; then export PATH='/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-path':"$PATH"; else export PATH='/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-path'; fi  exec '/bin/bash' -c 'ps -eo pid,ppid,stat,args | rg '"'"'gemma-sandbox-limits-tests|sandbox-limits-tests-light|pytest'"'"''
+      2       1 SN   /bin/bash -c ps -eo pid,ppid,stat,args | rg 'gemma-sandbox-limits-tests|sandbox-limits-tests-light|pytest'
+      4       2 SN   rg gemma-sandbox-limits-tests|sandbox-limits-tests-light|pytest
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+p='eval/kaggle/gold_calibration.py';s=open(p).read().replace('setup_scorer_env, gold_artifact_dir', 'setup_scorer_env, gold_artifact_dir, command_metrics').replace('    from eval.sandbox_env import command_metrics\\n', '')
+open(p,'w').write(s)
+p='eval/kaggle/stage_kernel.py';s=open(p).read().replace(\"    shared = (here.parent / 'sandbox_env.py').read_text()\", \"    shared = (here.parent / 'sandbox_env.py').read_text()\\n    proctree = (here.parent / 'proctree.py').read_text()\\n    shared = shared.replace('from eval import proctree', 'import _gemma_proctree as proctree')\")
+s=s.replace('embedded = (\"import types\\\\n\"', 'embedded = (\"import types\\\\n\"\\n                \"_proctree = types.ModuleType(\\'_gemma_proctree\\')\\\\n\"\\n                \"sys.modules[\\'_gemma_proctree\\'] = _proctree\\\\n\"\\n                f\"exec(compile({proctree"'!r}, '"\\'proctree.py\\', \\'exec\\'), _proctree.__dict__)\\\\n\"')
+s=s.replace('\"gold_artifact_dir = _shared_env.gold_artifact_dir\\\\n\")', '\"gold_artifact_dir = _shared_env.gold_artifact_dir\\\\n\"\\n                \"command_metrics = _shared_env.command_metrics\\\\n\")')
+open(p,'w').write(s)
+PY
+bin/job start sandbox-limits-check-light -- /home/ubuntu/gemma-local/venv/bin/python3 /tmp/gemma-sandbox-limits-tests.py
+while read -r state rest < ops/jobs/sandbox-limits-check-light.status && [ \""'$state" = running ]; do sleep 1; done
+cat ops/jobs/sandbox-limits-check-light.log' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 6917ms:
+started sandbox-limits-check-light: running 10 2026-11-05T17:55:34Z [memory cap: ulimit -v 5G per process (no systemd user manager)]
+[bin/job] memory cap: ulimit -v 5G per process (no systemd user manager)
+FFFFFFFFFF..........s............................................... [ 91%]
+......                                                                   [100%]
+=================================== FAILURES ===================================
+_________________________ test_timeout_orphans[False] __________________________
+
+execute = (<function execute.<locals>.run at 0x7a7300e90ea0>, {'orphan_kills': 0, 'peak_rss_bytes': 0, 'mem_kills': 0})
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-2/test_timeout_orphans_False_0')
+detach = False
+
+    @pytest.mark.parametrize('detach', [False, True])
+    def test_timeout_orphans(execute, tmp_path, detach):
+        run, metrics = execute
+        if detach:
+            code = ("import os,time; p=os.fork(); "
+                    "os._exit(0) if p else None; os.setsid(); "
+                    "open('child.pid','w').write(str(os.getpid())); time.sleep(600)")
+            cmd = ['/bin/bash', '-c', shlex.join(python(code)) + '; sleep 600']
+        else:
+            cmd = ['/bin/bash', '-c', '(sleep 600 & echo $! > child.pid); sleep 600']
+        start = time.monotonic()
+        result = run(cmd, timeout=1)
+>       assert result.status == 'timeout' and result.exit_code == 124
+E       AssertionError: assert ('error' == 'timeout'
+E         
+E         - timeout
+E         + error)
+
+eval/tests/test_sandbox_limits.py:51: AssertionError
+---------------------------- Captured stderr setup -----------------------------
+17:55:35 - LiteLLM:WARNING: get_model_cost_map.py:327 - LiteLLM: model cost map fetch attempt 1/3 failed (ConnectError fetching https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: [Errno -3] Temporary failure in name resolution); retrying in 2.4s
+17:55:35 - LiteLLM:WARNING: get_model_cost_map.py:705 - LiteLLM: Failed to fetch remote model cost map from https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: ConnectError fetching https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: [Errno -3] Temporary failure in name resolution. Falling back to local backup.
+__________________________ test_timeout_orphans[True] __________________________
+
+execute = (<function execute.<locals>.run at 0x7a72f52d5f80>, {'orphan_kills': 0, 'peak_rss_bytes': 1708032, 'mem_kills': 0})
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-2/test_timeout_orphans_True_0')
+detach = True
+
+    @pytest.mark.parametrize('detach', [False, True])
+    def test_timeout_orphans(execute, tmp_path, detach):
+        run, metrics = execute
+        if detach:
+            code = ("import os,time; p=os.fork(); "
+                    "os._exit(0) if p else None; os.setsid(); "
+                    "open('child.pid','w').write(str(os.getpid())); time.sleep(600)")
+            cmd = ['/bin/bash', '-c', shlex.join(python(code)) + '; sleep 600']
+        else:
+            cmd = ['/bin/bash', '-c', '(sleep 600 & echo $! > child.pid); sleep 600']
+        start = time.monotonic()
+        result = run(cmd, timeout=1)
+>       assert result.status == 'timeout' and result.exit_code == 124
+E       AssertionError: assert ('error' == 'timeout'
+E         
+E         - timeout
+E         + error)
+
+eval/tests/test_sandbox_limits.py:51: AssertionError
+_______________________________ test_memory_tree _______________________________
+
+execute = (<function execute.<locals>.run at 0x7a72f52d6340>, {'orphan_kills': 0, 'peak_rss_bytes': 1708032, 'mem_kills': 0})
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7a72f5234b90>
+
+    def test_memory_tree(execute, monkeypatch):
+        run, metrics = execute
+        monkeypatch.setenv('GEMMA_SANDBOX_MEM_BYTES', str(300 * 1024**2))
+        code = ("import time; chunks=[]\nfor _ in range(60):\n"
+                " chunks.append(bytearray(10*1024**2)); time.sleep(.04)\ntime.sleep(600)")
+        # Allocate in a child, so accounting must include descendants.
+        result = run(['/bin/bash', '-c', shlex.join(python(code)) + ' & wait'], timeout=8)
+>       assert result.status == 'error' and result.exit_code == 137
+E       AssertionError: assert ('error' == 'error'
+E         
+E           error and 1 == 137)
+E        +  where 1 = ExecutionResult(status='error', stdout='', stderr='prlimit: failed to set the AS resource limit: Operation not permitted\n', exit_code=1, duration_seconds=0.002).exit_code
+
+eval/tests/test_sandbox_limits.py:64: AssertionError
+_______________ test_original_output_contract[command0-kwargs0] ________________
+
+execute = (<function execute.<locals>.run at 0x7a72f52d65c0>, {'orphan_kills': 0, 'peak_rss_bytes': 1708032, 'mem_kills': 0})
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-2/test_original_output_contract_0')
+command = ['/bin/bash', '-c', 'echo hello'], kwargs = {}
+
+    @pytest.mark.parametrize('command,kwargs', [
+        (['/bin/bash', '-c', 'echo hello'], {}),
+        (['/bin/bash', '-c', 'exit 3'], {}),
+        (['/bin/bash', '-c', 'echo err >&2'], {}),
+        ('printf hello', {}),
+        (['/bin/bash', '-c', 'printf abcdef'], {'max_output_chars': 3}),
+        (python("import os; os.write(1, b'\\xff')"), {}),
+    ])
+    def test_original_output_contract(execute, tmp_path, command, kwargs):
+        run, metrics = execute
+        expected = original(command, tmp_path, dict(os.environ), **kwargs)
+        actual = run(command, **kwargs)
+        assert type(actual) is type(expected)
+>       assert (actual.status, actual.exit_code, actual.stdout, actual.stderr) == (
+            expected.status, expected.exit_code, expected.stdout, expected.stderr)
+E       AssertionError: assert ('error', 1, ... permitted\n') == ('ok', 0, 'hello\n', '')
+E         
+E         At index 0 diff: 'error' != 'ok'
+E         Use -v to get more diff
+
+eval/tests/test_sandbox_limits.py:83: AssertionError
+_______________ test_original_output_contract[command1-kwargs1] ________________
+
+execute = (<function execute.<locals>.run at 0x7a72f52d6480>, {'orphan_kills': 0, 'peak_rss_bytes': 1708032, 'mem_kills': 0})
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-2/test_original_output_contract_1')
+command = ['/bin/bash', '-c', 'exit 3'], kwargs = {}
+
+    @pytest.mark.parametrize('command,kwargs', [
+        (['/bin/bash', '-c', 'echo hello'], {}),
+        (['/bin/bash', '-c', 'exit 3'], {}),
+        (['/bin/bash', '-c', 'echo err >&2'], {}),
+        ('printf hello', {}),
+        (['/bin/bash', '-c', 'printf abcdef'], {'max_output_chars': 3}),
+        (python("import os; os.write(1, b'\\xff')"), {}),
+    ])
+    def test_original_output_contract(execute, tmp_path, command, kwargs):
+        run, metrics = execute
+        expected = original(command, tmp_path, dict(os.environ), **kwargs)
+        actual = run(command, **kwargs)
+        assert type(actual) is type(expected)
+>       assert (actual.status, actual.exit_code, actual.stdout, actual.stderr) == (
+            expected.status, expected.exit_code, expected.stdout, expected.stderr)
+E       AssertionError: assert ('error', 1, ... permitted\n') == ('error', 3, '', '')
+E         
+E         At index 1 diff: 1 != 3
+E         Use -v to get more diff
+
+eval/tests/test_sandbox_limits.py:83: AssertionError
+_______________ test_original_output_contract[command2-kwargs2] ________________
+
+execute = (<function execute.<locals>.run at 0x7a72f52d6f20>, {'orphan_kills': 0, 'peak_rss_bytes': 1708032, 'mem_kills': 0})
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-2/test_original_output_contract_2')
+command = ['/bin/bash', '-c', 'echo err >&2'], kwargs = {}
+
+    @pytest.mark.parametrize('command,kwargs', [
+        (['/bin/bash', '-c', 'echo hello'], {}),
+        (['/bin/bash', '-c', 'exit 3'], {}),
+        (['/bin/bash', '-c', 'echo err >&2'], {}),
+        ('printf hello', {}),
+        (['/bin/bash', '-c', 'printf abcdef'], {'max_output_chars': 3}),
+        (python("import os; os.write(1, b'\\xff')"), {}),
+    ])
+    def test_original_output_contract(execute, tmp_path, command, kwargs):
+        run, metrics = execute
+        expected = original(command, tmp_path, dict(os.environ), **kwargs)
+        actual = run(command, **kwargs)
+        assert type(actual) is type(expected)
+>       assert (actual.status, actual.exit_code, actual.stdout, actual.stderr) == (
+            expected.status, expected.exit_code, expected.stdout, expected.stderr)
+E       AssertionError: assert ('error', 1, ... permitted\n') == ('ok', 0, '', 'err\n')
+E         
+E         At index 0 diff: 'error' != 'ok'
+E         Use -v to get more diff
+
+eval/tests/test_sandbox_limits.py:83: AssertionError
+_____________ test_original_output_contract[printf hello-kwargs3] ______________
+
+execute = (<function execute.<locals>.run at 0x7a72f52d5c60>, {'orphan_kills': 0, 'peak_rss_bytes': 1708032, 'mem_kills': 0})
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-2/test_original_output_contract_3')
+command = 'printf hello', kwargs = {}
+
+    @pytest.mark.parametrize('command,kwargs', [
+        (['/bin/bash', '-c', 'echo hello'], {}),
+        (['/bin/bash', '-c', 'exit 3'], {}),
+        (['/bin/bash', '-c', 'echo err >&2'], {}),
+        ('printf hello', {}),
+        (['/bin/bash', '-c', 'printf abcdef'], {'max_output_chars': 3}),
+        (python("import os; os.write(1, b'\\xff')"), {}),
+    ])
+    def test_original_output_contract(execute, tmp_path, command, kwargs):
+        run, metrics = execute
+        expected = original(command, tmp_path, dict(os.environ), **kwargs)
+        actual = run(command, **kwargs)
+        assert type(actual) is type(expected)
+>       assert (actual.status, actual.exit_code, actual.stdout, actual.stderr) == (
+            expected.status, expected.exit_code, expected.stdout, expected.stderr)
+E       AssertionError: assert ('error', 1, ... permitted\n') == ('ok', 0, 'hello', '')
+E         
+E         At index 0 diff: 'error' != 'ok'
+E         Use -v to get more diff
+
+eval/tests/test_sandbox_limits.py:83: AssertionError
+_______________ test_original_output_contract[command4-kwargs4] ________________
+
+execute = (<function execute.<locals>.run at 0x7a72f52d7920>, {'orphan_kills': 0, 'peak_rss_bytes': 1708032, 'mem_kills': 0})
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-2/test_original_output_contract_4')
+command = ['/bin/bash', '-c', 'printf abcdef'], kwargs = {'max_output_chars': 3}
+
+    @pytest.mark.parametrize('command,kwargs', [
+        (['/bin/bash', '-c', 'echo hello'], {}),
+        (['/bin/bash', '-c', 'exit 3'], {}),
+        (['/bin/bash', '-c', 'echo err >&2'], {}),
+        ('printf hello', {}),
+        (['/bin/bash', '-c', 'printf abcdef'], {'max_output_chars': 3}),
+        (python("import os; os.write(1, b'\\xff')"), {}),
+    ])
+    def test_original_output_contract(execute, tmp_path, command, kwargs):
+        run, metrics = execute
+        expected = original(command, tmp_path, dict(os.environ), **kwargs)
+        actual = run(command, **kwargs)
+        assert type(actual) is type(expected)
+>       assert (actual.status, actual.exit_code, actual.stdout, actual.stderr) == (
+            expected.status, expected.exit_code, expected.stdout, expected.stderr)
+E       AssertionError: assert ('error', 1, ...0MB limit]\n') == ('ok', 0, 'ab...limit]\n', '')
+E         
+E         At index 0 diff: 'error' != 'ok'
+E         Use -v to get more diff
+
+eval/tests/test_sandbox_limits.py:83: AssertionError
+_______________ test_original_output_contract[command5-kwargs5] ________________
+
+execute = (<function execute.<locals>.run at 0x7a72f52d7d80>, {'orphan_kills': 0, 'peak_rss_bytes': 1708032, 'mem_kills': 0})
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-2/test_original_output_contract_5')
+command = ['/home/ubuntu/gemma-local/venv/bin/python3', '-c', "import os; os.write(1, b'\\xff')"]
+kwargs = {}
+
+    @pytest.mark.parametrize('command,kwargs', [
+        (['/bin/bash', '-c', 'echo hello'], {}),
+        (['/bin/bash', '-c', 'exit 3'], {}),
+        (['/bin/bash', '-c', 'echo err >&2'], {}),
+        ('printf hello', {}),
+        (['/bin/bash', '-c', 'printf abcdef'], {'max_output_chars': 3}),
+        (python("import os; os.write(1, b'\\xff')"), {}),
+    ])
+    def test_original_output_contract(execute, tmp_path, command, kwargs):
+        run, metrics = execute
+        expected = original(command, tmp_path, dict(os.environ), **kwargs)
+        actual = run(command, **kwargs)
+        assert type(actual) is type(expected)
+>       assert (actual.status, actual.exit_code, actual.stdout, actual.stderr) == (
+            expected.status, expected.exit_code, expected.stdout, expected.stderr)
+E       AssertionError: assert ('error', 1, ... permitted\n') == ('ok', 0, '�', '')
+E         
+E         At index 0 diff: 'error' != 'ok'
+E         Use -v to get more diff
+
+eval/tests/test_sandbox_limits.py:83: AssertionError
+___________________________ test_normal_exit_daemon ____________________________
+
+execute = (<function execute.<locals>.run at 0x7a72f52d5bc0>, {'orphan_kills': 0, 'peak_rss_bytes': 1708032, 'mem_kills': 0})
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-2/test_normal_exit_daemon0')
+
+    def test_normal_exit_daemon(execute, tmp_path):
+        run, metrics = execute
+        result = run(['/bin/bash', '-c', 'sleep 600 >/dev/null 2>&1 & echo $! > child.pid'], timeout=3)
+>       assert result.status == 'ok' and result.exit_code == 0
+E       AssertionError: assert ('error' == 'ok'
+E         
+E         - ok
+E         + error)
+
+eval/tests/test_sandbox_limits.py:91: AssertionError
+=========================== short test summary info ============================
+FAILED eval/tests/test_sandbox_limits.py::test_timeout_orphans[False] - Asser...
+FAILED eval/tests/test_sandbox_limits.py::test_timeout_orphans[True] - Assert...
+FAILED eval/tests/test_sandbox_limits.py::test_memory_tree - AssertionError: ...
+FAILED eval/tests/test_sandbox_limits.py::test_original_output_contract[command0-kwargs0]
+FAILED eval/tests/test_sandbox_limits.py::test_original_output_contract[command1-kwargs1]
+FAILED eval/tests/test_sandbox_limits.py::test_original_output_contract[command2-kwargs2]
+FAILED eval/tests/test_sandbox_limits.py::test_original_output_contract[printf hello-kwargs3]
+FAILED eval/tests/test_sandbox_limits.py::test_original_output_contract[command4-kwargs4]
+FAILED eval/tests/test_sandbox_limits.py::test_original_output_contract[command5-kwargs5]
+FAILED eval/tests/test_sandbox_limits.py::test_normal_exit_daemon - Assertion...
+10 failed, 63 passed, 1 skipped, 4 subtests passed in 5.15s
+
+exec
+/bin/bash -lc "rg -n 'LOCAL_MODEL_COST' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/litellm_core_utils/get_model_cost_map.py; sed -n '1,55p' eval/kaggle/stage_kernel.py; sed -n '190,212p' eval/tests/test_eval_fixes.py" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+4:This can be disabled by setting the LITELLM_LOCAL_MODEL_COST_MAP environment variable to True.
+8:export LITELLM_LOCAL_MODEL_COST_MAP=True
+392:    if os.getenv("LITELLM_LOCAL_MODEL_COST_MAP", "").lower() == "true":
+470:    - is_env_forced: True if LITELLM_LOCAL_MODEL_COST_MAP=True forced local usage
+662:    1. If ``LITELLM_LOCAL_MODEL_COST_MAP`` is set or this is a ``lite`` /
+676:    if os.getenv("LITELLM_LOCAL_MODEL_COST_MAP", "").lower() == "true" or _is_cli_process():
+"""Embed the shared scorer environment in Kaggle's single-file script artifact."""
+from pathlib import Path
+import sys
+
+
+def stage_kernel(destination):
+    here = Path(__file__).resolve().parent
+    source = (here / 'gold_calibration.py').read_text()
+    shared = (here.parent / 'sandbox_env.py').read_text()
+    proctree = (here.parent / 'proctree.py').read_text()
+    shared = shared.replace('from eval import proctree', 'import _gemma_proctree as proctree')
+    start = source.index('# BEGIN SHARED ENV IMPORT')
+    end = source.index('# END SHARED ENV IMPORT') + len('# END SHARED ENV IMPORT')
+    embedded = ("import types\n"
+                "_proctree = types.ModuleType('_gemma_proctree')\n"
+                "sys.modules['_gemma_proctree'] = _proctree\n"
+                f"exec(compile({proctree!r}, 'proctree.py', 'exec'), _proctree.__dict__)\n"
+                "_shared_env = types.ModuleType('sandbox_env')\n"
+                "_shared_env.__file__ = __file__\n"
+                f"exec(compile({shared!r}, 'sandbox_env.py', 'exec'), _shared_env.__dict__)\n"
+                "patch_subprocess_deps = _shared_env.patch_subprocess_deps\n"
+                "setup_scorer_env = _shared_env.setup_scorer_env\n"
+                "gold_artifact_dir = _shared_env.gold_artifact_dir\n"
+                "command_metrics = _shared_env.command_metrics\n")
+    Path(destination).write_text(source[:start] + embedded + source[end:])
+
+
+if __name__ == '__main__':
+    stage_kernel(sys.argv[1])
+    ('wheels_listing_sha256', 'new-wheels'), ('sandbox', 'none'), ('python_version', '99')])
+def test_resume_identity_refuses_changed_environment(tmp_path, key, value):
+    header = dict(_schema='agent_eval_v2', runner_source_sha256='old-source',
+                  provenance=dict(git_sha='old-sha', git_dirty=False),
+                  tasks_sha256='old-inventory', versions={'swegemma': '0.2.11'},
+                  wheels_listing_sha256='old-wheels', sandbox='bwrap', python_version='3.13')
+    path = tmp_path / 'run.jsonl'
+    runner.Journal(path, header).close()
+    with pytest.raises(ValueError, match='header mismatch') as exc:
+        runner.Journal(path, dict(header, **{key: value}))
+    assert key in str(exc.value) and '--force-new-out' in str(exc.value)
+
+
+def test_inventory_duplicate_scanned_before_harness_deduplication(tmp_path):
+    path = tmp_path / 'tasks.jsonl'
+    path.write_text('\n'.join(json.dumps(dict(instance_id=i, patch=p)) for i, p in
+                              [('one', 'A'), ('two', 'B'), ('one', 'C')]))
+    with pytest.raises(ValueError, match='Duplicate inventory IDs at line 3'):
+        runner.validate_inventory_ids(path)
+
+
+def test_git_c_quoted_utf8_octal_paths_and_diag_failure(monkeypatch):
+    patch = ('diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\n'
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+p='eval/sandbox_env.py';s=open(p).read().replace('import re\\n','import re\\nimport resource\\n');s=s.replace(\"        prlimit = shutil.which('prlimit')\", \"        # A bin/job fallback may already impose a lower hard AS cap. Raising\\n        # that cap is unprivileged and must never be attempted by prlimit.\\n        hard_as = resource.getrlimit(resource.RLIMIT_AS)[1]\\n        if hard_as "'!= resource.RLIM_INFINITY:'"\\n            as_limit = min(as_limit, hard_as)\\n        prlimit = shutil.which('prlimit')\")
+open(p,'w').write(s)
+p='eval/tests/test_sandbox_limits.py';s=open(p).read().replace(\"import pytest\\n\", \"import pytest\\n\\nos.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'\\n\")
+open(p,'w').write(s)
+PY
+bin/job start sandbox-limits-check2-light -- /home/ubuntu/gemma-local/venv/bin/python3 /tmp/gemma-sandbox-limits-tests.py
+while read -r state rest < ops/jobs/sandbox-limits-check2-light.status && [ \""'$state" = running ]; do sleep 1; done
+cat ops/jobs/sandbox-limits-check2-light.log' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 10922ms:
+started sandbox-limits-check2-light: running 10 2026-11-05T17:55:52Z [memory cap: ulimit -v 5G per process (no systemd user manager)]
+[bin/job] memory cap: ulimit -v 5G per process (no systemd user manager)
+....................s............................................... [ 91%]
+......                                                                   [100%]
+73 passed, 1 skipped, 4 subtests passed in 8.53s
+
+codex
+The tests caught an interaction with `bin/job`: its 5 GiB hard address-space cap prevents `prlimit` from setting an 8 GiB cap. The executor now respects an existing lower cap. The rerun passed: 73 passed, 1 skipped, and 4 subtests passed in 8.53 seconds.
+exec
+/bin/bash -lc "rg -n -A20 -B2 'stage_kernel' eval/tests/test_eval_fixes.py; git diff --check; git diff -- eval/kaggle/gold_calibration.py; cat ops/jobs/sandbox-limits-check2-light.status" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+19-    sys.path.insert(0, str(ROOT))
+20-from eval import run_agent_eval as runner, sandbox_env as env, tool_timing as timing
+21:from eval.kaggle.stage_kernel import stage_kernel
+22-
+23-
+24-@pytest.fixture
+25-def harness():
+26-    pytest.importorskip('swegemma')
+27-
+28-
+29-def test_bwrap_argv_masks_before_reexposing_runtime(tmp_path):
+30-    root = tmp_path / 'box'
+31-    workspace = root / 'workspace'
+32-    argv = env.bwrap_argv(['/bin/bash', '-c', 'true'], workspace,
+33-                          ['/home/ubuntu/repo', '/home/ubuntu'], ['/opt/python'])
+34-    assert argv[:11] == env.BWRAP_TEMPLATE[:11]
+35-    assert argv[11:15] == ['--tmpfs', '/home/ubuntu', '--tmpfs', '/home/ubuntu/repo']
+36-    assert argv[15:20] == ['--tmpfs', '/tmp', '--bind', str(root), str(root)]
+37-    assert argv[20:23] == ['--ro-bind', '/opt/python', '/opt/python']
+38-    assert argv[-5:] == ['--chdir', str(workspace), '/bin/bash', '-c', 'true']
+39-    for path in ['/x/tasks.jsonl', '/x/splits', '/x/runs', '/x/results']:
+40-        with pytest.raises(ValueError, match='Forbidden'):
+41-            env.bwrap_argv(['/bin/bash', '-c', 'true'], workspace, [], [path])
+--
+229-def test_shared_module_embedded_in_kernel(tmp_path):
+230-    staged = tmp_path / 'gold_calibration.py'
+231:    stage_kernel(staged)
+232-    # Import the staged single file without the repo on sys.path or any harness.
+233-    result = subprocess.run([sys.executable, '-I', '-c',
+234-        "import runpy, sys; m=runpy.run_path(sys.argv[1]); "
+235-        "assert m['setup_scorer_env'].__module__ == 'sandbox_env'; "
+236-        "assert m['patch_subprocess_deps'].__globals__ is m['setup_scorer_env'].__globals__",
+237-        str(staged)], capture_output=True, text=True)
+238-    assert result.returncode == 0, result.stderr
+239-
+240-
+241-def test_dependency_setup_preserves_gold_probe_log(tmp_path, monkeypatch, harness):
+242-    import swegemma.harness.container_setup as cs
+243-    # Restore all bindings changed by the shared setup after this test.
+244-    for name, module in list(sys.modules.items()):
+245-        if name.startswith('swegemma') and hasattr(module, 'install_test_dependencies'):
+246-            monkeypatch.setattr(module, 'install_test_dependencies', module.install_test_dependencies)
+247-    archive = tmp_path / 'empty.tar'
+248-    with tarfile.open(archive, 'w'):
+249-        pass
+250-    (tmp_path / 'wheels').mkdir()
+251-    site = tmp_path / 'venv/lib/python3.13/site-packages'
+diff --git a/eval/kaggle/gold_calibration.py b/eval/kaggle/gold_calibration.py
+index 706dce5..bd55f64 100644
+--- a/eval/kaggle/gold_calibration.py
++++ b/eval/kaggle/gold_calibration.py
+@@ -20,7 +20,9 @@ os.environ['PYTEST_ADDOPTS'] = (os.environ.get('PYTEST_ADDOPTS', '') + ' -p no:l
+ DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
+ WORKING_DIR = Path('/kaggle/working')
+ WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+-CONCURRENCY = 2
++CONCURRENCY = int(os.environ.get('GOLD_CONCURRENCY', '2'))
++if CONCURRENCY < 1:
++    raise ValueError('GOLD_CONCURRENCY must be positive')
+ ONLY_IDS = None  # all tasks (diag ids list removed after local repro, cycle 37)
+ 
+ 
+@@ -178,10 +180,10 @@ def choose_sandbox():
+ # push.sh embeds this module here when staging the single-file Kaggle kernel.
+ # BEGIN SHARED ENV IMPORT
+ try:
+-    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
++    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
+ except ModuleNotFoundError:
+     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+-    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir
++    from eval.sandbox_env import patch_subprocess_deps, setup_scorer_env, gold_artifact_dir, command_metrics
+ # END SHARED ENV IMPORT
+ 
+ 
+@@ -239,6 +241,8 @@ async def verify_gold(task, patch, data_dir, sandbox, out_dir=None):
+ def worker(args):
+     """No stdout/stderr from this process is exposed by the coordinator."""
+     logging.disable(logging.CRITICAL)
++    metrics = dict(peak_rss_bytes=0, mem_kills=0, orphan_kills=0)
++    metrics_token = command_metrics.set(metrics)
+     start = time.monotonic()
+     raw = next(t for t in load_inventory(args.data_dir) if t['instance_id'] == args.worker)
+     row = dict(instance_id=raw['instance_id'], repo=raw['repo'], resolved=False,
+@@ -282,6 +286,8 @@ def worker(args):
+         # Location only (file:line:function), never messages or values.
+         row['where'] = ' <- '.join(f'{Path(f.filename).name}:{f.lineno}:{f.name}'
+                                    for f in reversed(traceback.extract_tb(exc.__traceback__)[-4:]))
++    command_metrics.reset(metrics_token)
++    row.update({key: int(metrics[key]) for key in ('peak_rss_bytes', 'mem_kills', 'orphan_kills')})
+     row['duration_seconds'] = round(time.monotonic() - start, 3)
+     args.result.write_text(json.dumps(row) + '\n', encoding='utf-8')
+ 
+@@ -308,7 +314,8 @@ def run_one(task, data_dir, sandbox, allow_unsandboxed=False):
+         except Exception as exc:
+             error = f'Worker failure ({type(exc).__name__})'
+     return dict(instance_id=task['instance_id'], repo=task['repo'], resolved=False,
+-                exit_code=None, duration_seconds=round(time.monotonic() - start, 3),
++                exit_code=None, peak_rss_bytes=0, mem_kills=0, orphan_kills=0,
++                duration_seconds=round(time.monotonic() - start, 3),
+                 error=error, sandbox=sandbox)
+ 
+ 
+@@ -356,6 +363,7 @@ def main():
+                 os.fsync(stream.fileno())
+                 results[row['instance_id']] = row
+                 print(f"Finished {len(results)}/{len(tasks)}: {row['instance_id']} "
++                      f"peak_rss_bytes={row.get('peak_rss_bytes', 0)} mem_kills={row.get('mem_kills', 0)} orphan_kills={row.get('orphan_kills', 0)} "
+                       f"resolved={row['resolved']} exit_code={row['exit_code']} err={row.get('error')} where={row.get('where')} shape={row.get('shape')}", flush=True)
+     summary = summarize(tasks, results)
+     encoded = json.dumps(summary, indent=2, sort_keys=True) + '\n'
+done 0 2026-11-05T17:56:02Z
+
+exec
+/bin/bash -lc "sed -n '155,173p' eval/tests/test_eval_fixes.py; sed -n '90,255p' eval/sandbox_env.py; git diff --numstat" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ succeeded in 0ms:
+
+def test_real_bwrap_probe(tmp_path, monkeypatch, harness):
+    if not shutil.which('bwrap'):
+        pytest.skip('bubblewrap not installed')
+    preflight = subprocess.run(env.BWRAP_TEMPLATE[:11] + ['/bin/true'], capture_output=True, text=True)
+    if preflight.returncode:
+        pytest.skip('bubblewrap blocked by sandbox: ' + preflight.stderr.strip())
+    import swegemma.sandbox.subprocess as sb
+    monkeypatch.setattr(sb, 'execute_subprocess_command', sb.execute_subprocess_command)
+    (tmp_path / 'tasks.jsonl').write_text('hidden inventory')
+    env.isolate_host_packages()
+    env.apply_isolation([Path.home(), ROOT, tmp_path], [])
+    env.probe_isolation(sb.SubprocessManager(), tmp_path / 'tasks.jsonl', tmp_path)
+
+
+def test_config_forwards_fields_and_resolves_graph_paths(tmp_path, caplog, harness):
+    from swegemma.context import SwegemmaContext
+    args = SimpleNamespace(data_dir=tmp_path / 'other-data', bundle=tmp_path / 'bundle', concurrency=1)
+    config = runner.build_config(dict(verification_timeout_seconds=17, max_llm_calls=9,
+        wheel_target(wheels)
+    for path in wheels.rglob('*'):
+        if path.is_symlink():
+            wheel_target(path)
+    return paths
+
+
+def execute_limited(command, cwd, env, timeout=300, *, shell=None,
+                    max_output_chars=10 * 1024 * 1024):
+    """Installed executor contract, with host process-tree limits and cleanup."""
+    from adk_eval_core.errors import EvalCoreError
+    from adk_eval_core.sandbox.base import ExecutionResult
+
+    start = time.perf_counter()
+    metrics = command_metrics.get()
+    tracked = {}
+    peak = 0
+    marker = ('GEMMA_SANDBOX_TREE=' + uuid.uuid4().hex).encode()
+    child_env = dict(env)
+    child_env['GEMMA_SANDBOX_TREE'] = marker.decode().split('=', 1)[1]
+    if shell is None:
+        shell = isinstance(command, str)
+    try:
+        limit = int(os.environ.get('GEMMA_SANDBOX_MEM_BYTES', 4 * 1024**3))
+        as_limit = int(os.environ.get('GEMMA_SANDBOX_AS_BYTES', 8 * 1024**3))
+        # A bin/job fallback may already impose a lower hard AS cap. Raising
+        # that cap is unprivileged and must never be attempted by prlimit.
+        hard_as = resource.getrlimit(resource.RLIMIT_AS)[1]
+        if hard_as != resource.RLIM_INFINITY:
+            as_limit = min(as_limit, hard_as)
+        prlimit = shutil.which('prlimit')
+        if prlimit:
+            # Preserve Popen's string/list shell semantics inside the backstop.
+            if shell:
+                command = ['/bin/sh', '-c', command] if isinstance(command, str) else ['/bin/sh', '-c', *command]
+            elif isinstance(command, str):
+                command = [command]
+            command = [prlimit, f'--as={as_limit}', '--', *command]
+            shell = False
+        proc = subprocess.Popen(command, shell=shell, cwd=str(cwd), env=child_env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding='utf-8', errors='replace',
+                                start_new_session=True)
+    except (RuntimeError, OSError, ValueError, EvalCoreError) as exc:
+        return ExecutionResult(status='error', stdout='', stderr=str(exc), exit_code=-1,
+                               duration_seconds=round(time.perf_counter() - start, 3))
+
+    def scan():
+        nonlocal peak
+        processes = proctree.snapshot()
+        roots = set(proctree.survivors(tracked, processes)) | {proc.pid}
+        selected = proctree.descendants(roots, processes)
+        for p in processes.values():
+            if p.pgid == proc.pid or p.sid == proc.pid:
+                selected.add(p.pid)
+            elif p.pid not in selected:
+                # A child can setsid + reparent between polls. The inherited unique
+                # marker catches it without relying on namespace-local pids (bwrap).
+                try:
+                    if marker in Path(f'/proc/{p.pid}/environ').read_bytes().split(b'\0'):
+                        selected.add(p.pid)
+                except OSError:
+                    pass
+        selected = proctree.descendants(selected, processes)
+        for pid in selected:
+            if pid in processes:
+                tracked.setdefault(pid, processes[pid])
+        peak = max(peak, proctree.tree_rss(tracked, processes))
+        return proctree.survivors(tracked, processes)
+
+    def cleanup():
+        live = scan()
+        count = len(live)
+        deadline = time.monotonic() + 2
+        while live:
+            proctree.kill_tree(live)
+            proc.poll()  # Reap our direct child; zombies aren't running survivors.
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Sandbox processes survived SIGKILL')
+            time.sleep(0.025)
+            live = scan()
+        return count
+
+    status, code = None, None
+    stdout, stderr = '', ''
+    try:
+        while True:
+            scan()
+            if peak > limit:
+                status, code = 'error', 137
+                if metrics is not None:
+                    metrics['mem_kills'] = metrics.get('mem_kills', 0) + 1
+                cleanup()
+                break
+            if timeout is not None and time.perf_counter() - start >= timeout:
+                status, code = 'timeout', 124
+                cleanup()
+                break
+            if proc.poll() is not None:
+                count = cleanup()
+                if metrics is not None:
+                    metrics['orphan_kills'] = metrics.get('orphan_kills', 0) + count
+                break
+            wait = 0.25 if timeout is None else max(0.001, min(0.25, timeout - (time.perf_counter() - start)))
+            try:
+                stdout, stderr = proc.communicate(timeout=wait)
+            except subprocess.TimeoutExpired:
+                continue
+            # Scan and clean up even if detached daemons closed their pipe fds.
+            count = cleanup()
+            if metrics is not None:
+                metrics['orphan_kills'] = metrics.get('orphan_kills', 0) + count
+            break
+        try:
+            stdout, stderr = proc.communicate(timeout=1)
+        except Exception:
+            stdout, stderr = '', ''
+        if status is None:
+            status, code = ('ok' if proc.returncode == 0 else 'error'), proc.returncode
+        if status != 'timeout':
+            if max_output_chars and len(stdout) > max_output_chars:
+                stdout = stdout[:max_output_chars] + '\n...[Output truncated at 10MB limit]\n'
+            if max_output_chars and len(stderr) > max_output_chars:
+                stderr = stderr[:max_output_chars] + '\n...[Output truncated at 10MB limit]\n'
+        if code == 137:
+            stderr += '\nkilled: sandbox memory limit\n'
+    except (RuntimeError, OSError, ValueError, EvalCoreError) as exc:
+        status, code, stdout, stderr = 'error', 1, '', str(exc)
+    finally:
+        cleanup()  # Fail closed if a process cannot be killed.
+        proc.stdout.close()
+        proc.stderr.close()
+        if metrics is not None:
+            metrics['peak_rss_bytes'] = max(metrics.get('peak_rss_bytes', 0), peak)
+            for key in ('mem_kills', 'orphan_kills'):
+                metrics.setdefault(key, 0)
+    return ExecutionResult(status=status, stdout=stdout or '', stderr=stderr or '',
+                           exit_code=code, duration_seconds=round(time.perf_counter() - start, 3))
+
+
+def apply_isolation(hidden_paths, ro_paths):
+    """Wrap the module executor, retaining the installed manager's translation/env.
+
+    Empty hidden_paths disables bwrap (explicit opt-out), but retains timeout
+    accounting. Repeated setup replaces this hook rather than stacking it.
+    """
+    import swegemma.sandbox.subprocess as sb
+    hidden_paths, ro_paths = tuple(hidden_paths), tuple(ro_paths)
+    original = getattr(sb.execute_subprocess_command, '_unwrapped', sb.execute_subprocess_command)
+
+    def execute(command, cwd, env, **kwargs):
+        if ro_paths:
+            command = [*command[:2], re.sub(r'(?<![\w.-])/wheels(?![\w.-])',
+                                           str(Path(ro_paths[0]).resolve()), command[2])]
+        if hidden_paths:
+            if not isinstance(command, list) or command[:2] != ['/bin/bash', '-c']:
+                raise RuntimeError('Unsupported harness subprocess command')
+            # The harness's fallback wheel search doesn't include custom data dirs.
+            command = bwrap_argv(command, cwd, hidden_paths, runtime_ro_paths(cwd, ro_paths))
+        result = execute_limited(command=command, cwd=cwd, env=env, **kwargs)
+        metrics = command_metrics.get()
+        if metrics is not None and (result.status == 'timeout' or result.exit_code == 124):
+            metrics['cmd_timeouts'] = metrics.get('cmd_timeouts', 0) + 1
+        return result
+
+    execute._unwrapped = original
+12	4	eval/kaggle/gold_calibration.py
+7	1	eval/kaggle/stage_kernel.py
+139	1	eval/sandbox_env.py
+1	1	eval/tests/test_eval_fixes.py
+2	0	eval/tests/test_gold_calibration.py
+

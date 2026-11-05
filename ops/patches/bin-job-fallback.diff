@@ -1,0 +1,30 @@
+--- a/bin/job
++++ b/bin/job
+@@ -18,18 +18,22 @@
+     fi
+     printf '%q ' "$@" > "ops/jobs/$name.cmd"
+     # Memory cap per job: a runaway job must not stall the VM (Etho shares it; 2026-11-05 incident).
+-    # Prefer a systemd user scope (caps the whole process tree); after a cron-started boot with no
+-    # login there is no user manager, so fall back to a per-process ulimit -v.
++    # Prefer a systemd user scope (caps the whole process tree), but ONLY with linger on: without
++    # linger the user manager exists just while someone is logged in, and logout stops user@UID
++    # and every scope in it (the job dies, its status file still says running; dec 023).
++    # Otherwise fall back to a per-process RLIMIT_DATA cap. Not ulimit -v: Codex's tool host
++    # reserves a large virtual address space and crashes (SIGTRAP) under RLIMIT_AS.
+     rt=/run/user/$(id -u)
+     rm -f "ops/jobs/$name.unit"
+-    if [ -S "$rt/bus" ] && XDG_RUNTIME_DIR=$rt systemd-run --user --scope --quiet -p MemoryMax=64M true 2>/dev/null; then
++    linger=$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)
++    if [ "$linger" = yes ] && [ -S "$rt/bus" ] && XDG_RUNTIME_DIR=$rt systemd-run --user --scope --quiet -p MemoryMax=64M true 2>/dev/null; then
+       unit="gemma-job-$name-$(date +%s)"
+       echo "$unit" > "ops/jobs/$name.unit"
+       pre=(env XDG_RUNTIME_DIR="$rt" systemd-run --user --scope --quiet --collect --unit="$unit" -p MemoryMax=5G)
+       cap="memory cap: systemd scope MemoryMax=5G (whole job)"
+     else
+-      pre=(bash -c 'ulimit -v 5242880 && exec "$@"' _)
+-      cap="memory cap: ulimit -v 5G per process (no systemd user manager)"
++      pre=(bash -c 'ulimit -d 5242880 && exec "$@"' _)
++      cap="memory cap: ulimit -d 5G per process (no lingering systemd user manager)"
+     fi
+     # setsid: the wrapper leads its own process group, so `kill` can signal the whole tree.
+     GEMMA_JOB_CAP=$cap setsid nohup bash -c '

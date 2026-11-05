@@ -49,3 +49,20 @@ Confidence tags: **official** = Rules/Evaluation/Prizes pages; **host-forum** = 
   remain OPEN (752128, Oct 23–25, no staff answer) [participant].
 - **M7 LoRA** [participant]: thread 755677 (2026-11-04): some LoRA submissions score 0, others non-zero with
   rank-32 adapters. Consistent with our plan: validate on the exact base, prove outputs change, measure KV cache.
+
+## Public caps from notebooks (dec 023 item 3, pulled 2026-11-05 with `kaggle kernels pull`; only config lines read)
+- **C1 Official starter** [official]: kaggle.com/code/ryanholbrook/getting-started-gemma-4-developer-agent (Ryan
+  Holbrook, staff). It reads `eval_config.yaml` from the bundle. Defaults when a key is absent: timeout_seconds 300,
+  verification_timeout_seconds 300, max_tool_calls 100, **max_time_minutes 60.0 (float)**, max_turns None.
+  vLLM max_model_len 32768. It uses the subprocess sandbox backend. Rule: always set every cap explicitly, because
+  the defaults are not 12 h-safe.
+- **C2 Official sample_submission** [official, data/raw/sample_submission/eval_config.yaml]: timeout_seconds 60,
+  max_tool_calls 10, **max_time_minutes 1**, max_turns 50.
+- **C3 Public scored notebook** [participant]: kaggle.com/code/nihilisticneuralnet/0-10-gemma-4-developer-agent-submission
+  ("[0.10]", i.e. a reported LB score of 0.10). eval_config: timeout_seconds 60, max_tool_calls 40,
+  **max_time_minutes 4.5**, max_turns 100. Root sampling: temperature 0.15, thinking_budget 3072. Sub-agents:
+  temperature 0.0, thinking_budget 768. Facts recorded only, no code reused (no license on the kernel metadata).
+- **How to weigh C3** (dec 023): the 12 h is a TOTAL. A scored 4.5-min run shows only that mean(setup + agent) per
+  task stayed under about (720 - vLLM start) / 120 ≈ 5.9 min on that run. It says nothing about the worst case, and
+  nothing about setup being small: our measured ~210 s of setup plus a mean agent time under ~2.4 min also fits.
+  Our worst-case rule (dec 022 item 1) stands.
