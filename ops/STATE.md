@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 19:27Z (cycle 81, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-05 19:23Z (cycle 82, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 Per-cycle history: ops/journal.md; pre-cycle-51 STATE verbatim: ops/history/STATE-archive.md.
 Builder on Opus (dec 010: local-first, two-strike).
 
@@ -18,7 +18,7 @@ Builder on Opus (dec 010: local-first, two-strike).
 - Watchdog must be running: `bin/job status memguard` (old name, pid 7933) until the memguard-fix deploy, then `memguard-light`; if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - bin/job hardening is applied (b1eedd7); keep heavy jobs to one at a time until the Director relaxes this (waiters/memguard/codex exempt).
 
-## Running jobs (19:27Z)
+## Running jobs (19:23Z)
 - memguard (old name, pid 7933): running, 0 kills. Replaced by memguard-light at the memguard-fix deploy.
 - DEC 028 (report 005-prelim, option A APPROVED): 2a STOP met; artifact branch closed, 2b moot, no v000 re-time. CPU 2a dropped.
   Item 1-3: codex-kernel-setup-fix5 RUNNING (branch codex/kernel-setup-fix5 on round-4 c4c9528; spec ops/codex/build-kernel-setup-fix5.spec):
@@ -31,7 +31,7 @@ Builder on Opus (dec 010: local-first, two-strike).
   F: (cap+S+F)x125+30<=660 and (cap+F+0.875+0.75S); don't build v002 before the Director sees it.
 - Item 6: codex-sandbox-env-docker-order RUNNING (bin/codex-build from main; Docker order + wheel-set cache key + marker in
   eval/sandbox_env.py) -> review -> merge -> full eval/tests on main.
-- codex-memguard-fix6 RUNNING (round 6; inode-identity detection + fail closed). Then host livetest + review; no BLOCKING -> merge +
+- codex-memguard-fix6 BUILT eedf84b (Codex 93p/1s, live 94p); host job memguard-fix6-livetest RUNNING. Then review-memguard-fix6-light; no BLOCKING -> merge +
   deploy (stop 7933, start memguard-light at once). If still BLOCKING: stop iterating, short report (old memguard works).
 - Item 7: plan eval/plans/006.md pre-registered (31B timing, cap from e4b-v001 S/F, <= 4 quota-h, same 8 ids). After report 005.
 - NOTE: bin/codex-build always branches from main HEAD; for follow-up rounds create the worktree on the previous commit manually,

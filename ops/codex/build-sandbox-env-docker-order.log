@@ -2763,3 +2763,565 @@ index e8ff7cefd77a514219d91984f0ee0397f8d6e0f5..2cf685ca3cd5cc9cbe6967ab4f312269
          flag = '--fast-path' if fast_path else ''
          docker.exec(container_id, f'python3 /tmp/setup.py {flag} {repo}'.strip(), timeout=280)
 
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-sandbox-env-docker-order/eval/tests/test_sandbox_deps.py
+diff --git a/eval/sandbox_env.py b/eval/sandbox_env.py
+index e8ff7cefd77a514219d91984f0ee0397f8d6e0f5..2cf685ca3cd5cc9cbe6967ab4f312269b1b67af1
+--- a/eval/sandbox_env.py
++++ b/eval/sandbox_env.py
+@@ -275,18 +275,27 @@
+                 sha256=hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None)
+ 
+ 
++def base_cache_key(wheels, harness_version):
++    """Identify the selected base wheels, independent of enumeration order/path."""
++    import hashlib
++    identity = (str(harness_version), sorted((p.name, p.stat().st_size) for p in wheels))
++    return 'sp_base_local_' + hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:24]
++
++
+ def patch_subprocess_deps(data_dir):
+     """Emulate the docker-only dependency setup for the subprocess sandbox (swegemma skips it).
+ 
+     Contract (swegemma 0.2.11 container_setup): for docker, _ensure_container_site_packages
+-    unpacks every deduplicated (highest-version, py313-compatible) wheel from wheels_dir that is
+-    < 20 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
++    first attempts the workspace editable install, then unpacks every deduplicated
++    (highest-version, py313-compatible) wheel from wheels_dir that is
++    < 16 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
+     site-packages, no resolver; large wheels are added only if imported by the workspace; then
+     sandbox/setup.py runs with --fast-path. We replicate exactly that inside the sandbox venv.
+     The sandbox venv uses system_site_packages=True, so the HOST python must mirror the image
+     (Dockerfile.public: pytest, pytest-timeout==2.1.0, typer, build backends; nothing else).
+     """
+     import tarfile
++    from importlib.metadata import version
+     import swegemma.harness.container_setup as cs
+     import swegemma.harness.verification as vf
+     import swegemma.harness.sample_verification  # load all known by-name bindings
+@@ -305,13 +314,26 @@
+             return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+         venv_dir = docker.sandboxes[container_id]['venv']
+         sp_dir = next(iter(sorted(venv_dir.glob('lib/python3*/site-packages'))))
++        # The stock editable hook returns early for subprocess managers. Mirror
++        # its Docker command, ignored failure, and default manager timeout here.
++        docker.exec(container_id,
++                    'pip install --no-index --find-links=/wheels --no-build-isolation --no-deps -e /workspace 2>/dev/null || true')
++        # The harness index caches by directory path alone. Refresh it so a changed
++        # wheelhouse is still selected/deduplicated by the actual harness code.
++        cs._WHEEL_INDEX_CACHE.pop(str(wheels_src.resolve()), None)
+         base_wheels, large_wheels, _m2p, _req = cs._inspect_wheels_dir(wheels_src)
+         selected = list(base_wheels)
+         if large_wheels:  # public wheels have none; fail loudly rather than silently diverge
+             raise RuntimeError('large wheels present; workspace-import scan not emulated')
+-        tar_path = cs._build_unpacked_wheels_tar(selected, 'sp_base_local', '.swegemma_base_injected')
+-        with tarfile.open(tar_path) as tf:
+-            tf.extractall(sp_dir, filter='data')
++        cache_key = base_cache_key(selected, version('swegemma'))
++        marker = sp_dir / '.swegemma_base_injected'
++        if not marker.is_file() or marker.read_text() != cache_key:
++            tar_path = cs._build_unpacked_wheels_tar(selected, cache_key, marker.name)
++            with tarfile.open(tar_path) as tf:
++                tf.extractall(sp_dir, filter='data')
++            # The harness archive contains an 'ok' marker; bind the container's
++            # marker to this wheel identity only after extraction succeeds.
++            marker.write_text(cache_key)
+         docker.copy_to(container_id, setup_py, '/tmp/setup.py')
+         flag = '--fast-path' if fast_path else ''
+         docker.exec(container_id, f'python3 /tmp/setup.py {flag} {repo}'.strip(), timeout=280)
+diff --git a/eval/tests/test_sandbox_deps.py b/eval/tests/test_sandbox_deps.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c335047cfac08786419de31a360593a22b60cec
+--- /dev/null
++++ b/eval/tests/test_sandbox_deps.py
+@@ -0,0 +1,142 @@
++"""Offline Docker-order and wheel-cache contracts using fake harness modules."""
++import importlib.metadata
++import io
++from pathlib import Path
++import sys
++import tarfile
++from types import ModuleType, SimpleNamespace
++
++import pytest
++
++from eval import sandbox_env as env
++
++
++@pytest.fixture
++def local_setup(tmp_path, monkeypatch):
++    events = []
++    original = lambda *args, **kwargs: events.append(('docker', args, kwargs))
++    names = ['swegemma', 'swegemma.harness', 'swegemma.harness.container_setup',
++             'swegemma.harness.verification', 'swegemma.harness.sample_verification',
++             'swegemma.evaluate', 'swegemma.cli', 'swegemma.harness.agent_runner']
++    for name in names:
++        module = ModuleType(name)
++        monkeypatch.setitem(sys.modules, name, module)
++        if '.' in name:
++            parent, attr = name.rsplit('.', 1)
++            setattr(sys.modules[parent], attr, module)
++    cs = sys.modules['swegemma.harness.container_setup']
++    cs.install_test_dependencies = original
++    monkeypatch.setattr(importlib.metadata, 'version', lambda name: 'fake-0.2.11')
++    monkeypatch.delenv('GOLD_PROBE_LOG', raising=False)
++    wheels = tmp_path / 'wheels'
++    wheels.mkdir()
++    (wheels / 'a-1-py3-none-any.whl').write_bytes(b'wheel a')
++    site = tmp_path / 'venv/lib/python3.13/site-packages'
++    site.mkdir(parents=True)
++    cs._WHEEL_INDEX_CACHE = {str(wheels.resolve()): 'stale index'}
++
++    def inspect(path):
++        assert path == wheels
++        assert str(wheels.resolve()) not in cs._WHEEL_INDEX_CACHE
++        events.append(('inspect',))
++        return sorted(path.glob('*.whl')), {}, {}, {}
++
++    def build(selected, cache_key, marker_name):
++        events.append(('build', cache_key, tuple(p.name for p in selected)))
++        archive = tmp_path / (cache_key + '.tar')
++        if not archive.exists():
++            with tarfile.open(archive, 'w') as tf:
++                for name, content in [(p.name + '.payload', p.read_bytes()) for p in selected] + [(marker_name, b'ok\n')]:
++                    info = tarfile.TarInfo(name)
++                    info.size = len(content)
++                    tf.addfile(info, io.BytesIO(content))
++        return archive
++
++    cs._inspect_wheels_dir = inspect
++    cs._build_unpacked_wheels_tar = build
++
++    class SubprocessManager:
++        sandboxes = {'id': {'venv': tmp_path / 'venv'}}
++
++        def exec(self, sid, command, **kwargs):
++            events.append(('exec', command, kwargs))
++            # Even a failed editable attempt must be followed by injection.
++            return SimpleNamespace(exit_code=1)
++
++        def copy_to(self, sid, source, destination):
++            events.append(('copy', destination))
++
++    install = env.patch_subprocess_deps(tmp_path)
++    return SimpleNamespace(install=install, manager=SubprocessManager(), cs=cs,
++                           wheels=wheels, site=site, events=events)
++
++
++def test_editable_precedes_injection_and_setup_without_pip_environment(local_setup):
++    s = local_setup
++    s.install(s.manager, 'id', 'org/package')
++    assert [e[0] for e in s.events] == ['exec', 'inspect', 'build', 'copy', 'exec']
++    assert s.events[0] == ('exec',
++        'pip install --no-index --find-links=/wheels --no-build-isolation --no-deps -e /workspace 2>/dev/null || true', {})
++    assert s.events[-1] == ('exec', 'python3 /tmp/setup.py --fast-path org/package', {'timeout': 280})
++    assert all('PIP_' not in e[1] for e in s.events if e[0] == 'exec')
++    assert (s.site / 'a-1-py3-none-any.whl.payload').read_bytes() == b'wheel a'
++
++
++def test_base_cache_key_is_stable_and_tracks_wheel_identity(tmp_path):
++    a, b = tmp_path / 'a.whl', tmp_path / 'b.whl'
++    a.write_bytes(b'a')
++    b.write_bytes(b'bb')
++    key = env.base_cache_key([a, b], 'v1')
++    assert key == env.base_cache_key([b, a], 'v1')
++    assert key == env.base_cache_key([a, b], 'v1')
++    assert key != env.base_cache_key([a, b], 'v2')
++    a.write_bytes(b'aa')
++    assert key != env.base_cache_key([a, b], 'v1')
++    a.write_bytes(b'a')
++    a = a.rename(tmp_path / 'renamed.whl')
++    assert key != env.base_cache_key([a, b], 'v1')
++
++
++def test_matching_marker_skips_archive_and_extraction(local_setup):
++    s = local_setup
++    key = env.base_cache_key(list(s.wheels.glob('*.whl')), 'fake-0.2.11')
++    (s.site / '.swegemma_base_injected').write_text(key)
++    s.install(s.manager, 'id')
++    assert [e[0] for e in s.events] == ['exec', 'inspect', 'copy', 'exec']
++    assert not list(s.site.glob('*.payload'))
++
++
++@pytest.mark.parametrize('marker_value', ['ok\n', 'different-wheel-set'])
++def test_stale_marker_is_replaced_after_injection(local_setup, marker_value):
++    s = local_setup
++    marker = s.site / '.swegemma_base_injected'
++    marker.write_text(marker_value)
++    s.install(s.manager, 'id')
++    assert marker.read_text() == env.base_cache_key(list(s.wheels.glob('*.whl')), 'fake-0.2.11')
++    assert any(e[0] == 'build' for e in s.events)
++
++
++@pytest.mark.parametrize('change', ['size', 'name'])
++def test_changed_wheelhouse_uses_new_archive_and_reinjects(local_setup, change):
++    s = local_setup
++    s.install(s.manager, 'id')
++    first_key = (s.site / '.swegemma_base_injected').read_text()
++    wheel = next(s.wheels.glob('*.whl'))
++    if change == 'size':
++        wheel.write_bytes(b'new larger wheel')
++    else:
++        wheel = wheel.rename(s.wheels / 'renamed-1-py3-none-any.whl')
++    s.cs._WHEEL_INDEX_CACHE[str(s.wheels.resolve())] = 'stale index'
++    s.install(s.manager, 'id')
++    builds = [e for e in s.events if e[0] == 'build']
++    assert len(builds) == 2 and builds[0][1] != builds[1][1]
++    assert (s.site / '.swegemma_base_injected').read_text() != first_key
++    assert (s.site / (wheel.name + '.payload')).read_bytes() == wheel.read_bytes()
++
++
++def test_docker_manager_still_uses_original_hook(local_setup):
++    s = local_setup
++    manager = object()
++    s.install(manager, 'docker-id', 'org/package', fast_path=False, config='config')
++    assert s.events == [('docker', (manager, 'docker-id', 'org/package'),
++                         {'fast_path': False, 'config': 'config'})]
+
+exec
+/bin/bash -lc 'PATH=/home/ubuntu/gemma-local/venv/bin:$PATH LITELLM_LOCAL_MODEL_COST_MAP=True python -m pytest eval/tests/test_sandbox_deps.py -q' in /home/ubuntu/work/gemma-wt/codex-sandbox-env-docker-order
+ exited 1 in 0ms:
+/home/ubuntu/gemma-local/venv/bin/python: No module named pytest
+
+exec
+/bin/bash -lc "ls /home/ubuntu/gemma-local; ls /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pytest; rg -n 'PYTHONPATH|site-packages|pytest eval/tests' bin/codex-build eval/tests/test_agent_timing.py ops/codex/build-sandbox-limits*" in /home/ubuntu/work/gemma-wt/codex-sandbox-env-docker-order
+ succeeded in 0ms:
+fastapi_14258.json
+fastapi_14458.json
+imgrt-stub
+pyimg
+requests_7433.json
+rich_2725.json
+show.py
+venv
+wh
+__init__.py
+__main__.py
+__pycache__
+py.typed
+ops/codex/build-sandbox-limits.spec:1:Dec 020 item 6 + dec 021 item 4 (read ops/decisions/020-*.md and 021-*.md). Harden the LOCAL subprocess sandbox executor in eval/sandbox_env.py (the execute() wrapper installed by the hook that replaces swegemma.sandbox.subprocess.execute_subprocess_command; the original is adk_eval_core/sandbox/subprocess_sandbox.py:execute_subprocess_command in /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages, read it to mirror its return type and semantics exactly). Context: a local gold/null run OOM-stalled this shared 12 GB VM; two null-patch tasks ran ~45 min each despite 300 s command timeouts, with no per-sandbox memory limit and no RSS logging. Requirements: (1) New module eval/proctree.py (stdlib only, Linux /proc): snapshot of our-uid processes (pid, ppid, pgid, sid, rss, starttime), descendants(), tree_rss(), kill_tree(pids, verify starttime to avoid pid reuse), survivors(). (2) Our executor runs the command itself (do not call the original), with Popen(start_new_session=True), stdout/stderr captured exactly like the original (same decoding/truncation behaviour, same result object type and fields, same status values incl. 'timeout' and exit_code 124 on timeout), polling every 0.25 s: track the set of every pid ever seen in the tree (descendants of proc.pid, plus anything in its pgid/sid) so setsid'd or reparented orphans are still tracked; sum RSS over live tracked pids; record peak. (3) Memory limit: if summed tree RSS > GEMMA_SANDBOX_MEM_BYTES (default 4 GiB, the scorer sandbox limit) SIGKILL all tracked pids, return exit_code 137 with status 'error' (or the closest existing non-success status the original uses) and a clear stderr note 'killed: sandbox memory limit'. Backstop: prefix the command with prlimit --as=<GEMMA_SANDBOX_AS_BYTES, default 8 GiB> -- (skip if prlimit missing). (4) On timeout: SIGKILL every tracked live pid (killpg plus individual kills), then assert no survivors (re-scan up to 2 s); on any normal exit also kill any tracked survivors (background daemons left by tests) and count them. (5) Metrics: in the existing command_metrics ContextVar dict record peak_rss_bytes (max over commands), mem_kills, orphan_kills; and have eval/kaggle/gold_calibration.py write peak_rss_bytes, mem_kills, orphan_kills into each result row (numbers only, never task text) and log one line per task. Also add env GOLD_CONCURRENCY (default keep current 2) so a local run can use 1. (6) Must keep working with bwrap (--unshare-pid: inner processes are visible in host /proc with host pids) and without bwrap (hidden_paths empty). Tests: new eval/tests/test_sandbox_limits.py: (a) timeout with an orphaning grandchild via bash '(sleep 600 &); sleep 600' and a setsid'd grandchild via python os.setsid -> status timeout, exit 124, zero survivors; (b) memory: a child allocating ~600 MB in touched steps with GEMMA_SANDBOX_MEM_BYTES=300MB -> killed, 137, mem_kills=1; (c) normal command output/exit code identical to the original executor's for a few commands (echo, exit 3, stderr), peak_rss_bytes>0; (d) background daemon left after normal exit is killed and counted. Keep every test allocation <= 1 GB and test wall time < 60 s. Run ONLY eval/tests/test_sandbox_limits.py and eval/tests/test_eval_fixes.py plus eval/tests/test_gold_calibration.py (python: /home/ubuntu/gemma-local/venv/bin/python3 with /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages appended to sys.path, then pytest.main); do not run the full suite or any real gold calibration. No new dependencies.
+ops/codex/build-sandbox-limits3.log:561:        for pth in self.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'):
+ops/codex/build-sandbox-limits3.log:1330:/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages /home/ubuntu/gemma-local/venv/bin/python -m pytest --version; PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages /usr/bin/python3 -m pytest --version' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits3.log:1528:/bin/bash -lc "sed -n '55,95p' docs/GOLD_CALIBRATION.md; PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 UV_OFFLINE=1 /home/ubuntu/gemma-local/venv/bin/python -m pytest -q eval/tests/test_sandbox_limits.py" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits3.log:2071:/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 UV_OFFLINE=1 /home/ubuntu/gemma-local/venv/bin/python -m pytest -q eval/tests' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits3.log:2736:/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 UV_OFFLINE=1 /home/ubuntu/gemma-local/venv/bin/python -m pytest -q -rs --junitxml=/tmp/sandbox-limits-round3-eval.xml eval/tests' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits2.log:762:        for pth in self.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'):
+ops/codex/build-sandbox-limits2.log:791:    site-packages, no resolver; large wheels are added only if imported by the workspace; then
+ops/codex/build-sandbox-limits2.log:814:        sp_dir = next(iter(sorted(venv_dir.glob('lib/python3*/site-packages'))))
+ops/codex/build-sandbox-limits2.log:1230:python -m pytest eval/tests -q" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits2.log:1531:eval/README_AGENT_EVAL.md:72:export PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages
+ops/codex/build-sandbox-limits2.log:1532:eval/README_AGENT_EVAL.md:75:/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q
+ops/codex/build-sandbox-limits2.log:1533:eval/README_AGENT_EVAL.md:76:RUN_AGENT_EVAL_E2E=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q -rs
+ops/codex/build-sandbox-limits2.log:1536:/bin/bash -lc "sed -n '64,85p' eval/README_AGENT_EVAL.md; ls /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3; git diff --stat; git diff --check; PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_sandbox_limits.py -q" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits2.log:1546:export PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages
+ops/codex/build-sandbox-limits2.log:1549:/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q
+ops/codex/build-sandbox-limits2.log:1550:RUN_AGENT_EVAL_E2E=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q -rs
+ops/codex/build-sandbox-limits2.log:1700:PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_sandbox_limits.py -q" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits2.log:2005:PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True RUN_AGENT_EVAL_E2E=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q -rs" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits2.log:2317:PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True RUN_AGENT_EVAL_E2E=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q -rs" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits2.log:2454:/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True RUN_AGENT_EVAL_E2E=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q -rs' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits2.log:2592:PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True RUN_AGENT_EVAL_E2E=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q -rs" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits.log:14:Read AGENTS.md (your role: implementer) and CLAUDE.md. Implement: Dec 020 item 6 + dec 021 item 4 (read ops/decisions/020-*.md and 021-*.md). Harden the LOCAL subprocess sandbox executor in eval/sandbox_env.py (the execute() wrapper installed by the hook that replaces swegemma.sandbox.subprocess.execute_subprocess_command; the original is adk_eval_core/sandbox/subprocess_sandbox.py:execute_subprocess_command in /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages, read it to mirror its return type and semantics exactly). Context: a local gold/null run OOM-stalled this shared 12 GB VM; two null-patch tasks ran ~45 min each despite 300 s command timeouts, with no per-sandbox memory limit and no RSS logging. Requirements: (1) New module eval/proctree.py (stdlib only, Linux /proc): snapshot of our-uid processes (pid, ppid, pgid, sid, rss, starttime), descendants(), tree_rss(), kill_tree(pids, verify starttime to avoid pid reuse), survivors(). (2) Our executor runs the command itself (do not call the original), with Popen(start_new_session=True), stdout/stderr captured exactly like the original (same decoding/truncation behaviour, same result object type and fields, same status values incl. 'timeout' and exit_code 124 on timeout), polling every 0.25 s: track the set of every pid ever seen in the tree (descendants of proc.pid, plus anything in its pgid/sid) so setsid'd or reparented orphans are still tracked; sum RSS over live tracked pids; record peak. (3) Memory limit: if summed tree RSS > GEMMA_SANDBOX_MEM_BYTES (default 4 GiB, the scorer sandbox limit) SIGKILL all tracked pids, return exit_code 137 with status 'error' (or the closest existing non-success status the original uses) and a clear stderr note 'killed: sandbox memory limit'. Backstop: prefix the command with prlimit --as=<GEMMA_SANDBOX_AS_BYTES, default 8 GiB> -- (skip if prlimit missing). (4) On timeout: SIGKILL every tracked live pid (killpg plus individual kills), then assert no survivors (re-scan up to 2 s); on any normal exit also kill any tracked survivors (background daemons left by tests) and count them. (5) Metrics: in the existing command_metrics ContextVar dict record peak_rss_bytes (max over commands), mem_kills, orphan_kills; and have eval/kaggle/gold_calibration.py write peak_rss_bytes, mem_kills, orphan_kills into each result row (numbers only, never task text) and log one line per task. Also add env GOLD_CONCURRENCY (default keep current 2) so a local run can use 1. (6) Must keep working with bwrap (--unshare-pid: inner processes are visible in host /proc with host pids) and without bwrap (hidden_paths empty). Tests: new eval/tests/test_sandbox_limits.py: (a) timeout with an orphaning grandchild via bash '(sleep 600 &); sleep 600' and a setsid'd grandchild via python os.setsid -> status timeout, exit 124, zero survivors; (b) memory: a child allocating ~600 MB in touched steps with GEMMA_SANDBOX_MEM_BYTES=300MB -> killed, 137, mem_kills=1; (c) normal command output/exit code identical to the original executor's for a few commands (echo, exit 3, stderr), peak_rss_bytes>0; (d) background daemon left after normal exit is killed and counted. Keep every test allocation <= 1 GB and test wall time < 60 s. Run ONLY eval/tests/test_sandbox_limits.py and eval/tests/test_eval_fixes.py plus eval/tests/test_gold_calibration.py (python: /home/ubuntu/gemma-local/venv/bin/python3 with /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages appended to sys.path, then pytest.main); do not run the full suite or any real gold calibration. No new dependencies.
+ops/codex/build-sandbox-limits.log:291:1. All heavy local work (test suites, gold calibration, evals, builds, pytest eval/tests) runs only through bin/job, which now has a 5G memory cap. Never run it directly in a Claude Bash call, which has no cap. bin/job is edit-protected: don't touch it or work around it.
+ops/codex/build-sandbox-limits.log:336:  Test cmd: /home/ubuntu/gemma-local/venv/bin/python3 with pyimg cp3.13 site-packages appended to sys.path, pytest eval/tests.
+ops/codex/build-sandbox-limits.log:651:        for pth in self.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'):
+ops/codex/build-sandbox-limits.log:680:    site-packages, no resolver; large wheels are added only if imported by the workspace; then
+ops/codex/build-sandbox-limits.log:703:        sp_dir = next(iter(sorted(venv_dir.glob('lib/python3*/site-packages'))))
+ops/codex/build-sandbox-limits.log:731:/bin/bash -lc 'cat /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py; cat eval/kaggle/gold_calibration.py' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits.log:1409:/bin/bash -lc 'cat /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py' in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits.log:2473:sys.path.append('/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages')
+ops/codex/build-sandbox-limits.log:2879:/bin/bash -lc "rg -n 'LOCAL_MODEL_COST' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/litellm_core_utils/get_model_cost_map.py; sed -n '1,55p' eval/kaggle/stage_kernel.py; sed -n '190,212p' eval/tests/test_eval_fixes.py" in /home/ubuntu/work/gemma-wt/codex-sandbox-limits
+ops/codex/build-sandbox-limits.log:3008:251-    site = tmp_path / 'venv/lib/python3.13/site-packages'
+
+exec
+/bin/bash -lc 'PATH=/home/ubuntu/gemma-local/venv/bin:$PATH PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True python -m pytest eval/tests/test_sandbox_deps.py -q' in /home/ubuntu/work/gemma-wt/codex-sandbox-env-docker-order
+ succeeded in 113ms:
+........                                                                 [100%]
+8 passed in 0.05s
+
+exec
+/bin/bash -lc 'PATH=/home/ubuntu/gemma-local/venv/bin:$PATH PYTHONPATH=/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True python -m pytest eval/tests' in /home/ubuntu/work/gemma-wt/codex-sandbox-env-docker-order
+exec
+/bin/bash -lc "git diff --check; git diff --stat; git diff -- eval/sandbox_env.py; sed -n '685,707p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/docker.py; rg -n 'def exec\\(|timeout_seconds' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py | head -15" in /home/ubuntu/work/gemma-wt/codex-sandbox-env-docker-order
+ succeeded in 0ms:
+ eval/sandbox_env.py | 32 +++++++++++++++++++++++++++-----
+ 1 file changed, 27 insertions(+), 5 deletions(-)
+diff --git a/eval/sandbox_env.py b/eval/sandbox_env.py
+index e8ff7ce..2cf685c 100644
+--- a/eval/sandbox_env.py
++++ b/eval/sandbox_env.py
+@@ -275,18 +275,27 @@ def setup_script_identity(data_dir):
+                 sha256=hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None)
+ 
+ 
++def base_cache_key(wheels, harness_version):
++    """Identify the selected base wheels, independent of enumeration order/path."""
++    import hashlib
++    identity = (str(harness_version), sorted((p.name, p.stat().st_size) for p in wheels))
++    return 'sp_base_local_' + hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:24]
++
++
+ def patch_subprocess_deps(data_dir):
+     """Emulate the docker-only dependency setup for the subprocess sandbox (swegemma skips it).
+ 
+     Contract (swegemma 0.2.11 container_setup): for docker, _ensure_container_site_packages
+-    unpacks every deduplicated (highest-version, py313-compatible) wheel from wheels_dir that is
+-    < 20 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
++    first attempts the workspace editable install, then unpacks every deduplicated
++    (highest-version, py313-compatible) wheel from wheels_dir that is
++    < 16 MB and not in skip_base_pkgs (pytest, pluggy, ... come from the image) straight into
+     site-packages, no resolver; large wheels are added only if imported by the workspace; then
+     sandbox/setup.py runs with --fast-path. We replicate exactly that inside the sandbox venv.
+     The sandbox venv uses system_site_packages=True, so the HOST python must mirror the image
+     (Dockerfile.public: pytest, pytest-timeout==2.1.0, typer, build backends; nothing else).
+     """
+     import tarfile
++    from importlib.metadata import version
+     import swegemma.harness.container_setup as cs
+     import swegemma.harness.verification as vf
+     import swegemma.harness.sample_verification  # load all known by-name bindings
+@@ -305,13 +314,26 @@ def patch_subprocess_deps(data_dir):
+             return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+         venv_dir = docker.sandboxes[container_id]['venv']
+         sp_dir = next(iter(sorted(venv_dir.glob('lib/python3*/site-packages'))))
++        # The stock editable hook returns early for subprocess managers. Mirror
++        # its Docker command, ignored failure, and default manager timeout here.
++        docker.exec(container_id,
++                    'pip install --no-index --find-links=/wheels --no-build-isolation --no-deps -e /workspace 2>/dev/null || true')
++        # The harness index caches by directory path alone. Refresh it so a changed
++        # wheelhouse is still selected/deduplicated by the actual harness code.
++        cs._WHEEL_INDEX_CACHE.pop(str(wheels_src.resolve()), None)
+         base_wheels, large_wheels, _m2p, _req = cs._inspect_wheels_dir(wheels_src)
+         selected = list(base_wheels)
+         if large_wheels:  # public wheels have none; fail loudly rather than silently diverge
+             raise RuntimeError('large wheels present; workspace-import scan not emulated')
+-        tar_path = cs._build_unpacked_wheels_tar(selected, 'sp_base_local', '.swegemma_base_injected')
+-        with tarfile.open(tar_path) as tf:
+-            tf.extractall(sp_dir, filter='data')
++        cache_key = base_cache_key(selected, version('swegemma'))
++        marker = sp_dir / '.swegemma_base_injected'
++        if not marker.is_file() or marker.read_text() != cache_key:
++            tar_path = cs._build_unpacked_wheels_tar(selected, cache_key, marker.name)
++            with tarfile.open(tar_path) as tf:
++                tf.extractall(sp_dir, filter='data')
++            # The harness archive contains an 'ok' marker; bind the container's
++            # marker to this wheel identity only after extraction succeeds.
++            marker.write_text(cache_key)
+         docker.copy_to(container_id, setup_py, '/tmp/setup.py')
+         flag = '--fast-path' if fast_path else ''
+         docker.exec(container_id, f'python3 /tmp/setup.py {flag} {repo}'.strip(), timeout=280)
+            if self._default_container_id is None:
+                self._default_container_id = cid
+        return cid
+
+    async def start_async(self) -> str:
+        """Start a container asynchronously without blocking the event loop."""
+        return await asyncio.to_thread(self.start)
+
+    def exec(
+        self, container_id: str, command: str, *, timeout: int | None = None
+    ) -> ExecutionResult:
+        """Execute a command in a running container."""
+        import shlex
+
+        container = self.client.containers.get(container_id)
+        timeout = timeout if timeout is not None else self.config.timeout_seconds
+        start_time = time.perf_counter()
+
+        try:
+            escaped_command = shlex.quote(command)
+            timeout_command = f'timeout -k 5s {timeout} /bin/bash -c {escaped_command}'
+
+            res = container.exec_run(
+35:        timeout_seconds: int = 300,
+39:        self.timeout_seconds = timeout_seconds
+82:        int_timeout = int(timeout) if timeout is not None else self.timeout_seconds
+418:    def exec(
+430:        timeout = timeout if timeout is not None else self.timeout_seconds
+
+ exited 1 in 22236ms:
+============================= test session starts ==============================
+platform linux -- Python 3.13.18, pytest-9.2.0, pluggy-1.7.0
+rootdir: /home/ubuntu/work/gemma-wt/codex-sandbox-env-docker-order
+plugins: timeout-2.1.0, anyio-4.16.0
+collected 473 items
+
+eval/tests/test_agent_timing.py ...........                              [  2%]
+eval/tests/test_eval_fixes.py .........s................................ [ 11%]
+......                                                                   [ 12%]
+eval/tests/test_gold_calibration.py ................                     [ 15%]
+eval/tests/test_memguard.py F.                                           [ 16%]
+eval/tests/test_pack.py ................................................ [ 26%]
+........................................................................ [ 41%]
+........................................................................ [ 56%]
+........................................................................ [ 72%]
+...................................................................s.... [ 87%]
+......                                                                   [ 88%]
+eval/tests/test_run_agent_eval.py ...............ss..                    [ 92%]
+eval/tests/test_sandbox_deps.py ........                                 [ 94%]
+eval/tests/test_sandbox_limits.py ...........................            [100%]
+
+=================================== FAILURES ===================================
+________________ test_memguard_kills_job_tree_and_spares_dummy _________________
+
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-78/test_memguard_kills_job_tree_a0')
+
+    def test_memguard_kills_job_tree_and_spares_dummy(tmp_path):
+        marker = "GEMMA_MGTEST_" + uuid.uuid4().hex[:8]
+        root = tmp_path / "jobcwd"; root.mkdir()
+        rcfile = tmp_path / "rc"; log = tmp_path / "memguard.log"
+        env_clean = {k: v for k, v in os.environ.items() if not k.startswith("GEMMA_MGTEST_")}
+    
+        dummy = subprocess.Popen([sys.executable, "-c", ALLOC], cwd="/", env=env_clean)
+        job = subprocess.Popen(
+            ["bash", "-c", f'{sys.executable} -c "$CHILD_SRC"; echo $? > {rcfile}'],
+            cwd=root, env={**env_clean, marker: "test", "CHILD_SRC": CHILD})
+        mg = None
+        try:
+            time.sleep(3.0)  # dummy reaches ~1.2G; job grandchild is ramping
+            pids = [job.pid] + tree(job.pid)
+            assert len(pids) >= 3, f"synthetic tree not built: {pids}"
+            mg = subprocess.Popen(
+                [sys.executable, str(MG), "--marker", marker, "--max-total", "0.8", "--min-available", "0",
+                 "--unmarked-rss", "0.5", "--interval", "0.5", "--roots", str(tmp_path),
+                 "--log", str(log), "--no-mail"], env=env_clean,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = time.time() + 30
+            while time.time() < deadline and "survivors=" not in (log.read_text() if log.exists() else ""):
+                time.sleep(0.5)
+            text = log.read_text()
+            assert "KILL" in text and "survivors=[]" in text, text
+            job.wait(timeout=10)
+            for p in pids:
+                assert not alive(p), f"survivor {p}"
+            assert rcfile.read_text().strip() == "137"
+            assert alive(dummy.pid), "dummy non-target was killed"
+>           assert Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip() == "0"
+E           AssertionError: assert '1000' == '0'
+E             
+E             - 0
+E             + 1000
+
+eval/tests/test_memguard.py:82: AssertionError
+----------------------------- Captured stderr call -----------------------------
+bash: line 1:    57 Killed                  /home/ubuntu/gemma-local/venv/bin/python -c "$CHILD_SRC"
+=========================== short test summary info ============================
+FAILED eval/tests/test_memguard.py::test_memguard_kills_job_tree_and_spares_dummy
+================== 1 failed, 468 passed, 4 skipped in 20.69s ===================
+
+codex
+The eight new offline tests pass. The full suite reported 468 passed, 4 skipped, and one failure in an unchanged memguard test: it expects a dummy process’s `oom_score_adj` to be `0`, but the sandbox gives it `1000`. I’ll check whether that value is inherited and can be reset for the test run.
+exec
+/bin/bash -lc "cat /proc/self/oom_score_adj; sed -n '1,120p' eval/tests/test_memguard.py; git status --short; git diff --check; git diff --quiet HEAD -- bin/memguard eval/tests/test_memguard.py" in /home/ubuntu/work/gemma-wt/codex-sandbox-env-docker-order
+ succeeded in 0ms:
+1000
+"""bin/memguard end-to-end test (dec 021 item 1d). Run only under bin/job (allocates ~2.5G peak).
+
+A synthetic job (bash wrapper -> python child -> python grandchild that allocates in 200M steps)
+must be killed with no survivors, and the wrapper must record exit 137. A dummy non-target process
+at the same RSS (no marker, cwd outside --roots) must survive with its oom_score_adj untouched.
+Uses a private marker so neither this test's own bin/job nor the real memguard is involved.
+"""
+import os, subprocess, sys, time, uuid
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+MG = REPO / "bin" / "memguard"
+STEP = 200 * 1024 * 1024
+
+ALLOC = f"""
+import time
+held = []
+for _ in range(6):            # up to 1.2G, touched (non-zero) so it is resident
+    held.append(b"\\x01" * {STEP})
+    time.sleep(0.4)
+time.sleep(120)
+"""
+
+CHILD = f"""
+import subprocess, sys, time
+subprocess.Popen([sys.executable, "-c", {ALLOC!r}])
+time.sleep(120)
+"""
+
+
+def alive(pid):
+    try:
+        st = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return st.rsplit(") ", 1)[-1][:1] != "Z"
+
+
+def tree(pid):
+    out, stack = [], [pid]
+    while stack:
+        p = stack.pop()
+        try:
+            kids = Path(f"/proc/{p}/task/{p}/children").read_text().split()
+        except OSError:
+            kids = []
+        for k in map(int, kids):
+            out.append(k); stack.append(k)
+    return out
+
+
+def test_memguard_kills_job_tree_and_spares_dummy(tmp_path):
+    marker = "GEMMA_MGTEST_" + uuid.uuid4().hex[:8]
+    root = tmp_path / "jobcwd"; root.mkdir()
+    rcfile = tmp_path / "rc"; log = tmp_path / "memguard.log"
+    env_clean = {k: v for k, v in os.environ.items() if not k.startswith("GEMMA_MGTEST_")}
+
+    dummy = subprocess.Popen([sys.executable, "-c", ALLOC], cwd="/", env=env_clean)
+    job = subprocess.Popen(
+        ["bash", "-c", f'{sys.executable} -c "$CHILD_SRC"; echo $? > {rcfile}'],
+        cwd=root, env={**env_clean, marker: "test", "CHILD_SRC": CHILD})
+    mg = None
+    try:
+        time.sleep(3.0)  # dummy reaches ~1.2G; job grandchild is ramping
+        pids = [job.pid] + tree(job.pid)
+        assert len(pids) >= 3, f"synthetic tree not built: {pids}"
+        mg = subprocess.Popen(
+            [sys.executable, str(MG), "--marker", marker, "--max-total", "0.8", "--min-available", "0",
+             "--unmarked-rss", "0.5", "--interval", "0.5", "--roots", str(tmp_path),
+             "--log", str(log), "--no-mail"], env=env_clean,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + 30
+        while time.time() < deadline and "survivors=" not in (log.read_text() if log.exists() else ""):
+            time.sleep(0.5)
+        text = log.read_text()
+        assert "KILL" in text and "survivors=[]" in text, text
+        job.wait(timeout=10)
+        for p in pids:
+            assert not alive(p), f"survivor {p}"
+        assert rcfile.read_text().strip() == "137"
+        assert alive(dummy.pid), "dummy non-target was killed"
+        assert Path(f"/proc/{dummy.pid}/oom_score_adj").read_text().strip() == "0"
+        assert text.count("KILL") == 1, text
+    finally:
+        for p in ([mg] if mg else []) + [dummy, job]:
+            if p.poll() is None:
+                p.kill()
+        for p in [job.pid] + tree(job.pid):
+            try:
+                os.kill(p, 9)
+            except OSError:
+                pass
+
+
+def test_job_name_parses_bin_job_wrapper():
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("memguard", str(MG))
+    spec = importlib.util.spec_from_loader("memguard", loader)
+    mg = importlib.util.module_from_spec(spec); loader.exec_module(mg)
+    p = subprocess.Popen(["bash", "-c", "sleep 5; true # ops/jobs/", "_", "myjob", "x"])
+    try:
+        time.sleep(0.3)
+        assert mg.job_name(p.pid) == "myjob"
+        assert mg.job_name(os.getpid()) is None
+    finally:
+        p.kill()
+ M eval/sandbox_env.py
+?? eval/tests/test_sandbox_deps.py
+
