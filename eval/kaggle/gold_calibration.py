@@ -64,6 +64,8 @@ def pending_tasks(tasks, results):
 def summarize(tasks, results):
     """Aggregate every input task, including failures and unfinished attempts."""
     pending = pending_tasks(tasks, results)
+    if os.environ.get('GOLD_LIMIT'):  # smoke runs only: first task of each repo
+        seen = set(); pending = [t for t in pending if not (t['repo'] in seen or seen.add(t['repo']))]
     repos = {}
     passing, failing = [], []
     for task in tasks:
@@ -223,6 +225,9 @@ def worker(args):
             resolved = get('resolved')
             exit_code = get('test_exit_code', get('exit_code'))
             if type(resolved) is not bool or (exit_code is not None and type(exit_code) is not int):
+                # Shape diagnostics only: type and field names, never values.
+                names = sorted(result) if isinstance(result, dict) else [n for n in dir(result) if not n.startswith('_')]
+                row['shape'] = f'{type(result).__module__}.{type(result).__name__}: {",".join(map(str, names))[:400]}'
                 raise TypeError('Unsupported verification result')
             row.update(resolved=resolved, exit_code=exit_code)
             if not resolved:
@@ -277,6 +282,8 @@ def main():
     journal = args.working_dir / 'gold_results.jsonl'
     results = resume_journal(journal)
     pending = pending_tasks(tasks, results)
+    if os.environ.get('GOLD_LIMIT'):  # smoke runs only: first task of each repo
+        seen = set(); pending = [t for t in pending if not (t['repo'] in seen or seen.add(t['repo']))]
     if pending:
         install_harness()
         sandbox = choose_sandbox()
