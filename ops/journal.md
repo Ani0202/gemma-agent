@@ -63,3 +63,4 @@
 2026-11-05T15:01Z | merged codex/eval-runner to main (8add1a5); no runner numbers relied on until eval-runner-fix merged | eval/run_agent_eval.py
 2026-11-05T15:01Z | launched codex-build eval-runner-fix (B1-B5,N1-N3; bwrap isolation) | ops/codex/build-eval-runner-fix.spec
 2026-11-05T15:01Z | PRE-REG: after fix, rerun gold-local+gold-null in shared env; identical pass set+null control => splits v2 stand, else report to Director | eval/splits/MANIFEST.json
+2026-11-05T15:10Z | dec 016: E4B timing kernel push decoupled from eval-runner-fix/gold rerun; raw traces if tool_timing not merged; N2 already in fix spec | ops/decisions/016-20261105T150127-10712-from-builder.md

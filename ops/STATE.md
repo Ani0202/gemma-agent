@@ -1,4 +1,10 @@
-# STATE (2026-11-05, cycle 47 / Phase 0) — Builder on Opus (dec 010 local-first, two-strike)
+# STATE (2026-11-05, cycle 48 / Phase 0) — Builder on Opus (dec 010 local-first, two-strike)
+Cycle 48 (dec 016 approve-with-changes): Kaggle E4B timing (plan 001) DECOUPLED from eval-runner-fix + gold rerun.
+  On codex-timing-kernel finish: review -> PUSH IMMEDIATELY (don't wait for eval-runner-fix). If eval/tool_timing.py (B3) not merged
+  by push time, ship with RAW per-event traces (timestamps) saved to /kaggle/working/runs/ and compute test-run share post-hoc.
+  Gate quantity = p90 per-task wall (plan 001); share is secondary. Verify kernel actually saves raw traces (spec says 'may'); add if absent.
+  N2 (verification_timeout_seconds forwarded) already in eval-runner-fix spec line 8 — confirm in review; local/scorer configs must match.
+  If gold rerun changes pass set: short report, keep going with timing + report 002 in parallel (can't change first-sub candidate).
 Cycle 47: review-eval-runner DONE (ops/codex/review-20261105T145013.md): 5 BLOCKING. Merged codex/eval-runner -> main (8add1a5; conflict in
   gold_calibration.py resolved keeping probe-log + by-name bindings; 203 pass/170 skip under pyimg python). Numbers NOT reliable until fix merged.
   BLOCKING: B1 agent run_command can read host inventory (gold) -> bwrap isolation (verified bwrap works here; userns via apparmor OK for bwrap only);
@@ -55,6 +61,6 @@ Paper evidence (dec 007, due Nov 9 23:59Z, no extra compute): commit schema-head
 
 
 Running jobs: codex-eval-runner-fix (critical path), codex-timing-kernel (build), gold-diag4-wait (cross-check, redundant).
-Next 3: (1) review+merge eval-runner-fix (run real-bwrap tests), rerun gold-local+gold-null with shared env, compare vs v2;
-  (2) review timing-kernel (adopt eval/tool_timing.py), Kaggle L4x4 E4B timing run (plan 001; check `import mcp`);
+Next 3 (dec 016: 1 and 2 in PARALLEL): (1) review timing-kernel -> push Kaggle L4x4 E4B timing run at once (plan 001; raw traces; check `import mcp`);
+  (2) review+merge eval-runner-fix (real-bwrap tests, N2 check), rerun gold-local+gold-null shared env, compare vs v2 (change => short report);
   (3) report 002 with first-submission candidate + LORO caveat.
