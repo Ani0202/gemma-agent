@@ -12,14 +12,26 @@ case "$cmd" in
     [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "bad name"; exit 2; }
     if grep -q '^running' "ops/jobs/$name.status" 2>/dev/null; then echo "job $name already running"; exit 1; fi
     printf '%q ' "$@" > "ops/jobs/$name.cmd"
-    nohup bash -c '
+    # Memory cap per job: a runaway job must not stall the VM (Etho shares it; 2026-11-05 incident).
+    # Prefer a systemd user scope (caps the whole process tree); after a cron-started boot with no
+    # login there is no user manager, so fall back to a per-process ulimit -v.
+    rt=/run/user/$(id -u)
+    if [ -S "$rt/bus" ] && XDG_RUNTIME_DIR=$rt systemd-run --user --scope --quiet -p MemoryMax=64M true 2>/dev/null; then
+      pre=(env XDG_RUNTIME_DIR="$rt" systemd-run --user --scope --quiet --collect --unit="gemma-job-$name-$(date +%s)" -p MemoryMax=5G)
+      cap="memory cap: systemd scope MemoryMax=5G (whole job)"
+    else
+      pre=(bash -c 'ulimit -v 5242880 && exec "$@"' _)
+      cap="memory cap: ulimit -v 5G per process (no systemd user manager)"
+    fi
+    GEMMA_JOB_CAP=$cap nohup bash -c '
       name=$1; shift
       echo "running $$ $(date -u +%FT%TZ)" > "ops/jobs/$name.status"
-      nice -n 15 "$@" > "ops/jobs/$name.log" 2>&1; rc=$?
+      { echo "[bin/job] $GEMMA_JOB_CAP"; nice -n 15 "$@"; } > "ops/jobs/$name.log" 2>&1; rc=$?
+      [ $rc -eq 137 ] && echo "[bin/job] exit 137: killed, most likely at the memory cap" >> "ops/jobs/$name.log"
       if [ $rc -eq 0 ]; then st=done; else st=failed; fi
       echo "$st $rc $(date -u +%FT%TZ)" > "ops/jobs/$name.status"
-    ' _ "$name" "$@" >/dev/null 2>&1 &
-    sleep 1; echo "started $name: $(cat "ops/jobs/$name.status" 2>/dev/null)";;
+    ' _ "$name" "${pre[@]}" "$@" >/dev/null 2>&1 &
+    sleep 1; echo "started $name: $(cat "ops/jobs/$name.status" 2>/dev/null) [$cap]";;
   status)
     if [ -n "${1:-}" ]; then cat "ops/jobs/$1.status"; else for f in ops/jobs/*.status; do [ -e "$f" ] && echo "$(basename "$f" .status): $(cat "$f")"; done; fi;;
   tail) tail -n "${2:-40}" "ops/jobs/$1.log";;
