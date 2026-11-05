@@ -1,4 +1,13 @@
-# STATE (2026-11-05, cycle 46 / Phase 0) — Builder on Opus (dec 010 local-first, two-strike)
+# STATE (2026-11-05, cycle 47 / Phase 0) — Builder on Opus (dec 010 local-first, two-strike)
+Cycle 47: review-eval-runner DONE (ops/codex/review-20261105T145013.md): 5 BLOCKING. Merged codex/eval-runner -> main (8add1a5; conflict in
+  gold_calibration.py resolved keeping probe-log + by-name bindings; 203 pass/170 skip under pyimg python). Numbers NOT reliable until fix merged.
+  BLOCKING: B1 agent run_command can read host inventory (gold) -> bwrap isolation (verified bwrap works here; userns via apparmor OK for bwrap only);
+  B2 graph/embeddings dirs not passed to SwegemmaContext; B3 tool_seconds wrong for batched calls (merged timestamps) -> exec-boundary timing
+  eval/tool_timing.py (timing kernel should reuse it); B4 resume ignores git SHA/inventory/env; B5 runner removes _host_env.pth but gold
+  calibration did NOT -> gold clean list computed with harness-venv pkgs visible in sandbox.
+  Launched codex-build eval-runner-fix (effort high; spec ops/codex/build-eval-runner-fix.spec) covering B1-B5 + N1-N3.
+  On finish: review diff; run real-bwrap tests + stub E2E myself; codex-review; merge. Then RERUN gold-local + gold-null with shared env (B5).
+  Pre-registered rule (journaled): if gold pass set + null-control identical to v2 -> splits v2 stand; any change -> report to Director (no silent re-split).
 Cycle 46 (dec 015 approve): critical path = review-eval-runner -> merge -> Kaggle E4B timing (plan 001) -> report 002 w/ first-sub candidate.
   Launched codex-build timing-kernel (spec ops/codex/build-timing-kernel.spec): eval/kaggle/agent_timing.py (starter-faithful vLLM+EvalConfig,
   embedded bundle b64, seq tasks, timing.jsonl w/ tool_seconds + test-run share, time-box), timing_push.sh (--accelerator NvidiaL4X4, -t, --dry-run),
@@ -45,6 +54,6 @@ Dec 012 FYI: paper §4.1 cites only the committed gold-local v2 results file -> 
 Paper evidence (dec 007, due Nov 9 23:59Z, no extra compute): commit schema-headed results/ files for (a) gold calibration per-task outcomes+exclusion causes, (b) timing per task from Kaggle E4B smoke (31B if run), (c) failure taxonomy via trace-analyst once. Not yet produced; flag here if any won't exist by Nov 9.
 
 
-Running jobs: review-eval-runner (codex-review, critical path), codex-timing-kernel (build), gold-diag4-wait (cross-check).
-Next 3: (1) review-eval-runner -> fix BLOCKING, merge codex/eval-runner to main; (2) Kaggle L4x4 E4B timing run (plan 001;
-  check `import mcp` in kernel; log test-run share mean/p90 via tool_seconds); (3) report 002 with first-submission candidate + LORO caveat.
+Running jobs: codex-eval-runner-fix (critical path), codex-timing-kernel (build), gold-diag4-wait (cross-check, redundant).
+Next 3: (1) review+merge eval-runner-fix (run real-bwrap tests), rerun gold-local+gold-null with shared env, compare vs v2;
+  (2) review timing-kernel (adopt eval/tool_timing.py), Kaggle L4x4 E4B timing run (plan 001; check `import mcp`);

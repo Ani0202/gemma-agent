@@ -2498,3 +2498,520 @@ wc -l eval/kaggle/agent_timing.py' in /home/ubuntu/work/gemma-wt/codex-timing-ke
 
 codex
 The core script is in place: it embeds the bundle, uses the starter’s vLLM configuration, runs tasks sequentially, and writes durable metrics and raw artifacts. I also found that the runner captures the patch before protected-file stripping; I copied that behavior so test-file edits remain visible in the timing results. Next I’ll check the generated script and summary boundary logic.
+exec
+/bin/bash -lc "cat > eval/kaggle/timing_summary.py <<'PY'
+\"\"\"Summarize a downloaded kaggle_timing_v1 journal without reading raw task artifacts.\"\"\"
+import argparse
+import json
+import math
+from pathlib import Path
+
+
+def distribution(values):
+    values = sorted(values)
+    def percentile(q):
+        pos = (len(values) - 1) * q
+        low = int(pos)
+        return values[low] + (values[min(low + 1, len(values) - 1)] - values[low]) * (pos - low)
+    return dict(mean=sum(values) / len(values), p50=percentile(.5), p90=percentile(.9), max=max(values)) if values else dict.fromkeys(('mean', 'p50', 'p90', 'max'))
+
+
+def summarize(path):
+    records = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    if not records or records[0].get('_schema') "'!= '"'kaggle_timing_v1':
+        raise ValueError('Expected kaggle_timing_v1 header')
+    header, rows, startup, done, stopped = records[0], [], records[0].get('vllm_startup_seconds'), None, []
+    for row in records[1:]:
+        if 'instance_id' in row:
+            rows.append(row)
+        elif '_vllm' in row:
+            startup = row['_vllm']['startup_seconds']
+        elif '_done' in row:
+            done = row['_done']
+        elif '_stopped' in row:
+            stopped.append(row['_stopped'])
+        else:
+            raise ValueError('Unknown journal record')
+    ids = [r['instance_id'] for r in rows]
+    if len(ids) "'!= len(set(ids)) or set(ids) - set(header['"'task_ids']):
+        raise ValueError('Duplicate or unexpected task records')
+    if done is not None and done['n'] "'!= len(rows):
+        raise ValueError('"'Done count does not match task records')
+    def numbers(values):
+        if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in values):
+            raise ValueError('Invalid measurement')
+        return values
+    totals = distribution(numbers([r['wall_seconds']['total'] for r in rows]))
+    shares = distribution(numbers([r['test_run']['share_of_agent_seconds'] for r in rows if r['test_run']['share_of_agent_seconds'] is not None]))
+    runs = distribution(numbers([r['test_run']['n'] for r in rows]))
+    caps = header.get('caps') or {}
+    cap = caps.get('max_time_minutes')
+    timing_minutes = totals['p90'] * 125 / 60 + startup / 60 if totals['p90'] is not None and startup is not None else None
+    cap_minutes = cap * 125 + 30 if cap is not None else None
+    return dict(_schema='kaggle_timing_summary_v1', n=len(rows), vllm_startup_seconds=startup,
+                total_seconds=totals, test_run_share=shares, test_runs_per_task=runs,
+                empty_patch_count=sum(bool(r['empty_patch']) for r in rows),
+                test_files_edited_count=sum(bool(r['test_files_edited']) for r in rows),
+                stray_files_count=sum(bool(r['stray_files']) for r in rows),
+                test_files_edited_files=sum(len(r['test_files_edited']) for r in rows),
+                stray_files_files=sum(len(r['stray_files']) for r in rows),
+                decision='PASS' if timing_minutes is not None and cap_minutes is not None and timing_minutes <= 660 and cap_minutes <= 660 else 'FAIL',
+                projected_minutes=timing_minutes, cap_worst_case_minutes=cap_minutes,
+                cap_minutes=cap, missing_task_ids=[iid for iid in header['task_ids'] if iid not in ids],
+                done_present=done is not None, stopped=stopped)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('timing_jsonl', type=Path)
+    parser.add_argument('--output', type=Path, required=True)
+    args = parser.parse_args()
+    summary = summarize(args.timing_jsonl)
+    args.output.write_text(json.dumps(summary, indent=2, allow_nan=False) + '\\n')
+    print(json.dumps(summary, indent=2, allow_nan=False))
+
+
+if __name__ == '__main__':
+    main()
+PY
+# Remove surplus vertical whitespace to stay within the compact kernel target.
+python3 - <<'PY'
+p='eval/kaggle/agent_timing.py'
+s=open(p).read().replace('\\n\\n\\n','\\n\\n')
+s=s.replace(\"            kwargs['context'].task = safe\", \"            self.context = kwargs['context']\\n            self.context.task = safe\")
+s=s.replace('                evaluator.docker.cleanup_all()', \"                try:\\n                    evaluator.docker.cleanup_all()\\n                except Exception as exc:\\n                    error = 'Cleanup exception (' + type(exc).__name__ + ')'\")
+s=s.replace(\"llm_turns=result.total_llm_calls if result else None\", \"llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None\")
+open(p,'w').write(s)
+PY
+wc -l eval/kaggle/agent_timing.py
+cat > eval/tests/test_agent_timing.py <<'PY'
+\"\"\"Offline timing-kernel generation, instrumentation and runtime-gate checks.\"\"\"
+import ast
+import base64
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import py_compile
+import subprocess
+from types import SimpleNamespace as Entry
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def load(name):
+    spec = importlib.util.spec_from_file_location(name, ROOT / 'eval/kaggle' / f'{name}.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+timing = load('agent_timing')
+summary = load('timing_summary')
+
+
+def test_generated_script_and_bundle(tmp_path):
+    bundle = tmp_path / 'bundle'
+    bundle.mkdir()
+    (bundle / 'agent.yaml').write_text('model: gemma-4-e4b-it-qat-w4a16-ct\\n')
+    (bundle / 'prompt.md').write_text('example prompt')
+    ids = tmp_path / 'ids'
+    ids.write_text('task-1\\ntask-2\\n')
+    proc = subprocess.run(['bash', str(ROOT / 'eval/kaggle/timing_push.sh'), '--dry-run',
+                           'example/timing-test', str(bundle), str(ids), '1000'], check=True, capture_output=True, text=True)
+    stage = Path(proc.stdout.split('Dry run: no push. Staged: ')[1].strip())
+    try:
+        generated = stage / 'agent_timing.py'
+        py_compile.compile(str(generated), cfile=str(tmp_path / 'compiled.pyc'), doraise=True)
+        tree = ast.parse(generated.read_text())
+        constants = {n.targets[0].id: ast.literal_eval(n.value) for n in tree.body
+                     if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
+                     and n.targets[0].id in ('BUNDLE_B64', 'TASK_IDS', 'GIT_SHA', 'KERNEL_BUDGET_SECONDS')}
+        assert constants['TASK_IDS'] == ['task-1', 'task-2']
+        assert constants['KERNEL_BUDGET_SECONDS'] == 1000
+        assert len(constants['GIT_SHA']) == 40
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom):
+                assert not n.level and not n.module.startswith(('eval', 'gold_calibration', 'run_agent_eval'))
+            if isinstance(n, ast.Import):
+                assert all(not a.name.startswith(('eval.', 'gold_calibration', 'run_agent_eval')) for a in n.names)
+        digest, yaml_digest = timing.extract_bundle(constants['BUNDLE_B64'], tmp_path / 'extracted')
+        assert digest == hashlib.sha256(base64.b64decode(constants['BUNDLE_B64'])).hexdigest()
+        assert yaml_digest == hashlib.sha256((bundle / 'agent.yaml').read_bytes()).hexdigest()
+        assert (tmp_path / 'extracted/prompt.md').read_text() == 'example prompt'
+        metadata = json.loads((stage / 'kernel-metadata.json').read_text())
+        assert metadata['model_sources'] == ['google/gemma-4/other/gemma-4-e4b-it-qat-w4a16-ct/2']
+        assert metadata['kernel_type'] == 'script'
+        assert metadata['enable_gpu'] is True and metadata['enable_internet'] is False
+    finally:
+        import shutil
+        shutil.rmtree(stage)
+
+
+def trace_entry(event, timestamp, command='', tool='run_command'):
+    return Entry(event_type=event, timestamp=timestamp, tool_name=tool, tool_args={'command': command}, usage=None)
+
+
+@pytest.mark.parametrize('command', ['pytest -q', 'python -m unittest', 'tox', 'nox -s test', './run_tests.sh'])
+def test_test_run_classification(command):
+    trace = Entry(entries=[trace_entry('tool_call', 1, command), trace_entry('tool_response', 4),
+                           trace_entry('tool_call', 5, 'ls'), trace_entry('tool_response', 7),
+                           trace_entry('tool_call', 8, command, 'read_file'), trace_entry('tool_response', 9, tool='read_file')])
+    assert timing.test_run_stats(trace, 10) == dict(n=1, total_seconds=3, share_of_agent_seconds=.3)
+    assert timing.tool_seconds(trace.entries)['run_command'] == dict(n=2, total=5, max=3)
+    assert timing.trace_counts(trace)[1] == dict(prompt_tokens=None, completion_tokens=None)
+
+
+def test_unmatched_test_call_and_fifo():
+    trace = Entry(entries=[trace_entry('tool_call', 1, 'ls'), trace_entry('tool_call', 2, 'pytest'),
+                           trace_entry('tool_response', 4), trace_entry('tool_response', 7),
+                           trace_entry('tool_call', 8, 'pytest')])
+    assert timing.test_run_stats(trace, 10) == dict(n=2, total_seconds=5, share_of_agent_seconds=.5)
+
+
+def test_timebox_boundary():
+    assert not timing.should_stop(100, 5, 300, 0, 1000)
+    assert timing.should_stop(100.01, 5, 300, 0, 1000)
+    assert timing.should_stop(100, 5, 300, 601, 1000)
+
+
+def journal(path, cap=5.04, startup=1800, seconds=302.4):
+    header = dict(_schema='kaggle_timing_v1', task_ids=['a', 'b'], caps={'max_time_minutes': cap})
+    rows = [dict(instance_id=iid, wall_seconds={'total': seconds}, test_run=dict(n=n, share_of_agent_seconds=share),
+                 empty_patch=n == 0, test_files_edited=['tests/test_a.py'] if n else [], stray_files=['x'] if n else [])
+            for iid, n, share in [('a', 0, 0), ('b', 2, .5)]]
+    path.write_text('\\n'.join(json.dumps(r) for r in [header, {'_vllm': {'startup_seconds': startup}}, *rows, {'_done': {'n': 2}}]) + '\\n')
+
+
+def test_summary_boundary_and_cli(tmp_path):
+    path, output = tmp_path / 'timing.jsonl', tmp_path / 'summary.json'
+    journal(path)
+    result = summary.summarize(path)
+    assert result['decision'] == 'PASS'
+    assert result['projected_minutes'] == 660
+    assert result['cap_worst_case_minutes'] == 660
+    assert result['test_run_share']['p90'] == .45
+    assert result['test_runs_per_task']['mean'] == 1
+    assert result['test_runs_per_task']['max'] == 2
+    assert result['n'] == 2 and result['vllm_startup_seconds'] == 1800
+    assert result['empty_patch_count'] == result['test_files_edited_count'] == result['stray_files_count'] == 1
+    subprocess.run(['python3', str(ROOT / 'eval/kaggle/timing_summary.py'), str(path), '--output', str(output)], check=True, capture_output=True)
+    assert json.loads(output.read_text())['_schema'] == 'kaggle_timing_summary_v1'
+    journal(path, seconds=302.40001)
+    assert summary.summarize(path)['decision'] == 'FAIL'
+    journal(path, cap=5.04001)
+    assert summary.summarize(path)['decision'] == 'FAIL'
+
+
+def test_summary_rejects_dropped_or_duplicate_rows(tmp_path):
+    path = tmp_path / 'timing.jsonl'
+    journal(path)
+    rows = path.read_text().splitlines()
+    path.write_text('\\n'.join(rows[:2] + rows[3:]))
+    with pytest.raises(ValueError, match='Done count'):
+        summary.summarize(path)
+PY
+/home/ubuntu/gemma-local/venv/bin/python -m pytest eval/tests -q" in /home/ubuntu/work/gemma-wt/codex-timing-kernel
+ exited 1 in 0ms:
+420 eval/kaggle/agent_timing.py
+/home/ubuntu/gemma-local/venv/bin/python: No module named pytest
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+import importlib.util
+for name in ['pytest','_pytest','pluggy','packaging','iniconfig','pygments']:
+ s=importlib.util.find_spec(name)
+ print(name,s.origin if s else None)
+PY
+ls /home/ubuntu/gemma-local; sed -n '300,355p' eval/kaggle/agent_timing.py; git status --short" in /home/ubuntu/work/gemma-wt/codex-timing-kernel
+ succeeded in 0ms:
+pytest None
+_pytest None
+pluggy None
+packaging /usr/lib/python3/dist-packages/packaging/__init__.py
+iniconfig None
+pygments /usr/lib/python3/dist-packages/pygments/__init__.py
+fastapi_14258.json
+fastapi_14458.json
+pyimg
+requests_7433.json
+rich_2725.json
+show.py
+venv
+wh
+def start_server(holder):
+    import torch
+    from adk_submission import VllmConfig, VllmServer, discover_adapters
+    from adk_submission.discovery import discover_declared_models
+    from swegemma.config import ALLOWED_ADAPTER_EXTENSIONS
+    MODEL_VLLM_EXTRA_ARGS = {
+        'gemma-4-12b-it-qat-w4a16-ct': (
+            '--hf-overrides',
+            '{"architectures": ["Gemma4ForCausalLM"], "model_type": "gemma4"}',
+        ),
+    }
+    _SAFE_PATH_COMPONENT = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
+    INFERENCE_API_KEY = os.environ.get('LOCAL_API_KEY', 'EMPTY')
+    declared_models = discover_declared_models(BUNDLE)
+    assert len(declared_models) == 1, f'Expected exactly 1 declared model, got: {sorted(declared_models)}'
+    declared_model = next(iter(declared_models))
+    assert declared_model in frozenset('gemma-4-' + x + '-it-qat-w4a16-ct' for x in ('31b', '12b', 'e4b', 'e2b')), f'Unsupported model {declared_model!r}. Allowed: {sorted(frozenset('gemma-4-' + x + '-it-qat-w4a16-ct' for x in ('31b', '12b', 'e4b', 'e2b')))}'
+    MODEL_PATH = Path(f'/kaggle/input/models/google/gemma-4/other/{declared_model}/2')
+    assert MODEL_PATH.exists(), f'Model weights not found at {MODEL_PATH}. Ensure the model input is attached.'
+    adapters = discover_adapters(str(BUNDLE), adapter_extensions=ALLOWED_ADAPTER_EXTENSIONS)
+    adapter_map = getattr(adapters, 'adapters', None) or {}
+    for adapter_name in adapter_map:
+        assert _SAFE_PATH_COMPONENT.fullmatch(adapter_name), (
+            f'Unsafe adapter name {adapter_name!r}: must match [A-Za-z0-9][A-Za-z0-9._-]*'
+        )
+    detected_ranks = [
+        r for info in adapter_map.values() if (r := getattr(info, 'rank', None)) is not None and r > 0
+    ]
+    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    tp_size = 4 if gpu_count >= 4 else (2 if gpu_count >= 2 else 1)
+    vllm_cfg = VllmConfig(
+        model=str(MODEL_PATH),
+        port=8000,
+        host='127.0.0.1',
+        tool_call_parser='gemma4',
+        reasoning_parser='gemma4',
+        max_model_len=32768,
+        dtype='bfloat16' if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else 'auto',
+        gpu_memory_utilization=0.90,
+        enable_auto_tool_choice=True,
+        enable_lora=bool(adapter_map),
+        max_loras=max(1, len(adapter_map)),
+        max_lora_rank=max(detected_ranks) if detected_ranks else 128,
+        scheduler_reserve_full_isl=False,
+        tensor_parallel_size=tp_size,
+        startup_timeout=60 * 20,
+        extra_args=MODEL_VLLM_EXTRA_ARGS.get(declared_model, ()),
+    )
+    server_instance = VllmServer(vllm_cfg, adapter_manifest=adapters)
+    holder.append(server_instance)
+    start = time.perf_counter()
+    server_instance.start()
+    startup = time.perf_counter() - start
+    return server_instance, adapters, declared_model, startup
+
+def main():
+?? eval/kaggle/agent_timing.py
+?? eval/kaggle/timing_push.sh
+?? eval/kaggle/timing_summary.py
+?? eval/tests/test_agent_timing.py
+
+exec
+/bin/bash -lc "rg --files /home/ubuntu/gemma-local/wh /tmp /usr/local/lib /opt 2>/dev/null | rg '/(pytest|_pytest|pluggy|iniconfig|pygments|packaging)([-/]|\\.py)' | head -60" in /home/ubuntu/work/gemma-wt/codex-timing-kernel
+ succeeded in 0ms:
+/tmp/pytest-of-ubuntu/pytest-511/test_skill_count_boundary_fall0/31b/v000/skills/example/SKILL.md
+/tmp/pytest-of-ubuntu/pytest-511/test_skill_count_boundary_fall0/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_skill_count_boundary_fall0/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_reference_failures_fallba5/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_reference_failures_fallba5/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_instruction_boundary_and_1/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_instruction_boundary_and_1/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_nested_manifest_is_shippe1/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_nested_manifest_is_shippe1/31b/v000/nested/MANIFEST.md
+/tmp/pytest-of-ubuntu/pytest-511/test_nested_manifest_is_shippe1/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_cumulative_include_size_b1/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_cumulative_include_size_b1/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_cumulative_include_size_b1/31b/v000/included.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_cumulative_include_size_b1/31b/v000/data.txt
+/tmp/pytest-of-ubuntu/pytest-511/test_generation_mapping_fallba0/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_generation_mapping_fallba0/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_nested_name_required_fall0/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_nested_name_required_fall0/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_eval_positive_integer_inv43/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_eval_positive_integer_inv43/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_loop_iterations_invalid_f0/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_loop_iterations_invalid_f0/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_eval_positive_integer_inv47/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_eval_positive_integer_inv47/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_cap_invalid_fallback__nan0/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_cap_invalid_fallback__nan0/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_yaml_alias_agent_occurren1/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_yaml_alias_agent_occurren1/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_cap_missing_fallback_eval0/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_cap_missing_fallback_eval0/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_thinking_invalid_fallback5/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_thinking_invalid_fallback5/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_include_and_subagent_fall0/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_include_and_subagent_fall0/31b/v000/configs/sampling.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_include_and_subagent_fall0/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_include_and_subagent_fall0/31b/v000/sub_agents/child.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_include_and_subagent_fall0/31b/v000/prompts/system.md
+/tmp/pytest-of-ubuntu/pytest-511/test_bad_tools_fallback_tools50/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_bad_tools_fallback_tools50/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_eval_positive_integer_inv36/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_eval_positive_integer_inv36/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_stub_tool_calls_and_model0/script.json
+/tmp/pytest-of-ubuntu/pytest-511/test_loop_iterations_boundary_3/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_loop_iterations_boundary_3/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_eval_config_missing_fallb0/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_nested_include_expansion_1/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_nested_include_expansion_1/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_nested_include_expansion_1/31b/v000/included.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_nested_include_expansion_1/31b/v000/data.txt
+/tmp/pytest-of-ubuntu/pytest-511/test_nested_include_expansion_1/31b/v000/child.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_inline_agent_model_fallba0/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_inline_agent_model_fallba0/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_root_must_be_mapping_fall0/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_root_must_be_mapping_fall0/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_root_must_be_mapping_fall1/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_root_must_be_mapping_fall1/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_reference_failures_fallba7/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_reference_failures_fallba7/31b/v000/agent.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_eval_positive_integer_inv24/31b/v000/eval_config.yaml
+/tmp/pytest-of-ubuntu/pytest-511/test_eval_positive_integer_inv24/31b/v000/agent.yaml
+
+exec
+/bin/bash -lc 'cat eval/tests/test_gold_calibration.py | head -50; cat eval/tests/test_pack.py | head -35; cat eval/kaggle/gold_calibration_metadata.json; python3 --version; ls /home/ubuntu/gemma-local/wh | head' in /home/ubuntu/work/gemma-wt/codex-timing-kernel
+ succeeded in 0ms:
+"""Offline tests: stdlib unittest, no competition data or harness imports."""
+import argparse
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import types
+import unittest
+from unittest.mock import patch
+
+SCRIPT = Path(__file__).resolve().parents[1] / 'kaggle/gold_calibration.py'
+spec = importlib.util.spec_from_file_location('gold_calibration', SCRIPT)
+gold = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gold)
+
+
+def result(task_id='a', repo='org/repo', resolved=True, error=None):
+    return dict(instance_id=task_id, repo=repo, resolved=resolved,
+                exit_code=0 if resolved else 1, duration_seconds=1.5, error=error)
+
+
+class ResumeTests(unittest.TestCase):
+    def test_success_and_failure_are_finished(self):
+        rows = [result(), result('b', resolved=False, error='setup failed')]
+        results = gold.finished_results(''.join(json.dumps(row) + '\n' for row in rows))
+        tasks = [dict(instance_id=x, repo='org/repo') for x in 'abc']
+        self.assertEqual([t['instance_id'] for t in gold.pending_tasks(tasks, results)], ['c'])
+
+    def test_last_completed_duplicate_wins(self):
+        rows = [result(resolved=False), result()]
+        results = gold.finished_results('\n'.join(map(json.dumps, rows)) + '\n')
+        self.assertTrue(results['a']['resolved'])
+        self.assertEqual(len(results), 1)
+
+    def test_partial_tail_repaired_and_append_survives_second_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'results.jsonl'
+            complete = json.dumps(result()) + '\n'
+            path.write_text(complete + '{"instance_id": "unfinished')
+            self.assertEqual(set(gold.resume_journal(path)), {'a'})
+            self.assertEqual(path.read_text(), complete)
+            with path.open('a') as stream:
+                stream.write(json.dumps(result('b')) + '\n')
+            self.assertEqual(set(gold.resume_journal(path)), {'a', 'b'})
+
+    def test_complete_last_record_without_newline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'results.jsonl'
+            path.write_text(json.dumps(result()))
+            self.assertEqual(set(gold.resume_journal(path)), {'a'})
+"""Offline bundle validator and reproducible archive regression tests."""
+import hashlib
+import importlib.machinery
+import importlib.util
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import zipfile
+
+import pytest
+
+SCRIPT = Path(__file__).resolve().parents[2] / 'bin/pack'
+loader = importlib.machinery.SourceFileLoader('pack', str(SCRIPT))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+pack = importlib.util.module_from_spec(spec)
+loader.exec_module(pack)
+MODEL = 'gemma-4-31b-it-qat-w4a16-ct'
+
+
+@pytest.fixture(params=['pyyaml', 'fallback'])
+def backend(request, monkeypatch):
+    if request.param == 'fallback':
+        monkeypatch.setattr(pack, 'yaml', None)
+    elif pack.yaml is None:
+        pytest.skip('PyYAML not installed')
+
+
+@pytest.fixture
+def bundle(tmp_path, backend):
+    root = tmp_path / '31b/v000'
+    root.mkdir(parents=True)
+    (root / 'agent.yaml').write_text(f'name: main\nmodel: {MODEL}\ninstruction: "Fix {{problem_description}}"\n')
+    (root / 'eval_config.yaml').write_text('evaluation:\n  max_time_minutes: 5\n')
+{
+  "id": "your-kaggle-username/gemma-gold-calibration",
+  "title": "Gemma gold patch calibration",
+  "code_file": "gold_calibration.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "dataset_sources": ["metric/gemma-4-developer-agent-wheelhouse"],
+  "competition_sources": ["gemma-4-developer-agent"],
+  "kernel_sources": [],
+  "model_sources": []
+}
+Python 3.12.3
+adk_submission-0.2.13-py3-none-any.whl
+
+exec
+/bin/bash -lc "ls -d /home/ubuntu/work/* /home/ubuntu/*venv* /tmp/*venv* /opt/* 2>/dev/null; rg --files --hidden /home/ubuntu/.cache/uv /home/ubuntu/work/gemma/.venv /tmp 2>/dev/null | rg '/(_pytest/__init__\\.py|pytest-["'^/]*whl|pluggy/__init__'"\\.py)"'$'"' | head -25" in /home/ubuntu/work/gemma-wt/codex-timing-kernel
+ succeeded in 823ms:
+/home/ubuntu/work/etho
+/home/ubuntu/work/etho-wt
+/home/ubuntu/work/gemma
+/home/ubuntu/work/gemma-wt
+/opt/unified-monitoring-agent
+/home/ubuntu/.cache/uv/archive-v0/i0sipIeUBagSNiMq/_pytest/__init__.py
+/home/ubuntu/.cache/uv/archive-v0/pTVUOl5BkkpJvkh4/pluggy/__init__.py
+
+codex
+The requested Python interpreter has no `pytest` installed. I found an existing pytest copy in the local cache and will use it through a temporary `PYTHONPATH`, without installing anything. During API inspection, importing the installed harness also triggered LiteLLM’s automatic model-map lookup; it failed on DNS. I’ll keep subsequent inspection and tests offline.
+exec
+/bin/bash -lc "rg --files --hidden /home/ubuntu/.cache/uv/archive-v0 | rg '/(pytest|_pytest|pluggy|iniconfig|packaging|pygments|yaml)/__init__\\.py"'$'"'" in /home/ubuntu/work/gemma-wt/codex-timing-kernel
+ succeeded in 0ms:
+/home/ubuntu/.cache/uv/archive-v0/XmiyO_XcWsgc5nkE/pygments/__init__.py
+/home/ubuntu/.cache/uv/archive-v0/i0sipIeUBagSNiMq/pytest/__init__.py
+/home/ubuntu/.cache/uv/archive-v0/i0sipIeUBagSNiMq/_pytest/__init__.py
+/home/ubuntu/.cache/uv/archive-v0/pTVUOl5BkkpJvkh4/pluggy/__init__.py
+/home/ubuntu/.cache/uv/archive-v0/qoiBrzFb1ho0DXOo/yaml/__init__.py
+/home/ubuntu/.cache/uv/archive-v0/17fP9tknmUavK1yH/iniconfig/__init__.py
+/home/ubuntu/.cache/uv/archive-v0/Pp4JT3DbahaWgbc6/packaging/__init__.py
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+p='eval/kaggle/agent_timing.py'
+s=open(p).read()
+lines=s.splitlines()
+for i,l in enumerate(lines):
+ if \"assert declared_model in frozenset\" in l:
+  lines[i]=\"    assert declared_model in {'gemma-4-' + x + '-it-qat-w4a16-ct' for x in ('31b', '12b', 'e4b', 'e2b')}, 'Unsupported declared model'\"
+s='\\n'.join(lines)+'\\n'
+# Keep one blank only at top-level definitions; compact within function bodies.
+s=s.replace('\\n\\n    ', '\\n    ')
+open(p,'w').write(s)
+PY
+wc -l eval/kaggle/agent_timing.py" in /home/ubuntu/work/gemma-wt/codex-timing-kernel
+ succeeded in 0ms:
+418 eval/kaggle/agent_timing.py
+
+exec
+/bin/bash -lc 'PYTHONPATH=/home/ubuntu/.cache/uv/archive-v0/i0sipIeUBagSNiMq:/home/ubuntu/.cache/uv/archive-v0/pTVUOl5BkkpJvkh4:/home/ubuntu/.cache/uv/archive-v0/17fP9tknmUavK1yH:/home/ubuntu/.cache/uv/archive-v0/Pp4JT3DbahaWgbc6:/home/ubuntu/.cache/uv/archive-v0/XmiyO_XcWsgc5nkE:/home/ubuntu/.cache/uv/archive-v0/qoiBrzFb1ho0DXOo PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/venv/bin/python -m pytest eval/tests -q' in /home/ubuntu/work/gemma-wt/codex-timing-kernel

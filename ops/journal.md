@@ -59,3 +59,7 @@
 2026-11-05T14:58Z | ask-shadowing (codex) done: independently agrees wheel shadowing = official harness property; no change to dec 014 | ops/codex/ask-20261105T145051.md
 2026-11-05T14:58Z | codex-build timing-kernel launched (Kaggle L4x4 E4B timing kernel per plan 001, starter-faithful, dry-run push only) | ops/codex/build-timing-kernel.spec
 2026-11-05T14:58Z | plan 002 pre-registered (candidate: import-origin check lever) | eval/plans/002.md
+2026-11-05T15:01Z | review-eval-runner done: 5 BLOCKING (gold readable via run_command, graph_dir unset, tool_seconds batched-timestamp error, resume ignores SHA, runner/gold env mismatch _host_env.pth) | ops/codex/review-20261105T145013.md
+2026-11-05T15:01Z | merged codex/eval-runner to main (8add1a5); no runner numbers relied on until eval-runner-fix merged | eval/run_agent_eval.py
+2026-11-05T15:01Z | launched codex-build eval-runner-fix (B1-B5,N1-N3; bwrap isolation) | ops/codex/build-eval-runner-fix.spec
+2026-11-05T15:01Z | PRE-REG: after fix, rerun gold-local+gold-null in shared env; identical pass set+null control => splits v2 stand, else report to Director | eval/splits/MANIFEST.json
