@@ -278,8 +278,8 @@ def test_e2e(tmp_path, monkeypatch, transport):
         assert gold.resolved and gold_files
         assert all(p.is_relative_to(out) for p in gold_files)
         revision = runner.runner_revision()
-        monkeypatch.setattr(runner, 'runner_revision', lambda: dict(revision, git_sha='changed-sha'))
-        with pytest.raises(ValueError, match='git_sha'):
+        monkeypatch.setattr(runner, 'runner_revision', lambda: dict(revision, runner_source_sha256='changed'))
+        with pytest.raises(ValueError, match='runner_source_sha256'):
             runner.main(argv)
         handler_class = make_server(script)
         monkeypatch.setattr(runner, 'classify_patch', lambda *args: 1 / 0)

@@ -101,7 +101,7 @@ class Journal:
         try:
             if lines and not force:
                 old = json.loads(lines[0])
-                identity = (old.keys() | header.keys()) - {'created_utc'}
+                identity = (old.keys() | header.keys()) - {'created_utc', 'provenance'}
                 diff = {k: {'old': old.get(k), 'new': header.get(k)}
                         for k in sorted(identity) if old.get(k) != header.get(k)}
                 if diff:
@@ -233,10 +233,34 @@ def validate_inventory_ids(path):
             seen.add(iid)
 
 
+RUNNER_SOURCE_DIR = 'eval'
+
+
+def runner_source_sha():
+    """Content hash of the runner implementation as it is on disk (tracked or untracked,
+    committed or not). Generated artifacts (results, runs, caches) live outside eval/ or are
+    not .py, so writing the journal never changes the identity; tests are excluded."""
+    listing = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others',
+                                       '--exclude-standard', '--', RUNNER_SOURCE_DIR], cwd=ROOT)
+    files = sorted({f for f in listing.decode('utf-8', 'surrogateescape').split('\0')
+                    if f.endswith('.py') and not f.startswith(f'{RUNNER_SOURCE_DIR}/tests/')})
+    digest = hashlib.sha256()
+    for rel in files:
+        path = ROOT / rel
+        if path.is_file():  # a deleted tracked file drops out of the hash
+            digest.update(rel.encode('utf-8', 'surrogateescape') + b'\0'
+                          + hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
 def runner_revision():
-    return dict(git_sha=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
-                                               text=True).strip(),
-                git_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)))
+    # Identity is the source content hash. The commit SHA/dirty flag are provenance only:
+    # HEAD moves on every ops commit, and the default journal itself dirties the tree.
+    return dict(runner_source_sha256=runner_source_sha(),
+                provenance=dict(git_sha=subprocess.check_output(['git', 'rev-parse', 'HEAD'],
+                                                                cwd=ROOT, text=True).strip(),
+                                git_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'],
+                                                                       cwd=ROOT))))
 
 
 def wheels_listing_sha(path):
@@ -262,6 +286,26 @@ def config_snapshot(value):
     if isinstance(value, Path):
         return str(value)
     return value
+
+
+def resolve_caps(defaults, args):
+    """Precedence: CLI flag > flat bundle key > nested bundle key (left to swegemma) > runner fallback."""
+    def nested(section, key):
+        value = defaults.get(section)
+        return value.get(key) if isinstance(value, dict) else None
+
+    caps = {}
+    for key, value, fallback, nested_value in [
+            ('max_tool_calls', args.max_tool_calls, None, None),
+            ('max_turns', args.max_turns, None, None),
+            ('max_time_minutes', args.session_minutes, 5, nested('budget', 'time_minutes')),
+            ('timeout_seconds', args.command_timeout, 60, nested('harness', 'command_timeout_seconds'))]:
+        if value is None:
+            value = defaults.get(key)
+        if value is None and nested_value is None:
+            value = fallback
+        caps[key] = value
+    return caps
 
 
 def build_config(defaults, args, models, raw_dir, caps):
@@ -341,9 +385,7 @@ async def run(args):
         raise ValueError('Unsafe task ID')
     settings = args.bundle / 'eval_config.yaml'
     defaults = (yaml.safe_load(settings.read_text()) or {}).get('evaluation', {}) if settings.exists() else {}
-    caps = {key: value if value is not None else defaults.get(key, fallback) for key, value, fallback in
-            [('max_tool_calls', args.max_tool_calls, None), ('max_turns', args.max_turns, None),
-             ('max_time_minutes', args.session_minutes, 5), ('timeout_seconds', args.command_timeout, 60)]}
+    caps = resolve_caps(defaults, args)
     if any(v is not None and (not math.isfinite(v) or v <= 0) for v in caps.values()):
         raise ValueError('Caps must be positive finite numbers')
     if args.models_yaml and not args.models_yaml.is_file():

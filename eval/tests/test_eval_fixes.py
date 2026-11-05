@@ -185,11 +185,12 @@ def test_config_forwards_fields_and_resolves_graph_paths(tmp_path, caplog, harne
     json.dumps(runner.config_snapshot(config))
 
 
-@pytest.mark.parametrize('key,value', [('git_sha', 'new-sha'), ('git_dirty', True),
+@pytest.mark.parametrize('key,value', [('runner_source_sha256', 'new-source'),
     ('tasks_sha256', 'new-inventory'), ('versions', {'swegemma': '99'}),
     ('wheels_listing_sha256', 'new-wheels'), ('sandbox', 'none'), ('python_version', '99')])
 def test_resume_identity_refuses_changed_environment(tmp_path, key, value):
-    header = dict(_schema='agent_eval_v2', git_sha='old-sha', git_dirty=False,
+    header = dict(_schema='agent_eval_v2', runner_source_sha256='old-source',
+                  provenance=dict(git_sha='old-sha', git_dirty=False),
                   tasks_sha256='old-inventory', versions={'swegemma': '0.2.11'},
                   wheels_listing_sha256='old-wheels', sandbox='bwrap', python_version='3.13')
     path = tmp_path / 'run.jsonl'
@@ -368,3 +369,79 @@ def test_bwrap_binds_symlinked_ro_path_at_alias(tmp_path):
     argv = env.bwrap_argv(['/bin/bash', '-c', 'true'], ws, [tmp_path], [alias])
     pairs = {(argv[i + 1], argv[i + 2]) for i, a in enumerate(argv) if a == '--ro-bind'}
     assert (str(real), str(real)) in pairs and (str(real), str(alias)) in pairs
+
+
+def test_resume_ignores_provenance_only_changes(tmp_path):
+    header = dict(_schema='agent_eval_v2', runner_source_sha256='src',
+                  provenance=dict(git_sha='old-sha', git_dirty=False))
+    path = tmp_path / 'run.jsonl'
+    runner.Journal(path, header).close()
+    runner.Journal(path, dict(header, provenance=dict(git_sha='new-sha', git_dirty=True))).close()
+
+
+def _source_repo(tmp_path, monkeypatch):
+    repo = tmp_path / 'repo'
+    (repo / 'eval' / 'tests').mkdir(parents=True)
+    (repo / 'results').mkdir()
+    (repo / 'eval' / 'impl.py').write_text('X = 1\n')
+    (repo / 'eval' / 'tests' / 'test_x.py').write_text('pass\n')
+    (repo / '.gitignore').write_text('__pycache__/\n')
+    git = lambda *a: subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', *a],
+                                    cwd=repo, check=True, capture_output=True)
+    git('init', '-q'); git('add', '-A'); git('commit', '-qm', 'init')
+    monkeypatch.setattr(runner, 'ROOT', repo)
+    return repo
+
+
+def test_source_hash_distinguishes_dirty_implementations(tmp_path, monkeypatch):
+    repo = _source_repo(tmp_path, monkeypatch)
+    clean = runner.runner_source_sha()
+    (repo / 'eval' / 'impl.py').write_text('X = 2\n')
+    dirty_a = runner.runner_revision()
+    (repo / 'eval' / 'impl.py').write_text('X = 3\n')
+    dirty_b = runner.runner_revision()
+    assert dirty_a['provenance'] == dirty_b['provenance']  # the old identity collided here
+    assert len({clean, dirty_a['runner_source_sha256'], dirty_b['runner_source_sha256']}) == 3
+    (repo / 'eval' / 'new_helper.py').write_text('Y = 1\n')  # untracked source counts
+    assert runner.runner_source_sha() != dirty_b['runner_source_sha256']
+    path = tmp_path / 'run.jsonl'
+    runner.Journal(path, dict(_schema='agent_eval_v2', **dirty_a)).close()
+    with pytest.raises(ValueError, match='runner_source_sha256'):
+        runner.Journal(path, dict(_schema='agent_eval_v2', **dirty_b))
+
+
+def test_source_hash_ignores_journal_tests_and_caches(tmp_path, monkeypatch):
+    repo = _source_repo(tmp_path, monkeypatch)
+    before = runner.runner_revision()
+    path = repo / 'results' / 'run.jsonl'  # default, unignored journal location
+    runner.Journal(path, dict(_schema='agent_eval_v2', **before)).close()
+    (repo / 'eval' / 'tests' / 'test_x.py').write_text('assert True\n')
+    (repo / 'eval' / '__pycache__').mkdir()
+    (repo / 'eval' / '__pycache__' / 'impl.cpython-313.pyc').write_bytes(b'x')
+    after = runner.runner_revision()
+    assert after['provenance']['git_dirty'] and not before['provenance']['git_dirty']
+    assert after['runner_source_sha256'] == before['runner_source_sha256']
+    runner.Journal(path, dict(_schema='agent_eval_v2', **after)).close()  # resume accepted
+
+
+def _cap_args(**kw):
+    base = dict(max_tool_calls=None, max_turns=None, session_minutes=None, command_timeout=None)
+    return SimpleNamespace(**dict(base, **kw))
+
+
+def test_caps_respect_nested_bundle_settings(harness):
+    defaults = dict(budget=dict(time_minutes=2), harness=dict(command_timeout_seconds=7))
+    caps = runner.resolve_caps(defaults, _cap_args())
+    assert caps['max_time_minutes'] is None and caps['timeout_seconds'] is None
+    args = SimpleNamespace(data_dir=Path('/d'), bundle=Path('/b'), concurrency=1)
+    config = runner.build_config(defaults, args, None, Path('/r'), caps)
+    assert config.budget.time_minutes == 2
+    assert config.harness.command_timeout_seconds == 7
+
+
+def test_caps_precedence_cli_flat_fallback():
+    assert runner.resolve_caps({}, _cap_args())['max_time_minutes'] == 5
+    assert runner.resolve_caps({}, _cap_args())['timeout_seconds'] == 60
+    flat = dict(max_time_minutes=3, budget=dict(time_minutes=2))
+    assert runner.resolve_caps(flat, _cap_args())['max_time_minutes'] == 3
+    assert runner.resolve_caps(flat, _cap_args(session_minutes=4))['max_time_minutes'] == 4
