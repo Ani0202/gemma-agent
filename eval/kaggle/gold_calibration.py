@@ -17,9 +17,6 @@ import time
 
 # Kaggle's system python autoloads a langsmith pytest plugin that the scorer docker image lacks; it breaks on repo-local requests.py shadowing.
 os.environ['PYTEST_ADDOPTS'] = (os.environ.get('PYTEST_ADDOPTS', '') + ' -p no:langsmith_plugin').strip()
-# PYTEST_ADDOPTS did not reach the sandbox pytest (diag3: still crashed); remove the package that provides the plugin.
-_r = subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 'langsmith'], capture_output=True, text=True)
-print('langsmith uninstall rc=%s %s' % (_r.returncode, (_r.stdout + _r.stderr)[-200:]), flush=True)
 DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
 WORKING_DIR = Path('/kaggle/working')
 WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
@@ -192,6 +189,10 @@ def patch_subprocess_deps(data_dir):
     import tarfile
     import swegemma.harness.container_setup as cs
     import swegemma.harness.verification as vf
+    import swegemma.harness.sample_verification  # load all known by-name bindings
+    import swegemma.evaluate
+    import swegemma.cli
+    import swegemma.harness.agent_runner
     orig = cs.install_test_dependencies
     wheels_src = Path(data_dir) / 'wheels'
     if not wheels_src.is_dir():
@@ -223,8 +224,10 @@ def patch_subprocess_deps(data_dir):
                               f'"import {pkg};print({pkg}.__file__)"', timeout=60)
             with open(probe_log, 'a') as fh:
                 fh.write(json.dumps({'container': str(container_id), 'repo': repo, 'probe': str(out)[:500]}) + '\n')
-    cs.install_test_dependencies = install
-    vf.install_test_dependencies = install
+    for name, module in list(sys.modules.items()):
+        if (name == 'swegemma' or name.startswith('swegemma.')) and getattr(module, 'install_test_dependencies', None) is orig:
+            module.install_test_dependencies = install
+    return install
 
 
 async def verify_gold(task, patch, data_dir, sandbox):
@@ -304,12 +307,6 @@ def worker(args):
                 raise TypeError('Unsupported verification result')
             row.update(resolved=resolved, exit_code=exit_code)
             if not resolved:
-                import re as _re
-                _out = get('test_output', '') or ''
-                _pat = _re.compile(r'ModuleNotFoundError|ImportError|fixture .* not found|unrecognized arguments|PluginValidationError|INTERNALERROR|^E  |^ERROR|error:|Error:|passed|failed', _re.M)
-                row['diag'] = dict(err=(get('error_message', None) or get('error', None) or '')[:300],
-                                   lines=[l[:200] for l in _out.splitlines() if _pat.search(l)][:25],
-                                   tail=_out[-600:])
                 # Harness exception/error text can embed patches or task source. Never copy it.
                 row['error'] = ('Harness verification error' if get('error') else
                                 f'Phase 2 unresolved (exit_code={exit_code}; includes JUnit validation)')
@@ -350,6 +347,10 @@ def run_one(task, data_dir, sandbox):
 
 
 def main():
+    # Kaggle-only cleanup belongs at execution time, never on library import.
+    if Path('/kaggle/working').is_dir():
+        subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 'langsmith'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', type=Path, default=DATA_DIR)
     parser.add_argument('--working-dir', type=Path, default=WORKING_DIR)

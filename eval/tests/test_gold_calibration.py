@@ -119,6 +119,7 @@ class WorkerTests(unittest.TestCase):
                                       sandbox='subprocess', result=Path(directory) / 'result.json')
             with patch.object(gold, 'load_inventory', return_value=[raw]), \
                     patch.dict('sys.modules', {'swegemma.models': models}), \
+                    patch.object(gold, 'patch_subprocess_deps'), \
                     patch.object(gold, 'verify_gold', side_effect=verifier):
                 gold.worker(args)
             return json.loads(args.result.read_text())
