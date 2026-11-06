@@ -9,7 +9,8 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   Next e4b submit: earliest after this scores AND next UTC day (one pending at a time). Guard v6 applied b9caae4 (dry checks rc=3 x2).
 - 31b-v002 (dec 052 item 3; v001-t4 + cap 3.5 only): dist/31b-v002.zip sha256=e56a05e5701fa16a8dbbabb304d98f63a465511cefbb28d65850ea5ce086ec88,
   pack PASS, load check 8192 x2 / 210 s. Submit kernel aniket0202/gemma-submit-31b v1 (CPU) COMPLETE, output sha = e56a05e5 verified. NOT authorized: report 010 carries
-  SUBMIT line iff G1 holds; else propose alternative (repeat e4b-v002 after its score / 31B cap <= 1.23) with trade-offs (dec 052 item 4).
+  SUBMIT line (exact: SUBMIT dist/31b-v002.zip sha256=e56a05e5...ec88 track=31b) iff G1 holds AND review-31b-v002-light clean (dec 053);
+  submit only after e4b ref 58039259 is final (check server list first); no change to v002/kernel after review. Else propose alternative (repeat e4b-v002 after its score / 31B cap <= 1.23) with trade-offs (dec 052 item 4).
 - CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 E4B/12B/E2B validator
   acceptance (first e4b submit settles E4B); l.55 submit_patch/get_status vs call limits; l.63 private-LB multiple runs; l.72 wheels arch
   (x86 assumed, unrecorded); 12h overrun ruling. VERIFIED: l.42 submit method = kernel output (dec 041); l.76 superseded by l.112.
