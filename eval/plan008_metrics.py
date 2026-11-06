@@ -207,7 +207,9 @@ def earliest_candidate_index(entries):
     (b) the root submit call enclosing such a response (gate_invocations interval),
     (c) any root submit_patch call whose own response carries patch_size (builtin).
     Extra candidates only move the boundary earlier (stricter). None = no candidate."""
-    cands = [p['response_index'] for p in _pairs(entries)
+    cands = [i for i in nonroot_submit_responses(entries)
+             if _patch_size(entries[i].get('result', '')) is not None]
+    cands += [p['response_index'] for p in _pairs(entries)
              if p.get('author') == 'submit_patch' and p.get('tool') == 'submit_patch'
              and p['response_index'] is not None and _patch_size(p['response']) is not None]
     cands += [g['entry_index'] for g in gate_invocations(entries) if g['inner_successes']]

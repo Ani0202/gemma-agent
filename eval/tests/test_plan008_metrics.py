@@ -562,6 +562,36 @@ def test_d735_boundary_without_enclosing_root(tmp_path, monkeypatch):
     assert m.arm2_metrics(run2)['totals']['submitted_without_test'] == 1
 
 
+@pytest.mark.parametrize('kind', ['tool_response', 'tool_result'])
+@pytest.mark.parametrize('author', ['submit_patch', None])
+def test_d735_unpaired_inner_response_after_test(kind, author):
+    inner = dict(response('submit_patch', {'patch_size': 23}, author=author), type=kind)
+    if author is None:
+        inner.pop('author')
+    es = TESTED + [inner]
+    assert m.earliest_candidate_index(es) == len(TESTED)
+    r = m.d735_counts(dict(m.submit_evidence(row(), es),
+                          submitted_without_test=m.submitted_without_test(es)), es)
+    assert r['submit_unverifiable'] is True
+    assert r['swt_d735'] is False
+    assert r['no_submit_d735'] is False
+
+
+@pytest.mark.parametrize('kind', ['tool_response', 'tool_result'])
+@pytest.mark.parametrize('author', ['submit_patch', None])
+def test_d735_unpaired_inner_response_before_test(kind, author):
+    inner = dict(response('submit_patch', {'patch_size': 23}, author=author), type=kind)
+    if author is None:
+        inner.pop('author')
+    es = [inner] + TESTED
+    assert m.earliest_candidate_index(es) == 0
+    r = m.d735_counts(dict(m.submit_evidence(row(), es),
+                          submitted_without_test=m.submitted_without_test(es)), es)
+    assert r['submit_unverifiable'] is True
+    assert r['swt_d735'] is True
+    assert r['no_submit_d735'] is False
+
+
 def test_selected_bundle_ignores_free_text(tmp_path, monkeypatch):
     # codex D73.6 B2: a v010 smoke-verdict reference must not mark a v011 run as gated.
     monkeypatch.chdir(ROOT_DIR)
