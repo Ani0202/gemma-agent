@@ -23,7 +23,6 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-- DEC 068: Addendum B/B.1 (242859a/ea9c064, pre-download) H-VERIFY(empty-patch) = eval/plan007_report.py (50 tests); report layout a-e + empty headline (implemented, see dec 069 line).
 ## Running jobs (14:01Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-plan008-d73 (build, effort high).
 - CYCLE 145: re-reviews NOT clean: v010b 3 BLOCKING (rename eligibility, unacked inner submit, (ii) units) + v011-d71 6 BLOCKING (+8 turns,
   child turn cap, (i) exemption, event selectors, (ii) units, arg checks). Pre-data Addendum D73 (f582942) fixes all; Director FYI'd 140056.
@@ -50,7 +49,6 @@
   empty guard = dec 070 1(b) prompt rule + IN-BUNDLE agent_tool gate named submit_patch (shares Context; <=2 bounces). Both deviations
   accepted (dec 072). Ship rule: pass delta>=0 AND empty<=4/33 AND run>=5 tasks<=6/33 AND safety (submitted-without-test <= 23+3=26).
   Dec 070 item 5: arm-3 addendum must require smoke thinking blocks > 0.
-- DEC 065-067: d4cdf0f0 = GOVERNING plan-007 classifier (a208a023 alongside); main kernel 078f4ea; results header names 078f4ea, classifier sha, agent_timing.py 0dc1c972 + dec-065 note. Chunk 2 after reset+dec055 submit, same bundle/code.
 - PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
   33 dev fixed order eval/plans/007-arm1-ids.txt, --with-verification --no-stock-probe, slug aniket0202/gemma-31b-passrate.
 - DEC 061 (on report 014): approve-with-changes. CAP-BOUND accepted; A + B approved. (i) dec 055 v002 submit at 11-07T00:00Z stays FIRST;
