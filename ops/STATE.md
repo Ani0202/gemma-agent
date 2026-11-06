@@ -27,10 +27,6 @@
 - CYCLE 151: targeted re-review 142723 NOT CLEAN (residual B3: unpaired gate-authored inner submit_patch resp -> boundary None) -> D73.6 TRIGGERED:
   ARM 2 = v011 (dist/31b-v011.zip 4f5b078a...4938), NO smoke, no more v010 rounds; Director FYI'd. B3 moot for v011 (builtin submit_patch);
   fix B3 (+regression test, targeted review) before any gate arm uses metrics.
-- CYCLE 149: D73.6 combined review 141645 = NOT CLEAN (3 BLOCKING, metrics-only). Fixed f4bcc71: B1 smoke FAIL / arm2 IncompleteRun exit 3
-  unless EXACT registered ids (arm2 needs all 33 in ONE run dir); B2 gate layout from header agent_yaml_sha256 vs bundles v010/v011 agent.yaml only;
-  B3 d735 uses earliest_candidate_index (independent of root attribution); NB1 defs. 1481 tests, base identical. Zips unchanged. Director FYI'd.
-  Re-review CLEAN -> smoke v010 (by ~22:00Z, quota 2.34 h) w/ 1-line FYI; NOT CLEAN -> arm 2 = v011 (no smoke), journal + FYI.
 - DEC 076: D73.6 stands; single-run-dir exit 3 kept; arm 2 = ONE session; D73.7 chunk rule c93967b (pre-data, NO build unless chunk 2 needed).
 - DEC 075 (ack FYI): MANIFEST v010 l.1 fixed -> b0785a30, fc24fcc3/c7a86295 VOID (MANIFEST excluded from zip, sha unchanged). Review CLEAN -> NO decision request, proceed + 1-line FYI; decision only if arms/ids/thresholds/rule change.
 - DEC 074 APPROVE D73: D73.5 (submit_unverifiable counts AGAINST arm 2; metrics arm2 mode must implement - d73 build only REPORTS it, add after merge)
