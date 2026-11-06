@@ -236,3 +236,7 @@
 2026-11-06T01:06Z | dec 057 item 4 NOTE: bundles v000-v002 (31b AND e4b) carry an inherited FastAPI/docs_src prompt hint (e.g. bundles/31b/v002/prompts/system.md:16); any LB score from them is possibly tilted toward FastAPI-like tasks | ops/decisions/057-20261106T010506-10980-from-builder.md
 2026-11-06T01:08Z | bundles/drafts/item4-system.md: docs_src/FastAPI line removed (dec 057 item 2) | bundles/drafts/item4-system.md
 2026-11-06T01:07:03Z | PLAN 005 ARM B PUSHED: aniket0202/gemma-31b-timing v2 (31b-v003-p5t4 e9e603ab, cap 4.0, budget 6000, NvidiaL4); quota before 7.28 h; waiter timing-31b-v003-wait-light | ops/budget/kaggle.md
+2026-11-06T02:12Z | plan 005 arm B (gemma-31b-timing v2) COMPLETE; outputs in runs/31b-v003-p5t4-timing; bundle dir == bundles/31b/v003 (diff -rq clean) | ops/jobs/timing-31b-v003-wait-light.log
+2026-11-06T02:16Z | arm B analysis: gates a/b/d/e PASS (V), write_outside_ws 0, edit_missing_param 6 (M met), empty 4/8, A-empty-only 2 / B-empty-only 2 (E not met) -> pre-registered verdict MECHANISM-ONLY; no ship | results/trace_tool_errors_31b_v003.json results/kaggle_timing_31b_v003.json
+2026-11-06T02:16Z | Kaggle quota 9.42/30 h after arm B (+2.14) | ops/budget/kaggle.md
+2026-11-06T02:16Z | MECHANISM-ONLY branch: trace-analyst on arm B empties; Addendum B feasibility codex-ask job addb-feasibility-ask-light (CPU) | eval/plans/005.md
