@@ -2185,3 +2185,735 @@ Validation: **105 passed, 1 deselected** using read-only-compatible classifier t
   1380	if __name__ == '__main__':
   1381	    main()
 
+exec
+/bin/bash -lc "nl -ba eval/kaggle/classify_rows.py | sed -n '114,240p'; nl -ba eval/plans/007.md | sed -n '1,111p'; cat ops/codex/review-20261106T070737.md" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   114	    setup_reasons = []
+   115	    diagnostic = False
+   116	    if isinstance(deps, list) and deps:
+   117	        setup_reasons.append('s1:missing_tool_deps')
+   118	    for entry in calls:
+   119	        step, rc = entry.get('step'), entry.get('rc')
+   120	        if step not in ('pip_check', 'workspace_editable', 'setup.py'):
+   121	            if rc != 0 and (rc is not None or (entry.get('duration_s') or 0) > 0 or entry.get('stderr')):
+   122	                setup_reasons.append('s2:setup_step_failed')
+   123	        elif step == 'workspace_editable' and rc != 0:
+   124	            if RECORD in output_text(entry):
+   125	                diagnostic = True
+   126	            else:
+   127	                setup_reasons.append('s4:workspace_editable_failed')
+   128	        elif step == 'setup.py':
+   129	            if rc != 0:
+   130	                setup_reasons.append('s3:setup_py_failed')
+   131	            earlier_offline_record = False
+   132	            for sub in entry.get('subprocesses', []):
+   133	                argv = sub.get('argv')
+   134	                if not isinstance(argv, list) or '-e' not in argv or sub.get('rc') == 0:
+   135	                    continue
+   136	                if '--no-index' in argv and RECORD in output_text(sub):
+   137	                    earlier_offline_record = diagnostic = True
+   138	                elif '--no-index' not in argv and earlier_offline_record:
+   139	                    pass
+   140	                else:
+   141	                    setup_reasons.append('s5:unexpected_editable_failure')
+   142	    if row.get('setup_failed') is True and not setup_reasons and not diagnostic:
+   143	        setup_reasons.append('s6:setup_failed_unexplained')
+   144	    known_diag = diagnostic and not setup_reasons
+   145	    reasons = row_reasons + setup_reasons
+   146	    if known_diag:
+   147	        reasons.append('known_diag:record_chain')
+   148	    h = 'H-ROW' if row_reasons else ('H-SETUP' if setup_reasons else None)
+   149	    patch_bytes = row.get('verified_patch_bytes')
+   150	    result_error = row.get('result_error')
+   151	    patch_apply = isinstance(result_error, str) and result_error.startswith('Failed to apply agent patch:')
+   152	    if h is None and patch_bytes > 0 and not patch_apply and not (
+   153	        type(code) is int and code in (0, 1, 2, 3, 4, 5, 124)
+   154	    ):
+   155	        h = 'H-VERIFY'
+   156	        reasons.append('verify:unexpected_exit_code')
+   157	    # A stock PASS must be backed by a verified run: non-empty applied patch and pytest exit 0.
+   158	    if h is None and stock_resolved is True and not (patch_bytes > 0 and not patch_apply and code == 0):
+   159	        h = 'H-VERIFY'
+   160	        reasons.append('verify:contradictory_resolved')
+   161	    # A stock PASS next to an explicit verification-failure message (either field) is contradictory.
+   162	    if h is None and stock_resolved is True and any(
+   163	            isinstance(m, str) and m.strip().startswith(VERIFY_AGENT_PREFIXES) for m in messages):
+   164	        h = 'H-VERIFY'
+   165	        reasons.append('verify:resolved_with_verify_failure')
+   166	    agent = None
+   167	    if h is None:
+   168	        if stock_resolved is True:
+   169	            agent = 'PASS'
+   170	        elif patch_bytes == 0:
+   171	            agent = 'NO_PATCH'
+   172	        elif patch_apply:
+   173	            agent = 'PATCH_APPLY'
+   174	        elif code == 124:
+   175	            agent = 'VERIFY_TIMEOUT_124'
+   176	        elif code == 1:
+   177	            agent = 'PYTEST_1'
+   178	        elif code in (2, 3, 4, 5):
+   179	            agent = 'PYTEST_2_5'
+   180	        elif code == 0:
+   181	            agent = 'EXIT0_UNRESOLVED'
+   182	        else:
+   183	            agent = 'OTHER_FAIL'
+   184	    return dict(h=h, known_diag=known_diag, agent=agent,
+   185	                agent_end=agent_end(row.get('agent_error_text')), resolved=stock_resolved,
+   186	                reasons=list(dict.fromkeys(reasons)))
+   187	
+   188	
+   189	def main():
+   190	    parser = argparse.ArgumentParser(description=__doc__)
+   191	    parser.add_argument('timing', type=Path)
+   192	    parser.add_argument('--out', type=Path)
+   193	    args = parser.parse_args()
+   194	    payload = args.timing.read_bytes()
+   195	    rows = []
+   196	    for line in payload.decode('utf-8').splitlines():
+   197	        if not line.strip():
+   198	            continue
+   199	        row = json.loads(line)
+   200	        if isinstance(row, dict) and 'instance_id' in row:
+   201	            if any(r['instance_id'] == row['instance_id'] for r in rows):
+   202	                raise ValueError(f'Duplicate instance_id in one timing file: {row["instance_id"]!r}')
+   203	            rows.append(dict(instance_id=row['instance_id'], repo=row.get('repo'), **classify(row)))
+   204	    result = dict(_schema='plan007_row_classes/v1',
+   205	                  classifier_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+   206	                  input=str(args.timing), input_sha256=hashlib.sha256(payload).hexdigest(),
+   207	                  n_rows=len(rows),
+   208	                  counts=dict(h=dict(Counter(r['h'] for r in rows if r['h'] is not None)),
+   209	                              agent=dict(Counter(r['agent'] for r in rows if r['agent'] is not None)),
+   210	                              known_diag=sum(r['known_diag'] for r in rows)),
+   211	                  h_rows=[r['instance_id'] for r in rows if r['h'] is not None], rows=rows)
+   212	    output = json.dumps(result, indent=2) + '\n'
+   213	    if args.out:
+   214	        args.out.write_text(output, encoding='utf-8')
+   215	    print(output, end='')
+   216	
+   217	
+   218	if __name__ == '__main__':
+   219	    main()
+     1	# Plan 007: 33-dev pass rate (pre-registered 2026-11-06T06:29Z, BEFORE any plan-007 run; dec 058 item 7, dec 061 item 4, dec 062 items 4-5)
+     2	Revision 2 (2026-11-06T06:55Z, still BEFORE any plan-007 run): fixes codex review ops/codex/review-20261106T064331.md BLOCKING 1-3
+     3	  (KNOWN-DIAG chain, agent-caused verification messages + exit 124 out of H, per-pass + filtered-patch evidence; classifier as code) and Q1 (primary keeps stock resolved for H rows).
+     4	Revision 1 (2026-11-06T06:42Z, still BEFORE any plan-007 run): fixes codex review ops/codex/review-20261106T063014.md BLOCKING 1-4 and
+     5	non-blocking notes. Original text: git show e547980:eval/plans/007.md.
+     6	Supersedes the earlier "time-aware budget lever" draft (kept verbatim as Appendix Z, not scheduled).
+     7	
+     8	## Question
+     9	We have zero local pass-rate numbers. Arm 1 measures the exact pass/fail of the current default 31B config (thinking off) on all
+    10	33 dev tasks. Arm 2 (next week) is the paired thinking-on vs thinking-off comparison that the n=8 empty-diff screens cannot answer.
+    11	
+    12	## Arms
+    13	- ARM 1 (now, expiring quota): bundle 31b-v009-p7a1 = bundles/31b/v009 = dist/31b-v009.zip sha256=d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d
+    14	  = 31b-v006-p5d (plan 005 arm D: thinking_budget 0, plan-005 arm-B prompt, no repo-named hint) with ONLY max_time_minutes 4.0 -> 3.5
+    15	  (= the 31b-v002 cap, the FINALS-RULE maximum if v002 scores). Root T 0.2, analyzer T 0.2 + own thinking_budget 4096, 40 calls/50 turns,
+    16	  max_output_tokens 8192 x2. Choice rationale: thinking off is the current default direction (dec 059 item 1); 3.5 is the only cap that
+    17	  matters if 31b-v002 scores, which dec 061 (i) makes the next 31B question. A cap-1.23 pass rate is NOT measured here (CAP-BOUND, report 014).
+    18	- ARM 2 (after the 2026-11-07 reset; NOT run before then): v009 with ONLY root thinking_budget 0 -> 4096 (= v002 thinking setting), all else equal.
+    19	  Same ids, same order, same kernel code, k=1. Packed and reviewed before it runs.
+    20	
+    21	## Environment (dec 034 item 6 / dec 058 item 7: which env the local sandbox models, and why)
+    22	Docker-path emulation of Dockerfile.public (dec 027, the plan-006 kernel stack, setup_fix=1): editable install + test deps from the
+    23	offline /wheels via the harness setup.py into the sandbox venv; verification = the stock swegemma verify_task (Container B: fresh
+    24	sandbox, agent patch with test/config files stripped, hidden test_patch applied, pytest on the target test files; resolved = the stock verdict: pytest exit 0 AND the JUnit/required-test-node checks pass, so
+    25	exit 0 with resolved=False is possible, verification.py:646).
+    26	Why this env and not H1 (test deps from the scorer notebook's site-packages): (1) the clean list (48) and dev split were calibrated
+    27	with gold and null patches in this same docker-path emulation (results/gold_calibration_per_task.jsonl), so "dev task is solvable"
+    28	is only defined here; (2) no H1 gold calibration exists, so an H1 pass rate could not separate agent failures from env failures;
+    29	(3) the agent-side env is the same one all plan-005/006 screens used. Known gap: if the scorer runs H1, some tasks may pass or fail
+    30	differently from the scorer for env reasons (sign unknown). Follow-up, not part of this plan's runs: a CPU-only Kaggle gold+null pass
+    31	of the 33 dev ids through the same kernel verification path (and, separately, an H1 variant) to measure the env-disagreement rate.
+    32	
+    33	## Protocol
+    34	- Ids: all 33 of eval/splits/dev.txt (sha256 bff0841a...d2d7), run in the fixed pre-registered order eval/plans/007-arm1-ids.txt
+    35	  (sorted by sha256("plan007:"+id); file sha256 127d32f9440116822569a5395a77d356cb9a83a71d2c78ed15944a9a05da49e9). The order makes
+    36	  any completed prefix a random subset. Wilson CIs describe this curated 33-task dev set only, not the hidden set.
+    37	- Kernel: eval/kaggle/timing_push.sh --with-verification --no-stock-probe [--seed-max S] aniket0202/gemma-31b-passrate bundles/31b/v009
+    38	  <ids> <budget>. Kernel-stack changes vs arm F (b4d9f59), none on the agent or verification path: (a) --no-stock-probe
+    39	  (STOCK_PROBE=False skips the plan-006 P1 stock-setup timing probe, ~120 s/task); (b) the stop guard (rev 1, review item 4):
+    40	  should_stop reserves cap + verification_timeout + SETUP_PASS_SECONDS x 3 (240 s each: 1 agent-sandbox pass + 2 Container B
+    41	  installs) = 1230 s at cap 3.5, x1.5; (d) rev 2: three evidence fields per row (result_error, agent_error_text, verified_patch_bytes),
+    42	  wrapper-only; (c) --seed-max S seeds observed_max with the smoke's max per-task total (each kernel restarts
+    43	  its own totals). Conc 1, 4x L4, k=1. Quality run, not a timing measurement (wall times descriptive only).
+    44	
+    45	### Row classification (rev 2, frozen before any run; mechanical, from the raw timing.jsonl row)
+    46	- Rev 2 (codex review 064331 BLOCKING 1-3): the classifier is CODE, not prose: eval/kaggle/classify_rows.py
+    47	  (`classify(row)`; sha256 recorded below at freeze, and every summary prints `classifier_sha256`). Its rules, summarised:
+    48	- Row evidence (rev 2, wrapper-only change, not on the agent or verification path): each row now carries `result_error`
+    49	  (stock TaskResult.error verbatim, <=4096 chars), `agent_error_text`, and `verified_patch_bytes` (length of the stock
+    50	  result.agent_patch = the post-strip patch Container B verified). A row missing any of these is H-ROW (schema guard).
+    51	- KNOWN-DIAG (a flag, not an error, never gating): over EVERY `setup.py` entry in `setup_calls` (one per installation pass;
+    52	  passes are no longer judged from the overwritten `editable_failed` / `setup_subprocesses` fields), each failing editable
+    53	  subprocess is either the offline attempt (`--no-index`) whose output contains `uninstall-no-record-file`, or an online
+    54	  fallback (no `--no-index`) that follows such a failure in the same pass. The fallback's own output need not contain the
+    55	  diagnostic (rev 1's predicate rejected this documented chain: 0/7 matches on arm F; rev 2 matches 7/7). Same marker
+    56	  accepted for a failing `workspace_editable` step. Docs: docs/GOLD_CALIBRATION.md v2; the 48-clean gold/null calibration ran
+    57	  in the same docker-path.
+    58	- HARNESS (H), precedence H-ROW > H-SETUP > H-VERIFY:
+    59	  H-ROW = row missing; schema guard; wrapper `error` naming an evaluation/cleanup/trace-parse/row-build exception; or any
+    60	  non-empty `result_error`/`agent_error_text` that is neither a known agent end state (timeout/turns/tool_calls/no_submit)
+    61	  nor a stock verification message caused by the agent patch (`Failed to apply agent patch:`, the JUnit/required-node
+    62	  family in swegemma verification.py). So `Evaluation error:`, `Failed to apply test_patch:`, `Missing test specification`
+    63	  and unrecognised text stay H (fail closed); the wrapper's generic `Harness task failure` is re-derived from the two texts.
+    64	  H-SETUP = missing_tool_deps; a fatal step rc != 0; a `setup.py` rc != 0; any failing editable subprocess outside the
+    65	  KNOWN-DIAG chain in ANY pass; or setup_failed=True with none of these and no KNOWN-DIAG (unexplained).
+    66	  H-VERIFY = verified_patch_bytes > 0, not a patch-apply failure, and exit_code not an int in {0..5, 124}.
+    67	  vLLM not up = the whole kernel is void.
+    68	- AGENT outcomes (quality, never validity, never rerun): PASS = stock resolved=True; NO_PATCH (verified_patch_bytes 0);
+    69	  PATCH_APPLY; VERIFY_TIMEOUT_124 (the patch hangs pytest, review item 2); PYTEST_1; PYTEST_2_5; EXIT0_UNRESOLVED
+    70	  (JUnit/required nodes); OTHER_FAIL. `agent_end` (timeout/turns/...) is recorded alongside, descriptive.
+    71	- Reporting guard (not a validity rule, triggers nothing automatic): PATCH_APPLY + VERIFY_TIMEOUT_124 counts are in the
+    72	  headline line with ids; if their sum is >= 3 the report flags a possible harness defect for a Director ruling.
+    73	- Validation before freeze: unit tests (synthetic rows, eval/tests/test_classify_rows.py) + the arm F raw rows (expected:
+    74	  7 KNOWN-DIAG, 0 H-SETUP; H-ROW by schema guard only, since arm F predates the new fields) + codex review.
+    75	- FROZEN 2026-11-06T06:56Z: eval/kaggle/classify_rows.py sha256=69ab78f27c393373ce235be9868a80e3e47190a4d81b1d42e0849fd956994fc3
+    76	  (merge of codex/plan007-classifier 63f6866). Validation: eval/tests 783 passed / 4 skipped; arm F rows -> 8 H-ROW (r1 schema only),
+    77	  known_diag 7, 0 H-SETUP (results/plan007_classifier_armF_check.json). Any later edit = new sha + Director note before use.
+    78	- RE-FROZEN 2026-11-06T07:01Z (rev 3; supersedes the 69ab78f2 freeze above): sha256=18afdbbd088a6af2ead28de7e3bc52f4e3375d474a1ab92f241cea7afcc5af08.
+    79	  Fix for codex review 20261106T065651 BLOCKING 1 (fail-open on missing/invalid evidence): r6 = error 'Harness task failure' with
+    80	  no nonempty result_error/agent_error_text -> H-ROW; r7 = verified_patch_bytes present but not an int >= 0 -> H-ROW (absent key is
+    81	  still r1). Validation: eval/tests 794 passed / 4 skipped (+11 regression tests); arm F rows unchanged (8 H-ROW r1 only, known_diag 7,
+    82	  0 H-SETUP; results/plan007_classifier_armF_check.json regenerated with the new sha). Director noted before use.
+    83	  Classifier code SHA (provenance, dec 063 item 2): b6e120f (router-sync commit that first contains the 18afdbbd file + its tests; 2fc49b5
+    84	  holds only the plan text + armF check json). Cite b6e120f in the plan-007 results header and the smoke/main kernel manifest.
+    85	- RE-FROZEN 2026-11-06T07:07Z (rev 4; supersedes 18afdbbd): sha256=a208a02343b43556e990271b8757044fdf51515f27ff9a067cd3af14c1fd4e6b.
+    86	  Fix for codex review 20261106T070228 BLOCKING 1 (invalid/contradictory verdict evidence avoided H): r8 = resolved present but not
+    87	  a bool -> H-ROW; r9 = exit_code present, not null and not an int (bool excluded) -> H-ROW; verify:contradictory_resolved = stock
+    88	  resolved=True without (verified_patch_bytes > 0, no patch-apply error, exit_code == 0) -> H-VERIFY. PASS now requires resolved is True
+    89	  (no bool coercion); the stock `resolved` value is reported as-is. Legit NO_PATCH / PATCH_APPLY with exit_code null or -1 stay non-H.
+    90	  H-VERIFY rule above unchanged for int codes; non-int codes now H-ROW (r9) first. Validation: eval/tests 819 passed / 4 skipped
+    91	  (+25 regression tests); arm F rows unchanged (8 H-ROW r1 only, known_diag 7, 0 H-SETUP; check json regenerated, only sha differs).
+    92	  Needs a clean codex re-review + Director note before use (dec 063 item 3). Classifier code SHA = the commit adding this line.
+    93	- REV 5 CANDIDATE 2026-11-06T07:20Z (NOT frozen; dec 064 item 3: one exhaustive rev-5 review, then ONE re-freeze folding every
+    94	  listed item; supersedes a208a023 only once frozen): current sha256=21c3d46e9b44853779ac710a6aa7eb6c6d29ccb24df854836e078d5d455015a0.
+    95	  Fixes codex review 20261106T070737 BLOCKING 1-3: verify:resolved_with_verify_failure = stock resolved=True plus a recognized
+    96	  verification-failure message (VERIFY_AGENT_PREFIXES, either field) -> H-VERIFY; r10 = result_error/agent_error_text not str/null
+    97	  -> H-ROW; r11 = setup_calls not a list of {step: non-empty str, rc int|null (bool excluded), stdout/stderr str|null, duration_s
+    98	  finite >= 0|null, subprocesses list of {argv list[str], rc int|null, stdout/stderr str|null}} -> H-ROW; r12 = missing_tool_deps
+    99	  not null/list[str] -> H-ROW; r13 = setup_failed not null/bool -> H-ROW. Non-dict rows raise; the CLI rejects duplicate instance_ids
+   100	  in one file. Validation: eval/tests 933 passed / 4 skipped; arm F rows unchanged (8 H-ROW, known_diag 7; only sha differs).
+   101	
+   102	### Smoke, chunks, reruns
+   103	- SMOKE first: the first 3 ids (eval/plans/007-smoke-ids.txt: 2 rich + 1 fastapi), budget 5400 s (rev 1: was 4800; fits the larger stop-guard reserve). The gate checks mechanics
+   104	  only; agent quality (0/3 included) never fails it. Gate holds iff: vLLM up, 3 rows present, 0 H rows. On hold the smoke rows
+   105	  COUNT as the first 3 arm-1 rows, and the main kernel runs ids 4..33 with --seed-max = ceil(max smoke per-task total).
+   106	  Gate FAIL: no main run today; diagnose; the run moves after the reset (dec 062 item 4: no rushing).
+   107	- Budget: KERNEL_BUDGET for main sized from the smoke per-task wall and the quota left before the reset (target: week
+   108	  usage <= 29.5/30 h). Unrun ids (a suffix of the fixed order) run as chunk 2 after the reset, identical bundle and code SHA,
+   109	  with --seed-max from all earlier rows.
+   110	- First attempts are always retained and reported. A code change during arm 1 is allowed ONLY to fix a defect behind an H row,
+   111	  documented first (journal line naming the row + the H category + the cause, then a commit, then a codex review). If the fix
+**BLOCKING**
+
+1. **Explicit verification failures can still become PASS.** At [classify_rows.py:110](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:110), consistency checks only exclude patch-apply errors. On an otherwise complete row, `resolved=True`, `exit_code=0`, positive patch bytes, and `result_error="Required test node did not pass: t::x"` produces **`h=None, agent=PASS`**, including under `"Harness task failure"`. Every other recognized JUnit failure prefix reproduces this. Mark stock success accompanied by an explicit verification failure H-VERIFY; preserve stock `resolved` and legitimate `EXIT0_UNRESOLVED`.
+
+2. **Malformed message fields bypass H or crash classification.** The truthiness check at [classify_rows.py:51](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:51) silently accepts `False`, `0`, `[]`, and `{}` in either message field. Otherwise valid rows reach `EXIT0_UNRESOLVED` without H. A recognized companion message also lets malformed evidence through under `"Harness task failure"`. Truthy non-string values instead raise `AttributeError`; the final reporting call can raise even after H was established ([classify_rows.py:132](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:132)). Validate both fields as string-or-None before inspecting or reporting them; malformed values should yield H-ROW.
+
+3. **Malformed setup evidence reaches agent outcomes.** At [classify_rows.py:70](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:70), `setup_calls={}`, `setup_calls=""`, and `setup_calls=[{}]` all produce **no H, `EXIT0_UNRESOLVED`**. A `setup.py` entry with `rc=False` also passes because `False == 0`. Other malformed shapes raise exceptions. Validate the list, entry and nested subprocess shapes, and return-code types before classification. Preserve legitimate empty lists and documented not-run entries.
+
+These are synthetic reproductions; they are not observed arm F failures.
+
+**NON-BLOCKING**
+
+1. **Every prior-table case is closed.** The new guards correctly reject non-bool/null `resolved`, non-int exit codes, and the listed success contradictions. Regression coverage includes all prior combinations ([test_classify_rows.py:241](/home/ubuntu/work/gemma/eval/tests/test_classify_rows.py:241)).
+
+2. **No false H found in the requested legitimate cases.** Confirmed `NO_PATCH` and `PATCH_APPLY` with null/−1 exits, `EXIT0_UNRESOLVED`, `VERIFY_TIMEOUT_124`, and all four recognized agent-end messages in either field under `"Harness task failure"`. Non-string top-level `error` values correctly receive H-ROW ([classify_rows.py:46](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:46)).
+
+3. **Freeze and artifact checks pass.** The classifier matches the full `a208a023…` hash at [007.md:85](/home/ubuntu/work/gemma/eval/plans/007.md:85). The [arm F JSON](/home/ubuntu/work/gemma/results/plan007_classifier_armF_check.json:3) differs from its predecessor only in `classifier_sha256`; CLI regeneration matches exactly.
+
+4. **Pre-registration is otherwise sufficient for smoke.** The fixed 33-dev order, first-three smoke IDs, budget, gate and rerun policy are concrete. Smoke remains blocked by the findings above and the clean-review requirement at [007.md:92](/home/ubuntu/work/gemma/eval/plans/007.md:92).
+
+**Questions:** None.
+
+Validation: **105 passed, 1 deselected** using read-only-compatible classifier tests. The exact requested full-suite command could not start because pytest could not create temporary files. The CLI temporary-file test was excluded; read-only arm F CLI regeneration passed. All four reviewed files match `fcb6d6f`.
+
+exec
+/bin/bash -lc "rg -n 'AGENT_OUTCOMES|setup_step|setup_calls|setup_failed|result_error|agent_error_text|exit_code|agent_error|sanitize|rc=None|rc.*None' eval/kaggle/agent_timing.py; nl -ba eval/tests/test_classify_rows.py | sed -n '1,294p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+229:    row = current['setup_calls'][-1]
+262:        row['dist_probe_rc'] = result.exit_code
+263:        if result.exit_code != 0:
+271:def setup_step(current, name, action, *, fatal=True):
+275:               duration_s=0.0, rc=None, stdout='', stderr='', retrying_lines=0)
+276:    current['setup_calls'].append(row)
+279:        row['rc'] = getattr(result, 'exit_code', getattr(result, 'returncode', 0))
+290:            current['setup_failed'] = True
+294:        current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+296:            current['setup_failed'] = True
+386:                       source='missing', version_installed=None)
+396:                    row['rc'] = result.exit_code
+399:                    if result.exit_code == 0:
+451:            start_offset_s=start-origin, rc=getattr(result, 'returncode', None),
+480:            started=time.perf_counter(), setup_calls=[], setup_failed=False)
+493:            setup_step(current, 'base_tar_extraction', original_base)
+494:            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+505:            setup_step(current, 'venv_fidelity', isolate_venv)
+509:                    current['setup_calls'][-1]['source'] = str(pip_wheel)
+514:                    current['setup_calls'][-1]['source'] = copy_runtime_package('pip', sp)
+515:                    if current['setup_calls'][-1]['source'] == 'missing':
+518:            result = setup_step(current, 'pip_bootstrap', bootstrap_pip)
+519:            if result.exit_code != 0:
+525:            result = setup_step(current, 'interpreter_probe', lambda: docker.exec(
+527:            if result.exit_code != 0:
+543:            setup_step(current, 'tool_sources', validate_tools)
+546:                current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
+547:                if current['setup_calls'][-1]['source'] == 'missing':
+549:            setup_step(current, 'pytest_timeout_source', timeout_source)
+558:            result = setup_step(current, 'tool_install', install_tools)
+559:            if result.exit_code != 0:
+574:                    current['setup_calls'][-1]['retrying_lines'] += sum(
+579:                current['setup_calls'][-1]['dependencies'] = entries
+584:            setup_step(current, 'tool_deps', tool_deps)
+585:            setup_step(current, 'pip_check', lambda: docker.exec(
+588:            setup_step(current, 'workspace_editable', lambda: docker.exec(container_id,
+591:            current['workspace_editable_rc'] = current['setup_calls'][-1]['rc']
+593:            current['setup_failed'] |= current['editable_failed']
+594:            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+600:            setup_step(current, 'base_tar_extraction', extract_base)
+601:            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+609:            setup_step(current, 'setup.py', run_setup)
+618:            setup_row = next(c for c in reversed(current['setup_calls']) if c['step'] == 'setup.py')
+621:            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+623:            current['editable_rc'] = editable[0]['rc'] if editable else None
+624:            current['editable_final_rc'] = editable[-1]['rc'] if editable else None
+626:            current['setup_failed'] |= current['editable_failed']
+632:        current['status'] = 'failed' if current['setup_failed'] else 'passed'
+784:                row = dict(cmd=str(cmd)[:40], duration_s=None, rc=None)
+789:                row['rc'] = getattr(result, 'exit_code', None)
+807:                            agent_error=None, trace=None, start_time=0.0, **kwargs):
+811:        agent_patch=agent_patch, test_output='', test_exit_code=0,
+812:        duration_seconds=time.perf_counter() - start_time, error=agent_error, trace=trace)
+814:    result.test_exit_code = None
+822:    source = 'sandbox_wrappers' if phase1 is not None else 'run_agent_sandbox'
+838:# Normal agent end states that swegemma reports through agent_error (agent_runner.py 0.2.11).
+839:AGENT_OUTCOMES = (('timeout', re.compile(r'Agent exceeded session timeout\b')),
+850:    return next((name for name, pattern in AGENT_OUTCOMES if pattern.match(text)), None)
+853:def harness_error(result, agent_error):
+855:    messages = [m for m in ((result.error if result is not None else None), agent_error) if m]
+985:def image_emulation_seconds(setup_calls):
+987:    return sum(c.get('duration_s') or 0 for c in setup_calls if c.get('step') in IMAGE_EMULATION_STEPS)
+1032:        agent_seconds, patch, trace, agent_error = 0.0, '', None, ''
+1044:                self.patch, self.agent_error, self.trace = await super()._run_agent_sandbox(safe, *args, **kwargs)
+1045:                return self.patch, self.agent_error, self.trace
+1063:            times = dict(instance_id=task.instance_id, verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+1067:            evaluator.docker.start = lambda: setup_step(times, 'venv', original_start)
+1071:                error = harness_error(result, evaluator.agent_error)
+1087:            code = result.test_exit_code if result else None
+1092:            phase.update(agent_outcome=agent_outcome(evaluator.agent_error or raw_error),
+1093:                         image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
+1095:              append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+1096:                result_error=(result.error[:4096] if result is not None and result.error else None),
+1097:                agent_error_text=(evaluator.agent_error[:4096] if evaluator.agent_error else None),
+1100:                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+1101:                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+1112:                timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+1116:                    ('result_error', lambda: result.error[:4096] if result is not None and result.error else None),
+1117:                    ('agent_error_text', lambda: evaluator.agent_error[:4096] if evaluator.agent_error else None),
+1128:                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+1224:                   started=time.perf_counter(), setup_calls=[], setup_failed=False,
+1225:                   editable_rc=None, retrying_lines=0, interpreter_version=None,
+1231:        sid = setup_step(current, 'venv', manager.start)
+1234:        setup_step(current, 'setup_container_wheels', lambda: cs.setup_container_wheels(manager, sid, config))
+1236:        setup_step(current, 'extract_snapshot', lambda: cs.extract_snapshot(
+1238:        setup_step(current, 'setup_git_exclude', lambda: cs.setup_git_exclude(manager, sid))
+1240:            setup_step(current, 'install_editable_package', lambda: cs.install_editable_package(manager, sid))
+1243:        current.update(setup_failed=True, status='failed', error=type(exc).__name__ + ': ' + str(exc)[:2048])
+1247:            setup_step(current, 'teardown', manager.cleanup_all)
+1298:                          agent_outcome='timeout/turns/tool_calls/no_submit from agent_error, or null',
+1312:                          sandbox_setup_seconds='Sum of measured setup steps', setup_calls='Bounded setup command timings/output', setup_failed='Any setup failure', resolved='Harness verdict', exit_code='Verification exit code or null',
+     1	"""Offline synthetic tests for the frozen Plan 007 row classifier."""
+     2	import hashlib
+     3	from importlib import import_module
+     4	import json
+     5	from pathlib import Path
+     6	import subprocess
+     7	import sys
+     8	
+     9	import pytest
+    10	
+    11	classifier = import_module('eval.kaggle.classify_rows')
+    12	timing = import_module('eval.kaggle.agent_timing')
+    13	
+    14	
+    15	def row(**updates):
+    16	    return dict(dict(instance_id='task-1', repo='example/repo', result_error=None,
+    17	                     agent_error_text=None, verified_patch_bytes=10, setup_calls=[],
+    18	                     exit_code=0, resolved=False, error=None, setup_failed=False), **updates)
+    19	
+    20	
+    21	def editable(offline=True, record=True, rc=1):
+    22	    return dict(argv=['pip', 'install', '-e', '/workspace'] + (['--no-index'] if offline else []),
+    23	                rc=rc, stdout='' if offline else 'subprocess-exited-with-error',
+    24	                stderr=classifier.RECORD if record else 'other failure')
+    25	
+    26	
+    27	def chain():
+    28	    return dict(step='setup.py', rc=0,
+    29	                subprocesses=[editable(), editable(offline=False, record=False)])
+    30	
+    31	
+    32	def test_agent_patterns_are_stock():
+    33	    assert [(n, p.pattern, p.flags) for n, p in classifier.AGENT_END] == [
+    34	        (n, p.pattern, p.flags) for n, p in timing.AGENT_OUTCOMES]
+    35	
+    36	
+    37	@pytest.mark.parametrize('passes', [1, 3])
+    38	def test_record_chain_all_passes(passes):
+    39	    result = classifier.classify(row(setup_calls=[chain() for _ in range(passes)],
+    40	                                     setup_failed=True, editable_failed=True))
+    41	    assert result['h'] is None
+    42	    assert result['known_diag'] is True
+    43	
+    44	
+    45	@pytest.mark.parametrize('subprocesses', [
+    46	    [editable(record=False)], [editable(offline=False, record=False)],
+    47	    [editable(offline=False, record=False), editable()],
+    48	])
+    49	def test_unexpected_editable_failure(subprocesses):
+    50	    result = classifier.classify(row(setup_calls=[dict(step='setup.py', rc=0, subprocesses=subprocesses)]))
+    51	    assert result['h'] == 'H-SETUP'
+    52	    assert result['known_diag'] is False
+    53	    assert 's5:unexpected_editable_failure' in result['reasons']
+    54	
+    55	
+    56	def test_later_pass_failure_is_retained():
+    57	    calls = [chain(), dict(step='setup.py', rc=0, subprocesses=[editable(record=False)])]
+    58	    result = classifier.classify(row(setup_calls=calls))
+    59	    assert result['h'] == 'H-SETUP'
+    60	    assert result['known_diag'] is False
+    61	
+    62	
+    63	@pytest.mark.parametrize('updates,reason', [
+    64	    (dict(setup_calls=[dict(step='tool_deps', rc=-1)]), 's2:setup_step_failed'),
+    65	    (dict(missing_tool_deps=['x']), 's1:missing_tool_deps'),
+    66	    (dict(setup_failed=True), 's6:setup_failed_unexplained'),
+    67	    (dict(setup_calls=[dict(step='setup.py', rc=1)]), 's3:setup_py_failed'),
+    68	    (dict(setup_calls=[dict(step='workspace_editable', rc=1)]), 's4:workspace_editable_failed'),
+    69	])
+    70	def test_setup_failures(updates, reason):
+    71	    result = classifier.classify(row(**updates))
+    72	    assert result['h'] == 'H-SETUP'
+    73	    assert result['known_diag'] is False
+    74	    assert reason in result['reasons']
+    75	
+    76	
+    77	@pytest.mark.parametrize('duration,stderr,expected', [(0, '', None), (1, '', 'H-SETUP'), (0, 'failure', 'H-SETUP')])
+    78	def test_not_run_step(duration, stderr, expected):
+    79	    result = classifier.classify(row(setup_calls=[dict(step='tool_deps', rc=None, duration_s=duration, stderr=stderr)]))
+    80	    assert result['h'] == expected
+    81	
+    82	
+    83	def test_workspace_record_and_pip_check():
+    84	    result = classifier.classify(row(setup_failed=True, setup_calls=[
+    85	        dict(step='workspace_editable', rc=1, stdout=classifier.RECORD),
+    86	        dict(step='pip_check', rc=1), dict(step='setup.py', rc=0)]))
+    87	    assert result['h'] is None and result['known_diag'] is True
+    88	
+    89	
+    90	@pytest.mark.parametrize('message,code,expected', [
+    91	    ('Failed to apply agent patch: xyz', 1, 'PATCH_APPLY'),
+    92	    ('Failed to apply agent patch: xyz', None, 'PATCH_APPLY'),
+    93	    ('Required test node did not pass: a::b', 0, 'EXIT0_UNRESOLVED'),
+    94	    ('Test failures/errors recorded in JUnit XML (failures=1, errors=0)', 1, 'PYTEST_1'),
+    95	])
+    96	def test_verification_agent_errors(message, code, expected):
+    97	    result = classifier.classify(row(error='Harness task failure', result_error=message,
+    98	                                     exit_code=code, verified_patch_bytes=50))
+    99	    assert result['h'] is None and result['agent'] == expected
+   100	
+   101	
+   102	@pytest.mark.parametrize('prefix', classifier.VERIFY_AGENT_PREFIXES)
+   103	def test_all_verification_agent_prefixes(prefix):
+   104	    result = classifier.classify(row(error='Harness task failure', result_error=prefix + ' synthetic'))
+   105	    assert result['h'] is None
+   106	
+   107	
+   108	@pytest.mark.parametrize('code,expected', [(124, 'VERIFY_TIMEOUT_124'), (1, 'PYTEST_1'),
+   109	                                         (2, 'PYTEST_2_5'), (3, 'PYTEST_2_5'), (4, 'PYTEST_2_5'),
+   110	                                         (5, 'PYTEST_2_5'), (0, 'EXIT0_UNRESOLVED')])
+   111	def test_verification_outcomes(code, expected):
+   112	    result = classifier.classify(row(exit_code=code))
+   113	    assert result['h'] is None and result['agent'] == expected
+   114	
+   115	
+   116	@pytest.mark.parametrize('field,message', [
+   117	    ('result_error', 'Evaluation error: boom'),
+   118	    ('result_error', 'Failed to apply test_patch: x'),
+   119	    ('result_error', 'Missing test specification'),
+   120	    ('agent_error_text', 'Agent crashed'),
+   121	])
+   122	@pytest.mark.parametrize('error,reason', [('Harness task failure', 'r4:unrecognized_message'),
+   123	                                         (None, 'r5:unrecognized_message')])
+   124	def test_unrecognized_messages(field, message, error, reason):
+   125	    result = classifier.classify(row(error=error, **{field: message}))
+   126	    assert result['h'] == 'H-ROW' and result['agent'] is None
+   127	    assert reason in result['reasons']
+   128	
+   129	
+   130	@pytest.mark.parametrize('error', ['Cleanup exception (OSError)', 'Harness task failure trace parse (KeyError)',
+   131	                                 'Evaluation exception (ValueError)', 'Row build exception (TypeError)'])
+   132	def test_wrapper_errors_preserve_stock_verdict(error):
+   133	    result = classifier.classify(row(error=error, resolved=True))
+   134	    assert result['h'] == 'H-ROW' and result['resolved'] is True and result['agent'] is None
+   135	
+   136	
+   137	def test_other_row_error():
+   138	    assert classifier.classify(row(error='unexpected'))['reasons'] == ['r3:unexpected_error']
+   139	
+   140	
+   141	@pytest.mark.parametrize('code', [None, -1, 6])
+   142	def test_invalid_verification_codes(code):
+   143	    assert classifier.classify(row(verified_patch_bytes=30, exit_code=code))['h'] == 'H-VERIFY'
+   144	
+   145	
+   146	@pytest.mark.parametrize('code', ['0', False, 0.0])
+   147	def test_non_int_verification_codes_are_h_row(code):
+   148	    # rev 4: a non-int exit_code is invalid evidence (r9 -> H-ROW), checked before H-VERIFY.
+   149	    result = classifier.classify(row(verified_patch_bytes=30, exit_code=code))
+   150	    assert result['h'] == 'H-ROW' and 'r9:invalid_exit_code' in result['reasons']
+   151	
+   152	
+   153	def test_no_patch_with_agent_end():
+   154	    result = classifier.classify(row(verified_patch_bytes=0, exit_code=-1,
+   155	                                     agent_error_text='Agent exceeded turns budget'))
+   156	    assert result['h'] is None and result['agent'] == 'NO_PATCH' and result['agent_end'] == 'turns'
+   157	
+   158	
+   159	@pytest.mark.parametrize('name,message', [
+   160	    ('timeout', ' Agent exceeded session timeout (300s) '),
+   161	    ('turns', 'Agent exceeded maximum allowed LLM turns'),
+   162	    ('tool_calls', 'Agent exceeded tool call budget'),
+   163	    ('no_submit', 'Agent completed execution without calling submit_patch'),
+   164	])
+   165	def test_agent_end_is_descriptive(name, message):
+   166	    result = classifier.classify(row(exit_code=1, agent_error_text=message))
+   167	    assert result['agent'] == 'PYTEST_1' and result['agent_end'] == name
+   168	
+   169	
+   170	@pytest.mark.parametrize('key', classifier.REQUIRED)
+   171	def test_schema_guard(key):
+   172	    source = row()
+   173	    del source[key]
+   174	    assert classifier.classify(source)['h'] == 'H-ROW'
+   175	
+   176	
+   177	def test_pass_and_other_fail():
+   178	    assert classifier.classify(row(resolved=True))['agent'] == 'PASS'
+   179	    assert classifier.classify(row(verified_patch_bytes=10, exit_code=None, result_error='Agent exceeded tool call budget'))['h'] == 'H-VERIFY'
+   180	
+   181	
+   182	@pytest.mark.parametrize('patch_bytes,code', [(None, None), (-1, -1), (True, 0), (1.5, 0), ('10', 0)])
+   183	def test_invalid_patch_evidence_is_h(patch_bytes, code):
+   184	    result = classifier.classify(row(verified_patch_bytes=patch_bytes, exit_code=code))
+   185	    assert result['h'] == 'H-ROW' and result['agent'] is None
+   186	    assert 'r7:invalid_patch_evidence' in result['reasons']
+   187	
+   188	
+   189	@pytest.mark.parametrize('texts', [(None, None), ('', '  '), (None, '')])
+   190	def test_unexplained_harness_failure_is_h(texts):
+   191	    result = classifier.classify(row(error='Harness task failure', result_error=texts[0], agent_error_text=texts[1]))
+   192	    assert result['h'] == 'H-ROW' and 'r6:unexplained_harness_failure' in result['reasons']
+   193	
+   194	
+   195	@pytest.mark.parametrize('message', ['Agent exceeded tool call budget', 'Required test node did not pass: t::x'])
+   196	def test_explained_harness_failure_not_h(message):
+   197	    result = classifier.classify(row(error='Harness task failure', result_error=message, exit_code=1))
+   198	    assert result['h'] is None and result['agent'] == 'PYTEST_1'
+   199	
+   200	
+   201	def test_zero_patch_without_exit_code_is_no_patch():
+   202	    result = classifier.classify(row(verified_patch_bytes=0, exit_code=None))
+   203	    assert result['h'] is None and result['agent'] == 'NO_PATCH'
+   204	
+   205	
+   206	def test_precedence_and_orthogonal_diagnostic():
+   207	    result = classifier.classify(row(error='unexpected', setup_calls=[chain()]))
+   208	    assert result['h'] == 'H-ROW' and result['known_diag'] is True
+   209	    result = classifier.classify(row(error='unexpected', setup_failed=True, exit_code=-1))
+   210	    assert result['h'] == 'H-ROW' and result['known_diag'] is False
+   211	    assert classifier.classify(row(setup_failed=True, exit_code=-1))['h'] == 'H-SETUP'
+   212	
+   213	
+   214	def test_meta_rejected():
+   215	    with pytest.raises(ValueError):
+   216	        classifier.classify({'_schema': 'example'})
+   217	
+   218	
+   219	def test_cli(tmp_path):
+   220	    source, output = tmp_path / 'timing.jsonl', tmp_path / 'classes.json'
+   221	    source.write_text('\n'.join(json.dumps(r) for r in [
+   222	        {'_schema': 'example'}, {'_vllm': {}}, row(resolved=True),
+   223	        row(instance_id='bad', error='Harness task failure', result_error='Evaluation error: boom'),
+   224	        row(instance_id='diag', setup_calls=[chain()], setup_failed=True),
+   225	        {'_stopped': 'example'}, {'_done': {'n': 3}},
+   226	    ]) + '\n')
+   227	    proc = subprocess.run([sys.executable, classifier.__file__, str(source), '--out', str(output)],
+   228	                          check=True, capture_output=True, text=True)
+   229	    result = json.loads(proc.stdout)
+   230	    assert result == json.loads(output.read_text())
+   231	    assert result['_schema'] == 'plan007_row_classes/v1'
+   232	    assert result['n_rows'] == 3 and result['h_rows'] == ['bad']
+   233	    assert result['counts'] == dict(h={'H-ROW': 1}, agent={'PASS': 1, 'EXIT0_UNRESOLVED': 1}, known_diag=1)
+   234	    assert result['input_sha256'] == hashlib.sha256(source.read_bytes()).hexdigest()
+   235	    assert result['classifier_sha256'] == hashlib.sha256(Path(classifier.__file__).read_bytes()).hexdigest()
+   236	    assert 'boom' not in proc.stdout and 'Evaluation error' not in proc.stdout
+   237	    assert classifier.RECORD not in proc.stdout
+   238	    assert proc.stderr == ''
+   239	
+   240	
+   241	# Rev 4 (codex review 20261106T070228 BLOCKING 1): invalid or contradictory verdict evidence fails closed.
+   242	@pytest.mark.parametrize('updates,reason', [
+   243	    (dict(resolved=None), 'r8:invalid_resolved'),
+   244	    (dict(resolved='false'), 'r8:invalid_resolved'),
+   245	    (dict(resolved='false', exit_code=0), 'r8:invalid_resolved'),
+   246	    (dict(resolved=1), 'r8:invalid_resolved'),
+   247	    (dict(result_error='Failed to apply agent patch: x', exit_code='garbage'), 'r9:invalid_exit_code'),
+   248	    (dict(verified_patch_bytes=0, exit_code='garbage'), 'r9:invalid_exit_code'),
+   249	    (dict(verified_patch_bytes=0, exit_code=True), 'r9:invalid_exit_code'),
+   250	    (dict(exit_code=1.0), 'r9:invalid_exit_code'),
+   251	])
+   252	def test_invalid_verdict_evidence_is_h_row(updates, reason):
+   253	    result = classifier.classify(row(**updates))
+   254	    assert result['h'] == 'H-ROW' and result['agent'] is None and reason in result['reasons']
+   255	
+   256	
+   257	@pytest.mark.parametrize('updates', [
+   258	    dict(resolved=True, exit_code=1), dict(resolved=True, exit_code=124), dict(resolved=True, exit_code=None),
+   259	    dict(resolved=True, exit_code=-1),
+   260	    dict(resolved=True, result_error='Failed to apply agent patch: x', exit_code=None),
+   261	    dict(resolved=True, result_error='Failed to apply agent patch: x', exit_code=0),
+   262	    dict(resolved=True, verified_patch_bytes=0, exit_code=0),
+   263	    dict(resolved=True, verified_patch_bytes=0, exit_code=None),
+   264	])
+   265	def test_contradictory_resolved_is_h(updates):
+   266	    result = classifier.classify(row(**updates))
+   267	    assert result['h'] is not None and result['agent'] is None
+   268	    assert result['resolved'] is True  # stock verdict preserved for reporting
+   269	
+   270	
+   271	def test_contradictory_resolved_reason():
+   272	    result = classifier.classify(row(resolved=True, exit_code=1))
+   273	    assert result['h'] == 'H-VERIFY' and 'verify:contradictory_resolved' in result['reasons']
+   274	
+   275	
+   276	def test_stock_resolved_preserved_on_h_row():
+   277	    assert classifier.classify(row(resolved='false'))['resolved'] == 'false'
+   278	
+   279	
+   280	@pytest.mark.parametrize('updates,agent', [
+   281	    (dict(verified_patch_bytes=0, exit_code=None), 'NO_PATCH'),
+   282	    (dict(verified_patch_bytes=0, exit_code=-1), 'NO_PATCH'),
+   283	    (dict(result_error='Failed to apply agent patch: x', exit_code=None), 'PATCH_APPLY'),
+   284	    (dict(result_error='Failed to apply agent patch: x', exit_code=-1), 'PATCH_APPLY'),
+   285	    (dict(exit_code=0), 'EXIT0_UNRESOLVED'),
+   286	    (dict(exit_code=124), 'VERIFY_TIMEOUT_124'),
+   287	    (dict(resolved=True, exit_code=0), 'PASS'),
+   288	])
+   289	def test_legitimate_verdicts_not_h(updates, agent):
+   290	    result = classifier.classify(row(**updates))
+   291	    assert result['h'] is None and result['agent'] == agent
+   292	
+   293	
+   294	# Rev 5 (codex review 20261106T070737 BLOCKING 1-3).
+
+exec
+/bin/bash -lc 'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q' in /home/ubuntu/work/gemma
+ exited 1 in 10ms:
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pytest/__main__.py", line 9, in <module>
+    raise SystemExit(_console_main())
+                     ~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 286, in _console_main
+    code = _main(prog=_get_prog_name(sys.argv))
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 253, in _main
+    config = _prepareconfig(new_args, plugins, prog=prog)
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 443, in _prepareconfig
+    config: Config = pluginmanager.hook.pytest_cmdline_parse(
+                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        pluginmanager=pluginmanager, args=args
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_caller.py", line 197, in __call__
+    return self._hookexec(
+           ~~~~~~~~~~~~~~^
+        self.name, self._hookimpls.copy(), call_kwargs, firstresult
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_manager.py", line 183, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 195, in _multicall
+    raise exception
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 167, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/helpconfig.py", line 126, in pytest_cmdline_parse
+    config = yield
+             ^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 147, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 1397, in pytest_cmdline_parse
+    self.parse(args)
+    ~~~~~~~~~~^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 1791, in parse
+    self.hook.pytest_load_initial_conftests(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        early_config=self, args=args, parser=self._parser
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_caller.py", line 197, in __call__
+    return self._hookexec(
+           ~~~~~~~~~~~~~~^
+        self.name, self._hookimpls.copy(), call_kwargs, firstresult
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_manager.py", line 183, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 195, in _multicall
+    raise exception
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 167, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/warnings.py", line 114, in pytest_load_initial_conftests
+    return (yield)
+            ^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 141, in _multicall
+    next(function_gen)  # first yield
+    ~~~~^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 170, in pytest_load_initial_conftests
+    capman.start_global_capturing()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 779, in start_global_capturing
+    self._global_capturing = _get_multicapture(self._method)
+                             ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 720, in _get_multicapture
+    return MultiCapture(in_=FDCapture(0), out=FDCapture(1), err=FDCapture(2))
+                                              ~~~~~~~~~^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 493, in __init__
+    TemporaryFile(buffering=0),
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 686, in TemporaryFile
+    prefix, suffix, dir, output_type = _sanitize_params(prefix, suffix, dir)
+                                       ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 128, in _sanitize_params
+    dir = gettempdir()
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 366, in gettempdir
+    return _os.fsdecode(_gettempdir())
+                        ~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 359, in _gettempdir
+    tempdir = _get_default_tempdir()
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 223, in _get_default_tempdir
+    raise FileNotFoundError(_errno.ENOENT,
+                            "No usable temporary directory found in %s" %
+                            dirlist)
+FileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma']
+

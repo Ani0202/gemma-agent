@@ -29,11 +29,7 @@
   malformed setup_calls/rc=False) all fixed: verify:resolved_with_verify_failure, r10-r13, setup_shape_ok, dup-id CLI reject; tests 933/4skip;
   arm F unchanged. Director FYI'd 07:13Z. ON r5: fold EVERY listed item -> ONE re-freeze -> Director note -> smoke (if before 15:30Z).
   If r5 not clean/foldable: NO rev 6; report residuals + arm-F exposure to Director (dec 064 item 3).
-- REV 4 (0d49b1c): review r3 070228 = 1 BLOCKING (invalid/contradictory verdict evidence avoided H). Fixed r8 (resolved non-bool) / r9 (exit_code non-int)
-  -> H-ROW; verify:contradictory_resolved -> H-VERIFY; RE-FROZEN sha256=a208a023..4e6b; tests 819/4skip; arm F unchanged; Director FYI'd 07:08Z,
-  DEC 064 APPROVED freeze a208a023 (note on file); classifier code SHA = 0d49b1c (replaces b6e120f). Smoke gate = dec 063 item 3.
-  DEC 064 item 3: STOP review loop. If r4 BLOCKING: fix, rev-5 review w/ 'enumerate ALL remaining paths... single list; do not stop at first',
-  fold all into ONE re-freeze; if rev 5 not clean -> NO rev 6, report residuals + arm-F exposure to Director. Item 4: quota log before/after smoke; week <= 29.5 h.
+- REV 4 a208a023 (0d49b1c) frozen + DEC 064 approved, now superseded-pending by rev 5. DEC 064 item 4: quota log before/after smoke; week <= 29.5 h.
 - DEC 063 (approve): freeze 18afdbbd approved. Classifier code SHA = b6e120f (cite in results header + smoke/main kernel manifest; line
   added plan 007). Smoke ONLY if review r3 has 0 BLOCKING; new BLOCKING -> no patch+launch same cycle; miss 15:30Z -> after reset.
   Log Kaggle quota before/after smoke + main. Dec 055 submit at 11-07T00:00Z has priority; plan-007 must not hold the Kaggle session then.
