@@ -37,5 +37,4 @@ ACCEPTANCE (offline tests in eval/tests/test_plan009_metrics.py, synthetic fixtu
     / smoke (iii) FAIL; identity json missing record or pass false -> INVALID / FAIL; base=arm2 with INVALID or missing base verdict -> INVALID.
  b) a fully consistent synthetic fixture still yields each of ON-ADOPT, KEEP-OFF, NO-DIFFERENCE, ON-BETTER-VETOED as before.
  c) arm-1 self-pair stays INVALID (7 H rows) as now.
- d) full suite: cd eval && run the existing test command used for this repo (see memory: pyimg python + harness PYTHONPATH, or plain
-    python -m pytest eval/tests) - all previously passing tests still pass; report counts.
+ d) full suite: PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q   (all previously passing tests still pass; report counts)
