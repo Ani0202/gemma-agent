@@ -26,16 +26,15 @@
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
 ## Running jobs (06:45Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-plan007r1-light (on c6f0b66).
-- Review 063014 of plan 007 = BLOCKING x4 -> rev 1 c6f0b66: frozen row classes (KNOWN-DIAG = RECORD-strip editable fail, H-ROW/SETUP/VERIFY,
-  AGENT); smoke gate mechanics-only; reruns only for documented H defects; arm 2 k=1 fixed + VETOED branch + clock<=220 s check;
-  should_stop reserves 3x240 s setup + --seed-max (712 tests pass). Smoke budget 5400 s. ENV CONTROL (kernel gold/null mode) = follow-up.
+- Plan 007 review 063014 BLOCKING x4 -> rev 1 c6f0b66 (frozen row classes, KNOWN-DIAG RECORD strip, arm2 k=1, stop-guard setup reserve +
+  --seed-max; 712 pass). Smoke budget 5400 s. ENV CONTROL (kernel gold/null mode) = follow-up, not gating.
 - DEC 062 (report 015 approved, A): T stays 0.2 everywhere; no T 0.6 arm in plan 007; repeat guard = design note only (DONE draft
   eval/plans/007-repeat-guard.md); item 4: plan-007 arm 1 may use expiring quota IF pre-reg reviewed + pushed by 11-06T15:30Z, else after reset.
 - PLAN 007 PRE-REG written 06:29Z (eval/plans/007.md, commit e547980): arm 1 = 31b-v009-p7a1 (bundles/31b/v009 = v006 + cap 3.5;
   dist/31b-v009.zip sha256=d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d, pack PASS), 33 dev in fixed order
   eval/plans/007-arm1-ids.txt, docker-path env (reasons in plan), --with-verification --no-stock-probe (new flag), slug aniket0202/gemma-31b-passrate.
   NEXT: review clean -> SMOKE (eval/plans/007-smoke-ids.txt, 3 ids, budget 4800) -> gate -> main ids 4..33 budget sized to quota (week <= 29.5 h).
-- ARM F DONE NO-EFFECT (report 015, dec 062 accepted). results/plan005_armF_vs_D.json + *_31b_v008.json (schema-header check pending, dec 062 item 6).
+- Arm E CAP-BOUND (rep 014, v007 3a62f41f.., cap 1.23); arm D v006 b7b2eb3d.. PASS (rep 013). ARM F DONE NO-EFFECT (report 015, dec 062 accepted). results/plan005_armF_vs_D.json + *_31b_v008.json (schema-header check pending, dec 062 item 6).
 - DEC 061 (on report 014): approve-with-changes. CAP-BOUND accepted; A + B approved. (i) dec 055 v002 submit at 11-07T00:00Z stays FIRST;
   if SCORED -> bring v004 cap choice w/ data (FINALS RULE allows cap<=3.5); if ERROR/timeout -> CAP-BOUND binds, anti-loop only 31B path.
   (ii) v004 stays CPU draft, no slot; fold codex NB2 pipefail fix at system.md:33 next time source touched, label UNSCREENED; no repack.
@@ -48,7 +47,6 @@
   Item 4: plan 007 pre-reg (33-dev pass rate; H1 env; thinking off vs on paired arm) DUE 2026-11-07T18:00Z (may use leftover quota pre-reset).
   Item 5: Nov 8 slot candidate + 1-para justification DUE 2026-11-07T12:00Z (e4b-v002 repeat / e4b-v003 if packed+reviewed+smoke / 31b-v002 repeat).
   Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
-- Arm E DONE CAP-BOUND (report 014) = 31b-v007-p5e (dist/31b-v007.zip 3a62f41f..., v006 + cap 1.23). Arm D = 31b-v006-p5d (b7b2eb3d..., report 013 PASS).
 - 31b-v004 CPU DRAFT: dist/31b-v004.zip sha256=50537e1ddcf13f160fcaa9b2bfa145ac13ef91d99a2ce0b27d69f54ee125f7b3 (5f9b4ae) = v007 +
   1 quoting/no-repeat line. No slot (dec 061 ii). Review 043840: no BLOCKING; NB2 pipefail system.md:33 -> fold in next touch, UNSCREENED;
   NB3 timeout empty patch unguaranteed (dec 056 item 6).
