@@ -2136,3 +2136,407 @@ exec
    274	def _response_text(value):
    275	    return value if isinstance(value, str) else json.dumps(value)
 
+codex
+The diff addresses all four prior findings. I’m checking the inventory and candidate-boundary edge cases, and verifying that the SHA match keeps v011 on the builtin layout when metadata mentions v010.
+exec
+/bin/bash -lc "nl -ba eval/plan008_metrics.py | sed -n '405,558p'; rg -n 'pytest|venv' bin/codex-review pyproject.toml pytest.ini eval/tests/conftest.py .gitignore; rg -n '"'^def test_|''^@pytest'"' eval/tests/test_plan008_metrics.py | tail -70; ls -ld /tmp /dev/shm /home/ubuntu/gemma-local/venv/bin/python" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   405	                malformed |= args != {}
+   406	            else:
+   407	                malformed = True
+   408	    out['iii'] = _criterion('FAIL' if errors or malformed else 'PASS',
+   409	                            'error or malformed gate call/reply observed' if errors or malformed else 'no errors or malformed gate calls/replies observed')
+   410	    clock = row.get('agent_clock_seconds')
+   411	    valid = type(clock) in (int, float) and math.isfinite(clock) and clock >= 0
+   412	    out['iv'] = _criterion('UNVERIFIABLE' if not valid else 'PASS' if clock <= 210 else 'FAIL',
+   413	                           'agent clock missing or invalid' if not valid else 'agent clock within 210 seconds' if clock <= 210 else 'agent clock exceeds 210 seconds')
+   414	    out['v'] = _criterion('PASS' if desc['bounces'] <= 2 else 'FAIL',
+   415	                          'at most two EDIT_FIRST replies' if desc['bounces'] <= 2 else 'more than two EDIT_FIRST replies')
+   416	    return out
+   417	
+   418	
+   419	def _schema(mode, paths):
+   420	    return dict(name='plan008_metrics/v1', mode=mode, definitions=DEFINITIONS,
+   421	                script_sha256=base.sha(__file__),
+   422	                input_shas={str(p): base.sha(p) for p in dict.fromkeys(map(Path, paths))})
+   423	
+   424	
+   425	def base_metrics():
+   426	    rows, paths = [], [base.ARM_IDS, base.__file__, 'eval/plan007_report.py']
+   427	    for part, timing, d4path, a2path in base.PARTS:
+   428	        d4, a2 = [json.loads(Path(p).read_text()) for p in (d4path, a2path)]
+   429	        assert d4['classifier_sha256'] == base.D4_SHA and a2['classifier_sha256'] == base.A2_SHA
+   430	        assert d4['input_sha256'] == base.sha(timing) == a2['input_sha256']
+   431	        ts = base.load_rows(timing)
+   432	        cs, als = base.unique_map(d4['rows'], d4path), base.unique_map(a2['rows'], a2path)
+   433	        assert set(cs) == set(als) == {r['instance_id'] for r in ts}
+   434	        paths.extend((timing, d4path, a2path))
+   435	        for t in ts:
+   436	            iid = t['instance_id']
+   437	            base.assert_paired(cs[iid], t)
+   438	            base.assert_paired(als[iid], t)
+   439	            trace = Path(timing).parent / 'runs' / iid / 'trace.json'
+   440	            entries = json.loads(trace.read_text())['entries']
+   441	            paths.append(trace)
+   442	            rep = identical_runs_root(entries)
+   443	            rows.append(dict(instance_id=iid, part=part, **rep, mechanism2=rep['max_run'] >= 5,
+   444	                             mechanism1_empty=t.get('verified_patch_bytes') == 0,
+   445	                             submitted_without_test=submitted_without_test(entries, gate_mode=False)))
+   446	    assert [r['instance_id'] for r in rows] == base.ids_file(base.ARM_IDS)
+   447	    totals = dict(mechanism2=sum(r['mechanism2'] for r in rows),
+   448	                  mechanism1_empty=sum(r['mechanism1_empty'] for r in rows),
+   449	                  submitted_without_test=sum(r['submitted_without_test'] is True for r in rows),
+   450	                  count_no_successful_submit=sum(r['submitted_without_test'] is None for r in rows),
+   451	                  max_run=max((r['max_run'] for r in rows), default=0),
+   452	                  runs_ge3=sum(r['runs_ge3'] for r in rows), runs_ge5=sum(r['runs_ge5'] for r in rows),
+   453	                  repeated_calls=sum(r['repeated_calls'] for r in rows))
+   454	    assert totals['mechanism2'] == 17, 'arm-1 mechanism2 baseline changed'
+   455	    assert totals['mechanism1_empty'] == 12, 'arm-1 empty baseline changed'
+   456	    assert totals['submitted_without_test'] == 23, 'arm-1 safety baseline changed'
+   457	    assert totals['count_no_successful_submit'] == 7, 'arm-1 no-submit baseline changed'
+   458	    return dict(_schema=_schema('base', paths), n_rows=len(rows), totals=totals, rows=rows)
+   459	
+   460	
+   461	def load_task_test_files(tasks_path):
+   462	    # Match agent_timing.evaluate / run_agent_eval.run: the Task property derives
+   463	    # these paths from test_patch. Never use gold patch or test text as agent input.
+   464	    from swegemma.models import load_tasks
+   465	    tasks = load_tasks(Path(tasks_path))
+   466	    inventory = {t.instance_id: list(t.test_files) for t in tasks}
+   467	    if len(inventory) != len(tasks):
+   468	        raise ValueError('duplicate task IDs')
+   469	    return inventory
+   470	
+   471	
+   472	def _tasks_path():
+   473	    if os.environ.get('PLAN008_TASKS_PATH'):
+   474	        return Path(os.environ['PLAN008_TASKS_PATH'])
+   475	    kaggle = Path('/kaggle/input/competitions/gemma-4-developer-agent/tasks.jsonl')
+   476	    return kaggle if kaggle.is_file() else Path('data/raw/tasks.jsonl')
+   477	
+   478	
+   479	def _artifacts(run_dir, iid):
+   480	    # Kaggle: runs/<iid>; local eval runner: <iid>.
+   481	    nested = Path(run_dir) / 'runs' / iid
+   482	    return nested if nested.is_dir() else Path(run_dir) / iid
+   483	
+   484	
+   485	def smoke_metrics(run_dir, tasks_path=None):
+   486	    timing = Path(run_dir) / 'timing.jsonl'
+   487	    paths, rows = [timing, GATE_YAML], []
+   488	    tasks_path = Path(tasks_path) if tasks_path is not None else _tasks_path()
+   489	    if tasks_path.is_file():
+   490	        paths.append(tasks_path)
+   491	    try:
+   492	        test_files = load_task_test_files(tasks_path)
+   493	    except Exception:
+   494	        test_files = {}  # criterion ii is UNVERIFIABLE for every missing task
+   495	    for row in base.load_rows(timing):
+   496	        artifacts = _artifacts(run_dir, row['instance_id'])
+   497	        trace, patch = artifacts / 'trace.json', artifacts / 'agent.patch'
+   498	        if trace.is_file():
+   499	            paths.append(trace)
+   500	        entries = json.loads(trace.read_text()).get('entries', []) if trace.is_file() else []
+   501	        scored = None
+   502	        loaded = row['instance_id'] in test_files
+   503	        if patch.is_file():
+   504	            paths.append(patch)
+   505	            if loaded:
+   506	                from swegemma.harness.verification import strip_protected_files_from_patch
+   507	                try:
+   508	                    scored = strip_protected_files_from_patch(patch.read_bytes().decode('utf-8'),
+   509	                                extra_protected_paths=test_files[row['instance_id']])
+   510	                except (OSError, UnicodeError, ValueError):
+   511	                    scored = None
+   512	        desc = gate_descriptives(entries, row)
+   513	        desc.pop('gate_run_cmds')
+   514	        rows.append(dict(instance_id=row['instance_id'],
+   515	                         criteria=smoke_check(row, entries, GATE_YAML, scored, loaded), **desc))
+   516	    inv = inventory([r['instance_id'] for r in rows], expected_ids('smoke'))
+   517	    passed = inv['complete'] and bool(rows) and all(c['status'] == 'PASS' for r in rows for c in r['criteria'].values())
+   518	    return dict(_schema=_schema('smoke', paths), n_rows=len(rows), inventory=inv,
+   519	                overall='PASS' if passed else 'FAIL', rows=rows)
+   520	
+   521	
+   522	GATE_COUNTS = ('gate_calls', 'bounces', 'forced', 'check_error', 'submit_failed',
+   523	               'bounce_no_followup', 'gate_llm_limit', 'unacknowledged_inner_submits', 'untracked_only_submits')
+   524	
+   525	
+   526	class IncompleteRun(ValueError):
+   527	    pass
+   528	
+   529	
+   530	def arm2_metrics(run_dir):
+   531	    timing = Path(run_dir) / 'timing.jsonl'
+   532	    paths, rows, inputs = [timing], [], []
+   533	    for row in base.load_rows(timing):
+   534	        artifacts = _artifacts(run_dir, row['instance_id'])
+   535	        trace = artifacts / 'trace.json'
+   536	        if trace.is_file():
+   537	            paths.append(trace)
+   538	        entries = json.loads(trace.read_text()).get('entries', []) if trace.is_file() else []
+   539	        inputs.append((row, entries, artifacts))
+   540	    # Builtin responses carry patch_size; gate requests carry request, children
+   541	    # have author submit_patch. Header/directory labels cover runs with no calls.
+   542	    headers = [json.loads(line) for line in timing.read_text().splitlines() if line.strip()
+   543	               and 'instance_id' not in json.loads(line)]
+   544	    inv = inventory([row['instance_id'] for row, _, _ in inputs], expected_ids('arm2'))
+   545	    if not inv['complete']:
+   546	        raise IncompleteRun(inv)
+   547	    bundle, bundle_source = selected_bundle(headers)
+   548	    gate_events = (any(
+   549	        e.get('author') == 'submit_patch' or
+   550	        (e.get('author') == ROOT and e.get('tool') == 'submit_patch' and
+   551	         (isinstance(e.get('args'), dict) and 'request' in e['args'] or
+   552	          _reply(e.get('result')) in ('SUBMITTED', BOUNCE)))
+   553	        for _, entries, _ in inputs for e in entries))
+   554	    has_gate = bundle == 'v010' if bundle else gate_events
+   555	    for row, entries, artifacts in inputs:
+   556	        rep = identical_runs_root(entries)
+   557	        desc = gate_descriptives(entries, row) if has_gate else {}
+   558	        desc.pop('gate_run_cmds', None)
+rg: pyproject.toml: No such file or directory (os error 2)
+rg: pytest.ini: No such file or directory (os error 2)
+rg: eval/tests/conftest.py: No such file or directory (os error 2)
+.gitignore:14:.venv/
+18:@pytest.fixture(autouse=True)
+64:def test_root_filter_and_repeats(tmp_path):
+78:def test_pairing_fifo_author_and_missing():
+89:@pytest.mark.parametrize('command', ['pytest -q', 'python -m unittest', 'tox -e py'])
+90:def test_success_boundary(command):
+98:def test_no_test_and_never_success():
+112:def test_gate_descriptives():
+130:@pytest.mark.parametrize('patch,expected', [('', False), (' \n', False), ('hello', False),
+133:def test_untracked_only(patch, expected):
+141:def test_smoke_pass():
+149:@pytest.mark.parametrize('change', ['command', 'missing_submit', 'late_root', 'not_submitted', 'submit_before_check', 'extra_command'])
+150:def test_smoke_i_fail(change):
+168:def test_smoke_ii_fail_and_missing():
+176:@pytest.mark.parametrize('change', ['check_error', 'failed', 'malformed', 'agent_error', 'tool_error', 'unknown_tool', 'compile_error'])
+177:def test_smoke_iii_fail(change):
+196:def test_smoke_iv_and_v_fail():
+205:def test_smoke_unverifiable_and_no_exemption():
+236:def test_smoke_cli_counts_only(tmp_path, monkeypatch, capsys):
+260:@pytest.mark.parametrize('args', [{}, {'request': ''}, {'request': None},
+262:def test_malformed_root_gate_args(args):
+270:@pytest.mark.parametrize('index,args', [(1, {}), (1, {'command': 'other'}),
+273:def test_malformed_child_args(index, args):
+279:def test_canonical_replies_and_mirrored_display():
+295:@pytest.mark.parametrize('change', ['wrong_author', 'missing_check_reply', 'inner_error', 'edit_first_submit', 'missing_flag'])
+296:def test_smoke_i_missing_and_failed_evidence(change):
+312:@pytest.mark.parametrize('patch,loaded', [(None, True), ('x' * 23, False)])
+313:def test_smoke_ii_missing_patch_or_tasks(patch, loaded):
+317:def test_smoke_ii_utf8_and_final_capture():
+325:def test_smoke_real_strip_with_task_extras(tmp_path, monkeypatch):
+348:@pytest.mark.parametrize('clock', [-1, float('nan'), float('inf'), '210', True])
+349:def test_smoke_clock_invalid(clock):
+353:def test_deadline_between_capture_and_ack():
+366:@pytest.mark.parametrize('flag,success,unverifiable', [(True, True, False), (False, False, False),
+368:def test_submit_consistency(flag, success, unverifiable):
+378:def test_gate_llm_limit_attribution():
+387:@pytest.mark.parametrize('nested', [True, False])
+388:@pytest.mark.parametrize('builtin', [True, False])
+389:def test_arm2_cli(tmp_path, monkeypatch, nested, builtin):
+410:def test_arm2_mismatch_and_derived_flag(tmp_path, monkeypatch):
+433:def test_builtin_and_gate_response_authority():
+445:def test_trace_terminal_flag():
+454:def test_smoke_iii_budget_does_not_hide_compile_error():
+461:def test_smoke_saved_crlf_patch(tmp_path, monkeypatch):
+470:@pytest.mark.parametrize('missing', ['patch', 'result', 'tasks'])
+471:def test_arm2_acknowledged_untracked_evidence(tmp_path, monkeypatch, missing):
+487:def test_arm2_multirow_totals(tmp_path, monkeypatch, synthetic_inventory):
+520:@pytest.mark.skipif(not (ROOT_DIR / 'runs/31b-v009-p7a1-main').exists(), reason='real arm-1 inputs absent')
+521:def test_real_base_cli(tmp_path):
+536:@pytest.mark.parametrize('unverifiable,observed,flag,es,swt,nosub', [
+545:def test_d735_counts(unverifiable, observed, flag, es, swt, nosub):
+550:def test_d735_boundary_without_enclosing_root(tmp_path, monkeypatch):
+565:def test_selected_bundle_ignores_free_text(tmp_path, monkeypatch):
+580:def test_inventory_required(tmp_path, monkeypatch, synthetic_inventory):
+597:def test_registered_ids_files():
+drwxr-xr-x  2 ubuntu ubuntu     40 Nov  6 14:27 /dev/shm
+lrwxrwxrwx  1 ubuntu ubuntu     75 Nov  5 14:10 /home/ubuntu/gemma-local/venv/bin/python -> /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3.13
+drwxrwxrwt 83 nobody nogroup 69632 Nov  6 14:27 /tmp
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 /home/ubuntu/gemma-local/venv/bin/python - <<'PY'
+import pytest
+class MemoryOnly:
+    def pytest_collection_modifyitems(self, config, items):
+        keep, skip = [], []
+        for item in items:
+            (skip if 'tmp_path' in item.fixturenames or 'tmpdir' in item.fixturenames else keep).append(item)
+        items[:] = keep
+        config.hook.pytest_deselected(items=skip)
+raise SystemExit(pytest.main(['eval/tests/test_plan008_metrics.py', '-q', '-p', 'no:cacheprovider', '-s'], plugins=[MemoryOnly()]))
+PY" in /home/ubuntu/work/gemma
+ exited 1 in 0ms:
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+ModuleNotFoundError: No module named 'pytest'
+
+exec
+/bin/bash -lc "rg -n -A8 '"'^def load_rows'"' eval/plan007_arm1_summary.py; nl -ba eval/tests/test_plan008_metrics.py | sed -n '520,615p'; git diff --stat f4bcc71~1 f4bcc71 -- eval/plan008_metrics.py eval/tests/test_plan008_metrics.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+61:def load_rows(path):
+62-    out = []
+63-    for line in Path(path).read_text().splitlines():
+64-        if not line.strip():
+65-            continue
+66-        r = json.loads(line)
+67-        if 'instance_id' in r:
+68-            out.append(r)
+69-        elif not any(m <= set(r) for m in META_KEYS):
+   520	@pytest.mark.skipif(not (ROOT_DIR / 'runs/31b-v009-p7a1-main').exists(), reason='real arm-1 inputs absent')
+   521	def test_real_base_cli(tmp_path):
+   522	    dest = tmp_path / 'base.json'
+   523	    completed = subprocess.run([sys.executable, str(ROOT_DIR / 'eval/plan008_metrics.py'), 'base', str(dest)],
+   524	                               cwd=ROOT_DIR, capture_output=True, text=True)
+   525	    assert completed.returncode == 0, 'base CLI failed (task content suppressed)'
+   526	    out = json.loads(dest.read_text())
+   527	    assert out['totals']['mechanism2'] == 17
+   528	    assert out['totals']['mechanism1_empty'] == 12
+   529	    assert out['totals']['submitted_without_test'] == 23
+   530	    assert out['totals']['count_no_successful_submit'] == 7
+   531	
+   532	
+   533	TESTED = invoke('run_command', {'command': 'pytest -q'})
+   534	
+   535	
+   536	@pytest.mark.parametrize('unverifiable,observed,flag,es,swt,nosub', [
+   537	    (False, True, True, [], True, False), (False, False, True, [], False, False), (False, None, False, [], False, True),
+   538	    # D73.5: unverifiable rows count against arm 2.
+   539	    (True, True, True, gate() + TESTED, True, False), (True, True, False, gate() + TESTED, True, True),
+   540	    (True, False, True, TESTED + gate(), False, False), (True, False, False, TESTED + gate(), False, True),  # test before boundary
+   541	    (True, False, True, gate() + TESTED + gate(), True, False),  # test only after the earliest candidate
+   542	    (True, None, True, TESTED, True, False), (True, None, False, TESTED, True, True),  # no candidate boundary
+   543	    (True, None, True, TESTED + invoke('submit_patch', result={'patch_size': 1}, author='submit_patch'), False, False),  # B3
+   544	])
+   545	def test_d735_counts(unverifiable, observed, flag, es, swt, nosub):
+   546	    r = m.d735_counts(dict(submit_unverifiable=unverifiable, submitted_without_test=observed, patch_submitted=flag), es)
+   547	    assert (r['swt_d735'], r['no_submit_d735']) == (swt, nosub)
+   548	
+   549	
+   550	def test_d735_boundary_without_enclosing_root(tmp_path, monkeypatch):
+   551	    # codex D73.6 B3: root pytest, then a gate-authored inner success whose enclosing root call is absent.
+   552	    monkeypatch.chdir(ROOT_DIR)
+   553	    inner = invoke('submit_patch', result={'status': 'ok', 'patch_size': len(NEW)}, author='submit_patch')
+   554	    es = TESTED + inner
+   555	    assert m.earliest_candidate_index(es) == len(TESTED) + 1
+   556	    run, _ = make_run(tmp_path, es, row(patch_submitted=True))
+   557	    out = m.arm2_metrics(run)
+   558	    r = out['rows'][0]
+   559	    assert r['submit_unverifiable'] is True and r['swt_d735'] is False
+   560	    assert out['totals']['submitted_without_test'] == 0
+   561	    run2, _ = make_run(tmp_path / 'b', inner + TESTED, row(patch_submitted=True))
+   562	    assert m.arm2_metrics(run2)['totals']['submitted_without_test'] == 1
+   563	
+   564	
+   565	def test_selected_bundle_ignores_free_text(tmp_path, monkeypatch):
+   566	    # codex D73.6 B2: a v010 smoke-verdict reference must not mark a v011 run as gated.
+   567	    monkeypatch.chdir(ROOT_DIR)
+   568	    es = TESTED + invoke('submit_patch', result={'patch_size': len(NEW)})
+   569	    hdr = {'_schema': 'synthetic', 'agent_yaml_sha256': yaml_sha('v011'),
+   570	           'smoke_verdict': 'results/plan008_v010_smoke.json', 'bundle': 'v010'}
+   571	    run, _ = make_run(tmp_path, es, header=hdr)
+   572	    out = m.arm2_metrics(run)
+   573	    assert (out['selected_bundle'], out['gate_layout']) == ('v011', False)
+   574	    assert out['totals']['submitted_without_test'] == 0 and out['totals']['submit_unverifiable'] == 0
+   575	    assert m.selected_bundle([{'agent_yaml_sha256': yaml_sha('v010')}])[0] == 'v010'
+   576	    assert m.selected_bundle([{'bundle': 'v010'}])[0] is None
+   577	    assert m.selected_bundle([{'agent_yaml_sha256': yaml_sha('v010')}, {'agent_yaml_sha256': yaml_sha('v011')}])[0] is None
+   578	
+   579	
+   580	def test_inventory_required(tmp_path, monkeypatch, synthetic_inventory):
+   581	    # codex D73.6 B1: missing registered ids never yield decision-ready results.
+   582	    monkeypatch.chdir(ROOT_DIR)
+   583	    synthetic_inventory['smoke'][:] = ['synthetic', 'absent']
+   584	    synthetic_inventory['arm2'][:] = ['synthetic', 'absent']
+   585	    run, _ = make_run(tmp_path, gate(size=len(NEW)), patch=NEW)
+   586	    out = m.smoke_metrics(run, tmp_path / 'missing')
+   587	    assert out['overall'] == 'FAIL' and out['inventory']['missing'] == ['absent']
+   588	    with pytest.raises(m.IncompleteRun):
+   589	        m.arm2_metrics(run)
+   590	    dest = tmp_path / 'out.json'
+   591	    assert m.main(['metrics', 'arm2', str(run), str(dest)]) == 3 and not dest.exists()
+   592	    synthetic_inventory['arm2'][:] = []
+   593	    with pytest.raises(m.IncompleteRun):  # extra id
+   594	        m.arm2_metrics(run)
+   595	
+   596	
+   597	def test_registered_ids_files():
+   598	    assert m.registered_ids(ROOT_DIR / m.SMOKE_IDS) == ['rich_3063', 'fastapi_14258']
+   599	    ids = m.registered_ids(ROOT_DIR / m.ARM2_IDS)
+   600	    assert len(ids) == len(set(ids)) == 33 and ids[0] == 'rich_3063'
+ eval/plan008_metrics.py            | 112 +++++++++++++++++++++++++++++++------
+ eval/tests/test_plan008_metrics.py |  91 +++++++++++++++++++++++++++---
+ 2 files changed, 177 insertions(+), 26 deletions(-)
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import sys, pytest
+print('Interpreter:', sys.executable)
+class MemoryOnly:
+    def pytest_collection_modifyitems(self, config, items):
+        keep, skip = [], []
+        for item in items:
+            (skip if 'tmp_path' in item.fixturenames or 'tmpdir' in item.fixturenames else keep).append(item)
+        items[:] = keep
+        config.hook.pytest_deselected(items=skip)
+raise SystemExit(pytest.main(['eval/tests/test_plan008_metrics.py', '-q', '-p', 'no:cacheprovider', '-s'], plugins=[MemoryOnly()]))
+PY" in /home/ubuntu/work/gemma
+ exited 1 in 0ms:
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+ModuleNotFoundError: No module named 'pytest'
+
+exec
+/bin/bash -lc "ls -d .venv* /home/ubuntu/*venv* /home/ubuntu/work/gemma/*venv* 2>/dev/null; rg -n 'pytest|python' bin/codex-review ops/codex/review-20261106T141645.log | tail -20; command -v python python3 pytest; ls /home/ubuntu/gemma-local" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+ops/codex/review-20261106T141645.log:3963:../../gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py:359: in _gettempdir
+ops/codex/review-20261106T141645.log:4013:../../gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py:223: FileNotFoundError
+ops/codex/review-20261106T141645.log:4019:/bin/bash -lc "rg -n 'bundle.*sha|smoke.*verdict|_schema|bundle=' eval/kaggle/agent_timing.py | tail -28; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py | sed -n '281,350p;495,560p'; rg -n 'plan008_metrics' eval bin -g '*.py' -g '*.sh' -g '*.md'" in /home/ubuntu/work/gemma
+ops/codex/review-20261106T141645.log:4170:/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/shared_token_store.py | sed -n '50,95p;165,187p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py | sed -n '200,250p;350,390p'; sed -n '1285,1310p' eval/kaggle/agent_timing.py; nl -ba bundles/31b/v010/MANIFEST.md | head -4; nl -ba bundles/31b/v011/MANIFEST.md | tail -5" in /home/ubuntu/work/gemma
+ops/codex/review-20261106T141645.log:4376:/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True LITELLM_TOKEN_EXCHANGE_CACHE_DIR= /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+ops/codex/review-20261106T141645.log:4377:import pytest
+ops/codex/review-20261106T141645.log:4379:    def pytest_collection_modifyitems(self, config, items):
+ops/codex/review-20261106T141645.log:4382:        config.hook.pytest_deselected(items=removed)
+ops/codex/review-20261106T141645.log:4383:raise SystemExit(pytest.main(['-p','no:cacheprovider','--capture=sys','-q','eval/tests/test_submit_gate.py','eval/tests/test_plan008_metrics.py'], plugins=[ReadOnlySubset()]))
+ops/codex/review-20261106T141645.log:4391:/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/models/task.py | sed -n '1,90p'; git show 24b8a84:bundles/31b/v010/MANIFEST.md | head -1; cat eval/plans/008-smoke-ids.txt" in /home/ubuntu/work/gemma
+ops/codex/review-20261106T141645.log:4489:/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True LITELLM_TOKEN_EXCHANGE_CACHE_DIR= /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+ops/codex/review-20261106T141645.log:4520:es=checks.invoke('run_command',{'command':'pytest -q'})+checks.invoke('submit_patch',result={'patch_size':len(checks.NEW)})
+ops/codex/review-20261106T141645.log:4655:/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True LITELLM_TOKEN_EXCHANGE_CACHE_DIR= /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+ops/codex/review-20261106T141645.log:4659:es=[{'type':'tool_call','author':m.ROOT,'tool':'run_command','args':{'command':'pytest -q'}},
+ops/codex/review-20261106T141645.log:4672:/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+ops/codex/review-20261106T141645.log:4680:tree=ast.parse(Path('/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py').read_text())
+ops/codex/review-20261106T141645.log:4683:parser=cmd.split('python3 -c ',1)[1].split(') || c=err;',1)[0]
+ops/codex/review-20261106T141645.log:4686: p=subprocess.run(['python3','-c',parser],input=status,text=True,capture_output=True)
+ops/codex/review-20261106T141645.log:4705:2. **A v010 smoke-verdict reference misclassifies v011 as gated.** [eval/plan008_metrics.py:479](/home/ubuntu/work/gemma/eval/plan008_metrics.py:479) searches the entire serialized header for `v010`. Reproduced with selected bundle `v011`, a successful builtin submit after root `pytest`, and `smoke_verdict="results/plan008_v010_smoke.json"`: `submitted_without_test` changes from **0 to 1**, and `submit_unverifiable` from **0 to 1**. Referencing the smoke verdict is expressly required at [eval/plans/008.md:150](/home/ubuntu/work/gemma/eval/plans/008.md:150). Determine the selected bundle from authoritative identity fields; unrelated metadata must not override builtin-submit evidence.
+ops/codex/review-20261106T141645.log:4707:3. **D73.5 loses candidate boundaries lacking an enclosing root call.** [eval/plan008_metrics.py:201](/home/ubuntu/work/gemma/eval/plan008_metrics.py:201) reuses the observed successful-submit result, whose discovery requires attribution to a root call at [eval/plan008_metrics.py:151](/home/ubuntu/work/gemma/eval/plan008_metrics.py:151). Reproduced: root `pytest`, then a gate-authored inner submit call/response carrying `patch_size`, with its enclosing root call absent and `patch_submitted=True`. The row correctly becomes unverifiable, but `swt_d735=True`. [D73.5](/home/ubuntu/work/gemma/eval/plans/008.md:245) requires exemption because the test precedes the available inner-response candidate. Compute the earliest candidate independently of successful root attribution.
+/usr/bin/python3
+fastapi_14258.json
+fastapi_14458.json
+imgrt-stub
+pyimg
+requests_7433.json
+rich_2725.json
+show.py
+venv
+wh
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True LITELLM_TOKEN_EXCHANGE_CACHE_DIR= /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+import pytest
+class MemoryOnly:
+    def pytest_collection_modifyitems(self, config, items):
+        keep, skip = [], []
+        for item in items:
+            (skip if 'tmp_path' in item.fixturenames or 'tmpdir' in item.fixturenames else keep).append(item)
+        items[:] = keep
+        config.hook.pytest_deselected(items=skip)
+raise SystemExit(pytest.main(['eval/tests/test_plan008_metrics.py', '-q', '-p', 'no:cacheprovider', '--capture=sys'], plugins=[MemoryOnly()]))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 69ms:
+........................................................................ [ 86%]
+...........                                                              [100%]
+83 passed, 17 deselected in 0.06s
+

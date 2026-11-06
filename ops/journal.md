@@ -350,3 +350,4 @@
 2026-11-06T14:23Z | codex-review-d736-light done: NOT CLEAN, 3 BLOCKING metrics-only (B1 inventory, B2 header free-text bundle detection, B3 D73.5 boundary) + NB1 defs; base rerun reproduced 17/12/23/7 | ops/codex/review-20261106T141645.md
 2026-11-06T14:27Z | D73.6 fix f4bcc71 (metrics only, zips unchanged): exact-id inventory, bundle via header agent_yaml_sha256, earliest-candidate boundary; 1481 tests pass; base identical; arm2 on 007 main raises IncompleteRun (30/33) as intended | eval/plan008_metrics.py
 2026-11-06T14:27Z | codex-review-d736fix-light started (ONE targeted re-review of f4bcc71; not CLEAN -> arm 2 = v011, D73.6); Director FYI'd | ops/codex/
+2026-11-06T14:28:54Z | dec 076 read; D73.7 chunk contingency appended to eval/plans/008.md (c93967b), no build; waiting on codex-review-d736fix-light | ops/decisions/076-20261106T142742-17736-from-builder.md

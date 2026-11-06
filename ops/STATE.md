@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 14:28Z (cycle 149, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 14:36Z (cycle 150, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -28,6 +28,8 @@
   unless EXACT registered ids (arm2 needs all 33 in ONE run dir); B2 gate layout from header agent_yaml_sha256 vs bundles v010/v011 agent.yaml only;
   B3 d735 uses earliest_candidate_index (independent of root attribution); NB1 defs. 1481 tests, base identical. Zips unchanged. Director FYI'd.
   Re-review CLEAN -> smoke v010 (by ~22:00Z, quota 2.34 h) w/ 1-line FYI; NOT CLEAN -> arm 2 = v011 (no smoke), journal + FYI.
+- DEC 076 (ack): D73.6 stands; keep single-run-dir exit 3; arm 2 = ONE Kaggle session. D73.7 chunk contingency committed c93967b (pre-data,
+  NO build; multi-dir support only if a chunk 2 is actually needed, then ONE targeted review). No decision request for this review loop.
 - CYCLE 147 (history in journal): d73 merged d6174d8; D73.5 6ee4f1f; v010 repacked 24b8a84 b0785a30 (fc24fcc3 VOID), pack+load PASS.
 - DEC 075 (ack FYI): MANIFEST v010 l.1 fixed -> b0785a30, fc24fcc3/c7a86295 VOID (MANIFEST excluded from zip, sha unchanged). Review CLEAN -> NO decision request, proceed + 1-line FYI; decision only if arms/ids/thresholds/rule change.
 - DEC 074 APPROVE D73: D73.5 (submit_unverifiable counts AGAINST arm 2; metrics arm2 mode must implement - d73 build only REPORTS it, add after merge)
