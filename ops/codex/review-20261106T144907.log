@@ -828,3 +828,327 @@ exec
      7	   - Root cause explanation.
      8	   - Recommended minimal code change.
 
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import hashlib, pathlib, re, stat, zipfile, subprocess, json
+root=pathlib.Path('.')
+for parent,child in [('v009','v012'),('v011','v013')]:
+    base=root/'bundles/31b'/parent
+    bundle=root/'bundles/31b'/child
+    archive=root/'dist'/f'31b-{child}.zip'
+    digest=hashlib.sha256(archive.read_bytes()).hexdigest()
+    manifest=(bundle/'MANIFEST.md').read_text()
+    recorded=re.findall(r'(?:sha256=|zip sha256: )([0-9a-f]{64})',manifest)
+    print(f'{child}: zip_bytes={archive.stat().st_size} sha256={digest}; manifest_match={recorded[0]==digest and recorded[-1]==digest}')
+    assert recorded[0]==digest and recorded[-1]==digest
+    paths={p.relative_to(bundle).as_posix():p for p in bundle.rglob('*') if p.is_file()}
+    parentpaths={p.relative_to(base).as_posix():p for p in base.rglob('*') if p.is_file()}
+    assert paths.keys()==parentpaths.keys()
+    changed=sorted(k for k in paths.keys() & parentpaths.keys() if paths[k].read_bytes()"'!=parentpaths[k].read_bytes())
+    print('"'parent_path_set_equal: True; changed:',changed)
+    assert changed==['MANIFEST.md','configs/sampling.yaml']
+    assert paths['configs/sampling.yaml'].read_bytes()==parentpaths['configs/sampling.yaml'].read_bytes().replace(b'thinking_budget: 0',b'thinking_budget: 4096')
+    with zipfile.ZipFile(archive) as z:
+        names=z.namelist()
+        print('zip_names:',names)
+        print('dir_only:',sorted(paths.keys()-set(names)),'zip_only:',sorted(set(names)-paths.keys()))
+        assert set(paths)-set(names)=={'MANIFEST.md'} and not set(names)-set(paths)
+        mismatch=[n for n in names if n not in paths or z.read(n)"'!=paths[n].read_bytes()]
+        print('"'member_byte_mismatches:',mismatch,'duplicate_paths:',len(names)"'!=len(set(names)),'"'crc_failure:',z.testzip())
+        assert not mismatch and len(names)==len(set(names)) and z.testzip() is None
+        unsafe=[i.filename for i in z.infolist() if stat.S_ISLNK(i.external_attr>>16) or '..' in pathlib.PurePosixPath(i.filename).parts or pathlib.PurePosixPath(i.filename).is_absolute()]
+        print('unsafe_members:',unsafe,'uncompressed_size:',sum(i.file_size for i in z.infolist()))
+        assert not unsafe
+    tracked_mismatch=[]
+    for rel,p in paths.items():
+        committed=subprocess.check_output(['git','show',f'e5196a4:{p.as_posix()}'])
+        if committed"'!=p.read_bytes(): tracked_mismatch.append(rel)
+    print('"'commit_byte_mismatches:',tracked_mismatch)
+    assert not tracked_mismatch
+    result=root/'results'/f'bundle_load_check_31b_{child}.json'
+    check=json.loads(result.read_text())
+    assert [(a['depth'],a['max_output_tokens'],a['thinking_budget']) for a in check['agents']]==[(0,8192,4096),(1,8192,4096)]
+    assert check['eval']['raw']['max_time_minutes']==check['eval']['budget_time_minutes']==3.5
+    assert check['eval']['session_timeout_seconds']==210
+    assert subprocess.check_output(['git','show',f'e5196a4:{result.as_posix()}'])==result.read_bytes()
+    print('load_check: PASS; cap formula:',3.5*125+30,'<= 660')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+v012: zip_bytes=5367 sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5; manifest_match=True
+parent_path_set_equal: True; changed: ['MANIFEST.md', 'configs/sampling.yaml']
+zip_names: ['agent.yaml', 'configs/sampling.yaml', 'eval_config.yaml', 'prompts/analyzer.md', 'prompts/system.md', 'sub_agents/code_analyzer.yaml']
+dir_only: ['MANIFEST.md'] zip_only: []
+member_byte_mismatches: [] duplicate_paths: False crc_failure: None
+unsafe_members: [] uncompressed_size: 9070
+commit_byte_mismatches: []
+load_check: PASS; cap formula: 467.5 <= 660
+v013: zip_bytes=5696 sha256=06eff226d661c0528105a14d4fe0b69f67a8fb84fc52e654a0d54b6bc59a5dbb; manifest_match=True
+parent_path_set_equal: True; changed: ['MANIFEST.md', 'configs/sampling.yaml']
+zip_names: ['agent.yaml', 'configs/sampling.yaml', 'eval_config.yaml', 'prompts/analyzer.md', 'prompts/system.md', 'sub_agents/code_analyzer.yaml']
+dir_only: ['MANIFEST.md'] zip_only: []
+member_byte_mismatches: [] duplicate_paths: False crc_failure: None
+unsafe_members: [] uncompressed_size: 9968
+commit_byte_mismatches: []
+load_check: PASS; cap formula: 467.5 <= 660
+
+exec
+/bin/bash -lc "sed -n '375,415p' bin/pack; sed -n '474,522p' bin/pack; rg --files -g '*load*check*' -g '*bundle*check*' -g '"'!data/**'"' -g '"'!ops/decisions/**'"'; head -45 bin/pack; ls -l .venv/bin/python*" in /home/ubuntu/work/gemma
+ exited 2 in 0ms:
+
+    def validate(self):
+        require(self.root.is_dir() and not self.root.is_symlink(), f'not a bundle directory (or symlink): {self.root}')
+        total = 0
+        yaml_count = 0
+        for directory, dirs, files in os.walk(self.root, followlinks=False):
+            for name in sorted(dirs + files):
+                path = Path(directory) / name
+                safe_path(path.relative_to(self.root).as_posix())
+                mode = path.lstat().st_mode
+                require(not stat.S_ISLNK(mode), f'symlink forbidden: {path}')
+                require(stat.S_ISDIR(mode) or stat.S_ISREG(mode), f'not a regular file: {path}')
+                if stat.S_ISREG(mode):
+                    require(path.suffix in EXTENSIONS, f'extension not allowed: {path}')
+                    if path == self.root / 'MANIFEST.md':
+                        continue
+                    total += path.stat().st_size
+                    require(total < LIMIT, f'unpacked size must be < {LIMIT} bytes')
+                    self.files.append(path)
+                    require(len(self.files) <= MAX_FILE_COUNT, f'max_file_count exceeds {MAX_FILE_COUNT}')
+                    if path.suffix in {'.yaml', '.yml'}:
+                        yaml_count += 1
+                        require(yaml_count <= MAX_YAML_FILES, f'max_yaml_files exceeds {MAX_YAML_FILES}')
+                        require(path.stat().st_size <= MAX_YAML_BYTES,
+                                f'YAML size exceeds {MAX_YAML_BYTES} bytes: {path}')
+        self.files.sort()
+        require(self.root / 'agent.yaml' in self.files, 'missing agent.yaml at bundle root')
+        require(len(ROOTS & {p.name for p in self.files if p.parent == self.root}) == 1, 'multiple root agent configs')
+        require(isinstance(self.load(self.root / 'agent.yaml'), dict), 'agent.yaml must be a mapping')
+        for path in self.files:
+            if path.suffix in {'.yaml', '.yml'}:
+                value = self.load(path)
+                self.walk(value, str(path), agent=path == self.root / 'agent.yaml')
+            elif path.suffix != '.safetensors':
+                source = path.read_text(encoding='utf-8')
+                require('\0' not in source, f'null bytes in {path}')
+                if 'prompts' in path.relative_to(self.root).parts:
+                    self.prompt(source, str(path))
+        root = self.root / 'agent.yaml'
+        self.agent_documents.add(root)
+        self.agent(self.load(root), str(root), active=(root,))
+def write_zip(bundle, dist):
+    track, version = bundle.root.parent.name, bundle.root.name
+    require(re.fullmatch(r'[A-Za-z0-9_-]+', track) and re.fullmatch(r'[A-Za-z0-9_-]+', version), 'invalid track/version for archive name')
+    dist.mkdir(parents=True, exist_ok=True)
+    destination = dist / f'{track}-{version}.zip'
+    fd, temporary = tempfile.mkstemp(prefix='.pack-', suffix='.zip', dir=dist)
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+            for path in bundle.files:
+                if path == bundle.root / 'MANIFEST.md':
+                    continue
+                info = zipfile.ZipInfo(path.relative_to(bundle.root).as_posix(), (1980, 1, 1, 0, 0, 0))
+                info.create_system = 3
+                info.external_attr = (stat.S_IFREG | 0o644) << 16
+                info.compress_type = zipfile.ZIP_DEFLATED
+                with path.open('rb') as source, archive.open(info, 'w', force_zip64=True) as target:
+                    shutil.copyfileobj(source, target, 1024*1024)
+        digest = hashlib.sha256()
+        with open(temporary, 'rb') as source:
+            for chunk in iter(lambda: source.read(1024*1024), b''):
+                digest.update(chunk)
+        checksum = digest.hexdigest()
+        os.replace(temporary, destination)
+        manifest = bundle.root / 'MANIFEST.md'
+        content = manifest.read_text(encoding='utf-8') if manifest.exists() else ''
+        lines = [line for line in content.splitlines() if not re.match(r'^\s*(?:[-*]\s*)?zip sha256\s*:', line, re.I)]
+        manifest.write_text('\n'.join(lines).rstrip() + f'\nzip sha256: {checksum}\n', encoding='utf-8')
+        print(f'{destination}\nsha256: {checksum}\nsize: {destination.stat().st_size} bytes')
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('bundle_dir')
+    parser.add_argument('--zip', action='store_true')
+    args = parser.parse_args()
+    try:
+        bundle = Bundle(args.bundle_dir)
+        total = bundle.validate()
+        if args.zip:
+            write_zip(bundle, Path(__file__).resolve().parent.parent / 'dist')
+        print(f'PASS: {args.bundle_dir} ({total} unpacked bytes)')
+        return 0
+    except (Invalid, OSError, UnicodeError, RecursionError) as exc:
+        print(f'FAIL: {exc}', file=sys.stderr)
+        return 1
+results/bundle_load_check_31b_v011.json
+results/bundle_load_check_e4b_v002.json
+results/bundle_load_check_31b_v002.json
+results/bundle_load_check_31b_v010.json
+results/bundle_load_check_31b_v013.json
+results/bundle_load_check_31b_v012.json
+results/bundle_load_check_31b_v001.json
+eval/checks/bundle_load_check.py
+#!/usr/bin/env python3
+"""Validate a declarative Gemma bundle; optionally build dist/<track>-<version>.zip.
+
+Without PyYAML, a conservative YAML subset is supported: block mappings/lists,
+quoted/plain scalars, JSON flow collections, literal/folded blocks and !include.
+Unsupported YAML syntax fails closed with a request to use PyYAML.
+"""
+import argparse
+import hashlib
+import json
+import math
+import os
+from pathlib import Path, PureWindowsPath
+import re
+import shutil
+import stat
+import sys
+import tempfile
+import zipfile
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+LIMIT = 3221225472
+EXTENSIONS = {'.yaml', '.yml', '.md', '.txt', '.py', '.json', '.safetensors'}
+MODELS = {f'gemma-4-{size}-it-qat-w4a16-ct' for size in ('31b', '12b', 'e4b', 'e2b')}
+# Snapshot of HARNESS_README sections 2.4 and 6 (SwegemmaContext.create_tools).
+TOOLS = {'run_command', 'submit_patch', 'get_status', 'read_file', 'edit_file',
+         'write_file', 'get_code_neighbors', 'search_similar_code', 'get_code_subgraph'}
+GENERATION_FIELDS = {'temperature', 'top_p', 'top_k', 'max_output_tokens',
+                     'presence_penalty', 'frequency_penalty', 'stop_sequences',
+                     'response_mime_type', 'seed', 'thinking_config'}
+MAX_FILE_COUNT = 10000
+MAX_YAML_FILES = 1000
+MAX_YAML_BYTES = 50 * 1024 * 1024
+MAX_SKILL_BYTES = 50 * 1024 * 1024
+MAX_INSTRUCTION_CHARS = 1000000
+MAX_TOTAL_INSTRUCTION_CHARS = 10000000
+MAX_AGENTS = 500
+MAX_DEPTH = 50
+MAX_SKILLS = 1000
+ROOTS = {'agent.yaml', 'agent.yml', 'root_agent.yaml', 'root_agent.yml'}
+
+ls: cannot access '.venv/bin/python*': No such file or directory
+
+codex
+Both parent diffs contain exactly the thinking-budget change plus MANIFEST.md, and both zip hashes match. All six packaged files match their bundle files byte-for-byte. The zips omit MANIFEST.md by design in `bin/pack`; I’ll call out that exception explicitly in the verdict.
+exec
+/bin/bash -lc "nl -ba eval/checks/bundle_load_check.py | head -170; nl -ba bin/pack | sed -n '383,394p'; nl -ba bin/pack | sed -n '480,488p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	"""Offline load check for a bundle (dec 032 item 2): compiles agent.yaml with the real
+     2	adk_submission compiler + swegemma generation constraints, then prints the effective
+     3	max_output_tokens per agent and the effective session timeout from eval_config.yaml via EvalConfig.
+     4	Usage: python bundle_load_check.py <bundle_dir>  (CPU only, no model calls; stub tools)."""
+     5	import json, sys, tempfile
+     6	from pathlib import Path
+     7	import yaml
+     8	from adk_submission.compiler import compile_submission
+     9	from adk_submission.registry import ModelRegistry
+    10	from swegemma.config import EvalConfig, build_submission_limits
+    11	
+    12	bundle = Path(sys.argv[1]).resolve()
+    13	TOOLS = ['run_command', 'submit_patch', 'get_status', 'read_file', 'edit_file', 'write_file',
+    14	         'get_code_neighbors', 'search_similar_code', 'get_code_subgraph']
+    15	
+    16	def make_stub(name):
+    17	    def stub(x: str = '') -> str:
+    18	        return ''
+    19	    stub.__name__ = name
+    20	    stub.__doc__ = f'stub {name}'
+    21	    return stub
+    22	
+    23	models = ModelRegistry()
+    24	for m in ('gemma-4-e4b-it-qat-w4a16-ct', 'gemma-4-31b-it-qat-w4a16-ct'):
+    25	    models.register(m, m)
+    26	limits, constraints = build_submission_limits()
+    27	agent = compile_submission(submission_dir=bundle, tool_registry={t: make_stub(t) for t in TOOLS},
+    28	                           model_registry=models, limits=limits, generation_constraints=constraints)
+    29	out = {'bundle': str(bundle), 'agents': []}
+    30	def walk(a, depth=0):
+    31	    gcc = getattr(a, 'generate_content_config', None)
+    32	    tc = getattr(gcc, 'thinking_config', None) if gcc else None
+    33	    out['agents'].append(dict(name=a.name, depth=depth, model=str(getattr(a, 'model', None)),
+    34	        max_output_tokens=getattr(gcc, 'max_output_tokens', None) if gcc else None,
+    35	        thinking_budget=getattr(tc, 'thinking_budget', None) if tc else None))
+    36	    for sub in getattr(a, 'sub_agents', []) or []:
+    37	        walk(sub, depth + 1)
+    38	    for t in getattr(a, 'tools', []) or []:
+    39	        inner = getattr(t, 'agent', None)
+    40	        if inner is not None:
+    41	            walk(inner, depth + 1)
+    42	walk(agent)
+    43	raw = yaml.safe_load((bundle / 'eval_config.yaml').read_text()) or {}
+    44	sec = raw.get('evaluation', raw)
+    45	with tempfile.TemporaryDirectory() as d:
+    46	    cfg = EvalConfig(tasks_path=Path(d) / 't.jsonl', snapshots_dir=Path(d), results_dir=Path(d),
+    47	                     submission_dir=bundle, models=models, max_time_minutes=float(sec['max_time_minutes']),
+    48	                     timeout_seconds=int(sec['timeout_seconds']), max_tool_calls=int(sec['max_tool_calls']),
+    49	                     max_turns=int(sec['max_turns']))
+    50	    out['eval'] = dict(raw=sec, budget_time_minutes=cfg.budget.time_minutes,
+    51	                       session_timeout_seconds=cfg.budget.time_minutes * 60,  # agent_runner.py:718 rule
+    52	                       budget_tool_calls=cfg.budget.tool_calls, budget_turns=cfg.budget.turns)
+    53	print(json.dumps(out, indent=1, default=str))
+   383	                safe_path(path.relative_to(self.root).as_posix())
+   384	                mode = path.lstat().st_mode
+   385	                require(not stat.S_ISLNK(mode), f'symlink forbidden: {path}')
+   386	                require(stat.S_ISDIR(mode) or stat.S_ISREG(mode), f'not a regular file: {path}')
+   387	                if stat.S_ISREG(mode):
+   388	                    require(path.suffix in EXTENSIONS, f'extension not allowed: {path}')
+   389	                    if path == self.root / 'MANIFEST.md':
+   390	                        continue
+   391	                    total += path.stat().st_size
+   392	                    require(total < LIMIT, f'unpacked size must be < {LIMIT} bytes')
+   393	                    self.files.append(path)
+   394	                    require(len(self.files) <= MAX_FILE_COUNT, f'max_file_count exceeds {MAX_FILE_COUNT}')
+   480	    os.close(fd)
+   481	    try:
+   482	        with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+   483	            for path in bundle.files:
+   484	                if path == bundle.root / 'MANIFEST.md':
+   485	                    continue
+   486	                info = zipfile.ZipInfo(path.relative_to(bundle.root).as_posix(), (1980, 1, 1, 0, 0, 0))
+   487	                info.create_system = 3
+   488	                info.external_attr = (stat.S_IFREG | 0o644) << 16
+
+exec
+/bin/bash -lc 'python3 -B bin/pack bundles/31b/v012' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+PASS: bundles/31b/v012 (9070 unpacked bytes)
+
+exec
+/bin/bash -lc 'python3 -B bin/pack bundles/31b/v013' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+PASS: bundles/31b/v013 (9968 unpacked bytes)
+
+codex
+BLOCKING: None.
+
+Non-blocking:
+
+1. The zip comparison excludes `MANIFEST.md`, as required by [bin/pack:484](/home/ubuntu/work/gemma/bin/pack:484). Plan 009’s “same path set” wording should state this exception explicitly: [009.md:46](/home/ubuntu/work/gemma/eval/plans/009.md:46).
+
+Verified at `e5196a4`:
+
+- Both recursive parent diffs contain **only** `MANIFEST.md` and root `thinking_budget: 0 → 4096`: [v012 sampling:5](/home/ubuntu/work/gemma/bundles/31b/v012/configs/sampling.yaml:5), [v013 sampling:5](/home/ubuntu/work/gemma/bundles/31b/v013/configs/sampling.yaml:5).
+- Computed zip SHA-256 values match both manifest entries:
+  - v012: `78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5` — [MANIFEST.md:2](/home/ubuntu/work/gemma/bundles/31b/v012/MANIFEST.md:2).
+  - v013: `06eff226d661c0528105a14d4fe0b69f67a8fb84fc52e654a0d54b6bc59a5dbb` — [MANIFEST.md:2](/home/ubuntu/work/gemma/bundles/31b/v013/MANIFEST.md:2).
+- Each zip contains exactly the six bundle payload files, all byte-identical, with `agent.yaml` at root. No duplicate or unsafe paths, symlinks, or CRC failures.
+- Both committed load-check JSONs report root and analyzer **8192 output tokens / 4096 thinking budget**, cap **3.5 minutes**, session **210 seconds**: [v012:3](/home/ubuntu/work/gemma/results/bundle_load_check_31b_v012.json:3), [v013:3](/home/ubuntu/work/gemma/results/bundle_load_check_31b_v013.json:3).
+- Both read-only `bin/pack` validations **PASS**. Cap arithmetic: `3.5 × 125 + 30 = 467.5 ≤ 660`.
+- These candidates match the **Arm 3 bundle** specification: [009.md:23](/home/ubuntu/work/gemma/eval/plans/009.md:23).
+
+Questions: None.
+
+**Verdict: CLEAN** for this light one-knob review.
+tokens used
+29,694

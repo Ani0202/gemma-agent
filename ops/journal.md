@@ -362,3 +362,6 @@
 2026-11-06T14:47Z | codex review B3 merge ab4dd1a CLEAN (no FYI, dec 078) | ops/codex/review-20261106T144406.md
 2026-11-06T14:47Z | codex review plan 009 BLOCKING x2 (identity hashes; validity/H-row inheritance) -> rev 1 157b525, re-review launched | ops/codex/review-20261106T143954.md eval/plans/009.md
 2026-11-06T14:49Z | arm-3 candidates packed: 31b-v012-p9a 78a8fd30..., 31b-v013-p9b 06eff226...; load checks PASS; light review launched | bundles/31b/v012/MANIFEST.md bundles/31b/v013/MANIFEST.md
+2026-11-06T14:51Z | codex review 144907 (v012/v013) CLEAN; review 144758 (plan 009 rev 1) BLOCKING 1: CONTENT must exclude root MANIFEST.md | ops/codex/review-20261106T144907.md, ops/codex/review-20261106T144758.md
+2026-11-06T14:51Z | plan 009 rev 2 d8b4c43 (MANIFEST.md exclusion only); re-review launched codex-review-plan009r2-light | eval/plans/009.md
+2026-11-06T14:52Z | identity script f5cb353: pack-check v012/v013 ZIP+CONTENT PASS; review launched codex-review-identity-light | results/plan009_bundle_identity.json
