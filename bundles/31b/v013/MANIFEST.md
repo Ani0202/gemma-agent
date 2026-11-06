@@ -6,3 +6,5 @@ packed: dist/31b-v013.zip sha256=06eff226d661c0528105a14d4fe0b69f67a8fb84fc52e65
 - load check: results/bundle_load_check_31b_v013.json (root + analyzer 8192 / thinking 4096, session timeout 210 s).
 - git SHA: see the commit that adds this file. Light codex review: pending.
 zip sha256: 06eff226d661c0528105a14d4fe0b69f67a8fb84fc52e654a0d54b6bc59a5dbb
+
+- Review: codex ops/codex/review-20261106T144907.md CLEAN (light one-knob; parent diff = thinking_budget 0->4096 only; zip sha re-verified).
