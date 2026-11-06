@@ -30,8 +30,10 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - PLAN 005 ARM B DONE (c105): verdict MECHANISM-ONLY per pre-registered rule (V pass: gates a/b/d/e PASS, trace exit 0; M met:
   write_outside_ws 8->0, edit_missing_param 19->6; E NOT met: empty 4/8 (A 4/8), discordant A-only 2 / B-only 2, sign p1=0.69).
   Files: results/trace_tool_errors_31b_v003.json, results/kaggle_timing_31b_v003.json; quota 9.42 h after (+2.14).
-  Branch: NO ship, no v004 (dec 056 item 5 only on PASS). trace-analyst on B empties -> results/taxonomy-31b-v003-p5t4.json (in flight,
-  Builder subagent). Addendum B baseline = arm B (tie). Then report 012 (must carry dec 057 item 4 sentence).
+  Branch: NO ship, no v004 (dec 056 item 5 only on PASS). Taxonomy DONE results/taxonomy-31b-v003-p5t4.json: 4 empties = 0 edit calls;
+  tool exec <1 s/task, ~100% of 240 s is generation (~30 tok/s, 4.5-7.3k completion tok/task); classes: no-edit budget burn (3953),
+  long thinking 87+68 s turns (3063), repeat reads 22/40 after history drops (14851), broad exploration (3930). Test-runtime cap = no help.
+  Addendum B baseline = arm B (tie). Then report 012 (must carry dec 057 item 4 sentence). Harness-side dedup = NOT bundle-expressible.
 - DEC 057 (FastAPI/docs_src hint): dec 055 UNCHANGED (don't touch 31b-v002/zip/kernel). Standing rule: no new bundle/draft carries any
   repo-named hint (31b-v004+, e4b-v003+, drafts). v004 diff vs v002 = prompts/system.md + MANIFEST only, and MUST remove the line.
   bundles/drafts/item4-system.md line REMOVED (c104). FINALS: no final with a repo-specific line -> e4b-v003 = e4b-v002 + generic

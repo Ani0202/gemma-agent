@@ -240,3 +240,4 @@
 2026-11-06T02:16Z | arm B analysis: gates a/b/d/e PASS (V), write_outside_ws 0, edit_missing_param 6 (M met), empty 4/8, A-empty-only 2 / B-empty-only 2 (E not met) -> pre-registered verdict MECHANISM-ONLY; no ship | results/trace_tool_errors_31b_v003.json results/kaggle_timing_31b_v003.json
 2026-11-06T02:16Z | Kaggle quota 9.42/30 h after arm B (+2.14) | ops/budget/kaggle.md
 2026-11-06T02:16Z | MECHANISM-ONLY branch: trace-analyst on arm B empties; Addendum B feasibility codex-ask job addb-feasibility-ask-light (CPU) | eval/plans/005.md
+2026-11-06T02:25Z | trace-analyst on arm B empties: all 4 never called edit; time = model generation (tool exec <1 s); classes budget-burn/long-thinking/repeat-reads/broad-exploration | results/taxonomy-31b-v003-p5t4.json
