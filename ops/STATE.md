@@ -27,11 +27,8 @@
 - DEC 077 (ack D73.6): arm 2 = v011 no smoke. Item 2 DONE 9486a3b: builtin arm2 path exits 4 (no results) on any non-root submit_patch
   response (raw scan, pairing-independent) + regression test; 106 tests pass; arm-1 traces 0/33 hits. Must be CLEAN before arm-2 METRICS run
   (does not block launch). If NOT CLEAN: fix + report. Item 3: B3 fix before any gate arm pre-reg (low prio). Arm-2 launch = 1-line FYI only.
-- CYCLE 151: targeted re-review 142723 NOT CLEAN (residual B3: unpaired gate-authored inner submit_patch resp -> boundary None) -> D73.6 TRIGGERED:
-  ARM 2 = v011 (dist/31b-v011.zip 4f5b078a...4938), NO smoke, no more v010 rounds; Director FYI'd. B3 moot for v011 (builtin submit_patch);
-  fix B3 (+regression test, targeted review) before any gate arm uses metrics.
-- DEC 076: D73.6 stands; single-run-dir exit 3 kept; arm 2 = ONE session; D73.7 chunk rule c93967b (pre-data, NO build unless chunk 2 needed).
-- DEC 075 (ack FYI): MANIFEST v010 l.1 fixed -> b0785a30, fc24fcc3/c7a86295 VOID (MANIFEST excluded from zip, sha unchanged). Review CLEAN -> NO decision request, proceed + 1-line FYI; decision only if arms/ids/thresholds/rule change.
+- CYCLE 151: re-review 142723 NOT CLEAN (B3) -> D73.6 TRIGGERED: ARM 2 = v011 (dist/31b-v011.zip 4f5b078a...4938), NO smoke; B3 moot for v011.
+- DEC 076: D73.6 stands; single-run-dir exit 3 kept; arm 2 = ONE session; D73.7 chunk rule c93967b. DEC 075: MANIFEST v010 fix b0785a30; CLEAN review -> FYI only.
 - DEC 074 APPROVE D73: D73.5 (submit_unverifiable counts AGAINST arm 2; metrics arm2 mode must implement - d73 build only REPORTS it, add after merge)
   + D73.6 (combined review = LAST full round; BLOCKING -> fix + 1 targeted re-review; not CLEAN after that or by 11-07T06:00Z -> arm 2 = v011, no smoke) written to 008.md.
 - DEC 073 APPROVE (D72 accepted as governing pre-data defs; metrics asserts mech2 17/empty 12 fail -> STOP+report, never adjust; arm-1 safety base committed BEFORE arm-2 rows; new gate-changing BLOCKING -> new sha + D72.x line + 1-line FYI; re-verify /tmp if reuse_containers ever set).
