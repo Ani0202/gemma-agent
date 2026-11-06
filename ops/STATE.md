@@ -43,8 +43,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   Item 4: plan 007 pre-reg (33-dev pass rate; H1 env; thinking off vs on paired arm) DUE 2026-11-07T18:00Z (may use leftover quota pre-reset).
   Item 5: Nov 8 slot candidate + 1-para justification DUE 2026-11-07T12:00Z (e4b-v002 repeat / e4b-v003 if packed+reviewed+smoke / 31b-v002 repeat).
   Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
-- Arm E DONE: CAP-BOUND (report 014, results/plan005_armE_vs_D.json); dec 056 item 6 = binding blocker for 31B final at cap<=1.23.
-- Arm E = 31b-v007-p5e (dist/31b-v007.zip 3a62f41f..., v006 + cap 1.23). Arm D = 31b-v006-p5d (b7b2eb3d..., report 013 PASS).
+- Arm E DONE CAP-BOUND (report 014) = 31b-v007-p5e (dist/31b-v007.zip 3a62f41f..., v006 + cap 1.23). Arm D = 31b-v006-p5d (b7b2eb3d..., report 013 PASS).
   Push cmd: eval/kaggle/timing_push.sh aniket0202/gemma-31b-timing <bundle> eval/plans/004-gpu-retime-ids.txt 6000.
 - 31b-v004 CPU DRAFT: dist/31b-v004.zip sha256=50537e1ddcf13f160fcaa9b2bfa145ac13ef91d99a2ce0b27d69f54ee125f7b3 (5f9b4ae) = v007 +
   1 quoting/no-repeat line. No slot (dec 061 ii). Review 043840: no BLOCKING; NB2 pipefail system.md:33 -> fold in next touch, UNSCREENED;
