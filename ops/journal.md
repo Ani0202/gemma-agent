@@ -281,3 +281,7 @@
 2026-11-06T06:22Z | kernel gemma-31b-timing v6 (arm F) COMPLETE; outputs -> runs/31b-v008-p5f-timing; kernel bundle == dist/31b-v008.zip (only MANIFEST extra); quota 14.49 -> 16.02 h (+1.53) | ops/budget/kaggle.md
 2026-11-06T06:30Z | PLAN 005 ARM F: V (gates PASS), empty 2/8 (D 3/8), F-empty-only 0, tasks w/ identical run>=5 F 3 (22,10,8) vs D 2 -> verdict NO-EFFECT; descriptive: timeouts 2->0, cmd_error_shell 22->0 (not gated) | results/plan005_armF_vs_D.json results/kaggle_timing_31b_v008.json results/trace_tool_errors_31b_v008.json results/thinking_bound_31b_v008.json
 2026-11-06T06:31Z | c119 report 015 (arm F NO-EFFECT, rec A: T stays 0.2, repeat guard design-only); NEEDS_DECISION sent | ops/reports/015-plan005-armF-result.md
+2026-11-06T07:05Z | dec 062 read (report 015 approved, opt A; T stays 0.2; plan-007 arm 1 may use expiring quota if reviewed+pushed by 15:30Z) | ops/decisions/062-015-plan005-armF-result.md
+2026-11-06T07:10Z | bundle 31b-v009-p7a1 packed (v006 + cap 3.5 only) sha256 d38c55c7...130d; timing_push.sh --no-stock-probe flag (dry run: STOCK_PROBE=False, SKIP_VERIFICATION=False) | bundles/31b/v009/MANIFEST.md
+2026-11-06T07:12Z | PLAN 007 pre-registered (33-dev pass rate, arm 1 thinking off cap 3.5, docker-path env, smoke gate, fixed sha256 order, arm-2 rule); codex review job started | eval/plans/007.md ops/jobs/codex-review-plan007-light.status
+2026-11-06T07:28Z | repeat-guard design note (dec 062 item 3; CPU only, not built) | eval/plans/007-repeat-guard.md

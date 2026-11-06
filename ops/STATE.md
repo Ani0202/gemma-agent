@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 06:32Z (cycle 119, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 07:30Z (cycle 120, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -25,9 +25,14 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (06:32Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z).
-- ARM F DONE NO-EFFECT (report 015, NEEDS_DECISION; rec A: T stays 0.2, repeat guard design-only): V PASS, empty 2/8 vs D 3/8, F-only 0,
-  loop tasks>=5 F 3 (22/10/8) vs D 2; descriptive timeouts 2->0, cmd_error_shell 22->0. results/plan005_armF_vs_D.json + *_31b_v008.json.
+## Running jobs (07:30Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-plan007-light (on e547980).
+- DEC 062 (report 015 approved, A): T stays 0.2 everywhere; no T 0.6 arm in plan 007; repeat guard = design note only (DONE draft
+  eval/plans/007-repeat-guard.md); item 4: plan-007 arm 1 may use expiring quota IF pre-reg reviewed + pushed by 11-06T15:30Z, else after reset.
+- PLAN 007 PRE-REG written 07:10Z (eval/plans/007.md, commit e547980): arm 1 = 31b-v009-p7a1 (bundles/31b/v009 = v006 + cap 3.5;
+  dist/31b-v009.zip sha256=d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d, pack PASS), 33 dev in fixed order
+  eval/plans/007-arm1-ids.txt, docker-path env (reasons in plan), --with-verification --no-stock-probe (new flag), slug aniket0202/gemma-31b-passrate.
+  NEXT: review clean -> SMOKE (eval/plans/007-smoke-ids.txt, 3 ids, budget 4800) -> gate -> main ids 4..33 budget sized to quota (week <= 29.5 h).
+- ARM F DONE NO-EFFECT (report 015, dec 062 accepted). results/plan005_armF_vs_D.json + *_31b_v008.json (schema-header check pending, dec 062 item 6).
 - armF compare script REVIEW CLEAN (review-20261106T053934 on 0c3c777: 0 BLOCKING; NB1 malformed schema raises, fails closed). E-as-F smoke 3/5, F-only 2, HARM. Cleared for use.
 - ARM F kernel v6 COMPLETE 06:21Z (repo b4d9f59); kernel bundle == dist zip; quota 14.49 -> 16.02 h.
 - DEC 061 (on report 014): approve-with-changes. CAP-BOUND accepted; A + B approved. (i) dec 055 v002 submit at 11-07T00:00Z stays FIRST;
@@ -73,6 +78,6 @@
 - Forum question (dec 035): Aniket posts report 009 s6; Builder posts NOTHING; summarize any answer (no task data) in next report.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. Await Director ruling on report 015; if A: write repeat-guard design note (CPU only, no build).
+1. On codex review: fix BLOCKING; push smoke (log quota before/after); on gate PASS push main (ids 4..33) by 15:30Z; else after reset.
 2. Dec 055 at 2026-11-07T00:00Z FIRST: (2)(3) hold; re-check (2) live, do (4) commit, (5) journal T=5.007 h <= 6.0 PASS, then submit.
-3. Plan 007 pre-reg (due 11-07T18:00Z) + Nov 8 slot proposal (due 11-07T12:00Z); dec 038 paper evidence by Nov 9 23:59Z.
+3. Nov 8 slot proposal (due 11-07T12:00Z); pass-rate summarizer script (codex-reviewed) before reading arm-1 rows; dec 038 paper evidence by Nov 9.
