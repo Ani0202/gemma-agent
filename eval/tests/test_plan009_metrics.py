@@ -349,6 +349,8 @@ def test_full_33_quality_verdicts(full_pair, quality, expected):
     ('missing_base', 'INVALID (base invalid/unruled)'),
     ('unreadable_base', 'INVALID (base invalid/unruled)'),
     ('unruled_base', 'INVALID (base invalid/unruled)'),
+    ('harm_base', 'INVALID (base invalid/unruled)'),
+    ('arm2_output_base', 'INVALID (base invalid/unruled)'),
 ])
 def test_full_33_fail_closed(full_pair, change, expected):
     dirs, off, cs, opts, ids = full_pair
@@ -390,7 +392,9 @@ def test_full_33_fail_closed(full_pair, change, expected):
         opts['base_verdict_json'] += '.absent'
     else:
         Path(opts['base_verdict_json']).write_text(json.dumps(
-            dict(decision='INVALID') if change == 'invalid_base' else {}))
+            dict(decision='INVALID') if change == 'invalid_base' else
+            dict(verdict='HARM') if change == 'harm_base' else
+            dict(totals={}, rows=[]) if change == 'arm2_output_base' else {}))
     result = m.arm3_metrics('arm2', dirs, off, cs, **opts)
     assert result['decision'].startswith(expected)
     if change in ('conflicting_agent', 'transport'):

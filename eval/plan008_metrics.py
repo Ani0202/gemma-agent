@@ -8,6 +8,8 @@ Usage: plan008_metrics.py base OUT_JSON | smoke RUN_DIR OUT_JSON | arm2 RUN_DIR 
            --smoke-json PATH [--base-verdict-json PATH]
        Dirs are supplied in push order: smoke, main, chunk1, chunk2, ...
        Both arm3 modes require --identity-json PATH --bundle v01N --transport DIR=SHA256 (each arm3 dir).
+       --base-verdict-json (base arm2) = the journaled plan-008 ruling file, {"verdict": "<plan 008 verdict>"};
+       the raw arm2-mode output carries no verdict and therefore fails closed. Only SHIP-ELIGIBLE is a valid arm2 base.
 
 Exit: 0 ok, 2 usage, 3 incomplete arm2/arm3 inventory, 4 builtin arm2 run holds a non-root
 submit_patch response (dec 077 failure-safe; STOP and report). 3/4 write no results.
@@ -664,7 +666,7 @@ ARM3_DEFINITIONS = {
     'descriptive': 'per repo uses timing repo, fallback id prefix before __; unscreened excludes 004-gpu-retime ids; context overflow unavailable in plan007',
     'env_drift': 'header environment values, null if absent; setup/verification wall p50/p90 from timing; differences reported only',
     'kernel_code': 'header kernel_code and agent/verification path hashes when present; differing values void pairing',
-    'decision': 'INVALID for voided pairing, identity mismatch, invalid/unruled base, unbound/failed smoke or H>=5; on ahead p<0.2 adopts only with timeout/timing/all safety; otherwise veto; off>=on KEEP-OFF; else NO-DIFFERENCE',
+    'decision': 'INVALID for voided pairing, identity mismatch, invalid/unruled base (arm2 base needs ruled SHIP-ELIGIBLE), unbound/failed smoke or H>=5; on ahead p<0.2 adopts only with timeout/timing/all safety; otherwise veto; off>=on KEEP-OFF; else NO-DIFFERENCE',
 }
 
 
@@ -1023,8 +1025,8 @@ def arm3_metrics(base_name, arm3_dirs, base_dirs, classifiers, smoke_json=None, 
     identity = identity_check(arm3_dirs, identity_json, bundle, transports or {}, smoke_dirs)
     base_verdict = _read_json(base_verdict_json)
     verdicts = [base_verdict[k] for k in ('decision', 'verdict') if k in base_verdict]
-    base_valid = base_name == 'arm1' or bool(verdicts) and all(
-        v in ('SHIP-ELIGIBLE', 'GUARD FAILED', 'HARM', 'NO-DECISION') for v in verdicts)
+    # Plan 009 l.17-19: base = arm 2 iff plan 008 returned SHIP-ELIGIBLE; any other verdict means base = arm 1.
+    base_valid = base_name == 'arm1' or bool(verdicts) and all(v == 'SHIP-ELIGIBLE' for v in verdicts)
     differences = [k for k in envs['arm3'] if envs['arm3'][k] != envs['base'][k]]
     envs.update(differences=differences, pairing_void_candidate='kernel_code' in differences)
     inputs = dict(arm3_timeouts=a['timeouts']['count'], base_timeouts=b['timeouts']['count'],
