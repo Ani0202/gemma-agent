@@ -28,11 +28,7 @@
   unless EXACT registered ids (arm2 needs all 33 in ONE run dir); B2 gate layout from header agent_yaml_sha256 vs bundles v010/v011 agent.yaml only;
   B3 d735 uses earliest_candidate_index (independent of root attribution); NB1 defs. 1481 tests, base identical. Zips unchanged. Director FYI'd.
   Re-review CLEAN -> smoke v010 (by ~22:00Z, quota 2.34 h) w/ 1-line FYI; NOT CLEAN -> arm 2 = v011 (no smoke), journal + FYI.
-- CYCLE 147: codex d73 build merged d6174d8 (a9cef73); D73.5 counting implemented 6ee4f1f (d735_counts; totals swt/no-submit = D73.5,
-  *_observed kept); eval/tests 1475 pass; arm-1 base re-run IDENTICAL (totals + all rows). v010 REPACKED 24b8a84:
-  dist/31b-v010.zip sha256=b0785a30e2ad3451f0bbb0fb574e6cde53412ca2381ab04394e66792886d33ce (fc24fcc3 VOID), pack+load PASS; D73.4 sha line in 008.md.
-  Director FYI'd. On review: CLEAN -> smoke (008-smoke-ids, quota log before/after) if by ~22:00Z and quota (2.34 h) allows; BLOCKING -> fix + ONE
-  targeted re-review of fix diff; not CLEAN after that or by 11-07T06:00Z -> arm 2 = v011 (no smoke).
+- CYCLE 147 (history in journal): d73 merged d6174d8; D73.5 6ee4f1f; v010 repacked 24b8a84 b0785a30 (fc24fcc3 VOID), pack+load PASS.
 - DEC 075 (ack FYI): MANIFEST v010 l.1 fixed -> b0785a30, fc24fcc3/c7a86295 VOID (MANIFEST excluded from zip, sha unchanged). Review CLEAN -> NO decision request, proceed + 1-line FYI; decision only if arms/ids/thresholds/rule change.
 - DEC 074 APPROVE D73: D73.5 (submit_unverifiable counts AGAINST arm 2; metrics arm2 mode must implement - d73 build only REPORTS it, add after merge)
   + D73.6 (combined review = LAST full round; BLOCKING -> fix + 1 targeted re-review; not CLEAN after that or by 11-07T06:00Z -> arm 2 = v011, no smoke) written to 008.md.
