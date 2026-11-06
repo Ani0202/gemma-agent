@@ -23,12 +23,7 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-- DEC 068 (rep 017, A): no rerun/rev 6; d4cdf0f0 governs. Addendum B in plan 007 committed 242859a 08:12:14Z BEFORE main download:
-  H-VERIFY(empty-patch) = eval/plan007_report.py is_h_verify_empty_patch (39 tests pass; smoke hit = rich_3063 only).
-  ADDENDUM B.1 (ea9c064, 08:15Z, pre-download): codex 081225 B1+B2 fixed (id pairing -> assert_paired; error keys must be present);
-  sha a5c58a1d..., 50 tests; re-review 081435 CLEAN (0 BLOCKING); NB1 fixed (smoke test asserts equal id sets, no silent skips), 50 pass. Report script MUST call assert_paired before predicate. Report layout
-  (a) primary all rows Wilson+per-repo (b) d4cdf0f0 counts (c) sens excl all H (d) sens excl H except empty-patch (e) a208a023; footnote l.239 once.
-  HEADLINE empty-patch rate (vpb==0) Wilson, split timeout/non-timeout; per row llm_turns + tool mix only.
+- DEC 068: Addendum B/B.1 (242859a/ea9c064, pre-download) H-VERIFY(empty-patch) = eval/plan007_report.py (50 tests); report layout a-e + empty headline (implemented, see dec 069 line).
 ## Running jobs (13:36Z): memguard-light (0 KILL), submit-window-31b-light (fires 11-07T00:00:30Z).
 - DEC 069 (rep 018, A w/ conditions): arm 1 VALID by POST-HOC ruling = plan 007 Addendum C (7ceb059). PRIMARY 4/33 FINAL
   (codex 132715 BLOCKING = missing descriptive lines -> fixed; re-review 133120 CLEAN). results/plan007_arm1_summary.json v2
