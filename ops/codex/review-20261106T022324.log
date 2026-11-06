@@ -2310,3 +2310,960 @@ runs
 setup_artifacts
 timing.jsonl
 
+web search: 
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py | sed -n '155,190p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py | sed -n '400,490p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py | sed -n '180,240p;250,338p;370,435p'; rg -n 'class GenerationConstraints|thinking_budget|minimum' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/limits.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   155	class ThinkingConfig(BaseModel):
+   156	    """Thinking configuration for supported LLMs (e.g., reasoning models).
+   157	
+   158	    Attributes:
+   159	        thinking_budget (Optional[int]): The token budget allocated for the model's internal
+   160	            reasoning/thinking process. Must be greater than or equal to 0 (0 disables thinking).
+   161	            Defaults to None.
+   162	        include_thoughts (Optional[bool]): Whether to include the raw reasoning thoughts in the
+   163	            final model output. Defaults to None.
+   164	        thinking_level (Optional[str]): Presets for model thinking level (e.g., 'MINIMAL', 'LOW', 'MEDIUM', 'HIGH'). Defaults to None.
+   165	    """
+   166	
+   167	    model_config = ConfigDict(extra="forbid", frozen=True)
+   168	
+   169	    thinking_budget: int | None = Field(default=None, ge=0)
+   170	    include_thoughts: bool | None = None
+   171	    thinking_level: str | None = None
+   172	
+   173	    @field_validator("thinking_budget", mode="before")
+   174	    @classmethod
+   175	    def _validate_thinking_budget(cls, v: Any) -> Any:
+   176	        return _reject_bool_nan_inf(v, "thinking_budget")
+   177	
+   178	
+   179	class GenerateContentConfig(BaseModel):
+   180	    """Generation parameters — validated against organizer constraints at compile time.
+   181	
+   182	    This schema is intentionally permissive: it defines the *universe* of parameters a submission
+   183	    could set. Actual restrictions and bounding checks are applied by
+   184	    :class:`~adk_submission.limits.GenerationConstraints` during compilation.
+   185	
+   186	    Fields that are **never** settable by submissions (``safety_settings``, ``tools``,
+   187	    ``system_instruction``, ``response_schema``) are hard-excluded from this schema.
+   188	
+   189	    Attributes:
+   190	        temperature (Optional[float]): Sampling temperature. Must be >= 0.0. Defaults to None.
+   400	        if raw_level is not None:
+   401	            level_str = str(getattr(raw_level, "value", raw_level)).lower()
+   402	
+   403	        has_budget = thinking_budget is not None and not isinstance(
+   404	            thinking_budget, bool
+   405	        )
+   406	
+   407	        if level_str == "none" or (has_budget and int(thinking_budget) <= 0):
+   408	            enable_thinking = False
+   409	        elif (
+   410	            level_str in {"minimal", "low", "medium", "high"}
+   411	            or (has_budget and int(thinking_budget) > 0)
+   412	        ):
+   413	            enable_thinking = True
+   414	        elif include_thoughts is False:
+   415	            enable_thinking = False
+   416	        elif include_thoughts is True:
+   417	            enable_thinking = True
+   418	
+   419	    if enable_thinking is None and not has_valid_seed and include_thoughts is None:
+   420	        return model
+   421	
+   422	    import copy
+   423	
+   424	    cloned = copy.copy(model)
+   425	    additional_args = copy.deepcopy(model._additional_args)
+   426	    if isinstance(include_thoughts, bool):
+   427	        cloned.__dict__["_adk_include_thoughts"] = include_thoughts
+   428	    else:
+   429	        cloned.__dict__.pop("_adk_include_thoughts", None)
+   430	
+   431	    if has_valid_seed:
+   432	        additional_args["seed"] = int(seed)  # type: ignore[arg-type]
+   433	
+   434	    if enable_thinking is not None:
+   435	        extra_body = dict(additional_args.get("extra_body") or {})
+   436	        chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+   437	        chat_template_kwargs["enable_thinking"] = enable_thinking
+   438	        extra_body["chat_template_kwargs"] = chat_template_kwargs
+   439	
+   440	        if (
+   441	            enable_thinking
+   442	            and thinking_budget is not None
+   443	            and not isinstance(thinking_budget, bool)
+   444	            and int(thinking_budget) > 0
+   445	        ):
+   446	            extra_body["thinking_token_budget"] = int(thinking_budget)
+   447	        else:
+   448	            extra_body.pop("thinking_token_budget", None)
+   449	
+   450	        additional_args["extra_body"] = extra_body
+   451	
+   452	        if enable_thinking and level_str in {"low", "medium", "high"}:
+   453	            additional_args["reasoning_effort"] = level_str
+   454	        elif not enable_thinking:
+   455	            additional_args.pop("reasoning_effort", None)
+   456	
+   457	    cloned._additional_args = additional_args
+   458	    return cloned
+   459	
+   460	
+   461	__all__ = [
+   462	    "_get_genai_types",
+   463	    "apply_thinking_config_to_model",
+   464	    "install_litellm_reasoning_patch",
+   465	    "resolve_generation_config",
+   466	]
+   180	        return False
+   181	
+   182	    def _record_function_call(
+   183	        self,
+   184	        part: Any,
+   185	        author: str,
+   186	        model: str,
+   187	        now: float,
+   188	        elapsed: float,
+   189	        consume_usage: Callable[[], dict[str, Any] | None],
+   190	    ) -> None:
+   191	        """Record a tool function call event."""
+   192	        fc = part.function_call
+   193	        args = dict(fc.args) if fc.args else {}
+   194	        self._add(
+   195	            TraceEntry(
+   196	                timestamp=now,
+   197	                elapsed=elapsed,
+   198	                event_type="tool_call",
+   199	                author=author,
+   200	                tool_name=fc.name,
+   201	                tool_args=args,
+   202	                usage=consume_usage(),
+   203	                model_version=model,
+   204	            )
+   205	        )
+   206	
+   207	    def _record_function_response(
+   208	        self,
+   209	        part: Any,
+   210	        author: str,
+   211	        model: str,
+   212	        now: float,
+   213	        elapsed: float,
+   214	        consume_usage: Callable[[], dict[str, Any] | None],
+   215	    ) -> None:
+   216	        """Record a tool function response event."""
+   217	        fr = part.function_response
+   218	        parsed = unwrap_tool_response(fr)
+   219	        resp_text = json.dumps(parsed, default=str) if parsed is not None else ""
+   220	        self._add(
+   221	            TraceEntry(
+   222	                timestamp=now,
+   223	                elapsed=elapsed,
+   224	                event_type="tool_response",
+   225	                author=author,
+   226	                tool_name=getattr(fr, "name", "") or "",
+   227	                tool_result=resp_text,
+   228	                usage=consume_usage(),
+   229	                model_version=model,
+   230	            )
+   231	        )
+   232	
+   233	    def _record_thought(
+   234	        self,
+   235	        part: Any,
+   236	        author: str,
+   237	        model: str,
+   238	        now: float,
+   239	        elapsed: float,
+   240	        consume_usage: Callable[[], dict[str, Any] | None],
+   250	                usage=consume_usage(),
+   251	                model_version=model,
+   252	            )
+   253	        )
+   254	
+   255	    def _record_text(
+   256	        self,
+   257	        part: Any,
+   258	        event: Any,
+   259	        author: str,
+   260	        model: str,
+   261	        now: float,
+   262	        elapsed: float,
+   263	        consume_usage: Callable[[], dict[str, Any] | None],
+   264	    ) -> None:
+   265	        """Record a text or final response event."""
+   266	        is_final = (
+   267	            hasattr(event, "is_final_response") and event.is_final_response()
+   268	        )
+   269	        self._add(
+   270	            TraceEntry(
+   271	                timestamp=now,
+   272	                elapsed=elapsed,
+   273	                event_type="final" if is_final else "text",
+   274	                author=author,
+   275	                content=part.text.strip(),
+   276	                usage=consume_usage(),
+   277	                model_version=model,
+   278	            )
+   279	        )
+   280	
+   281	    def record_event(self, event: Any) -> None:
+   282	        """Record an ADK Event into the trace."""
+   283	        now = time.time()
+   284	        elapsed = now - self._start_time if self._start_time is not None else 0.0
+   285	        author = getattr(event, "author", "")
+   286	        model = getattr(event, "model_version", "") or ""
+   287	
+   288	        usage = self._extract_usage(event)
+   289	
+   290	        def _consume_usage() -> dict[str, Any] | None:
+   291	            """Return usage and clear it so it's only attached once."""
+   292	            nonlocal usage
+   293	            result, usage = usage, None
+   294	            return result
+   295	
+   296	        if self._record_compaction(event, author, model, now, elapsed, _consume_usage):
+   297	            return
+   298	
+   299	        content = getattr(event, "content", None)
+   300	        if not content or not hasattr(content, "parts") or not content.parts:
+   301	            if usage:
+   302	                self._add(
+   303	                    TraceEntry(
+   304	                        timestamp=now,
+   305	                        elapsed=elapsed,
+   306	                        event_type="usage",
+   307	                        author=author,
+   308	                        usage=_consume_usage(),
+   309	                        model_version=model,
+   310	                    )
+   311	                )
+   312	            return
+   313	
+   314	        for part in content.parts:
+   315	            if hasattr(part, "function_call") and part.function_call:
+   316	                self._record_function_call(part, author, model, now, elapsed, _consume_usage)
+   317	            elif hasattr(part, "function_response") and part.function_response:
+   318	                self._record_function_response(part, author, model, now, elapsed, _consume_usage)
+   319	            elif hasattr(part, "thought") and part.thought:
+   320	                self._record_thought(part, author, model, now, elapsed, _consume_usage)
+   321	            elif hasattr(part, "text") and part.text and part.text.strip():
+   322	                self._record_text(part, event, author, model, now, elapsed, _consume_usage)
+   323	
+   324	        if usage:
+   325	            self._add(
+   326	                TraceEntry(
+   327	                    timestamp=now,
+   328	                    elapsed=elapsed,
+   329	                    event_type="usage",
+   330	                    author=author,
+   331	                    usage=_consume_usage(),
+   332	                    model_version=model,
+   333	                )
+   334	            )
+   335	
+   336	    def record_custom(
+   337	        self,
+   338	        event_type: str,
+   370	            model_name=model_name,
+   371	        )
+   372	
+   373	    def to_dict(self, format: str = "atif") -> dict[str, Any]:
+   374	        """Export the full trace as a dict (in either 'atif' or 'legacy' format)."""
+   375	        if format == "legacy":
+   376	            return {
+   377	                "trace_version": "1.0",
+   378	                "duration_s": round(self.duration, 3),
+   379	                "num_entries": len(self._entries),
+   380	                "entries": [e.to_dict() for e in self._entries],
+   381	                "summary": self.summarize(),
+   382	            }
+   383	        return self.to_atif().to_dict()
+   384	
+   385	    @property
+   386	    def tool_call_breakdown(self) -> dict[str, int]:
+   387	        """Return a mapping of tool name → call count."""
+   388	        counts: dict[str, int] = {}
+   389	        for e in self._entries:
+   390	            if e.event_type == "tool_call":
+   391	                counts[e.tool_name] = counts.get(e.tool_name, 0) + 1
+   392	        return counts
+   393	
+   394	    def summarize(self) -> dict[str, Any]:
+   395	        """Generate summary statistics."""
+   396	        breakdown = self.tool_call_breakdown
+   397	
+   398	        total_prompt = sum(
+   399	            int(e.usage.get("prompt_tokens", 0) or 0) for e in self._entries if e.usage
+   400	        )
+   401	        total_cached = sum(
+   402	            int(e.usage.get("cached_tokens", 0) or 0) for e in self._entries if e.usage
+   403	        )
+   404	        total_completion = sum(
+   405	            int(e.usage.get("completion_tokens", 0) or 0) for e in self._entries if e.usage
+   406	        )
+   407	        total_tokens = sum(
+   408	            max(
+   409	                int(e.usage.get("prompt_tokens", 0) or 0) + int(e.usage.get("completion_tokens", 0) or 0),
+   410	                int(e.usage.get("total_tokens", 0) or 0),
+   411	            )
+   412	            for e in self._entries
+   413	            if e.usage
+   414	        )
+   415	
+   416	        return {
+   417	            "total_events": len(self._entries),
+   418	            "tool_calls": sum(breakdown.values()),
+   419	            "tool_call_breakdown": breakdown,
+   420	            "thinking_entries": sum(
+   421	                1 for e in self._entries if e.event_type == "thinking"
+   422	            ),
+   423	            "compaction_entries": sum(
+   424	                1 for e in self._entries if e.event_type == "compaction"
+   425	            ),
+   426	            "text_entries": sum(1 for e in self._entries if e.event_type == "text"),
+   427	            "total_prompt_tokens": total_prompt,
+   428	            "total_cached_prompt_tokens": total_cached,
+   429	            "total_completion_tokens": total_completion,
+   430	            "total_tokens": total_tokens,
+   431	        }
+   432	
+   433	    def save(self, path: str | Path, format: str = "atif") -> None:
+   434	        """Save the trace to a JSON file."""
+   435	        path = Path(path)
+39:        min: The minimum allowed value (inclusive). Can be a float or an integer.
+51:        """Validate that the minimum value is less than or equal to the maximum value.
+263:class GenerationConstraints:
+287:        thinking_budget: Bounding range constraint for the model's thinking budget
+304:    thinking_budget: NumericRange | None = None
+321:        5. Validates ``thinking_budget`` within ``thinking_config``. If ``thinking_config`` is
+323:           allowed budget (``thinking_budget.max``).
+409:        # 6. Check and enrich thinking_budget on merged config
+413:                tc.get("thinking_budget")
+415:                else getattr(tc, "thinking_budget", None)
+425:                        f"Agent '{agent_name}': thinking_budget={budget!r} is not a valid finite number"
+427:                if self.thinking_budget is not None:
+428:                    self.thinking_budget.check(budget, "thinking_budget", agent_name)
+429:            elif self.thinking_budget is not None:
+430:                default_budget = self.thinking_budget.max
+433:                    tc_copy["thinking_budget"] = default_budget
+437:                    tc_copy["thinking_budget"] = default_budget
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import json,pathlib
+for p in sorted(pathlib.Path('runs/31b-v003-p5t4-timing/runs').glob('*/trace.json')):
+ d=json.loads(p.read_text());es=d['entries']; usages=[(e.get('agent'),e.get('author'),e['type'],e['usage'].get('completion_tokens')) for e in es if e.get('usage')];thoughts=[e for e in es if e['type']=='thinking']
+ print(p.parent.name,'keys',list(d),'summary',d.get('summary'),'authors',sorted({str(e.get('author')) for e in es}),'usage_entries',len(usages),'max_completion',max((x[3] for x in usages if isinstance(x[3],int)),default=None),'thoughts',len(thoughts),'usage_keys',list(next((e['usage'] for e in es if e.get('usage')),{})),'entry_keys',list(es[0]) if es else [],'analyzer_calls',sum(e.get('tool')=='code_analyzer_agent' and e['type']=='tool_call' for e in es))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+fastapi_14258 keys ['trace_version', 'duration_s', 'num_entries', 'entries', 'summary'] summary {'total_events': 97, 'tool_calls': 31, 'tool_call_breakdown': {'read_file': 10, 'run_command': 17, 'edit_file': 3, 'submit_patch': 1}, 'thinking_entries': 32, 'compaction_entries': 0, 'text_entries': 0, 'total_prompt_tokens': 310707, 'total_cached_prompt_tokens': 0, 'total_completion_tokens': 5443, 'total_tokens': 316150} authors ['harness', 'swe_baseline_agent'] usage_entries 32 max_completion 903 thoughts 32 usage_keys ['prompt_tokens', 'completion_tokens', 'cached_tokens', 'total_tokens'] entry_keys ['timestamp', 'elapsed_s', 'type', 'author', 'content'] analyzer_calls 0
+fastapi_14851 keys ['trace_version', 'duration_s', 'num_entries', 'entries', 'summary'] summary {'total_events': 122, 'tool_calls': 40, 'tool_call_breakdown': {'read_file': 20, 'run_command': 20}, 'thinking_entries': 40, 'compaction_entries': 0, 'text_entries': 0, 'total_prompt_tokens': 398941, 'total_cached_prompt_tokens': 0, 'total_completion_tokens': 6001, 'total_tokens': 404942} authors ['harness', 'swe_baseline_agent'] usage_entries 40 max_completion 1230 thoughts 40 usage_keys ['prompt_tokens', 'completion_tokens', 'cached_tokens', 'total_tokens'] entry_keys ['timestamp', 'elapsed_s', 'type', 'author', 'content'] analyzer_calls 0
+rich_3063 keys ['trace_version', 'duration_s', 'num_entries', 'entries', 'summary'] summary {'total_events': 20, 'tool_calls': 6, 'tool_call_breakdown': {'run_command': 5, 'read_file': 1}, 'thinking_entries': 6, 'compaction_entries': 0, 'text_entries': 0, 'total_prompt_tokens': 42253, 'total_cached_prompt_tokens': 0, 'total_completion_tokens': 7272, 'total_tokens': 49525} authors ['harness', 'swe_baseline_agent'] usage_entries 6 max_completion 3092 thoughts 6 usage_keys ['prompt_tokens', 'completion_tokens', 'cached_tokens', 'total_tokens'] entry_keys ['timestamp', 'elapsed_s', 'type', 'author', 'content'] analyzer_calls 0
+rich_3067 keys ['trace_version', 'duration_s', 'num_entries', 'entries', 'summary'] summary {'total_events': 73, 'tool_calls': 23, 'tool_call_breakdown': {'run_command': 14, 'read_file': 7, 'edit_file': 1, 'submit_patch': 1}, 'thinking_entries': 24, 'compaction_entries': 0, 'text_entries': 0, 'total_prompt_tokens': 212911, 'total_cached_prompt_tokens': 0, 'total_completion_tokens': 5763, 'total_tokens': 218674} authors ['harness', 'swe_baseline_agent'] usage_entries 24 max_completion 547 thoughts 24 usage_keys ['prompt_tokens', 'completion_tokens', 'cached_tokens', 'total_tokens'] entry_keys ['timestamp', 'elapsed_s', 'type', 'author', 'content'] analyzer_calls 0
+rich_3454 keys ['trace_version', 'duration_s', 'num_entries', 'entries', 'summary'] summary {'total_events': 82, 'tool_calls': 26, 'tool_call_breakdown': {'read_file': 5, 'run_command': 12, 'edit_file': 8, 'submit_patch': 1}, 'thinking_entries': 27, 'compaction_entries': 0, 'text_entries': 0, 'total_prompt_tokens': 221342, 'total_cached_prompt_tokens': 0, 'total_completion_tokens': 4195, 'total_tokens': 225537} authors ['harness', 'swe_baseline_agent'] usage_entries 27 max_completion 908 thoughts 27 usage_keys ['prompt_tokens', 'completion_tokens', 'cached_tokens', 'total_tokens'] entry_keys ['timestamp', 'elapsed_s', 'type', 'author', 'content'] analyzer_calls 0
+rich_3535 keys ['trace_version', 'duration_s', 'num_entries', 'entries', 'summary'] summary {'total_events': 26, 'tool_calls': 8, 'tool_call_breakdown': {'run_command': 5, 'read_file': 2, 'edit_file': 1}, 'thinking_entries': 8, 'compaction_entries': 0, 'text_entries': 0, 'total_prompt_tokens': 66908, 'total_cached_prompt_tokens': 0, 'total_completion_tokens': 7088, 'total_tokens': 73996} authors ['harness', 'swe_baseline_agent'] usage_entries 8 max_completion 4247 thoughts 8 usage_keys ['prompt_tokens', 'completion_tokens', 'cached_tokens', 'total_tokens'] entry_keys ['timestamp', 'elapsed_s', 'type', 'author', 'content'] analyzer_calls 0
+rich_3930 keys ['trace_version', 'duration_s', 'num_entries', 'entries', 'summary'] summary {'total_events': 56, 'tool_calls': 18, 'tool_call_breakdown': {'run_command': 6, 'read_file': 12}, 'thinking_entries': 18, 'compaction_entries': 0, 'text_entries': 0, 'total_prompt_tokens': 189881, 'total_cached_prompt_tokens': 0, 'total_completion_tokens': 5656, 'total_tokens': 195537} authors ['harness', 'swe_baseline_agent'] usage_entries 18 max_completion 2829 thoughts 18 usage_keys ['prompt_tokens', 'completion_tokens', 'cached_tokens', 'total_tokens'] entry_keys ['timestamp', 'elapsed_s', 'type', 'author', 'content'] analyzer_calls 0
+rich_3953 keys ['trace_version', 'duration_s', 'num_entries', 'entries', 'summary'] summary {'total_events': 50, 'tool_calls': 16, 'tool_call_breakdown': {'run_command': 10, 'read_file': 6}, 'thinking_entries': 16, 'compaction_entries': 0, 'text_entries': 0, 'total_prompt_tokens': 149931, 'total_cached_prompt_tokens': 0, 'total_completion_tokens': 4554, 'total_tokens': 154485} authors ['harness', 'swe_baseline_agent'] usage_entries 16 max_completion 1197 thoughts 16 usage_keys ['prompt_tokens', 'completion_tokens', 'cached_tokens', 'total_tokens'] entry_keys ['timestamp', 'elapsed_s', 'type', 'author', 'content'] analyzer_calls 0
+
+web search: site.github.com/vllm-project/vllm gemma4_reasoning_parser enable_thinking ...
+web search: 
+web search: https://raw.githubusercontent.com/vllm-project/vllm/main/vllm/reasoning/gemma4_reasoning_parser.py
+web search: 
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py | sed -n '30,110p;233,252p'; rg -n 'trace|record_event|generate_content_config|GenerationConstraints|thinking_budget' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py | sed -n '165,174p'; nl -ba eval/plans/006.md | sed -n '60,90p'; ls /home/ubuntu/gemma-local/pyimg" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+    30	            "thinking", "text", "final", "usage", or custom types).
+    31	        author: The agent or component that produced this event.
+    32	        content: Text content (for thinking, text, and final events).
+    33	        tool_name: Name of the tool (for tool_call and tool_response events).
+    34	        tool_args: Arguments passed to the tool (for tool_call events).
+    35	        tool_result: Serialized tool response (for tool_response events).
+    36	        usage: Token usage metadata (prompt, completion, total counts).
+    37	        model_version: Model identifier that produced this event.
+    38	        metadata: Arbitrary metadata for custom events.
+    39	    """
+    40	
+    41	    timestamp: float
+    42	    elapsed: float  # seconds since trace start
+    43	    event_type: (
+    44	        str  # "thinking", "tool_call", "tool_response", "text", "final", "error"
+    45	    )
+    46	    author: str = ""
+    47	    content: str = ""
+    48	    tool_name: str = ""
+    49	    tool_args: dict[str, Any] | None = None
+    50	    tool_result: str = ""
+    51	    usage: dict[str, Any] | None = None  # token counts
+    52	    model_version: str = ""
+    53	    metadata: dict[str, Any] | None = None
+    54	
+    55	    def to_dict(self) -> dict[str, Any]:
+    56	        """Convert the trace entry to a dictionary."""
+    57	        d = {
+    58	            "timestamp": self.timestamp,
+    59	            "elapsed_s": round(self.elapsed, 3),
+    60	            "type": self.event_type,
+    61	        }
+    62	        if self.author:
+    63	            d["author"] = self.author
+    64	        if self.content:
+    65	            d["content"] = self.content
+    66	        if self.tool_name:
+    67	            d["tool"] = self.tool_name
+    68	        if self.tool_args is not None:
+    69	            d["args"] = self.tool_args
+    70	        if self.tool_result:
+    71	            d["result"] = self.tool_result
+    72	        if self.usage:
+    73	            d["usage"] = self.usage
+    74	        if self.model_version:
+    75	            d["model"] = self.model_version
+    76	        if self.metadata:
+    77	            d["metadata"] = self.metadata
+    78	        return d
+    79	
+    80	
+    81	class SessionTrace:
+    82	    """Records and exports a complete session trace.
+    83	
+    84	    Usage:
+    85	        trace = SessionTrace()
+    86	        trace.start()
+    87	        # ... during agent run, call trace.record_event(event) for each ADK event
+    88	        trace.save("trace.json")
+    89	    """
+    90	
+    91	    def __init__(self) -> None:
+    92	        self._entries: list[TraceEntry] = []
+    93	        self._start_time: float | None = None
+    94	        self._on_entry: Callable[[TraceEntry], None] | None = None
+    95	
+    96	    def start(self) -> None:
+    97	        """Mark the start of the trace."""
+    98	        self._start_time = time.time()
+    99	        self._entries.clear()
+   100	
+   101	    @property
+   102	    def entries(self) -> list[TraceEntry]:
+   103	        """Return a copy of the recorded trace entries."""
+   104	        return list(self._entries)
+   105	
+   106	    @property
+   107	    def duration(self) -> float:
+   108	        """Return the total elapsed duration of the trace in seconds."""
+   109	        if not self._entries:
+   110	            return 0.0
+   233	    def _record_thought(
+   234	        self,
+   235	        part: Any,
+   236	        author: str,
+   237	        model: str,
+   238	        now: float,
+   239	        elapsed: float,
+   240	        consume_usage: Callable[[], dict[str, Any] | None],
+   241	    ) -> None:
+   242	        """Record a thinking/thought event."""
+   243	        self._add(
+   244	            TraceEntry(
+   245	                timestamp=now,
+   246	                elapsed=elapsed,
+   247	                event_type="thinking",
+   248	                author=author,
+   249	                content=part.text.strip() if part.text else "",
+   250	                usage=consume_usage(),
+   251	                model_version=model,
+   252	            )
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:11:    GenerationConstraints,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:36:) -> tuple[SubmissionLimits, GenerationConstraints]:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:59:    gen_constraints = GenerationConstraints(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:62:        thinking_budget=NumericRange(0, 32768),
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:65:            'thinking_config': {'thinking_budget': 4096},
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:115:    generation_constraints: GenerationConstraints | None = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:499:    trace = SessionTrace()
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:500:    trace.start()
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:662:            trace.record_event(event)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:668:            trace_callback=_on_event,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:730:        # Record prompts into trace for TraceViewer and offline analysis
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:743:            trace.record_custom(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:748:        trace.record_custom(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1008:                        trace.record_custom(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1120:    return agent_patch, agent_error, trace
+   165	    """
+   166	
+   167	    model_config = ConfigDict(extra="forbid", frozen=True)
+   168	
+   169	    thinking_budget: int | None = Field(default=None, ge=0)
+   170	    include_thoughts: bool | None = None
+   171	    thinking_level: str | None = None
+   172	
+   173	    @field_validator("thinking_budget", mode="before")
+   174	    @classmethod
+    60	  <= 2 L4x4 h = 4 quota-h. Push after codex-review (job review-kernel-probes-light) is clean; no further decision needed.
+    61	
+    62	## Dec 036 correction (2026-11-05T21:34Z; before any 31B run, no 31B data exists)
+    63	- The minus-image mode in 63127c8 subtracted only image_emulation_seconds (~11.5 s in v5), not the ~202 s setup.py step,
+    64	  so (b) would FAIL by construction at cap 4.0. Replaced by `--gate-mode stock-path` (branch codex/kernel-probes-gate 92a74c7):
+    65	  stockpath_phase1 = phase1_wall - image_emulation_seconds - setup_py_emulation_seconds (setup_calls step 'setup.py'; missing -> FAIL).
+    66	  (b) max(stockpath_phase1) <= cap x 60 + 37 s (277 s at cap 4.0). Default mode 'total' unchanged.
+    67	- Reported, NOT gated: h1_composite = agent_clock + finalization + P1 stock_setup total_s (per task + max). G1 rests on it.
+    68	- Check on v5 (cap 1.4, results/kaggle_timing_e4b_v001.json): rich_3067 stockpath_phase1 = 303.24 - 11.52 - 202.19 = 89.52 s
+    69	  (unit test). Whole v5 journal: max 92.3 s <= 121 s (would PASS b); gate overall FAIL on (a) only (known).
+    70	- Command for the plan-006 run: timing_summary.py --gate-mode stock-path --gate-vllm-seconds 600.
+    71	- Bundle naming (dec 036 item 2): the cap-4.0 bundle is 31b-v001-t4 (timing only). The G1 SUBMIT candidate is a separate 31b-v002,
+    72	  cap <= 3.5, byte-identical apart from the eval_config cap + comment; no re-time.
+    73	- Push only after BOTH reviews are clean: review-kernel-probes-light (63127c8, P1-P3 + bundle) and
+    74	  review-kernel-probes-gate-light (63127c8..92a74c7 delta + dec 036 item 3 check). The kernel pushed = codex/kernel-probes-gate.
+cpython-3.13-linux-x86_64-gnu
+cpython-3.13.18-linux-x86_64-gnu
+
+web search: site.github.com/vllm-project/vllm "class Gemma4" "enable_thinking" ...
+web search: 
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 /home/ubuntu/gemma-local/venv/bin/python3 - <<'PY'
+from types import SimpleNamespace
+from adk_submission.schema import ThinkingConfig
+from adk_submission.resolvers.generation import apply_thinking_config_to_model
+from swegemma.config import default_submission_constraints
+import inspect
+print('constraints factory',inspect.signature(default_submission_constraints))
+for budget in (0,1024,4096):
+ cfg=ThinkingConfig(thinking_budget=budget, include_thoughts=True)
+ model=SimpleNamespace(_additional_args={'extra_body':{'thinking_token_budget':999},'reasoning_effort':'high'})
+ out=apply_thinking_config_to_model(model, {'thinking_config':cfg.model_dump(exclude_none=True)})
+ print('budget',budget,'args',out._additional_args,'include_thoughts',out.__dict__.get('_adk_include_thoughts'))
+ assert out is not model
+ if budget==0:
+  assert out._additional_args['extra_body']=={'chat_template_kwargs':{'enable_thinking':False}}
+  assert 'reasoning_effort' not in out._additional_args
+PY" in /home/ubuntu/work/gemma
+web search: https://raw.githubusercontent.com/vllm-project/vllm/main/vllm/reasoning/gemma4_reasoning.py
+ exited 1 in 2078ms:
+02:25:05 - LiteLLM:WARNING: get_model_cost_map.py:327 - LiteLLM: model cost map fetch attempt 1/3 failed (ConnectError fetching https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: [Errno -3] Temporary failure in name resolution); retrying in 2.0s
+02:25:05 - LiteLLM:WARNING: get_model_cost_map.py:705 - LiteLLM: Failed to fetch remote model cost map from https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: ConnectError fetching https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: [Errno -3] Temporary failure in name resolution. Falling back to local backup.
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/__init__.py", line 84, in <module>
+    import litellm
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/__init__.py", line 1342, in <module>
+    from .llms.anthropic.common_utils import AnthropicModelInfo
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/__init__.py", line 1, in <module>
+    from .batches.transformation import AnthropicBatchesConfig
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/batches/__init__.py", line 1, in <module>
+    from .handler import AnthropicBatchesHandler
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/batches/handler.py", line 21, in <module>
+    from ..common_utils import AnthropicModelInfo
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/common_utils.py", line 37, in <module>
+    from litellm.llms.anthropic.wif import (
+    ...<4 lines>...
+    )
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/wif.py", line 18, in <module>
+    from litellm.llms.base_llm.auth.client_credentials import keycloak_assertion_source
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/__init__.py", line 1, in <module>
+    from litellm.llms.base_llm.auth.client_credentials import (
+    ...<3 lines>...
+    )
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/client_credentials.py", line 25, in <module>
+    from litellm.llms.base_llm.auth.token_exchange import (
+    ...<5 lines>...
+    )
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/token_exchange.py", line 942, in <module>
+    default_token_exchange_engine: Final = JwtBearerTokenExchangeEngine(shared_store=default_shared_token_store())
+                                                                                     ~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/base_llm/auth/shared_token_store.py", line 182, in default_shared_token_store
+    return FileTokenStore(Path(tempfile.gettempdir()) / f"litellm-token-exchange-{os.getuid()}")
+                               ~~~~~~~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 366, in gettempdir
+    return _os.fsdecode(_gettempdir())
+                        ~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 359, in _gettempdir
+    tempdir = _get_default_tempdir()
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 223, in _get_default_tempdir
+    raise FileNotFoundError(_errno.ENOENT,
+                            "No usable temporary directory found in %s" %
+                            dirlist)
+FileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma']
+
+web search: 
+exec
+/bin/bash -lc "rg -n -m 6 'vLLM API server version|vllm version|vllm==|vllm-' runs/31b-v003-p5t4-timing/gemma-31b-timing.log; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py | sed -n '33,72p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py | sed -n '240,305p'; rg -n 'trace_callback|after_model|before_model' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core -g '*.py' | head -n 45; git status --short" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+    33	
+    34	def build_submission_limits(
+    35	    max_loop_iterations: int = 500,
+    36	) -> tuple[SubmissionLimits, GenerationConstraints]:
+    37	    """Assemble default competition submission limits and generation constraints.
+    38	
+    39	    Enforces a 3 GiB total unpacked submission size cap (including adapters/),
+    40	    restricts file types to strictly required config/prompt/skill/LoRA formats
+    41	    (.yaml, .yml, .md, .txt, .py, .json, .safetensors), and bounds token generation
+    42	    parameters to the 4x L4 vLLM context length (32,768 tokens).
+    43	    """
+    44	    limits = SubmissionLimits(
+    45	        max_total_size_bytes=MAX_SUBMISSION_SIZE_BYTES,
+    46	        max_yaml_size_bytes=50 * 1024 * 1024,
+    47	        max_skill_size_bytes=50 * 1024 * 1024,
+    48	        max_file_count=10_000,
+    49	        max_yaml_files=1_000,
+    50	        max_instruction_chars=1_000_000,
+    51	        max_total_instruction_chars=10_000_000,
+    52	        max_agents=500,
+    53	        max_sub_agent_depth=50,
+    54	        max_skills=1_000,
+    55	        max_loop_iterations=max_loop_iterations,
+    56	        allowed_file_extensions=ALLOWED_SUBMISSION_EXTENSIONS,
+    57	        adapter_extensions=ALLOWED_ADAPTER_EXTENSIONS,
+    58	    )
+    59	    gen_constraints = GenerationConstraints(
+    60	        allowed_fields=None,
+    61	        max_output_tokens=NumericRange(1, 32768),
+    62	        thinking_budget=NumericRange(0, 32768),
+    63	        defaults={
+    64	            'max_output_tokens': 16384,
+    65	            'thinking_config': {'thinking_budget': 4096},
+    66	        },
+    67	    )
+    68	    return limits, gen_constraints
+    69	
+    70	if TYPE_CHECKING:
+    71	    from google.adk.agents.context_cache_config import ContextCacheConfig
+    72	    from google.adk.apps._configs import EventsCompactionConfig
+   240	        else:
+   241	
+   242	            @functools.wraps(orig_content_to_msg)
+   243	            def _patched_content_to_message_param(*args: Any, **kwargs: Any) -> Any:
+   244	                res = orig_content_to_msg(*args, **kwargs)
+   245	                return _normalize_reasoning_message(res)
+   246	
+   247	        _patched_content_to_message_param._adk_submission_reasoning_patched = True  # type: ignore[attr-defined]
+   248	        lite_llm._content_to_message_param = _patched_content_to_message_param
+   249	        patched = True
+   250	
+   251	    orig_ensure_tools = getattr(lite_llm, "_ensure_tool_results", None)
+   252	    if callable(orig_ensure_tools) and not getattr(
+   253	        orig_ensure_tools, "_adk_submission_reasoning_patched", False
+   254	    ):
+   255	
+   256	        @functools.wraps(orig_ensure_tools)
+   257	        def _patched_ensure_tool_results(messages: Any, *args: Any, **kwargs: Any) -> Any:
+   258	            res = orig_ensure_tools(messages, *args, **kwargs)
+   259	            _normalize_reasoning_message(messages)
+   260	            return res
+   261	
+   262	        _patched_ensure_tool_results._adk_submission_reasoning_patched = True  # type: ignore[attr-defined]
+   263	        lite_llm._ensure_tool_results = _patched_ensure_tool_results
+   264	        patched = True
+   265	
+   266	    orig_get_inputs = getattr(lite_llm, "_get_completion_inputs", None)
+   267	    if callable(orig_get_inputs) and not getattr(
+   268	        orig_get_inputs, "_adk_submission_reasoning_patched", False
+   269	    ):
+   270	        def _enrich_completion_inputs(res: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+   271	            if not isinstance(res, tuple) or len(res) == 0:
+   272	                return res
+   273	            llm_request = args[0] if args else kwargs.get("llm_request")
+   274	            inc_thoughts = _extract_include_thoughts(llm_request)
+   275	            if inc_thoughts is False:
+   276	                _strip_reasoning_from_messages(res[0])
+   277	            else:
+   278	                _normalize_reasoning_message(res[0])
+   279	            req_cfg = getattr(llm_request, "config", None) if llm_request is not None else None
+   280	            seed = getattr(req_cfg, "seed", None) if req_cfg is not None else None
+   281	            if seed is not None and not isinstance(seed, bool) and len(res) >= 4:
+   282	                gen_params = dict(res[3]) if isinstance(res[3], dict) else {}
+   283	                gen_params.setdefault("seed", int(seed))
+   284	                return (res[0], res[1], res[2], gen_params, *res[4:])
+   285	            return res
+   286	
+   287	        if inspect.iscoroutinefunction(orig_get_inputs):
+   288	
+   289	            @functools.wraps(orig_get_inputs)
+   290	            async def _patched_get_completion_inputs(*args: Any, **kwargs: Any) -> Any:
+   291	                res = await orig_get_inputs(*args, **kwargs)
+   292	                return _enrich_completion_inputs(res, args, kwargs)
+   293	
+   294	        else:
+   295	
+   296	            @functools.wraps(orig_get_inputs)
+   297	            def _patched_get_completion_inputs(*args: Any, **kwargs: Any) -> Any:
+   298	                res = orig_get_inputs(*args, **kwargs)
+   299	                return _enrich_completion_inputs(res, args, kwargs)
+   300	
+   301	        _patched_get_completion_inputs._adk_submission_reasoning_patched = True  # type: ignore[attr-defined]
+   302	        lite_llm._get_completion_inputs = _patched_get_completion_inputs
+   303	        patched = True
+   304	
+   305	    litellm_cls = getattr(lite_llm, "LiteLlm", None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:37:        trace_callback: Callable[[Any], None] | None = None,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:45:                    trace_callback is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:54:        eff_on_event = on_event if on_event is not None else trace_callback
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:75:        self.trace_callback = self._on_event
+ M ops/codex/review-20261106T022324.log
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 /home/ubuntu/gemma-local/venv/bin/python3 - <<'PY'
+import ast,pathlib
+from typing import Any
+from types import SimpleNamespace
+from adk_submission.schema import ThinkingConfig
+p=pathlib.Path('/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py')
+t=ast.parse(p.read_text());f=next(n for n in t.body if isinstance(n,ast.FunctionDef) and n.name=='apply_thinking_config_to_model')
+ns={'Any':Any,'install_litellm_reasoning_patch':lambda:None}
+exec(compile(ast.Module(body=[f],type_ignores=[]),str(p),'exec'),ns)
+for budget in (0,1024,4096):
+ c=ThinkingConfig(thinking_budget=budget,include_thoughts=True)
+ model=SimpleNamespace(_additional_args={'extra_body':{'thinking_token_budget':999},'reasoning_effort':'high'})
+ out=ns['apply_thinking_config_to_model'](model,{'thinking_config':c.model_dump(exclude_none=True)})
+ print('budget',budget,'args',out._additional_args,'include_thoughts',out.__dict__.get('_adk_include_thoughts'))
+ if budget==0:
+  assert out._additional_args=={'extra_body':{'chat_template_kwargs':{'enable_thinking':False}}}
+print('PASS schema and isolated resolver mapping; LiteLLM patch installation not exercised')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 793ms:
+budget 0 args {'extra_body': {'chat_template_kwargs': {'enable_thinking': False}}} include_thoughts True
+budget 1024 args {'extra_body': {'thinking_token_budget': 1024, 'chat_template_kwargs': {'enable_thinking': True}}, 'reasoning_effort': 'high'} include_thoughts True
+budget 4096 args {'extra_body': {'thinking_token_budget': 4096, 'chat_template_kwargs': {'enable_thinking': True}}, 'reasoning_effort': 'high'} include_thoughts True
+PASS schema and isolated resolver mapping; LiteLLM patch installation not exercised
+
+web search: 'enable_thinking'
+codex
+Md has two interpretation problems: the callable analyzer still has a 4096 thinking budget, while Md checks the whole trace; and zero thinking does not limit visible text or tool arguments to 1024 tokens. Either can trigger “NOT-ENFORCED” even if the root agent correctly switches thinking off. The fields are measurable, and the rule covers every V/Md outcome once both predicates are defined.
+web search: 
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py | sed -n '1,30p;115,155p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py | sed -n '1,100p'; rg -n 'def after_model|def on_event|_on_event|trace' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/*.py | head -n 45; nl -ba eval/plans/005.md | sed -n '101,116p'; nl -ba bundles/31b/v006/MANIFEST.md" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	"""Session trace recorder for ADK agent benchmark evaluations.
+     2	
+     3	Captures every ADK event during an agent run and provides
+     4	structured output for debugging and analysis.
+     5	"""
+     6	
+     7	from __future__ import annotations
+     8	
+     9	import json
+    10	import time
+    11	from collections.abc import Callable
+    12	from dataclasses import dataclass
+    13	from pathlib import Path
+    14	from typing import TYPE_CHECKING, Any
+    15	
+    16	from adk_eval_core.utils.utils import unwrap_tool_response
+    17	
+    18	if TYPE_CHECKING:
+    19	    from adk_eval_core.tracing.atif import Trajectory
+    20	
+    21	
+    22	@dataclass
+    23	class TraceEntry:
+    24	    """A single recorded event in the session trace.
+    25	
+    26	    Attributes:
+    27	        timestamp: Absolute wall-clock time of the event (seconds since epoch).
+    28	        elapsed: Seconds elapsed since the trace started.
+    29	        event_type: Category of event (e.g., "tool_call", "tool_response",
+    30	            "thinking", "text", "final", "usage", or custom types).
+   115	        self._on_entry = callback
+   116	
+   117	    def _add(self, entry: TraceEntry) -> None:
+   118	        """Append a trace entry and fire the callback if set."""
+   119	        self._entries.append(entry)
+   120	        if self._on_entry:
+   121	            self._on_entry(entry)
+   122	
+   123	    def _extract_usage(self, event: Any) -> dict[str, Any] | None:
+   124	        """Extract usage metadata from an event if available."""
+   125	        if hasattr(event, "usage_metadata") and event.usage_metadata:
+   126	            um = event.usage_metadata
+   127	            usage = {}
+   128	            if hasattr(um, "prompt_token_count") and um.prompt_token_count is not None:
+   129	                usage["prompt_tokens"] = um.prompt_token_count
+   130	            if hasattr(um, "candidates_token_count") and um.candidates_token_count is not None:
+   131	                usage["completion_tokens"] = um.candidates_token_count
+   132	            if hasattr(um, "cached_content_token_count") and um.cached_content_token_count is not None:
+   133	                usage["cached_tokens"] = um.cached_content_token_count
+   134	            if hasattr(um, "total_token_count") and um.total_token_count is not None:
+   135	                usage["total_tokens"] = um.total_token_count
+   136	            if any(usage.values()):
+   137	                return usage
+   138	        return None
+   139	
+   140	    def _record_compaction(
+   141	        self,
+   142	        event: Any,
+   143	        author: str,
+   144	        model: str,
+   145	        now: float,
+   146	        elapsed: float,
+   147	        consume_usage: Callable[[], dict[str, Any] | None],
+   148	    ) -> bool:
+   149	        """Record compaction action event if present."""
+   150	        if (
+   151	            hasattr(event, "actions")
+   152	            and event.actions
+   153	            and type(event.actions).__name__ != "MagicMock"
+   154	            and hasattr(event.actions, "compaction")
+   155	            and event.actions.compaction
+     1	"""ADK EventDisplayPlugin for real-time live terminal streaming."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import logging
+     6	from collections.abc import Callable
+     7	from typing import TYPE_CHECKING, Any
+     8	
+     9	from google.adk.plugins.base_plugin import BasePlugin
+    10	
+    11	from adk_eval_core.ui.formatters import (
+    12	    ToolFormatterRegistry,
+    13	    get_default_formatter_registry,
+    14	)
+    15	
+    16	if TYPE_CHECKING:
+    17	    from google.adk.agents.invocation_context import InvocationContext
+    18	    from google.adk.events.event import Event
+    19	
+    20	    from adk_eval_core.ui.event_display import EventDisplay
+    21	
+    22	logger = logging.getLogger(__name__)
+    23	
+    24	
+    25	class EventDisplayPlugin(BasePlugin):
+    26	    """ADK plugin intercepting agent events to render terminal UI updates."""
+    27	
+    28	    def __init__(
+    29	        self,
+    30	        display: EventDisplay | Callable[[Any], None] | None = None,
+    31	        formatter_registry: ToolFormatterRegistry | None = None,
+    32	        name: str | None = None,
+    33	        on_event: Callable[[Any], None] | None = None,
+    34	        *,
+    35	        event_display: Any | None = None,
+    36	        display_manager: Any | None = None,
+    37	        trace_callback: Callable[[Any], None] | None = None,
+    38	    ) -> None:
+    39	        eff_name = (
+    40	            name
+    41	            if name is not None
+    42	            else (
+    43	                "swegemma_display"
+    44	                if (
+    45	                    trace_callback is not None
+    46	                    or display_manager is not None
+    47	                    or event_display is not None
+    48	                )
+    49	                else "event_display"
+    50	            )
+    51	        )
+    52	        super().__init__(name=eff_name)
+    53	        eff_display = display if display is not None else (event_display or display_manager)
+    54	        eff_on_event = on_event if on_event is not None else trace_callback
+    55	
+    56	        if callable(eff_on_event):
+    57	            self._on_event: Callable[..., Any] | None = eff_on_event
+    58	            self.display: Any | None = (
+    59	                eff_display
+    60	                if (eff_display is not None and not callable(eff_display))
+    61	                else None
+    62	            )
+    63	        elif (
+    64	            callable(eff_display)
+    65	            and not hasattr(eff_display, "on_event")
+    66	            and not hasattr(eff_display, "log")
+    67	        ):
+    68	            self._on_event = eff_display
+    69	            self.display = None
+    70	        else:
+    71	            self._on_event = None
+    72	            self.display = eff_display
+    73	
+    74	        self.display_manager = self.display
+    75	        self.trace_callback = self._on_event
+    76	
+    77	        if formatter_registry is not None:
+    78	            self.formatter_registry = formatter_registry
+    79	        elif self.display and hasattr(self.display, "formatter_registry"):
+    80	            self.formatter_registry = self.display.formatter_registry
+    81	        else:
+    82	            self.formatter_registry = get_default_formatter_registry()
+    83	
+    84	    async def on_event_callback(
+    85	        self,
+    86	        *,
+    87	        invocation_context: InvocationContext,
+    88	        event: Event,
+    89	    ) -> Event | None:
+    90	        """Called when an ADK event occurs during agent execution."""
+    91	        if self.display is not None and hasattr(self.display, "on_event"):
+    92	            self.display.on_event(event)
+    93	
+    94	        if self._on_event is not None and self._on_event != getattr(self.display, "on_event", None):
+    95	            self._on_event(event)
+    96	
+    97	        if self.display is not None and hasattr(self.display, "log") and not hasattr(self.display, "on_event"):
+    98	            from rich.markup import escape
+    99	
+   100	            event_type = getattr(event, "type", "event")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:37:        trace_callback: Callable[[Any], None] | None = None,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:45:                    trace_callback is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:54:        eff_on_event = on_event if on_event is not None else trace_callback
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:56:        if callable(eff_on_event):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:57:            self._on_event: Callable[..., Any] | None = eff_on_event
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:68:            self._on_event = eff_display
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:71:            self._on_event = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:75:        self.trace_callback = self._on_event
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:84:    async def on_event_callback(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:94:        if self._on_event is not None and self._on_event != getattr(self.display, "on_event", None):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py:95:            self._on_event(event)
+   101	## Addendum D (pre-registered 2026-11-06T02:23Z, BEFORE any arm-C or arm-D result exists; dec 058 item 4) - CONDITIONAL
+   102	Why: the shippable 31B cap is <= 1.23 min under H3 until a higher cap scores (~2k completion tokens/task at ~30 tok/s), so the question
+   103	is whether minimal thinking still lands edits. Form settled by reading the schema: adk_submission/schema.py ThinkingConfig.thinking_budget
+   104	is `ge=0`; resolvers/generation.py:407 maps thinking_budget <= 0 to enable_thinking=False (chat_template_kwargs.enable_thinking=false,
+   105	no thinking_token_budget sent). So arm D = arm C (31b-v005-p5c) with thinking_budget 1024 -> 0 ONLY (+ MANIFEST); include_thoughts unchanged.
+   106	Run condition: ONLY IF arm C is V-valid AND Mc holds, AND arm D can be pushed by 2026-11-06T21:00Z. Otherwise drop, no further decision.
+   107	Design: same 8 ids, same plan-006 kernel/flags, cap 4.0, 40 calls/50 turns, conc 1, KERNEL_BUDGET 6000 s, k=1; paired vs arm C.
+   108	Mechanism (Md): trace summary thinking_entries == 0 AND per-turn max completion tokens <= 1024 in >= 7/8 tasks (arm B baseline:
+   109	thinking_entries = one per model turn in 8/8 tasks).
+   110	Primary: empty count, paired discordants vs arm C, exact sign test (reported, not in the rule). Secondary: first-ok-edit call index,
+   111	timeouts, completion tokens/task, tool errors (trace_tool_errors.py totals), gates a/b/d/e.
+   112	Decision rule: not V -> INVALID (no verdict, not a strike). V and not Md -> NOT-ENFORCED (thinking cannot be switched off on this
+   113	stack; note for e4b). V and Md and D empty <= C empty and D-empty-only <= 1 -> PASS (minimal thinking is a viable low-cap setting;
+   114	carry into the next 31B candidate design with the cap question, codex-review). V and Md otherwise -> NO-GAIN (keep C's setting or
+   115	4096 per Addendum C verdict). Honest limits: n=8/k=1; thinking off may lower fix quality invisibly here; a non-empty diff is not a pass.
+   116	 Bundle (2026-11-06T02:23Z, before any run): 31b-v006-p5d = bundles/31b/v006, dist/31b-v006.zip sha256 b7b2eb3d139629a5893647546348c1b436c1ff94c786cbdf4e6ec1be12f660a0.
+     1	# 31b-v006-p5d (SCREEN bundle ONLY for plan 005 Addendum D, cap 4.0; conditional on arm C, dec 058 item 4). NOT a submission candidate.
+     2	- Name: 31b-v006-p5d (directory bundles/31b/v006, file dist/31b-v006.zip).
+     3	- parent: 31b-v005-p5c (dist/31b-v005.zip sha256=e8fbcfdc5800d927e6f6e7522b98f252766c6f85a72dcf67adbcc3abc00344f3) = arm C.
+     4	- built from repo git SHA: see the commit that adds this file.
+     5	- changes (EXACTLY one file): configs/sampling.yaml thinking_config.thinking_budget 1024 -> 0 (=> enable_thinking=false per
+     6	  adk_submission/resolvers/generation.py:407). Prompt, caps, analyzer unchanged.
+     7	- status: UNVALIDATED.
+     8	- packed 2026-11-06T02:23Z with bin/pack --zip (PASS, 9091 unpacked bytes, zip 5350 bytes). zip sha256: b7b2eb3d139629a5893647546348c1b436c1ff94c786cbdf4e6ec1be12f660a0
+     9	zip sha256: b7b2eb3d139629a5893647546348c1b436c1ff94c786cbdf4e6ec1be12f660a0
+
+web search: https://raw.githubusercontent.com/vllm-project/vllm/main/vllm/reasoning/gemma4_reasoning_parser.py
+codex
+**BLOCKING**
+
+1. **Md measures agents whose thinking setting was not changed.** The root uses zero, but the callable analyzer retains `thinking_budget: 4096` and `include_thoughts: true` ([sampling.yaml:5](/home/ubuntu/work/gemma/bundles/31b/v006/configs/sampling.yaml:5), [code_analyzer.yaml:23](/home/ubuntu/work/gemma/bundles/31b/v006/sub_agents/code_analyzer.yaml:23)). Md checks whole-trace `thinking_entries`, then interprets failure as “thinking cannot be switched off” ([005.md:108](/home/ubuntu/work/gemma/eval/plans/005.md:108), [005.md:112](/home/ubuntu/work/gemma/eval/plans/005.md:112)). Analyzer reasoning could therefore reject a correctly functioning root intervention. **Fix:** scope the thinking and token checks to entries with `author == "swe_baseline_agent"`; report analyzer activity separately. This preserves the required bundle diff.
+
+2. **The 1024 completion-token threshold cannot diagnose enforcement.** Zero thinking leaves `max_output_tokens: 8192` ([sampling.yaml:3](/home/ubuntu/work/gemma/bundles/31b/v006/configs/sampling.yaml:3)). A root turn can correctly produce no reasoning but exceed 1024 tokens through visible text or edit arguments. Two such tasks make Md fail and produce the false conclusion “NOT-ENFORCED” ([005.md:108](/home/ubuntu/work/gemma/eval/plans/005.md:108)). **Fix:** separate “thinking disabled” from “turns sufficiently short.” Zero root thinking entries plus long completions should receive a distinct length/no-gain verdict.
+
+**Non-blocking / verified**
+
+- **Diff and archive pass.** Directory differences are exactly `configs/sampling.yaml` (`1024 → 0`) and `MANIFEST.md`; ZIP payload differences are only the sampling file. ZIP SHA-256 matches [005.md:116](/home/ubuntu/work/gemma/eval/plans/005.md:116). All six archived files match source; no unsafe paths or symlinks. `bin/pack bundles/31b/v006` reports `PASS` with 9091 unpacked bytes.
+
+- **Zero is accepted and mapped correctly.** Installed [schema.py:169](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:169) accepts zero; competition [config.py:62](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:62) also permits it. [generation.py:407](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:407) gives zero precedence over `include_thoughts: true`; [generation.py:434](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:434) emits `enable_thinking=false`, removes `thinking_token_budget`, and removes `reasoning_effort`. Schema and isolated resolver execution passed. Keeping `include_thoughts: true` preserves any returned reasoning for observation; it does not override zero.
+
+- **Upstream Gemma/vLLM support the switch.** The [QAT chat template](https://huggingface.co/google/gemma-4-31B-it-qat-w4a16-ct/blob/main/chat_template.jinja) gates `<|think|>` on the flag and supplies a closed empty thought block for a new non-thinking turn. The [current vLLM parser](https://github.com/vllm-project/vllm/blob/main/vllm/parser/gemma4.py#L454) reads that flag; [parser tests](https://github.com/vllm-project/vllm/blob/main/tests/reasoning/test_gemma4_reasoning_parser.py#L251) explicitly cover false. However, [agent_timing.py:1151](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:1151) proves parser selection only. I could not certify the exact Kaggle wheel/template revision locally; capture those versions with the screen.
+
+- **Fields are measurable; Boolean branches are exhaustive.** Legacy traces contain `summary.thinking_entries`, `entries[].author`, and `entries[].usage.completion_tokens`; usage is consumed once per event ([trace.py:290](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:290)). All eight existing arm-B traces contain these fields. Scan every usage-bearing entry, including tool calls. [005.md:112](/home/ubuntu/work/gemma/eval/plans/005.md:112) covers every defined V/Md combination. Explicitly assign missing summary/usage to `INVALID`, and clarify whether ≥7/8 applies jointly to both Md conditions.
+
+**Questions**
+
+None.
+
+No files edited. Full runtime import verification was prevented by dependency initialization requiring writable temporary storage; the isolated resolver check passed.
+tokens used
+112,245
