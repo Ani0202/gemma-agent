@@ -34,16 +34,9 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - PLAN 005 ARM C DONE (c107): V-valid; verdict NO-GAIN (empty 3/8 > 2/8; disc B-only 1 / C-only 0, p1=0.5); timeouts 5->3; label
   CONSISTENT (0/8 max LB>1088 vs B 5/8). Files: results/plan005_armC_vs_B.json (B vs C per-turn table), kaggle_timing/trace_tool_errors/
   thinking_bound _31b_v005.json. Director FYI sent 03:38Z. Arm D condition met -> pushed. Quota 11.43 h before D (C +2.01).
-  ARM D analysis when waiter mails: same 3 scripts on runs/31b-v006-p5d-timing (timing_summary --gate-mode stock-path --gate-vllm-seconds
-  600 --gate-max-phase1 277; trace_tool_errors.py <run> 31b-v006-p5d <out> eval/plans/004-gpu-retime-ids.txt; thinking_bound.py),
-  Md = zero root thinking_blocks in >=7/8; verdict vs arm C (D empty <= 3 and D-empty-only <= 1 -> PASS). Then combined C+D report.
 - PLAN 005 ARM B DONE (c105): MECHANISM-ONLY (empty 4/8; write_outside_ws 8->0, edit_missing_param 19->6); taxonomy
   results/taxonomy-31b-v003-p5t4.json (~100% of window = generation). M1/M3 infeasible, M2 declined. v004 reserved.
-- DEC 058: arm C APPROVED (push after review-p5c-light clean; any byte fix -> re-pack + dated sha line first). Push cmd (dry-run OK):
-  eval/kaggle/timing_push.sh aniket0202/gemma-31b-timing bundles/31b/v005 eval/plans/004-gpu-retime-ids.txt 6000 (log quota before/after;
-  waiter like timing-31b-v003-wait-light -> runs/31b-v005-p5c-timing, kernel version 3). Report B vs C per-turn max completion tokens.
-  M2 DECLINED (Addendum B on file, don't build). ARM D (Addendum D, 31b-v006-p5d thinking_budget 0, dist/31b-v006.zip b7b2eb3d...60a0):
-  run ONLY IF C valid AND Mc AND pushable by 2026-11-06T21:00Z, else drop. NOT-ENFORCED -> one e4b line "thinking lever dead".
+- DEC 058 (arm C/D push cmd: eval/kaggle/timing_push.sh aniket0202/gemma-31b-timing <bundle> eval/plans/004-gpu-retime-ids.txt 6000; M2 declined).
   Item 6: fold /tmp fix + hint removal into next candidate (CPU draft OK). Item 7: plan 007 (33-dev pass rate) pre-reg next week.
 - DEC 057 (FastAPI/docs_src hint): dec 055 UNCHANGED (don't touch 31b-v002/zip/kernel). Standing rule: no new bundle/draft carries any
   repo-named hint (31b-v004+, e4b-v003+, drafts). v004 diff vs v002 = prompts/system.md + MANIFEST only, and MUST remove the line.
