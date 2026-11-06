@@ -273,3 +273,6 @@
 2026-11-06T05:30Z | DEC 061 read: CAP-BOUND accepted; A+B approved; arm F (temperature 0.6 on v006) today on expiring quota; plan 007 pre-reg by 11-07T18:00Z; Nov 8 slot proposal by 11-07T12:00Z | ops/decisions/061-014-plan005-armE-result.md
 2026-11-06T05:30Z | Addendum F pre-registered (LOOP-REDUCED / HARM / NO-EFFECT) BEFORE pack; 31b-v008-p5f packed e1513aac (sampling.yaml only), commit 4ead877; light review started | eval/plans/005.md bundles/31b/v008/MANIFEST.md
 2026-11-06T05:33Z | eval/plan005_armF_compare.py written (reuses arm-E metric fns; unreviewed) | eval/plan005_armF_compare.py
+2026-11-06T05:34Z | codex-review-v008-light done: no BLOCKING, one-knob diff + temp 0.6 reaches request confirmed | ops/codex/review-20261106T053049.md
+2026-11-06T05:34:58Z | arm F pushed: gemma-31b-timing v6 (31b-v008-p5f, e1513aac), quota 14.49 h before; waiter timing-31b-v008-wait-light | ops/budget/kaggle.md
+2026-11-06T05:35Z | codex review of eval/plan005_armF_compare.py started (dec 061: review before relying) | ops/jobs/codex-review-armF-compare-light.status

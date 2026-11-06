@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 05:33Z (cycle 115, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-06 05:36Z (cycle 116, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
@@ -26,7 +26,8 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (05:33Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-v008-light (started 05:30:48Z).
+## Running jobs (05:36Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), timing-31b-v008-wait-light (kernel v6, out -> runs/31b-v008-p5f-timing), codex-review-armF-compare-light (05:35Z).
+- ARM F PUSHED 05:34:58Z: aniket0202/gemma-31b-timing v6 (machine_shape NvidiaL4), repo b4d9f59; review-20261106T053049 v008 no BLOCKING; quota 14.49 h BEFORE (05:34:48Z).
 - DEC 061 (on report 014): approve-with-changes. CAP-BOUND accepted; A + B approved. (i) dec 055 v002 submit at 11-07T00:00Z stays FIRST;
   if SCORED -> bring v004 cap choice w/ data (FINALS RULE allows cap<=3.5); if ERROR/timeout -> CAP-BOUND binds, anti-loop only 31B path.
   (ii) v004 stays CPU draft, no slot; fold codex NB2 pipefail fix at system.md:33 next time source touched, label UNSCREENED; no repack.
@@ -75,6 +76,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - Forum question (dec 035): Aniket posts report 009 s6; Builder posts NOTHING; summarize any answer (no task data) in next report.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. On codex-review-v008-light done: if no BLOCKING -> quota log, push arm F, waiter; else fix + re-review.
+1. On waiter done: quota AFTER -> kaggle.md row; post-process (timing_summary, trace_tool_errors, thinking_bound -> results/*_31b_v008.json); armF compare (only if review clean) -> report 015.
 2. Dec 055 at 2026-11-07T00:00Z FIRST: (2)(3) hold; re-check (2) live, do (4) commit, (5) journal T=5.007 h <= 6.0 PASS, then submit.
 3. Plan 007 pre-reg (due 11-07T18:00Z) + Nov 8 slot proposal (due 11-07T12:00Z); dec 038 paper evidence by Nov 9 23:59Z.
