@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 05:29Z (cycle 114, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-06 05:33Z (cycle 115, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
@@ -28,11 +28,24 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   (prompt sections, thinking_budget, cap, quoting line) + which are screened; (b) describe minimal alt, DON'T pack unless asked; (c) label
   quoting line UNSCREENED (covered only by later paired v004-vs-v002). Item 2: dec 059 last line superseded; Nov 7 31B submit write-up
   must note v002 LB = ONLY result carrying the FastAPI hint caveat. Item 3: repeat metric added to plan 007 (Addendum). Priority unchanged.
-## Running jobs (05:29Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z). Arm E DONE: CAP-BOUND (V; empty 5/8 > 4;
-  E-empty-only 2 / D-empty-only 0, p2 0.5; timeouts 2->5, all empty). dec 056 item 6 = binding blocker for 31B final at cap<=1.23. results/plan005_armE_vs_D.json.
-  Post-hoc: identical-tool-call loops (rich_3067 17x failing edit_file, span 55.6 s). REPORT 014 SENT (NEEDS_DECISION 05:28Z) after
-  review-20261106T052532 BLOCKING (range) + NB1/NB2 fixed (script asserts 8 ids, saves run start/end/span); JSON regenerated, other fields identical.
-  Recommends A (wait v002 LB) + B (anti-loop arm F next week). Awaiting Director decision 061.
+## Running jobs (05:33Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-v008-light (started 05:30:48Z).
+- DEC 061 (on report 014): approve-with-changes. CAP-BOUND accepted; A + B approved. (i) dec 055 v002 submit at 11-07T00:00Z stays FIRST;
+  if SCORED -> bring v004 cap choice w/ data (FINALS RULE allows cap<=3.5); if ERROR/timeout -> CAP-BOUND binds, anti-loop only 31B path.
+  (ii) v004 stays CPU draft, no slot; fold codex NB2 pipefail fix at system.md:33 next time source touched, label UNSCREENED; no repack.
+  (iii) next 31B GPU arm = exact-repeat loops.
+  ARM F (item 2-3): pre-registered eval/plans/005.md Addendum F (05:30Z) BEFORE pack. 31b-v008-p5f = bundles/31b/v008 =
+  v006 + root temperature 0.2->0.6 ONLY (code_analyzer sub-agent 0.2 unchanged), dist/31b-v008.zip
+  sha256=e1513aac762e97b9191ec315e87a4132d6657df03d7888a40bdfd19bc135cfe9 (commit 4ead877); diff -r + unzip diff = sampling.yaml only.
+  Rule: not V->INVALID; F empty>=5 or F-empty-only>=3 -> HARM; 0 tasks run>=5 & empty<=4 & F-only<=2 -> LOOP-REDUCED; else NO-EFFECT.
+  Push cmd after review clean: log `kaggle quota`, then eval/kaggle/timing_push.sh aniket0202/gemma-31b-timing bundles/31b/v008
+  eval/plans/004-gpu-retime-ids.txt 6000 (expect kernel v6); waiter like ops/jobs/timing-31b-v007-wait-light.cmd -> runs/31b-v008-p5f-timing.
+  Push by 20:00Z else after reset (no further decision). Then post-process like v007 (timing_summary, trace_tool_errors, thinking_bound
+  -> results/*_31b_v008.json) + eval/plan005_armF_compare.py results/plan005_armF_vs_D.json (script WRITTEN, UNREVIEWED: review before
+  relying). Report honest: T 0.2 stochastic, n=8/k=1 = mechanism screen.
+  Item 4: plan 007 pre-reg (33-dev pass rate; H1 env; thinking off vs on paired arm) DUE 2026-11-07T18:00Z (may use leftover quota pre-reset).
+  Item 5: Nov 8 slot candidate + 1-para justification DUE 2026-11-07T12:00Z (e4b-v002 repeat / e4b-v003 if packed+reviewed+smoke / 31b-v002 repeat).
+  Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
+- Arm E DONE: CAP-BOUND (report 014, results/plan005_armE_vs_D.json); dec 056 item 6 = binding blocker for 31B final at cap<=1.23.
 - DEC 059 (on report 013): B approved. ARM E = 31b-v007-p5e (bundles/31b/v007, dist/31b-v007.zip 3a62f41fa5417ee5b129e845296c5a8e44d496f1d22501d5b3a4b29667be3c6f,
   v006 + cap 1.23 only; light review-20261106T043550 no BLOCKING). Addendum E rule: not V -> INVALID; V & E empty<=4/8 & E-empty-only(vs D)<=2
   -> USABLE; else CAP-BOUND. Analysis DONE c113 (report 014).
@@ -75,6 +88,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - Forum question (dec 035): Aniket posts report 009 s6; Builder posts NOTHING; summarize any answer (no task data) in next report.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. Act on Director decision for report 014 (sent 05:28Z).
+1. On codex-review-v008-light done: if no BLOCKING -> quota log, push arm F, waiter; else fix + re-review.
 2. Dec 055 at 2026-11-07T00:00Z FIRST: (2)(3) hold; re-check (2) live, do (4) commit, (5) journal T=5.007 h <= 6.0 PASS, then submit.
-3. Pre-register arm F (anti-loop, generic) for after reset; Dec 038 paper evidence by Nov 9 23:59Z; plan 007 pre-reg.
+3. Plan 007 pre-reg (due 11-07T18:00Z) + Nov 8 slot proposal (due 11-07T12:00Z); dec 038 paper evidence by Nov 9 23:59Z.

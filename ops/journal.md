@@ -270,3 +270,6 @@
 2026-11-06T05:25Z | post-hoc: identical-tool-call loops 15-72 s in 2-3/8 tasks per arm (E rich_3067 17x same failing edit_file despite no-repeat rule) | results/plan005_armE_vs_D.json
 2026-11-06T05:25Z | report 014 drafted (dec 060 item 1 a-c byte-diff table; quoting line UNSCREENED); review-p5e-light started before sending | ops/reports/014-plan005-armE-result.md
 2026-11-06T05:29Z | c114 report 014 codex BLOCKING (repeat range 15-72 s -> spans 14.8-55.6 s) + NB1/NB2 fixed; JSON regenerated (verdict CAP-BOUND unchanged); NEEDS_DECISION sent | ops/reports/014-plan005-armE-result.md, ops/codex/review-20261106T052532.md, results/plan005_armE_vs_D.json
+2026-11-06T05:30Z | DEC 061 read: CAP-BOUND accepted; A+B approved; arm F (temperature 0.6 on v006) today on expiring quota; plan 007 pre-reg by 11-07T18:00Z; Nov 8 slot proposal by 11-07T12:00Z | ops/decisions/061-014-plan005-armE-result.md
+2026-11-06T05:30Z | Addendum F pre-registered (LOOP-REDUCED / HARM / NO-EFFECT) BEFORE pack; 31b-v008-p5f packed e1513aac (sampling.yaml only), commit 4ead877; light review started | eval/plans/005.md bundles/31b/v008/MANIFEST.md
+2026-11-06T05:33Z | eval/plan005_armF_compare.py written (reuses arm-E metric fns; unreviewed) | eval/plan005_armF_compare.py
