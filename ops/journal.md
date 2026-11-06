@@ -213,3 +213,4 @@
 2026-11-06T00:12:02Z | guard v6 committed b9caae4 (owner-applied; dry checks: unauthorized sha rc=3, wrong version 2 rc=3 at download) | bin/kaggle-submit
 2026-11-06T00:12:02Z | SUBMITTED e4b-v002 ref 58039259 at 00:11:23Z (dec 040, kernel aniket0202/gemma-submit-e4b v1); waiter lb-e4b-v002-wait-light; results/lb_e4b_v002.json started | ops/submissions.jsonl results/lb_e4b_v002.json
 2026-11-06T00:12:02Z | ops/patches v1-v5 guard diffs moved to ops/patches/superseded/ (dec 045 item 4) | ops/patches/superseded/
+2026-11-06T00:13:54Z | dec 052: built 31b-v002 (cap 3.5 only vs v001-t4), pack PASS sha e56a05e5, load check OK; CPU submit kernel aniket0202/gemma-submit-31b v1 pushed (no submission) | bundles/31b/v002/MANIFEST.md results/bundle_load_check_31b_v002.json
