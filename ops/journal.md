@@ -314,3 +314,5 @@
 2026-11-06T08:10Z | report 017 NEEDS_DECISION (treat empty-patch H-VERIFY as footnote, no rerun; rec A) | ops/reports/017-plan007-smoke-unblind-hverify.md
 2026-11-06T08:12:14Z | dec 068 ack: plan 007 Addendum B pre-registered (H-VERIFY(empty-patch) sub-case = eval/plan007_report.py ea495048ba090012, 39 tests pass; report layout a-e; empty-patch headline metric) BEFORE main download (main ETA ~14:10Z, not downloaded) | eval/plans/007.md, ops/decisions/068-017-plan007-smoke-unblind-hverify.md
 2026-11-06T08:12Z | codex-review-p7report-light launched on 242859a (sub-case fn); waiting on main | ops/codex/
+2026-11-06T08:13Z | codex review of 242859a DONE: 2 BLOCKING (B1 instance_id check in predicate; B2 absent error keys accepted as null) | ops/codex/review-20261106T081225.md
+2026-11-06T08:15Z | plan 007 Addendum B.1 committed ea9c064 BEFORE main download: predicate fixed to literal dec-068 definition (assert_paired separate; keys must be present), sha a5c58a1d, 50 tests, smoke hits unchanged (rich_3063); re-review codex-review-p7fix-light launched | eval/plans/007.md
