@@ -1471,3 +1471,212 @@ summary_keys: ['_schema', 'a_primary', 'b_d4cdf0f0_counts', 'c_sens_excl_all_h',
 aggregates: {'n_rows': 33, 'a_primary': {'resolved': {'k': 4, 'n': 33, 'rate': 0.1212, 'wilson95': [0.0482, 0.2733]}, 'per_repo': {'Textualize/rich': {'k': 4, 'n': 27, 'rate': 0.1481, 'wilson95': [0.0592, 0.3248]}, 'fastapi/fastapi': {'k': 0, 'n': 6, 'rate': 0.0, 'wilson95': [0.0, 0.3903]}}}, 'b_d4cdf0f0_counts': {'h': {'H-VERIFY': 7}, 'agent': {'PYTEST_1': 13, 'PYTEST_2_5': 4, 'NO_PATCH': 5, 'PASS': 4}, 'known_diag': 27, 'h_total': 7}, 'c_sens_excl_all_h': {'k': 4, 'n': 26, 'rate': 0.1538, 'wilson95': [0.0615, 0.3353]}, 'd_sens_excl_h_except_empty_patch': {'k': 4, 'n': 27, 'rate': 0.1481, 'wilson95': [0.0592, 0.3248]}, 'e_a208a023_counts': {'h': {}, 'agent': {'NO_PATCH': 12, 'PYTEST_1': 13, 'PYTEST_2_5': 4, 'PASS': 4}, 'known_diag': 27}, 'invalidity_rule': {'text': 'Arm 1 INVALID iff H rows >= 5 of 33 (eval/plans/007.md Decision rules)', 'h_total': 7, 'literal_verdict': 'INVALID'}, 'note': 'plan-005/006 screen ids (tuned-on): see eval/plans/007.md Metrics'}
 empty_aggregates: {'all': {'k': 12, 'n': 33, 'rate': 0.3636, 'wilson95': [0.2219, 0.5338]}, 'timeout': 2, 'non_timeout': 10, 'empty_with_submit_patch_called': 7}
 
+exec
+/bin/bash -lc "ls -d .venv/bin/python* .venv/bin/pytest venv/bin/python* 2>/dev/null; nl -ba eval/plan005_armF_compare.py | sed -n '1,115p'; rg --files eval/plans eval/splits | rg '005|006|screen'; rg -n 'arm1_summary|never.screen|repeat|thinking' ops/reports/017-plan007-smoke-unblind-hverify.md eval/tests/test_plan007_report.py" in /home/ubuntu/work/gemma
+ exited 1 in 0ms:
+     1	#!/usr/bin/env python3
+     2	"""Plan 005 Addendum F: arm F (31b-v008-p5f, temperature 0.6) vs arm D (31b-v006-p5d, temperature 0.2), same cap 4.0,
+     3	paired on the same 8 ids, k=1. Reuses first_ok_edit() and max_identical_run() from plan005_armE_compare.py unchanged
+     4	(the Addendum F metric is defined as that function).
+     5	Usage: plan005_armF_compare.py <out.json>"""
+     6	import json, sys
+     7	from math import comb
+     8	sys.path.insert(0, "eval")
+     9	import plan005_armE_compare as E
+    10	
+    11	RUNS = {"D": "runs/31b-v006-p5d-timing", "F": "runs/31b-v008-p5f-timing"}
+    12	VER = {"D": "v006", "F": "v008"}
+    13	CAP_S = 240.0  # cap 4.0 min, both arms
+    14	LOOP_MIN = 5
+    15	
+    16	def main(out):
+    17	    ids = [l.strip() for l in open("eval/plans/004-gpu-retime-ids.txt") if l.strip() and not l.startswith("#")]
+    18	    assert len(ids) == 8, ids
+    19	    assert len(set(ids)) == 8, f"duplicate planned ids: {ids}"
+    20	    problems = []  # integrity failures (codex review 20261106T053515 BLOCKING 1-2): any entry -> verdict INVALID
+    21	    raw = {}
+    22	    for k, v in VER.items():
+    23	        for src in ("kaggle_timing", "trace_tool_errors"):
+    24	            lst = [t["instance_id"] for t in json.load(open(f"results/{src}_31b_{v}.json"))["tasks"]]
+    25	            dup = sorted({i for i in lst if lst.count(i) > 1})
+    26	            if dup: problems.append(f"{src}_31b_{v}: duplicate ids {dup}")
+    27	            if set(lst) != set(ids):
+    28	                problems.append(f"{src}_31b_{v}: ids != planned 8 (missing {sorted(set(ids) - set(lst))}, extra {sorted(set(lst) - set(ids))})")
+    29	            raw[(src, k)] = json.load(open(f"results/{src}_31b_{v}.json"))["tasks"]
+    30	    tim = {k: {t["instance_id"]: t for t in raw[("kaggle_timing", k)]} for k in VER}
+    31	    tte = {k: {t["instance_id"]: t for t in raw[("trace_tool_errors", k)]} for k in VER}
+    32	    for k in VER:
+    33	        for i in ids:
+    34	            pb = tte[k].get(i, {}).get("patch_bytes")
+    35	            if not (isinstance(pb, int) and not isinstance(pb, bool) and pb >= 0):
+    36	                problems.append(f"arm {k} {i}: patch_bytes={pb!r} not a nonnegative int (missing/unknown patch)")
+    37	    if problems:
+    38	        res = {"_schema": "plan005_arm_compare_v1", "plan": "eval/plans/005.md Addendum F", "generator": "eval/plan005_armF_compare.py",
+    39	               "verdict_armF": "INVALID", "integrity_problems": problems}
+    40	        json.dump(res, open(out, "w"), indent=1); print(json.dumps(res, indent=1)); sys.exit(3)
+    41	    rows = []
+    42	    for i in ids:
+    43	        r = {"id": i}
+    44	        for k in ("D", "F"):
+    45	            s, tool = E.first_ok_edit(RUNS[k], i)
+    46	            r.update({f"{k}_patch_bytes": tte[k][i]["patch_bytes"], f"{k}_timeout": bool(tim[k][i]["agent_timeout_fired"]),
+    47	                      f"{k}_agent_clock_s": round(tim[k][i]["agent_clock_seconds"], 3),
+    48	                      f"{k}_first_ok_edit_s": s, f"{k}_first_ok_edit_tool": tool, f"{k}_tool_calls": tte[k][i]["tool_calls"],
+    49	                      **dict(zip((f"{k}_max_identical_call_run", f"{k}_max_identical_run_start_s",
+    50	                                  f"{k}_max_identical_run_end_s", f"{k}_max_identical_run_span_s"), E.max_identical_run(RUNS[k], i)))})
+    51	        rows.append(r)
+    52	    eD = sum(r["D_patch_bytes"] == 0 for r in rows); eF = sum(r["F_patch_bytes"] == 0 for r in rows)
+    53	    d_only = sum(r["D_patch_bytes"] == 0 and r["F_patch_bytes"] > 0 for r in rows)
+    54	    f_only = sum(r["F_patch_bytes"] == 0 and r["D_patch_bytes"] > 0 for r in rows)
+    55	    n = d_only + f_only
+    56	    p_one = sum(comb(n, j) for j in range(f_only, n + 1)) / 2 ** n if n else 1.0  # P(F-empty-only >= obs | p=.5)
+    57	    p_two = min(1.0, 2 * min(p_one, sum(comb(n, j) for j in range(0, f_only + 1)) / 2 ** n)) if n else 1.0
+    58	    loops = {k: sum(r[f"{k}_max_identical_call_run"] >= LOOP_MIN for r in rows) for k in ("D", "F")}
+    59	    totals = {k: json.load(open(f"results/trace_tool_errors_31b_{VER[k]}.json"))["totals"] for k in ("D", "F")}
+    60	    res = {"_schema": "plan005_arm_compare_v1", "plan": "eval/plans/005.md Addendum F",
+    61	           "A": "arm D 31b-v006-p5d b7b2eb3d (cap 4.0, temperature 0.2)", "B": "arm F 31b-v008-p5f e1513aac (cap 4.0, temperature 0.6)",
+    62	           "generator": "eval/plan005_armF_compare.py", "n": len(rows), "k": 1,
+    63	           "empty": {"armD": eD, "armF": eF}, "discordant": {"armD_empty_only": d_only, "armF_empty_only": f_only},
+    64	           "sign_test": {"n_discordant": n, "p_one_sided_F_more_empty": p_one, "p_two_sided": p_two},
+    65	           "tasks_max_identical_run_ge_5": loops,
+    66	           "timeouts": {"armD": sum(r["D_timeout"] for r in rows), "armF": sum(r["F_timeout"] for r in rows)},
+    67	           "agent_clock_sum_s": {"armD": round(sum(r["D_agent_clock_s"] for r in rows), 1),
+    68	                                  "armF": round(sum(r["F_agent_clock_s"] for r in rows), 1)},
+    69	           "first_ok_edit_before_cap_240s": {k2: sum(r[f"{k}_first_ok_edit_s"] is not None and r[f"{k}_first_ok_edit_s"] < CAP_S for r in rows)
+    70	                                             for k, k2 in (("D", "armD"), ("F", "armF"))},
+    71	           "edit_missing_param": {"armD": totals["D"].get("edit_missing_param", 0), "armF": totals["F"].get("edit_missing_param", 0)},
+    72	           "cmd_error_shell": {"armD": totals["D"].get("cmd_error_shell", 0), "armF": totals["F"].get("cmd_error_shell", 0)},
+    73	           "tool_errors_totals": {"armD": totals["D"], "armF": totals["F"]},
+    74	           "tasks": rows}
+    75	    gate = json.load(open("results/kaggle_timing_31b_v008.json"))["gate"]
+    76	    tb = json.load(open("results/thinking_bound_31b_v008.json"))
+    77	    tbt = tb.get("tasks", tb)
+    78	    tb_ids = set(tbt) if isinstance(tbt, dict) else {v["instance_id"] for v in tbt}
+    79	    assert tb_ids == set(ids), f"thinking-bound ids != planned 8 ids: {sorted(tb_ids ^ set(ids))}"
+    80	    addon = all(v.get("has_summary") and v.get("root_usage_turns", 0) >= 1 for v in (tbt.values() if isinstance(tbt, dict) else tbt))
+    81	    res["integrity_problems"] = []
+    82	    res["gates_armF"] = gate; res["V_gates"] = gate["status"] == "PASS"; res["V_addon"] = addon
+    83	    V = res["V_gates"] and addon
+    84	    if not V: verdict = "INVALID"
+    85	    elif eF >= 5 or f_only >= 3: verdict = "HARM"
+    86	    elif loops["F"] == 0 and eF <= 4 and f_only <= 2: verdict = "LOOP-REDUCED"
+    87	    else: verdict = "NO-EFFECT"
+    88	    res["verdict_armF"] = verdict
+    89	    json.dump(res, open(out, "w"), indent=1)
+    90	    print(json.dumps({k: v for k, v in res.items() if k not in ("tasks", "gates_armF", "tool_errors_totals")}, indent=1))
+    91	    for r in rows: print(r)
+    92	
+    93	if __name__ == "__main__":
+    94	    main(sys.argv[1])
+eval/plans/005.md
+eval/plans/006.md
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import contextlib, importlib.util, io, json, math, sys
+from collections import Counter
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, 'eval')
+import plan007_arm1_summary as m
+calls=[]
+real_paired=m.assert_paired
+real_pred=m.is_h_verify_empty_patch
+def paired(c,t):
+ real_paired(c,t)
+ calls.append((c['instance_id'],id(c),id(t)))
+def pred(c,t):
+ assert (c['instance_id'],id(c),id(t)) in calls
+ return real_pred(c,t)
+captured={}
+def write(p,s,*a,**kw):
+ captured['out']=json.loads(s)
+ return len(s)
+with patch.object(m, 'assert_paired', paired), patch.object(m,'is_h_verify_empty_patch',pred), patch.object(Path,'write_text',write), contextlib.redirect_stdout(io.StringIO()):
+ assert m.main(['summary','/tmp/not-written.json'])==0
+out=captured['out']
+print('Execution: no files written; pairing-before-predicate verified; pairing calls:',len(calls))
+rows=[]
+for part,tpath,dpath,apath in m.PARTS:
+ ts=[json.loads(s) for s in Path(tpath).read_text().splitlines() if s.strip()]
+ ts=[r for r in ts if 'instance_id' in r]
+ ds=json.loads(Path(dpath).read_text())['rows']
+ ars=json.loads(Path(apath).read_text())['rows']
+ assert len(ds)==len({r['instance_id'] for r in ds})==len(ts)
+ assert len(ars)==len({r['instance_id'] for r in ars})==len(ts)
+ rows.extend(zip(ts,ds,ars))
+assert len(rows)==33
+assert [t['instance_id'] for t,_,_ in rows]==[s.strip() for s in Path(m.ARM_IDS).read_text().splitlines() if s.strip() and not s.startswith('#')]
+a=sum(t['resolved'] is True for t,_,_ in rows)
+c=[t for t,d,_ in rows if d['h'] is None]
+d=[t for t,cl,_ in rows if cl['h'] is None or real_pred(cl,t)]
+e=[t for t,_,_ in rows if t['verified_patch_bytes']==0]
+et=sum(t.get('timed_out') is True or t.get('agent_timeout_fired') is True for t in e)
+assert (out['a_primary']['resolved']['k'],out['a_primary']['resolved']['n'])==(a,33)
+for key, sub in [('c_sens_excl_all_h',c),('d_sens_excl_h_except_empty_patch',d)]:
+ assert (out[key]['k'],out[key]['n'])==(sum(t['resolved'] is True for t in sub),len(sub))
+assert out['headline_empty_patch']['all']['k']==len(e)
+assert (out['headline_empty_patch']['timeout'],out['headline_empty_patch']['non_timeout'])==(et,len(e)-et)
+for key, idx in [('b_d4cdf0f0_counts',1),('e_a208a023_counts',2)]:
+ assert out[key]['h']==dict(Counter(r[idx]['h'] for r in rows if r[idx]['h'] is not None))
+ assert out[key]['agent']==dict(Counter(r[idx]['agent'] for r in rows if r[idx]['agent'] is not None))
+assert out['invalidity_rule']['literal_verdict']==('INVALID' if sum(cl['h'] is not None for _,cl,_ in rows)>=5 else 'VALID')
+print('Independent aggregate checks passed: primary, per-class counts, both sensitivities, empty split, fixed order, invalidity.')
+# Wilson endpoints independently solve n*(p-k/n)"'^2=z''^2*p*(1-p).
+z=1.959963984540054
+checks=0
+for n in range(1,34):
+ for k in range(n+1):
+  aa=n+z*z; bb=-(2*k+z*z); cc=k*k/n
+  disc=bb*bb-4*aa*cc
+  ends=[(-bb-math.sqrt(disc))/(2*aa),(-bb+math.sqrt(disc))/(2*aa)]
+  assert m.wilson(k,n)==[round(max(0,ends[0]),4),round(min(1,ends[1]),4)]
+  checks+=1
+assert m.wilson(0,0) is None
+print('"'Wilson score-quadratic checks passed:', checks, 'plus n=0')
+# Demonstrate synthetic bad records are ignored by loader (no task content).
+with patch.object(Path,'read_text',return_value='{\"repo\":\"synthetic\",\"resolved\":true}\\n'):
+ assert m.load_rows('unused')==[]
+print('Robustness finding confirmed: loader silently ignores an unrecognized record lacking instance_id.')
+# Dict conversion silently overwrites duplicate classifier records.
+orig=json.loads(Path(m.PARTS[0][2]).read_text())['rows']
+assert len({r['instance_id']:r for r in orig+[orig[0]]})==len(orig)
+print('Robustness finding confirmed: classifier map construction collapses duplicate input records.')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+Execution: no files written; pairing-before-predicate verified; pairing calls: 66
+Independent aggregate checks passed: primary, per-class counts, both sensitivities, empty split, fixed order, invalidity.
+Wilson score-quadratic checks passed: 594 plus n=0
+Robustness finding confirmed: loader silently ignores an unrecognized record lacking instance_id.
+Robustness finding confirmed: classifier map construction collapses duplicate input records.
+
+exec
+/bin/bash -lc 'PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider eval/tests/test_plan007_report.py' in /home/ubuntu/work/gemma
+ exited 1 in 0ms:
+/usr/bin/python3: No module named pytest
+
+codex
+**BLOCKING**
+
+1. **Required Metrics outputs are missing.** [Line 181](/home/ubuntu/work/gemma/eval/plan007_arm1_summary.py:181) emits only a screening note; it never computes the pass rate over the 25 never-screened IDs required by [plan line 140](/home/ubuntu/work/gemma/eval/plans/007.md:140). The secondary output at [line 164](/home/ubuntu/work/gemma/eval/plan007_arm1_summary.py:164) also omits the repeat-run and thinking-block metrics required by [plan line 144](/home/ubuntu/work/gemma/eval/plans/007.md:144). These omissions block treating this JSON as the complete pre-registered arm-1 report.
+
+**NON-BLOCKING**
+
+1. **Input handling can silently discard malformed or duplicate records.** [Line 65](/home/ubuntu/work/gemma/eval/plan007_arm1_summary.py:65) ignores every record lacking `instance_id`, without validating that it is recognized metadata. Dictionary construction at [line 81](/home/ubuntu/work/gemma/eval/plan007_arm1_summary.py:81) silently collapses duplicate classifier rows; subsequent length checks cannot detect those duplicates. Reject unexpected records and validate uniqueness before constructing maps. **No task rows were dropped from the current inputs:** all 33 unique IDs appear in fixed order.
+
+The requested calculation checks otherwise pass:
+
+- Pairing: both classifier rows are checked before the predicate, at [line 87](/home/ubuntu/work/gemma/eval/plan007_arm1_summary.py:87).
+- Wilson: [line 36](/home/ubuntu/work/gemma/eval/plan007_arm1_summary.py:36) matches independent score-equation calculations for 594 `(k,n)` combinations.
+- Layout a–e: primary **4/33**, sensitivity c **4/26**, sensitivity d **4/27**; both classifier counts preserved ([line 145](/home/ubuntu/work/gemma/eval/plan007_arm1_summary.py:145)).
+- Empty-patch headline: **12/33**, split **2 timeout / 10 non-timeout**, using the specified fields ([line 119](/home/ubuntu/work/gemma/eval/plan007_arm1_summary.py:119)).
+- Fixed order: exact list equality is enforced at [line 96](/home/ubuntu/work/gemma/eval/plan007_arm1_summary.py:96).
+- Decision rule: seven governing H rows correctly yield **INVALID**, while retaining all rows in primary ([line 178](/home/ubuntu/work/gemma/eval/plan007_arm1_summary.py:178)).
+
+**Questions**
+
+None.
+
+Validation used an in-memory execution with file writes intercepted. Existing pytest tests could not run because `pytest` is unavailable. No files changed or task content printed.
+tokens used
+40,007
