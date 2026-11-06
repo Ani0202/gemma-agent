@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 13:47Z (cycle 142, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 13:53Z (cycle 143, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -24,7 +24,12 @@
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
 - DEC 068: Addendum B/B.1 (242859a/ea9c064, pre-download) H-VERIFY(empty-patch) = eval/plan007_report.py (50 tests); report layout a-e + empty headline (implemented, see dec 069 line).
-## Running jobs (13:47Z): memguard-light (0 KILL), submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-v010-light, codex-review-v011-d71-light.
+## Running jobs (13:53Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-v011-d71-light, codex-review-v010b-light, codex-plan008-metrics (build).
+- DEC 072 (both deviations ACCEPTED): codex 133941 on v010 = 4 BLOCKING -> fixed 1a3b831: gate = harness-equal eligibility (py one-liner of
+  _is_protected_test_or_config_path), outputs GATE call/kept_files + reason=changes|forced|check_error, failure-safe counter, SUBMIT FAILED.
+  31b-v010 REPACKED dist/31b-v010.zip sha256=fc24fcc3eeb98f1bdcd5914d61d597ed2b309d74eb64bed717a2ba5b47bd7c42 (c7a86295 VOID); load PASS; 58 gate tests.
+  Plan 008 Addendum D72 (root author filter; test-run boundary = successful submit; gate descriptives per row; untracked-only; /tmp per-task VERIFIED).
+  Metric script eval/plan008_metrics.py = codex-build plan008-metrics (base asserts mech2 17, empty 12). Review + merge, then run base, commit.
 - DEC 071 (gate approved w/ conditions): items 1-3 DONE 787b465. Plan 008 Addendum D71: wiring (a) YES same Context (gate alive),
   (b) scored = patch at submit call, else end-of-session workspace diff, (c) no name keying (keep name submit_patch), (d) gate counts:
   worst +3 calls/+7 turns. Smoke ids eval/plans/008-smoke-ids.txt (rule: first 2 non-timeout empty arm-1 rows) sha dcae5058...;
@@ -40,11 +45,9 @@
   empty guard = dec 070 1(b) prompt rule + IN-BUNDLE agent_tool gate named submit_patch (shares Context; <=2 bounces). Both deviations
   flagged to Director 133950 (awaiting objection). Ship rule: pass delta>=0 AND empty<=4/33 AND run>=5 tasks<=6/33 AND safety (incl.
   submitted-without-test-run <= arm1+3; arm-1 base to compute with same script BEFORE arm 2). dist/31b-v010.zip sha256=
-  c7a86295a023db971bcc9d149c4e6c68674d5ea052ecdfb3c11655b535772cd8 pack PASS, load check PASS, 16 gate tests pass. codex-review-v010-light RUNNING.
+  [VOID, superseded by fc24fcc3 above].
   Smoke <=2 tasks (007-smoke-ids) only if review CLEAN by ~22:00Z (2.34 h quota). Dec 070 item 5: arm-3 addendum must require smoke thinking blocks > 0.
-- DEC 065-067 (DONE through main push): d4cdf0f0 = GOVERNING plan-007 classifier (last freeze, no rev 6; a208a023 counts alongside);
-  main on kernel 078f4ea; results header must name 078f4ea, classifier sha, agent_timing.py sha 0dc1c972...dc96 + dec-065 deviation note.
-  Nothing about main changes from smoke outcomes. Chunk 2 (unrun suffix) after reset AND after dec 055 submit, same bundle/code, seed-max from all rows.
+- DEC 065-067: d4cdf0f0 = GOVERNING plan-007 classifier (a208a023 alongside); main kernel 078f4ea; results header names 078f4ea, classifier sha, agent_timing.py 0dc1c972 + dec-065 note. Chunk 2 after reset+dec055 submit, same bundle/code.
 - PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
   33 dev fixed order eval/plans/007-arm1-ids.txt, --with-verification --no-stock-probe, slug aniket0202/gemma-31b-passrate.
 - DEC 061 (on report 014): approve-with-changes. CAP-BOUND accepted; A + B approved. (i) dec 055 v002 submit at 11-07T00:00Z stays FIRST;
@@ -54,12 +57,8 @@
   Item 4: plan 007 pre-reg (33-dev pass rate; H1 env; thinking off vs on paired arm) DUE 2026-11-07T18:00Z (may use leftover quota pre-reset).
   Item 5: Nov 8 slot candidate + 1-para justification DUE 2026-11-07T12:00Z (e4b-v002 repeat / e4b-v003 if packed+reviewed+smoke / 31b-v002 repeat).
   Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
-- 31b-v004 CPU DRAFT: dist/31b-v004.zip sha256=50537e1ddcf13f160fcaa9b2bfa145ac13ef91d99a2ce0b27d69f54ee125f7b3 (5f9b4ae) = v007 +
-  1 quoting/no-repeat line. No slot (dec 061 ii). Review 043840: no BLOCKING; NB2 pipefail system.md:33 -> fold in next touch, UNSCREENED;
-  NB3 timeout empty patch unguaranteed (dec 056 item 6).
-- DEC 057: no new bundle/draft carries any repo-named hint; dec 055 v002 untouched. e4b-v003 = e4b-v002 + generic prompt fixes
-  minus the FastAPI line (CPU draft). Reports MUST state v000-v002 (both tracks) carry the hint; LB scores may tilt FastAPI-ward.
-## Quota / spend
+- 31b-v004 CPU DRAFT dist/31b-v004.zip 50537e1d... (v007 + quoting line), no slot (dec 061 ii); NB3 timeout empty patch unguaranteed (dec 056 item 6).
+- DEC 057: no new bundle carries a repo-named hint; v000-v002 (both tracks) carry the FastAPI hint -> reports must say so; LB may tilt FastAPI-ward. e4b-v003 = e4b-v002 + generic fixes minus that line (CPU draft).
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU this week: 27.66/30 h per `kaggle quota` 13:26Z after main (+10.41); 2.34 h left. Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
 ## Live caveats (dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035)
 - Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
@@ -75,6 +74,6 @@
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. On both codex reviews (v010; v011+D71): fix BLOCKING, write metric script (mech 1/2 + test-run safety + smoke (i)-(v) checker) + arm-1 base, review; smoke (008-smoke-ids) if ALL CLEAN by ~22:00Z, else after reset AFTER dec 055 submit.
+1. On codex-review-v010b + v011-d71 + plan008-metrics build: fix BLOCKING, merge metrics, run base (arm-1) + commit; smoke (008-smoke-ids) on v010 fc24fcc3 if ALL CLEAN by ~22:00Z, else after reset AFTER dec 055 submit.
 2. Dec 055 31b-v002 submit 11-07T00:00Z FIRST (checklist in Best bundles).
 3. Nov 8 slot proposal (due 11-07T12:00Z); arm-3 thinking addendum (dec 070 item 5) due 11-07T18:00Z; dec 038 paper evidence by Nov 9.

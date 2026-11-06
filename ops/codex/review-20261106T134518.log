@@ -8371,3 +8371,40 @@ AttributeError: 'NoneType' object has no attribute 'required'
  succeeded in 958ms:
 {"compile": "PASS", "tools": ["run_command", "read_file", "edit_file", "write_file", "get_status", "submit_patch", "get_code_neighbors", "search_similar_code", "get_code_subgraph", "code_analyzer_agent"], "root_model": "gemma-4-31b-it-qat-w4a16-ct", "child_models": ["gemma-4-31b-it-qat-w4a16-ct"], "timeout": 210.0, "calls": 40, "turns": 50}
 
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 /home/ubuntu/gemma-local/venv/bin/python -B - <<'PY'
+import asyncio,json,logging
+from google.adk.agents import LlmAgent
+from google.adk.models.base_llm import BaseLlm
+from google.adk.models.llm_response import LlmResponse
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.adk.tools.agent_tool import AgentTool
+from google.genai import types
+from adk_eval_core.plugins.display_plugin import EventDisplayPlugin
+from adk_eval_core.tracing import SessionTrace
+logging.disable(logging.CRITICAL)
+class Scripted(BaseLlm):
+    script:list[dict]
+    index:int=0
+    async def generate_content_async(self,llm_request,stream=False):
+        item=self.script[self.index];self.index+=1
+        p=types.Part(function_call=types.FunctionCall(**item)) if 'name' in item else types.Part(text=item['text'])
+        yield LlmResponse(content=types.Content(role='model',parts=[p]))
+def run_command(command:str)->dict: return {'status':'ok','stdout':'VERDICT=SUBMIT'}
+def submit_patch()->dict: return {'status':'ok','patch_size':1}
+async def main():
+    child=LlmAgent(name='submit_patch',model=Scripted(model='offline',script=[{'name':'run_command','args':{'command':'fixed'}},{'name':'submit_patch','args':{}},{'text':'SUBMITTED'}]),tools=[run_command,submit_patch])
+    gate=AgentTool(agent=child,skip_summarization=True)
+    root=LlmAgent(name='swe_baseline_agent',model=Scripted(model='offline',script=[{'name':'submit_patch','args':{}}]),tools=[gate])
+    ss=InMemorySessionService();tr=SessionTrace();r=Runner(app_name='offline',agent=root,session_service=ss,plugins=[EventDisplayPlugin(trace_callback=tr.record_event)])
+    s=await ss.create_session(app_name='offline',user_id='u')
+    async for e in r.run_async(user_id='u',session_id=s.id,new_message=types.Content(role='user',parts=[types.Part(text='go')])): pass
+    es=tr.to_dict(format='legacy')['entries']; decl=gate._get_declaration()
+    print(json.dumps(dict(schema=decl.model_dump(exclude_none=True),root_args=es[0]['args'],root_model_calls=root.model.index,root_gate_response=[e['result'] for e in es if e['type']=='tool_response' and e['author']=='swe_baseline_agent'],root_finals=[e['content'] for e in es if e['type']=='final' and e['author']=='swe_baseline_agent'])))
+    await r.close()
+asyncio.run(main())
+PY" in /home/ubuntu/work/gemma
+ succeeded in 770ms:
+{"schema": {"description": "", "name": "submit_patch", "parameters_json_schema": {"type": "object", "properties": {"request": {"type": "string"}}, "required": ["request"]}}, "root_args": {}, "root_model_calls": 1, "root_gate_response": ["{\"raw\": \"SUBMITTED\"}"], "root_finals": ["SUBMITTED"]}
+
