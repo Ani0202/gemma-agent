@@ -38,11 +38,11 @@ fastapi_14258 508->508, fastapi_14851 0->0. The two E-only empties had their fir
 The three surviving E diffs landed their first edit at 12-35 s.
 
 **New finding: identical-tool-call loops (descriptive, post hoc, NOT pre-registered).** The longest run of byte-identical consecutive tool calls
-per task is in results/plan005_armE_vs_D.json (`*_max_identical_call_run`):
-- E: rich_3067 = **17 identical failing edit_file calls, 16-72 s**, i.e. the rest of the window. This happened although the prompt says "if an edit fails twice
-  with the same error, do NOT repeat it". rich_3063 = 16 identical run_command (32 s); fastapi_14851 = 8 identical read_file (15 s).
-- D: rich_3454 = 20 identical run_command (45 s; this is the 21-repeat quoting_heredoc of dec 059 item 4b); rich_3063 = 18 identical run_command (35 s).
-- So at thinking off, 2-3 of 8 tasks per arm lose 15-72 s to exact repeats. Inside a 73.8 s window that's the main way time is lost.
+per task is in results/plan005_armE_vs_D.json (`*_max_identical_call_run`; start/end/span agent-clock s in `*_max_identical_run_{start,end,span}_s`, span = first to last call of the run):
+- E: rich_3067 = **17 identical failing edit_file calls, agent-clock 16.1-71.6 s (span 55.6 s)**, i.e. the rest of the window. This happened although the prompt says "if an edit fails twice
+  with the same error, do NOT repeat it". rich_3063 = 16 identical run_command (span 32.4 s); fastapi_14851 = 8 identical read_file (span 14.8 s).
+- D: rich_3454 = 20 identical run_command (span 44.9 s; this is the 21-repeat quoting_heredoc of dec 059 item 4b); rich_3063 = 18 identical run_command (span 34.7 s).
+- So at thinking off, 2-3 of 8 tasks per arm lose ~15-56 s each to exact repeats (spans 14.8-55.6 s). Inside a 73.8 s window that's the main way time is lost.
   The prompt rule doesn't stop it (seen in E). The v004 quoting line targets only the shell-error variant.
 Honest limits: n=8/k=1, and empty-diff counts aren't pass rates. The loop metric was defined after seeing the data. Cap 1.23 has zero margin under H3.
 
@@ -87,3 +87,6 @@ the 1.23 cap needs most. I still recommend the full v004 over the minimal alt, b
 A + B. No submission or GPU request this cycle (B fits the weekly Kaggle plan after the reset; I'll pre-register it as plan 005 Addendum F or
 plan 008 and send it before running). Dec 055 checklist at 2026-11-07T00:00Z still comes first and is unaffected. Write-up note (dec 060 item 2):
 the v002 LB score will be the only result carrying the FastAPI hint caveat.
+
+
+Revision c114: codex review ops/codex/review-20261106T052532.md BLOCKING (repeat range 15-72 s -> spans 14.8-55.6 s) fixed; NB1 (8-id assert) and NB2 (run timestamps saved) fixed in eval/plan005_armE_compare.py; regenerated JSON, all other fields unchanged, verdict CAP-BOUND unchanged.

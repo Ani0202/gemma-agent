@@ -27,15 +27,23 @@ def first_ok_edit(run, tid):
     return None, None
 
 def max_identical_run(run, tid):
-    """Longest run of consecutive byte-identical tool calls (same tool + same args JSON)."""
+    """Longest run of consecutive byte-identical tool calls (same tool + same args JSON).
+    Returns (count, start_s, end_s, span_s): agent-clock seconds of the run's first and last tool_call entry."""
     d = json.load(open(f"{run}/runs/{tid}/trace.json"))
-    best = cur = 0; prev = None
+    t0 = float(next(e["elapsed_s"] for e in d["entries"] if e["type"] == "task_prompt"))
+    best = (0, None, None, None); cur = 0; prev = None; start = None
     for e in d["entries"]:
         if e["type"] != "tool_call":
             continue
         key = (e.get("tool"), json.dumps(e.get("args", e.get("arguments")), sort_keys=True))
-        cur = cur + 1 if key == prev else 1
-        prev = key; best = max(best, cur)
+        ts = round(float(e["elapsed_s"]) - t0, 3)
+        if key == prev:
+            cur += 1
+        else:
+            cur, start = 1, ts
+        prev = key
+        if cur > best[0]:
+            best = (cur, start, ts, round(ts - start, 3))
     return best
 
 def main(out):
@@ -52,7 +60,8 @@ def main(out):
             r.update({f"{k}_patch_bytes": tte[k][i]["patch_bytes"], f"{k}_timeout": bool(tim[k][i]["agent_timeout_fired"]),
                       f"{k}_agent_clock_s": round(tim[k][i]["agent_clock_seconds"], 3),
                       f"{k}_first_ok_edit_s": s, f"{k}_first_ok_edit_tool": tool, f"{k}_tool_calls": tte[k][i]["tool_calls"],
-                      f"{k}_max_identical_call_run": max_identical_run(RUNS[k], i)})
+                      **dict(zip((f"{k}_max_identical_call_run", f"{k}_max_identical_run_start_s",
+                                  f"{k}_max_identical_run_end_s", f"{k}_max_identical_run_span_s"), max_identical_run(RUNS[k], i)))})
         rows.append(r)
     eD = sum(r["D_patch_bytes"] == 0 for r in rows); eE = sum(r["E_patch_bytes"] == 0 for r in rows)
     d_only = sum(r["D_patch_bytes"] == 0 and r["E_patch_bytes"] > 0 for r in rows)
@@ -76,6 +85,8 @@ def main(out):
     gate = json.load(open("results/kaggle_timing_31b_v007.json"))["gate"]
     tb = json.load(open("results/thinking_bound_31b_v007.json"))
     tbt = tb.get("tasks", tb)
+    tb_ids = set(tbt) if isinstance(tbt, dict) else {v["instance_id"] for v in tbt}
+    assert tb_ids == set(ids) and len(ids) == 8, f"thinking-bound ids != planned 8 ids: {sorted(tb_ids ^ set(ids))}"
     addon = all(v.get("has_summary") and v.get("root_usage_turns", 0) >= 1 for v in (tbt.values() if isinstance(tbt, dict) else tbt))
     res["gates_armE"] = gate; res["V_gates"] = gate["status"] == "PASS"; res["V_addon"] = addon
     V = res["V_gates"] and addon

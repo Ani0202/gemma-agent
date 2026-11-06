@@ -269,3 +269,4 @@
 2026-11-06T05:25Z | PLAN 005 ARM E: V (gates PASS, add-on 8/8), empty 5/8 (D 3/8), D-only/E-only non-empty 2/0 (p2 0.5), timeouts 2->5 -> verdict CAP-BOUND; dec 056 item 6 binding for 31B final at cap<=1.23 | results/plan005_armE_vs_D.json results/kaggle_timing_31b_v007.json
 2026-11-06T05:25Z | post-hoc: identical-tool-call loops 15-72 s in 2-3/8 tasks per arm (E rich_3067 17x same failing edit_file despite no-repeat rule) | results/plan005_armE_vs_D.json
 2026-11-06T05:25Z | report 014 drafted (dec 060 item 1 a-c byte-diff table; quoting line UNSCREENED); review-p5e-light started before sending | ops/reports/014-plan005-armE-result.md
+2026-11-06T05:29Z | c114 report 014 codex BLOCKING (repeat range 15-72 s -> spans 14.8-55.6 s) + NB1/NB2 fixed; JSON regenerated (verdict CAP-BOUND unchanged); NEEDS_DECISION sent | ops/reports/014-plan005-armE-result.md, ops/codex/review-20261106T052532.md, results/plan005_armE_vs_D.json
