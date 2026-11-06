@@ -138,9 +138,16 @@ def test_other_row_error():
     assert classifier.classify(row(error='unexpected'))['reasons'] == ['r3:unexpected_error']
 
 
-@pytest.mark.parametrize('code', [None, -1, 6, '0', False, 0.0])
+@pytest.mark.parametrize('code', [None, -1, 6])
 def test_invalid_verification_codes(code):
     assert classifier.classify(row(verified_patch_bytes=30, exit_code=code))['h'] == 'H-VERIFY'
+
+
+@pytest.mark.parametrize('code', ['0', False, 0.0])
+def test_non_int_verification_codes_are_h_row(code):
+    # rev 4: a non-int exit_code is invalid evidence (r9 -> H-ROW), checked before H-VERIFY.
+    result = classifier.classify(row(verified_patch_bytes=30, exit_code=code))
+    assert result['h'] == 'H-ROW' and 'r9:invalid_exit_code' in result['reasons']
 
 
 def test_no_patch_with_agent_end():
@@ -229,3 +236,56 @@ def test_cli(tmp_path):
     assert 'boom' not in proc.stdout and 'Evaluation error' not in proc.stdout
     assert classifier.RECORD not in proc.stdout
     assert proc.stderr == ''
+
+
+# Rev 4 (codex review 20261106T070228 BLOCKING 1): invalid or contradictory verdict evidence fails closed.
+@pytest.mark.parametrize('updates,reason', [
+    (dict(resolved=None), 'r8:invalid_resolved'),
+    (dict(resolved='false'), 'r8:invalid_resolved'),
+    (dict(resolved='false', exit_code=0), 'r8:invalid_resolved'),
+    (dict(resolved=1), 'r8:invalid_resolved'),
+    (dict(result_error='Failed to apply agent patch: x', exit_code='garbage'), 'r9:invalid_exit_code'),
+    (dict(verified_patch_bytes=0, exit_code='garbage'), 'r9:invalid_exit_code'),
+    (dict(verified_patch_bytes=0, exit_code=True), 'r9:invalid_exit_code'),
+    (dict(exit_code=1.0), 'r9:invalid_exit_code'),
+])
+def test_invalid_verdict_evidence_is_h_row(updates, reason):
+    result = classifier.classify(row(**updates))
+    assert result['h'] == 'H-ROW' and result['agent'] is None and reason in result['reasons']
+
+
+@pytest.mark.parametrize('updates', [
+    dict(resolved=True, exit_code=1), dict(resolved=True, exit_code=124), dict(resolved=True, exit_code=None),
+    dict(resolved=True, exit_code=-1),
+    dict(resolved=True, result_error='Failed to apply agent patch: x', exit_code=None),
+    dict(resolved=True, result_error='Failed to apply agent patch: x', exit_code=0),
+    dict(resolved=True, verified_patch_bytes=0, exit_code=0),
+    dict(resolved=True, verified_patch_bytes=0, exit_code=None),
+])
+def test_contradictory_resolved_is_h(updates):
+    result = classifier.classify(row(**updates))
+    assert result['h'] is not None and result['agent'] is None
+    assert result['resolved'] is True  # stock verdict preserved for reporting
+
+
+def test_contradictory_resolved_reason():
+    result = classifier.classify(row(resolved=True, exit_code=1))
+    assert result['h'] == 'H-VERIFY' and 'verify:contradictory_resolved' in result['reasons']
+
+
+def test_stock_resolved_preserved_on_h_row():
+    assert classifier.classify(row(resolved='false'))['resolved'] == 'false'
+
+
+@pytest.mark.parametrize('updates,agent', [
+    (dict(verified_patch_bytes=0, exit_code=None), 'NO_PATCH'),
+    (dict(verified_patch_bytes=0, exit_code=-1), 'NO_PATCH'),
+    (dict(result_error='Failed to apply agent patch: x', exit_code=None), 'PATCH_APPLY'),
+    (dict(result_error='Failed to apply agent patch: x', exit_code=-1), 'PATCH_APPLY'),
+    (dict(exit_code=0), 'EXIT0_UNRESOLVED'),
+    (dict(exit_code=124), 'VERIFY_TIMEOUT_124'),
+    (dict(resolved=True, exit_code=0), 'PASS'),
+])
+def test_legitimate_verdicts_not_h(updates, agent):
+    result = classifier.classify(row(**updates))
+    assert result['h'] is None and result['agent'] == agent

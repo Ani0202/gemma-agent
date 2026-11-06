@@ -1,4 +1,4 @@
-"""Frozen Plan 007 rev 2 classifier for timing journal rows (stdlib only)."""
+"""Frozen Plan 007 rev 4 classifier for timing journal rows (stdlib only)."""
 import argparse
 from collections import Counter
 import hashlib
@@ -56,6 +56,12 @@ def classify(row: dict) -> dict:
     patch_evidence = row.get('verified_patch_bytes')
     if 'verified_patch_bytes' in row and not (type(patch_evidence) is int and patch_evidence >= 0):
         row_reasons.append('r7:invalid_patch_evidence')
+    stock_resolved = row.get('resolved')
+    if 'resolved' in row and type(stock_resolved) is not bool:
+        row_reasons.append('r8:invalid_resolved')
+    code = row.get('exit_code')
+    if 'exit_code' in row and code is not None and type(code) is not int:
+        row_reasons.append('r9:invalid_exit_code')
 
     setup_reasons = []
     diagnostic = False
@@ -93,17 +99,20 @@ def classify(row: dict) -> dict:
         reasons.append('known_diag:record_chain')
     h = 'H-ROW' if row_reasons else ('H-SETUP' if setup_reasons else None)
     patch_bytes = row.get('verified_patch_bytes')
-    patch_apply = (row.get('result_error') or '').startswith('Failed to apply agent patch:')
-    code = row.get('exit_code')
-    if h is None and patch_bytes is not None and patch_bytes > 0 and not patch_apply and not (
+    result_error = row.get('result_error')
+    patch_apply = isinstance(result_error, str) and result_error.startswith('Failed to apply agent patch:')
+    if h is None and patch_bytes > 0 and not patch_apply and not (
         type(code) is int and code in (0, 1, 2, 3, 4, 5, 124)
     ):
         h = 'H-VERIFY'
         reasons.append('verify:unexpected_exit_code')
-    resolved = bool(row.get('resolved'))
+    # A stock PASS must be backed by a verified run: non-empty applied patch and pytest exit 0.
+    if h is None and stock_resolved is True and not (patch_bytes > 0 and not patch_apply and code == 0):
+        h = 'H-VERIFY'
+        reasons.append('verify:contradictory_resolved')
     agent = None
     if h is None:
-        if resolved:
+        if stock_resolved is True:
             agent = 'PASS'
         elif patch_bytes == 0:
             agent = 'NO_PATCH'
@@ -120,7 +129,7 @@ def classify(row: dict) -> dict:
         else:
             agent = 'OTHER_FAIL'
     return dict(h=h, known_diag=known_diag, agent=agent,
-                agent_end=agent_end(row.get('agent_error_text')), resolved=resolved,
+                agent_end=agent_end(row.get('agent_error_text')), resolved=stock_resolved,
                 reasons=list(dict.fromkeys(reasons)))
 
 
