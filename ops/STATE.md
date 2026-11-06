@@ -1,22 +1,21 @@
-# STATE: snapshot 2026-11-06 04:50Z (cycle 111, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-06 05:15Z (cycle 112, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
-  SUBMITTED 2026-11-06T00:11:23Z ref 58039259 (kernel aniket0202/gemma-submit-e4b v1, auth dec 040); PENDING. Waiter lb-e4b-v002-wait-light
-  -> results/lb_e4b_v002.polls.csv; on score fill results/lb_e4b_v002.json (score, completed_utc, runtime fields) + ops/budget/kaggle.md.
-  Next e4b submit: earliest after this scores AND next UTC day (one pending at a time). Guard v6 applied b9caae4 (dry checks rc=3 x2).
+  SUBMITTED 2026-11-06T00:11:23Z ref 58039259; SCORED public 0.05 (COMPLETE; first final poll 05:11:49Z, T=5.007 h). results/lb_e4b_v002.json filled,
+  budget row updated, Director FYI'd. No runtime fields from CLI. E4B validator acceptance VERIFIED. Next e4b submit: next UTC day at earliest. Guard v6 applied b9caae4 (dry checks rc=3 x2).
 - 31b-v002 (dec 052 item 3; v001-t4 + cap 3.5 only): dist/31b-v002.zip sha256=e56a05e5701fa16a8dbbabb304d98f63a465511cefbb28d65850ea5ce086ec88,
   pack PASS, load check 8192 x2 / 210 s. Submit kernel aniket0202/gemma-submit-31b v1 (CPU) COMPLETE, output sha e56a05e5 verified. Review CLEAN.
   DEC 055 = SUBMIT AUTHORIZED, CONDITIONAL. ALL must hold or it is void: (1) now >= 2026-11-07T00:00Z (waiter submit-window-31b-light);
-  (2) `kaggle competitions submissions` shows e4b 58039259 FINAL; (3) T = (first poll showing e4b final, results/lb_e4b_v002.polls.csv) - 00:11:23Z;
+  (2) [HOLDS: COMPLETE 0.05] e4b 58039259 FINAL; (3) [HOLDS: T=5.007 h, SCORED] T = (first poll showing e4b final, results/lb_e4b_v002.polls.csv) - 00:11:23Z;
   submit only if e4b SCORED and T <= 6.0 h. If 6<T<=8 h or e4b ERRORED (any cause): do NOT submit, mail Director T + exact status text +
   options B (31B cap<=1.23) / C (repeat e4b-v002). e4b still pending at 2026-11-07T18:00Z: mail Director, don't submit.
   (4) commit "config: SUBMIT_KERNEL=aniket0202/gemma-submit-31b for 31b-v002 (dec 054)", grep into journal, kernel v1.
   (5) journal T + veto (number, threshold, verdict) BEFORE bin/kaggle-submit; then results/lb_31b_v002.json (same schema as
   lb_e4b_v002.json) + waiter -light. Expect a weak LB score (validation submit); don't act on it alone.
-- CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 E4B/12B/E2B validator
-  acceptance (first e4b submit settles E4B); l.55 submit_patch/get_status vs call limits; l.63 private-LB multiple runs; l.72 wheels arch
+- CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 12B/E2B validator
+  acceptance (E4B VERIFIED by 58039259 scoring); l.55 submit_patch/get_status vs call limits; l.63 private-LB multiple runs; l.72 wheels arch
   (x86 assumed, unrecorded); 12h overrun ruling. VERIFIED: l.42 submit method = kernel output (dec 041); l.76 superseded by l.112.
 - No local pass-rate scores yet. eval-runner-fix MERGED 70c0d9f (421 pass, 3 skip). Test cmd: /home/ubuntu/gemma-local/venv/bin/python3 with pyimg cp3.13 site-packages appended to sys.path, pytest eval/tests.
 ## Eval data
@@ -29,8 +28,8 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   (prompt sections, thinking_budget, cap, quoting line) + which are screened; (b) describe minimal alt, DON'T pack unless asked; (c) label
   quoting line UNSCREENED (covered only by later paired v004-vs-v002). Item 2: dec 059 last line superseded; Nov 7 31B submit write-up
   must note v002 LB = ONLY result carrying the FastAPI hint caveat. Item 3: repeat metric added to plan 007 (Addendum). Priority unchanged.
-## Running jobs (04:50Z): timing-31b-v007-wait-light (arm E kernel gemma-31b-timing v5, pushed 04:37:21Z; outputs -> runs/31b-v007-p5e-timing),
-  lb-e4b-v002-wait-light (e4b PENDING 04:41Z poll), memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z).
+## Running jobs (05:15Z; lb-e4b waiter DONE): timing-31b-v007-wait-light (arm E kernel gemma-31b-timing v5, pushed 04:37:21Z; outputs -> runs/31b-v007-p5e-timing),
+  memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z).
 - DEC 059 (on report 013): B approved. ARM E = 31b-v007-p5e (bundles/31b/v007, dist/31b-v007.zip 3a62f41fa5417ee5b129e845296c5a8e44d496f1d22501d5b3a4b29667be3c6f,
   v006 + cap 1.23 only; light review-20261106T043550 no BLOCKING). Addendum E rule: not V -> INVALID; V & E empty<=4/8 & E-empty-only(vs D)<=2
   -> USABLE; else CAP-BOUND (+1 line: dec 056 item 6 = binding blocker for 31B final at cap<=1.23). Descriptive: timeouts, tasks w/ first ok
@@ -75,6 +74,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - Forum question (dec 035): Aniket posts report 009 s6; Builder posts NOTHING; summarize any answer (no task data) in next report.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. Dec 055 checklist at 2026-11-07T00:00Z FIRST (e4b waiter final -> results/lb_e4b_v002.json, T, veto). Arm E never blocks it.
+1. Dec 055 at 2026-11-07T00:00Z FIRST: (2)(3) hold; re-check (2) live, do (4) commit, (5) journal T=5.007 h <= 6.0 PASS, then submit. Arm E never blocks it.
 2. Arm E done -> analysis per Addendum E + report 014 (verdict, item 4 checks, dec 060 item 1 a-c byte-diff list, review result).
 3. Dec 038 paper evidence by Nov 9 23:59Z; plan 007 pre-reg (thinking on/off paired arm); ops/patches cleanup.

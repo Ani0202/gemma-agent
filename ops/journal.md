@@ -264,3 +264,4 @@
 2026-11-06T04:38Z | 31b-v004 CPU draft packed 50537e1d (v002 + thinking 0 + plan-005 prompt + 1 quoting/no-repeat line + cap 1.23); deviation from literal item 1 flagged; review codex-review-v004-light running | bundles/31b/v004/MANIFEST.md 5f9b4ae
 2026-11-06T04:40:19Z | dec 060 read: v004 deviation accepted provisionally (report-014 conditions a-c), dec 059 last line superseded, repeat metric added to plan 007 Addendum | ops/decisions/060-20261106T043853-1647-from-builder.md, eval/plans/007.md
 2026-11-06T04:50Z | codex-review v004 CPU draft: BLOCKING none; NB2 pipefail in system.md:33 example deferred to report 014 (no repack) | ops/codex/review-20261106T043840.md
+2026-11-06T05:13:09Z | e4b-v002 ref 58039259 SCORED public 0.05; first final poll 05:11:49Z, dec 055 T=5.007 h (<=6.0, conds 2+3 hold); Director FYI | results/lb_e4b_v002.json
