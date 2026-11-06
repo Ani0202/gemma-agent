@@ -15,10 +15,14 @@
   anchor or /tmp Python script" (PROMPT-LEVEL: no tool-level hook exists, feasibility in eval/plans/008.md).
 - unchanged: eval_config.yaml (cap 3.5, 40 calls / 50 turns), sampling, analyzer sub-agent. No repo-named content (dec 057).
 - bundle_load_check (real adk_submission compiler, stub tools): PASS; root tools end with code_analyzer_agent, submit_patch (AgentTool).
-zip sha256: fc24fcc3eeb98f1bdcd5914d61d597ed2b309d74eb64bed717a2ba5b47bd7c42
 - REPACK (plan 008 Addendum D72.1, codex review 20261106T133941 BLOCKING 1-2): gate check = harness protected-path rule (python3 one-liner
   reimplementing verification._is_protected_test_or_config_path over `git diff --name-status -z _swegemma_baseline` (D73.4: keep rename/copy entries only when neither path is protected)), outputs
   `GATE call= kept_files=` + `VERDICT=... reason=changes|forced|check_error`; counter failure-safe; SUBMIT FAILED on inner error; system.md
   "non-test source file" -> "non-test file" in the gate sentence. Previous zip c7a86295... VOID (never run). Load check PASS
   (results/bundle_load_check_31b_v010.json); tests eval/tests/test_submit_gate.py 58 pass.
 - Correction: the anti-pattern line is the Option A text with its first sentence bolded, so it is not byte-verbatim (codex NB3).
+zip sha256: b0785a30e2ad3451f0bbb0fb574e6cde53412ca2381ab04394e66792886d33ce
+- REPACK D73.4 (plan 008 Addendum D73; merge d6174d8 of codex a9cef73): eligibility via `git diff --name-status -z` (default rename detection,
+  rename/copy kept only if neither path protected); counter accepts only 1-2 digit decimal state (10#), else n=9; forced check now precedes
+  changes (n>2 -> reason=forced). fc24fcc3 VOID (never run). New zip sha256 b0785a30e2ad3451f0bbb0fb574e6cde53412ca2381ab04394e66792886d33ce
+  (line above); pack PASS; load check PASS (results/bundle_load_check_31b_v010.json unchanged); eval/tests 1475 pass.
