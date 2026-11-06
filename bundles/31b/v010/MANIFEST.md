@@ -1,4 +1,4 @@
-# 31b-v010-p8 (PLAN 008 ARM-2 candidate, dec 069 item 3). CPU DRAFT, UNVALIDATED, packed: dist/31b-v010.zip sha256=c7a86295a023db971bcc9d149c4e6c68674d5ea052ecdfb3c11655b535772cd8 (bin/pack PASS).
+# 31b-v010-p8 (PLAN 008 ARM-2 candidate, dec 069 item 3). CPU DRAFT, UNVALIDATED, packed: dist/31b-v010.zip sha256=fc24fcc3eeb98f1bdcd5914d61d597ed2b309d74eb64bed717a2ba5b47bd7c42 (bin/pack PASS).
 - parent: 31b-v009-p7a1 (dist/31b-v009.zip sha256=d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d).
 - WHY a gate sub-agent: the harness submit_patch cannot be wrapped from a bundle (swegemma 0.2.11 registers no callbacks:
   CallbackRegistry unused), and agent_runner breaks the session as soon as context.patch_submitted is set, even for an
@@ -15,4 +15,10 @@
   anchor or /tmp Python script" (PROMPT-LEVEL: no tool-level hook exists, feasibility in eval/plans/008.md).
 - unchanged: eval_config.yaml (cap 3.5, 40 calls / 50 turns), sampling, analyzer sub-agent. No repo-named content (dec 057).
 - bundle_load_check (real adk_submission compiler, stub tools): PASS; root tools end with code_analyzer_agent, submit_patch (AgentTool).
-zip sha256: c7a86295a023db971bcc9d149c4e6c68674d5ea052ecdfb3c11655b535772cd8
+zip sha256: fc24fcc3eeb98f1bdcd5914d61d597ed2b309d74eb64bed717a2ba5b47bd7c42
+- REPACK (plan 008 Addendum D72.1, codex review 20261106T133941 BLOCKING 1-2): gate check = harness protected-path rule (python3 one-liner
+  reimplementing verification._is_protected_test_or_config_path over `git diff --no-renames --name-only -z _swegemma_baseline`), outputs
+  `GATE call= kept_files=` + `VERDICT=... reason=changes|forced|check_error`; counter failure-safe; SUBMIT FAILED on inner error; system.md
+  "non-test source file" -> "non-test file" in the gate sentence. Previous zip c7a86295... VOID (never run). Load check PASS
+  (results/bundle_load_check_31b_v010.json); tests eval/tests/test_submit_gate.py 58 pass.
+- Correction: the anti-pattern line is the Option A text with its first sentence bolded, so it is not byte-verbatim (codex NB3).
