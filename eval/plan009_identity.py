@@ -13,8 +13,8 @@ Exit 0 iff every requested bundle passes ZIP and CONTENT. Appends one record per
 import argparse, datetime, hashlib, json, os, re, subprocess, sys, zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCHEMA = ("plan009_bundle_identity v1: records[] each {utc, git_sha, event, bundles{<v>: {zip_path, zip_sha256, "
-          "manifest_zip_sha256, zip_ok, content_ok, only_in_zip[], only_in_dir[], byte_mismatch[], excluded[], "
+SCHEMA = ("plan009_bundle_identity v2 (records made before v2 lack duplicate_members): records[] each {utc, git_sha, event, bundles{<v>: {zip_path, zip_sha256, "
+          "manifest_zip_sha256, zip_ok, content_ok, only_in_zip[], only_in_dir[], byte_mismatch[], duplicate_members[], excluded[], "
           "agent_yaml_sha256, pass}}}")
 
 
@@ -31,11 +31,15 @@ def check(v):
     with open(zpath, "rb") as f:
         zsha = sha(f.read())
     zfiles = {}
+    dup = []
     with zipfile.ZipFile(zpath) as z:
         for info in z.infolist():
             if info.is_dir():
                 continue
+            if info.filename in zfiles:
+                dup.append(info.filename)  # duplicate member names could hide unmatched bytes
             zfiles[info.filename] = sha(z.read(info))
+    dup = sorted(set(dup))
     dfiles = {}
     for dp, dn, fn in os.walk(bdir):
         for n in fn:
@@ -51,10 +55,10 @@ def check(v):
     only_d = sorted(set(dfiles) - set(zfiles))
     mism = sorted(p for p in set(zfiles) & set(dfiles) if zfiles[p] != dfiles[p])
     zip_ok = manifest_sha is not None and manifest_sha == zsha
-    content_ok = not (only_z or only_d or mism)
+    content_ok = not (only_z or only_d or mism or dup)
     return {"zip_path": os.path.relpath(zpath, ROOT), "zip_sha256": zsha, "manifest_zip_sha256": manifest_sha,
             "zip_ok": zip_ok, "content_ok": content_ok, "only_in_zip": only_z, "only_in_dir": only_d,
-            "byte_mismatch": mism, "excluded": excluded, "agent_yaml_sha256": zfiles.get("agent.yaml"),
+            "byte_mismatch": mism, "duplicate_members": dup, "excluded": excluded, "agent_yaml_sha256": zfiles.get("agent.yaml"),
             "pass": zip_ok and content_ok and "agent.yaml" in zfiles}
 
 
@@ -69,7 +73,10 @@ def main():
            "event": a.event, "bundles": {v: check(v) for v in a.versions}}
     data = {"_schema": SCHEMA, "records": []}
     if os.path.exists(a.out):
-        data = json.load(open(a.out))
+        old = json.load(open(a.out))
+        if not isinstance(old, dict) or not isinstance(old.get("records"), list):
+            sys.exit(f"ERROR: {a.out} is not a records file; refusing to overwrite")
+        data["records"] = old["records"]  # _schema is always rewritten to the current SCHEMA
     data["records"].append(rec)
     with open(a.out, "w") as f:
         json.dump(data, f, indent=1)
