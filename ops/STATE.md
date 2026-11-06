@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 15:26Z (cycle 163, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 15:33Z (cycle 164, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -23,10 +23,10 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (15:26Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-plan009-arm3-fix2
-  (fixes re-review 151940 BLOCKING: F1 one identity record per push via new --push-event DIR=EVENT, no chunkN wildcard;
-  F2 complete v2 identity records + single registered zip sha == MANIFEST; F3 arm3 recomputes smoke with current classifier +
-  classifier sha bound; spec ops/codex/build-plan009-arm3-fix2.spec). NOT CLEARED until re-review CLEAN. Fix1 merged 7e47b5c.
+## Running jobs (15:33Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-arm3fix2-light
+  (re-review of fix2 for review 151940 F1-F3: --push-event DIR=EVENT exact per push; complete v2 identity + MANIFEST zip sha; arm3 recomputes
+  smoke w/ current D4 classifier). Codex 6ec3227 eval files merged main 7876239 (Builder reviewed diff; suite 1614 pass/4 skip; legacy tests unchanged).
+  arm3 CLI needs --identity-json --bundle --transport DIR=SHA --push-event DIR=EVENT (every dir) --smoke-json [--base-verdict-json]. NOT CLEARED until CLEAN.
   DONE: identity 145500 CLEAN (1fd32d9) -> plan009_identity.py cleared. PLAN 009 rev 2 CLEAN (145128) = FINAL.
   v012/v013 review 144907 CLEAN. Arm-3 packed e5196a4: 31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096);
   31b-v013-p9b dist/31b-v013.zip sha256=06eff226d661c0528105a14d4fe0b69f67a8fb84fc52e654a0d54b6bc59a5dbb (v011+think 4096); load checks PASS.
@@ -74,7 +74,7 @@
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. codex-plan009-arm3-fix2 done -> review diff myself, run suite, merge, launch codex-review (-light); CLEAN -> arm3 modes cleared. If base=arm2 ever, write ruling file {verdict} after Director rules.
+1. codex-review-arm3fix2-light: CLEAN -> journal arm3 modes cleared; BLOCKING -> spec + codex-build fix3. If base=arm2 ever, write ruling file {verdict} after Director rules.
 2. Dec 055 31b-v002 submit 11-07T00:00Z FIRST (checklist in Best bundles); kaggle quota log after reset; then arm-2 v011 ONE session
    (verify kernel/runner names v011 sha 4f5b078a, journal, quota before/after, 1-line FYI).
 3. Nov 8 proposal from ops/drafts/nov8-slot-inputs.md by 11-07T12:00Z.
