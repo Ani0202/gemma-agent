@@ -5,5 +5,5 @@
 - changes (EXACTLY one file): configs/sampling.yaml thinking_config.thinking_budget 1024 -> 0 (=> enable_thinking=false per
   adk_submission/resolvers/generation.py:407). Prompt, caps, analyzer unchanged.
 - status: UNVALIDATED.
+- packed 2026-11-06T02:23Z with bin/pack --zip (PASS, 9091 unpacked bytes, zip 5350 bytes). zip sha256: b7b2eb3d139629a5893647546348c1b436c1ff94c786cbdf4e6ec1be12f660a0
 zip sha256: b7b2eb3d139629a5893647546348c1b436c1ff94c786cbdf4e6ec1be12f660a0
-- packed 2026-11-06T02:24Z with bin/pack --zip (PASS, 9091 unpacked bytes, zip 5350 bytes). zip sha256: b7b2eb3d139629a5893647546348c1b436c1ff94c786cbdf4e6ec1be12f660a0
