@@ -326,3 +326,6 @@
 2026-11-06T13:31Z | dec 069 read; codex 132715 BLOCKING (missing unscreened/dec060/dec062 lines) fixed + Addendum C (POST-HOC) committed 7ceb059; no prior number changed | eval/plans/007.md, results/plan007_arm1_summary.json
 2026-11-06T13:33Z | codex re-review 133120 CLEAN -> arm-1 PRIMARY 4/33 no longer provisional (ENV CONTROL caveat stays) | ops/codex/review-20261106T133120.md
 2026-11-06T13:35Z | 31b-v010 CPU draft: submit gate sub-agent (harness submit_patch unwrappable) + repeat ban + pipefail NB2; load check PASS, 16 gate tests pass | bundles/31b/v010/MANIFEST.md
+2026-11-06T13:37Z | dec 070 read (generic repeat guard approved w/ conditions; feasibility first) | ops/decisions/070-20261106T133129-32516-from-builder.md
+2026-11-06T13:39Z | feasibility: bundle callbacks silently dropped (no CallbackRegistry); agent_tool gate shares Context -> in-bundle empty-diff gate OK, repeat guard PROMPT-LEVEL; plan 008 pre-reg committed (BOTH mechanism metrics required) | eval/plans/008.md
+2026-11-06T13:39Z | 31b-v010 packed: Option A repeat text + dec 070 1(b) submit rule; dist/31b-v010.zip c7a86295...; pack/load/16 tests PASS; codex-review-v010-light started; deviations (gate kept, /tmp not write_file) flagged to Director | bundles/31b/v010/MANIFEST.md
