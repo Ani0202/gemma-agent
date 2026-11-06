@@ -276,3 +276,4 @@
 2026-11-06T05:34Z | codex-review-v008-light done: no BLOCKING, one-knob diff + temp 0.6 reaches request confirmed | ops/codex/review-20261106T053049.md
 2026-11-06T05:34:58Z | arm F pushed: gemma-31b-timing v6 (31b-v008-p5f, e1513aac), quota 14.49 h before; waiter timing-31b-v008-wait-light | ops/budget/kaggle.md
 2026-11-06T05:35Z | codex review of eval/plan005_armF_compare.py started (dec 061: review before relying) | ops/jobs/codex-review-armF-compare-light.status
+2026-11-06T05:39Z | codex review armF compare 053515: 2 BLOCKING (null patch_bytes, dup ids); fixed 0c3c777, E-as-F smoke HARM 3/5 reproduced; re-review job codex-review-armF-compare2-light | ops/codex/review-20261106T053515.md
