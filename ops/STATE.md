@@ -59,7 +59,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 ## Timing facts (results/kaggle_timing_e4b_v000_setup.json)
 - Harness sandbox setup ~210 s/task, outside max_time_minutes (clock starts after setup); flat across repos. vLLM startup 5.39 min;
   verification ~410 s (excluded from the 12 h). Agent clock p90 144 s at cap 5.
-
 ## Open decisions / instructions in force
 - Dec 022: interim timing rule (cap + S) x125 + 30 <= 660 (S now per dec 034 hypotheses). Item 4 (truncation-safe diff, patch hygiene, tool-output trimming) pending = dec 032 item 8.
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
@@ -67,16 +66,9 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 ## Dec 034 (report 009 ruled: option C with gated step-up) — in force
 - 31b-v001-t4 (dec 036 item 2 name; dir bundles/31b/v001) = TIMING bundle (cap 4.0, max_output_tokens 8192 x2): dist/31b-v001.zip sha256=3c3a264652ab1d72ff6b9c5609c482c34a2ab7af37eb600689e5cfa0bf810f6a,
   pack PASS, load check results/bundle_load_check_31b_v001.json (8192/8192, 240 s). NOT a submission candidate.
-- Kernel probes P1-P3: branch codex/kernel-probes 63127c8 (on fix5 87001e4). DEC 036: gate fix on branch codex/kernel-probes-gate
-  92a74c7 (worktree gemma-wt/codex-kernel-probes-gate): --gate-mode stock-path, b = max(phase1 - image_emu - setup.py) <= cap*60+37,
-  h1_composite reported (not gated); 118 tests pass; v5 rich_3067 = 89.52 s; whole v5 b max 92.3 <= 121 (PASS; overall FAIL on (a)).
-  Push the -gate branch at cap 4.0, budget 6000 only after BOTH review-kernel-probes-light and review-kernel-probes-gate-light are clean
-  (eval/plans/006.md "Dec 036 correction"). Summary cmd: timing_summary.py --gate-mode stock-path --gate-vllm-seconds 600.
-  Kaggle slug/push command: same as v5 (ops/budget/kaggle.md); log quota.
-  DEC 037: minus-image-only BLOCKING in the 63127c8 review = MOOT (say so in push note); gate prompt scoped OK; queue order holds.
+- Timing kernel (plan 006 DONE, G1 held -> dec 055): stack main 2db5f51 per Addendum A (gate fix from 92a74c7, worktree
+  gemma-wt/codex-kernel-probes-gate). Summary: timing_summary.py --gate-mode stock-path --gate-vllm-seconds 600. Slug/push: ops/budget/kaggle.md.
 - Gates for that run: (a) 8/8 no harness error; (b) max(Phase-1 - emulation) <= 277 s; (d) vLLM <= 600 s; (e) >= 1 non-empty diff.
-- G1 = P2 no docker binary + no docker.sock AND P1 stock setup <= 30 s on all 8 AND gates pass -> request SUBMIT 31b-v002 (cap <= 3.5,
-  byte-identical to v001-t4 except cap + comment, no re-time; dec 036 item 2) in report 010, citing h1_composite.
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - e4b-v002 submit: record submit time, completion time, any runtime field from the Kaggle API/CLI in ops/budget/kaggle.md (weak evidence; never act on it alone).
 - Forum question (dec 035, E4 YES): Aniket posts report 009 s6 from his own account; Builder posts NOTHING. When an answer appears, summarize it (no task data) in the next report. Nothing waits on it; G1 governs.
