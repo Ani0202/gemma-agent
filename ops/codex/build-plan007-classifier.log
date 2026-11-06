@@ -1675,3 +1675,1612 @@ def platform_probe(host='pypi.org', port=443, timeout=10.0):
 1071:    result = summary.summarize(path)
 1080:    test_skip_verification_result_and_task_row(tmp_path, monkeypatch, None, True, scenario)
 
+codex
+The journal rows currently lack the three fields needed to distinguish stock verification failures from wrapper failures. I’ll add them to both row paths and have the classifier inspect every retained setup entry, so a later installation pass cannot hide an earlier failure.
+exec
+/bin/bash -lc "sed -n '630,660p' eval/tests/test_agent_timing.py; tail -8 eval/kaggle/agent_timing.py" in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+ succeeded in 0ms:
+            probes.append(True)
+            clock[0] += 360
+            return dict(total_s=360, error='deadline', steps_s={})
+        monkeypatch.setattr(timing, 'stock_setup_probe', fake_probe)
+        totals = [463.0]
+    with (tmp_path / 'journal').open('w+') as stream:
+        asyncio.run(timing.evaluate(Entry(tasks_path=None), stream, 0 if budget_scenario else timing.time.monotonic(),
+                    dict(max_time_minutes=1.4, verification_timeout_seconds=300), totals))
+        stream.seek(0)
+        row = json.loads(stream.read())
+    if budget_scenario:
+        assert row == {'_stopped': 'insufficient remaining budget for next task'}
+        assert len(probes) == (0 if budget_scenario == 'reserve' else 1)
+        assert len(seen) == (1 if budget_scenario == 'reserve' else 2)
+        assert totals == [463.0]
+        assert ev.verify_task is original_verify
+        return
+    assert row['verification_skipped'] is skip
+    assert (row['error'] is not None) is bool(failure)
+    verified = not skip and failure not in ('runner', 'setup')
+    assert row['resolved'] is verified
+    assert row['exit_code'] == (0 if verified else None)
+    assert len(verification_calls) == int(verified)
+    assert row['fallback_patch_used'] is (failure not in ('runner', 'setup'))
+    assert row['phase1_source'] == ('run_agent_sandbox' if failure in ('runner', 'setup') else 'sandbox_wrappers')
+    assert seen[0][2] == (0 if skip else 300)
+    assert ev.verify_task is original_verify
+    assert all(getattr(ar, key) is originals[key] for key in ('asyncio', 'sandbox_start', 'sandbox_stop', 'sandbox_exec'))
+
+
+@pytest.mark.parametrize('key,value,check', [
+            try:
+                for server in servers:
+                    server.stop()
+            finally:
+                append(journal, {'_done': dict(n=len(totals), total_seconds=distribution(totals), startup_seconds=startup)})
+
+if __name__ == '__main__':
+    main()
+
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-plan007-classifier/eval/kaggle/agent_timing.py
+diff --git a/eval/kaggle/agent_timing.py b/eval/kaggle/agent_timing.py
+index ed95dcf86acd7a38b4afdb2be6a50be572ca9fe9..0874676bd55fb2f6b8784f8d95db066056d2982f
+--- a/eval/kaggle/agent_timing.py
++++ b/eval/kaggle/agent_timing.py
+@@ -1093,6 +1093,9 @@
+                          image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
+             try:
+               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
++                result_error=(result.error[:4096] if result is not None and result.error else None),
++                agent_error_text=(evaluator.agent_error[:4096] if evaluator.agent_error else None),
++                verified_patch_bytes=(len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+                 **phase,
+                 wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+                 setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+@@ -1108,7 +1111,18 @@
+                 **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+                 timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+             except Exception as exc:
++                evidence = {}
++                for key, value in (
++                    ('result_error', lambda: result.error[:4096] if result is not None and result.error else None),
++                    ('agent_error_text', lambda: evaluator.agent_error[:4096] if evaluator.agent_error else None),
++                    ('verified_patch_bytes', lambda: len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
++                ):
++                    try:
++                        evidence[key] = value()
++                    except Exception:
++                        evidence[key] = None
+                 append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
++                                     **evidence,
+                                      **phase,
+                                      wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+                                      setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+
+exec
+/bin/bash -lc "cat > eval/kaggle/classify_rows.py <<'PY'
+\"\"\"Frozen Plan 007 rev 2 classifier for timing journal rows (stdlib only).\"\"\"
+import argparse
+from collections import Counter
+import hashlib
+import json
+from pathlib import Path
+
+if __package__:
+    from .agent_timing import AGENT_OUTCOMES as AGENT_END
+else:
+    from agent_timing import AGENT_OUTCOMES as AGENT_END
+
+RECORD = 'uninstall-no-record-file'
+WRAPPER_H = ('Evaluation exception (', 'Cleanup exception (', 'trace parse (', 'Row build exception (')
+VERIFY_AGENT_PREFIXES = (
+    'Failed to apply agent patch:',
+    'Missing or empty JUnit XML report', 'Malformed JUnit XML report:',
+    'No <testsuite> elements found in JUnit XML',
+    'No passing tests recorded in JUnit XML', 'Test failures/errors recorded in JUnit XML',
+    'Required test node did not pass:',
+    'Pytest stdout summary indicates zero or no passing tests',
+    'Missing JUnit XML report (possible premature os._exit(0))',
+)
+REQUIRED = ('result_error', 'agent_error_text', 'verified_patch_bytes', 'setup_calls', 'exit_code', 'resolved')
+
+
+def agent_end(message):
+    text = (message or '').strip()
+    return next((name for name, pattern in AGENT_END if pattern.match(text)), None)
+
+
+def output_text(entry):
+    return (entry.get('stdout') or '') + (entry.get('stderr') or '')
+
+
+def classify(row: dict) -> dict:
+    \"\"\"Classify one task row, preserving the stock verdict even for H rows.\"\"\"
+    if 'instance_id' not in row:
+        raise ValueError('Meta row has no instance_id')
+    row_reasons = []
+    error = row.get('error')
+    if any(key not in row for key in REQUIRED):
+        row_reasons.append('r1:missing_schema')
+    if isinstance(error, str) and any(marker in error for marker in WRAPPER_H):
+        row_reasons.append('r2:wrapper_exception')
+    elif error is not None and error "'!= '"'Harness task failure':
+        row_reasons.append('r3:unexpected_error')
+    elif error is None or error == 'Harness task failure':
+        for message in (row.get('result_error'), row.get('agent_error_text')):
+            if message and agent_end(message) is None and not message.startswith(VERIFY_AGENT_PREFIXES):
+                row_reasons.append('r4:unrecognized_message' if error else 'r5:unrecognized_message')
+                break
+
+    setup_reasons = []
+    diagnostic = False
+    if row.get('missing_tool_deps'):
+        setup_reasons.append('s1:missing_tool_deps')
+    for entry in row.get('setup_calls', []):
+        step, rc = entry.get('step'), entry.get('rc')
+        if step not in ('pip_check', 'workspace_editable', 'setup.py'):
+            if rc "'!= 0 and (rc is not None or (entry.get('"'duration_s') or 0) > 0 or entry.get('stderr')):
+                setup_reasons.append('s2:setup_step_failed')
+        elif step == 'workspace_editable' and rc "'!= 0:
+            if RECORD in output_text(entry):
+                diagnostic = True
+            else:
+                setup_reasons.append('"'s4:workspace_editable_failed')
+        elif step == 'setup.py':
+            if rc "'!= 0:
+                setup_reasons.append('"'s3:setup_py_failed')
+            earlier_offline_record = False
+            for sub in entry.get('subprocesses', []):
+                argv = sub.get('argv')
+                if not isinstance(argv, list) or '-e' not in argv or sub.get('rc') == 0:
+                    continue
+                if '--no-index' in argv and RECORD in output_text(sub):
+                    earlier_offline_record = diagnostic = True
+                elif '--no-index' not in argv and earlier_offline_record:
+                    pass
+                else:
+                    setup_reasons.append('s5:unexpected_editable_failure')
+    if row.get('setup_failed') is True and not setup_reasons and not diagnostic:
+        setup_reasons.append('s6:setup_failed_unexplained')
+    known_diag = diagnostic and not setup_reasons
+    reasons = row_reasons + setup_reasons
+    if known_diag:
+        reasons.append('known_diag:record_chain')
+    h = 'H-ROW' if row_reasons else ('H-SETUP' if setup_reasons else None)
+    patch_bytes = row.get('verified_patch_bytes')
+    patch_apply = (row.get('result_error') or '').startswith('Failed to apply agent patch:')
+    code = row.get('exit_code')
+    if h is None and patch_bytes is not None and patch_bytes > 0 and not patch_apply and not (
+        type(code) is int and code in (0, 1, 2, 3, 4, 5, 124)
+    ):
+        h = 'H-VERIFY'
+        reasons.append('verify:unexpected_exit_code')
+    resolved = bool(row.get('resolved'))
+    agent = None
+    if h is None:
+        if resolved:
+            agent = 'PASS'
+        elif patch_bytes == 0:
+            agent = 'NO_PATCH'
+        elif patch_apply:
+            agent = 'PATCH_APPLY'
+        elif code == 124:
+            agent = 'VERIFY_TIMEOUT_124'
+        elif code == 1:
+            agent = 'PYTEST_1'
+        elif code in (2, 3, 4, 5):
+            agent = 'PYTEST_2_5'
+        elif code == 0:
+            agent = 'EXIT0_UNRESOLVED'
+        else:
+            agent = 'OTHER_FAIL'
+    return dict(h=h, known_diag=known_diag, agent=agent,
+                agent_end=agent_end(row.get('agent_error_text')), resolved=resolved,
+                reasons=list(dict.fromkeys(reasons)))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('timing', type=Path)
+    parser.add_argument('--out', type=Path)
+    args = parser.parse_args()
+    payload = args.timing.read_bytes()
+    rows = []
+    for line in payload.decode('utf-8').splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if 'instance_id' in row:
+            rows.append(dict(instance_id=row['instance_id'], repo=row.get('repo'), **classify(row)))
+    result = dict(_schema='plan007_row_classes/v1',
+                  classifier_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                  input=str(args.timing), input_sha256=hashlib.sha256(payload).hexdigest(),
+                  n_rows=len(rows),
+                  counts=dict(h=dict(Counter(r['h'] for r in rows if r['h'] is not None)),
+                              agent=dict(Counter(r['agent'] for r in rows if r['agent'] is not None)),
+                              known_diag=sum(r['known_diag'] for r in rows)),
+                  h_rows=[r['instance_id'] for r in rows if r['h'] is not None], rows=rows)
+    output = json.dumps(result, indent=2) + '\\n'
+    if args.out:
+        args.out.write_text(output, encoding='utf-8')
+    print(output, end='')
+
+
+if __name__ == '__main__':
+    main()
+PY" in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+ succeeded in 0ms:
+exec
+/bin/bash -lc "sed -n '535,635p' eval/tests/test_agent_timing.py" in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+ succeeded in 0ms:
+    assert fields['post_phase1_seconds'] == 6
+    assert fields['fallback_patch_used'] is True
+    fields = timing.phase1_fields({}, 2, 3, None, '')
+    assert fields['phase1_wall_seconds'] == 2 and fields['phase1_source'] == 'run_agent_sandbox'
+    assert fields['agent_clock_seconds'] is fields['agent_timeout_fired'] is None
+    assert fields['patch_submitted'] is fields['fallback_patch_used'] is None
+
+
+@pytest.mark.parametrize('failure', [None, 'runner', 'setup', 'cleanup'])
+@pytest.mark.parametrize('skip', [True, False])
+def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, skip, budget_scenario=None):
+    import asyncio
+    from contextvars import ContextVar
+    import dataclasses
+    import sys
+    from types import ModuleType
+    modules = {}
+    for name in ('swegemma', 'swegemma.evaluate', 'swegemma.models', 'swegemma.harness',
+                 'swegemma.harness.verification', 'swegemma.harness.agent_runner'):
+        modules[name] = ModuleType(name)
+        monkeypatch.setitem(sys.modules, name, modules[name])
+    ev, vf, ar, models = [modules['swegemma.' + n] for n in (
+        'evaluate', 'harness.verification', 'harness.agent_runner', 'models')]
+    class TaskResult(Entry):
+        tool_calls = 0
+        def model_dump(self, **kwargs):
+            return vars(self)
+    models.TaskResult = TaskResult
+    task = dataclasses.make_dataclass('Task', [('instance_id', str), ('repo', str),
+        ('patch', str), ('test_patch', str), ('FAIL_TO_PASS', tuple), ('PASS_TO_PASS', tuple),
+        ('test_files', tuple)])('task', 'org/repo', '', '', (), (), ())
+    result = asyncio.run(timing.skip_verification(None, None, task, None, agent_patch='diff'))
+    assert isinstance(result, TaskResult)
+    assert result.resolved is False and result.test_exit_code is None
+    assert result.agent_patch == 'diff' and result.error is None and result.trace is None
+    assert timing.harness_error(result, '') is None
+    assert timing.harness_error(result, 'Sandbox execution error: failed') == 'Harness task failure'
+    models.load_tasks = lambda path: [task]
+    verification_calls = []
+    async def original_verify(*a, **kw):
+        assert not skip, 'real verification must not run when skipped'
+        verification_calls.append((a, kw))
+        result = await timing.skip_verification(*a, **kw)
+        result.resolved, result.test_exit_code = True, 0
+        return result
+    ev.verify_task = original_verify
+    vf.strip_protected_files_from_patch = lambda patch, **kw: patch
+    vf._is_protected_test_or_config_path = lambda path: False
+    ar.asyncio = asyncio
+    async def sandbox(*a, **kw):
+        if failure == 'setup':
+            raise RuntimeError('container setup failed')
+        return 'sid'
+    ar.sandbox_start = ar.sandbox_stop = ar.sandbox_exec = sandbox
+    originals = dict(vars(ar))
+    class Evaluator:
+        def __init__(self, config):
+            assert budget_scenario is None, "measured task must not start"
+            def cleanup():
+                if failure == 'cleanup':
+                    raise RuntimeError('cleanup failed')
+            self.docker = Entry(start=lambda: None, cleanup_all=cleanup)
+        async def _run_agent_sandbox(self, task, *args, **kw):
+            assert not task.patch and not task.test_patch
+            if failure == 'runner':
+                raise RuntimeError('runner failed')
+            sid = await ar.sandbox_start(self.docker)
+            async with ar.asyncio.timeout(10):
+                pass
+            await ar.sandbox_stop(self.docker, sid)
+            return 'diff --git a/repo/a.py b/repo/a.py\n', '', None
+        async def evaluate_task(self, task):
+            context = Entry(task=task, patch_submitted=False, llm_calls_used=0)
+            patch, error, trace = await self._run_agent_sandbox(task, context=context)
+            return await ev.verify_task(self.docker, None, task, None,
+                                        agent_patch=patch, agent_error=error, trace=trace)
+    ev.Evaluator = Evaluator
+    monkeypatch.setattr(timing, 'TASK_IDS', ['task'])
+    monkeypatch.setattr(timing, 'WORK', tmp_path)
+    monkeypatch.setattr(timing, 'SKIP_VERIFICATION', skip)
+    monkeypatch.setattr(timing, 'patch_subprocess_deps', lambda *a: None)
+    seen = []
+    monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or False)
+    totals = []
+    if budget_scenario:
+        # Review example: 5200 + 1.5*463 fits 6000, but P1's reservation does not.
+        # The second case admits P1, then catches an unexpectedly long fake probe.
+        clock = [5200.0 if budget_scenario == 'reserve' else 5000.0]
+        real_should_stop = load('agent_timing').should_stop
+        monkeypatch.setattr(timing.time, 'monotonic', lambda: clock[0])
+        monkeypatch.setenv('KERNEL_BUDGET_SECONDS', '6000')
+        monkeypatch.setattr(timing, 'STOCK_PROBE', True)
+        monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or real_should_stop(*a))
+        probes = []
+        def fake_probe(*args):
+            probes.append(True)
+            clock[0] += 360
+            return dict(total_s=360, error='deadline', steps_s={})
+        monkeypatch.setattr(timing, 'stock_setup_probe', fake_probe)
+        totals = [463.0]
+    with (tmp_path / 'journal').open('w+') as stream:
+
+exec
+/bin/bash -lc "cat > eval/tests/test_classify_rows.py <<'PY'
+\"\"\"Offline synthetic tests for the frozen Plan 007 row classifier.\"\"\"
+import hashlib
+from importlib import import_module
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
+classifier = import_module('eval.kaggle.classify_rows')
+timing = import_module('eval.kaggle.agent_timing')
+
+
+def row(**updates):
+    return dict(dict(instance_id='task-1', repo='example/repo', result_error=None,
+                     agent_error_text=None, verified_patch_bytes=10, setup_calls=[],
+                     exit_code=0, resolved=False, error=None, setup_failed=False), **updates)
+
+
+def editable(offline=True, record=True, rc=1):
+    return dict(argv=['pip', 'install', '-e', '/workspace'] + (['--no-index'] if offline else []),
+                rc=rc, stdout='' if offline else 'subprocess-exited-with-error',
+                stderr=classifier.RECORD if record else 'other failure')
+
+
+def chain():
+    return dict(step='setup.py', rc=0,
+                subprocesses=[editable(), editable(offline=False, record=False)])
+
+
+def test_agent_patterns_are_stock():
+    assert [(n, p.pattern, p.flags) for n, p in classifier.AGENT_END] == [
+        (n, p.pattern, p.flags) for n, p in timing.AGENT_OUTCOMES]
+
+
+@pytest.mark.parametrize('passes', [1, 3])
+def test_record_chain_all_passes(passes):
+    result = classifier.classify(row(setup_calls=[chain() for _ in range(passes)],
+                                     setup_failed=True, editable_failed=True))
+    assert result['h'] is None
+    assert result['known_diag'] is True
+
+
+@pytest.mark.parametrize('subprocesses', [
+    [editable(record=False)], [editable(offline=False, record=False)],
+    [editable(offline=False, record=False), editable()],
+])
+def test_unexpected_editable_failure(subprocesses):
+    result = classifier.classify(row(setup_calls=[dict(step='setup.py', rc=0, subprocesses=subprocesses)]))
+    assert result['h'] == 'H-SETUP'
+    assert result['known_diag'] is False
+    assert 's5:unexpected_editable_failure' in result['reasons']
+
+
+def test_later_pass_failure_is_retained():
+    calls = [chain(), dict(step='setup.py', rc=0, subprocesses=[editable(record=False)])]
+    result = classifier.classify(row(setup_calls=calls))
+    assert result['h'] == 'H-SETUP'
+    assert result['known_diag'] is False
+
+
+@pytest.mark.parametrize('updates,reason', [
+    (dict(setup_calls=[dict(step='tool_deps', rc=-1)]), 's2:setup_step_failed'),
+    (dict(missing_tool_deps=['x']), 's1:missing_tool_deps'),
+    (dict(setup_failed=True), 's6:setup_failed_unexplained'),
+    (dict(setup_calls=[dict(step='setup.py', rc=1)]), 's3:setup_py_failed'),
+    (dict(setup_calls=[dict(step='workspace_editable', rc=1)]), 's4:workspace_editable_failed'),
+])
+def test_setup_failures(updates, reason):
+    result = classifier.classify(row(**updates))
+    assert result['h'] == 'H-SETUP'
+    assert result['known_diag'] is False
+    assert reason in result['reasons']
+
+
+@pytest.mark.parametrize('duration,stderr,expected', [(0, '', None), (1, '', 'H-SETUP'), (0, 'failure', 'H-SETUP')])
+def test_not_run_step(duration, stderr, expected):
+    result = classifier.classify(row(setup_calls=[dict(step='tool_deps', rc=None, duration_s=duration, stderr=stderr)]))
+    assert result['h'] == expected
+
+
+def test_workspace_record_and_pip_check():
+    result = classifier.classify(row(setup_failed=True, setup_calls=[
+        dict(step='workspace_editable', rc=1, stdout=classifier.RECORD),
+        dict(step='pip_check', rc=1), dict(step='setup.py', rc=0)]))
+    assert result['h'] is None and result['known_diag'] is True
+
+
+@pytest.mark.parametrize('message,code,expected', [
+    ('Failed to apply agent patch: xyz', 1, 'PATCH_APPLY'),
+    ('Failed to apply agent patch: xyz', None, 'PATCH_APPLY'),
+    ('Required test node did not pass: a::b', 0, 'EXIT0_UNRESOLVED'),
+    ('Test failures/errors recorded in JUnit XML (failures=1, errors=0)', 1, 'PYTEST_1'),
+])
+def test_verification_agent_errors(message, code, expected):
+    result = classifier.classify(row(error='Harness task failure', result_error=message,
+                                     exit_code=code, verified_patch_bytes=50))
+    assert result['h'] is None and result['agent'] == expected
+
+
+@pytest.mark.parametrize('prefix', classifier.VERIFY_AGENT_PREFIXES)
+def test_all_verification_agent_prefixes(prefix):
+    result = classifier.classify(row(error='Harness task failure', result_error=prefix + ' synthetic'))
+    assert result['h'] is None
+
+
+@pytest.mark.parametrize('code,expected', [(124, 'VERIFY_TIMEOUT_124'), (1, 'PYTEST_1'),
+                                         (2, 'PYTEST_2_5'), (3, 'PYTEST_2_5'), (4, 'PYTEST_2_5'),
+                                         (5, 'PYTEST_2_5'), (0, 'EXIT0_UNRESOLVED')])
+def test_verification_outcomes(code, expected):
+    result = classifier.classify(row(exit_code=code))
+    assert result['h'] is None and result['agent'] == expected
+
+
+@pytest.mark.parametrize('field,message', [
+    ('result_error', 'Evaluation error: boom'),
+    ('result_error', 'Failed to apply test_patch: x'),
+    ('result_error', 'Missing test specification'),
+    ('agent_error_text', 'Agent crashed'),
+])
+@pytest.mark.parametrize('error,reason', [('Harness task failure', 'r4:unrecognized_message'),
+                                         (None, 'r5:unrecognized_message')])
+def test_unrecognized_messages(field, message, error, reason):
+    result = classifier.classify(row(error=error, **{field: message}))
+    assert result['h'] == 'H-ROW' and result['agent'] is None
+    assert reason in result['reasons']
+
+
+@pytest.mark.parametrize('error', ['Cleanup exception (OSError)', 'Harness task failure trace parse (KeyError)',
+                                 'Evaluation exception (ValueError)', 'Row build exception (TypeError)'])
+def test_wrapper_errors_preserve_stock_verdict(error):
+    result = classifier.classify(row(error=error, resolved=True))
+    assert result['h'] == 'H-ROW' and result['resolved'] is True and result['agent'] is None
+
+
+def test_other_row_error():
+    assert classifier.classify(row(error='unexpected'))['reasons'] == ['r3:unexpected_error']
+
+
+@pytest.mark.parametrize('code', [None, -1, 6, '0', False, 0.0])
+def test_invalid_verification_codes(code):
+    assert classifier.classify(row(verified_patch_bytes=30, exit_code=code))['h'] == 'H-VERIFY'
+
+
+def test_no_patch_with_agent_end():
+    result = classifier.classify(row(verified_patch_bytes=0, exit_code=-1,
+                                     agent_error_text='Agent exceeded turns budget'))
+    assert result['h'] is None and result['agent'] == 'NO_PATCH' and result['agent_end'] == 'turns'
+
+
+@pytest.mark.parametrize('name,message', [
+    ('timeout', ' Agent exceeded session timeout (300s) '),
+    ('turns', 'Agent exceeded maximum allowed LLM turns'),
+    ('tool_calls', 'Agent exceeded tool call budget'),
+    ('no_submit', 'Agent completed execution without calling submit_patch'),
+])
+def test_agent_end_is_descriptive(name, message):
+    result = classifier.classify(row(exit_code=1, agent_error_text=message))
+    assert result['agent'] == 'PYTEST_1' and result['agent_end'] == name
+
+
+@pytest.mark.parametrize('key', classifier.REQUIRED)
+def test_schema_guard(key):
+    source = row()
+    del source[key]
+    assert classifier.classify(source)['h'] == 'H-ROW'
+
+
+def test_pass_and_other_fail():
+    assert classifier.classify(row(resolved=True))['agent'] == 'PASS'
+    assert classifier.classify(row(verified_patch_bytes=None, exit_code=None))['agent'] == 'OTHER_FAIL'
+
+
+def test_precedence_and_orthogonal_diagnostic():
+    result = classifier.classify(row(error='unexpected', setup_calls=[chain()]))
+    assert result['h'] == 'H-ROW' and result['known_diag'] is True
+    result = classifier.classify(row(error='unexpected', setup_failed=True, exit_code=-1))
+    assert result['h'] == 'H-ROW' and result['known_diag'] is False
+    assert classifier.classify(row(setup_failed=True, exit_code=-1))['h'] == 'H-SETUP'
+
+
+def test_meta_rejected():
+    with pytest.raises(ValueError):
+        classifier.classify({'_schema': 'example'})
+
+
+def test_cli(tmp_path):
+    source, output = tmp_path / 'timing.jsonl', tmp_path / 'classes.json'
+    source.write_text('\\n'.join(json.dumps(r) for r in [
+        {'_schema': 'example'}, {'_vllm': {}}, row(resolved=True),
+        row(instance_id='bad', error='Harness task failure', result_error='Evaluation error: boom'),
+        row(instance_id='diag', setup_calls=[chain()], setup_failed=True),
+        {'_stopped': 'example'}, {'_done': {'n': 3}},
+    ]) + '\\n')
+    proc = subprocess.run([sys.executable, classifier.__file__, str(source), '--out', str(output)],
+                          check=True, capture_output=True, text=True)
+    result = json.loads(proc.stdout)
+    assert result == json.loads(output.read_text())
+    assert result['_schema'] == 'plan007_row_classes/v1'
+    assert result['n_rows'] == 3 and result['h_rows'] == ['bad']
+    assert result['counts'] == dict(h={'H-ROW': 1}, agent={'PASS': 1, 'EXIT0_UNRESOLVED': 1}, known_diag=1)
+    assert result['input_sha256'] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert result['classifier_sha256'] == hashlib.sha256(Path(classifier.__file__).read_bytes()).hexdigest()
+    assert 'boom' not in proc.stdout and 'Evaluation error' not in proc.stdout
+    assert classifier.RECORD not in proc.stdout
+    assert proc.stderr == ''
+PY" in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+ succeeded in 0ms:
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-plan007-classifier/eval/tests/test_agent_timing.py
+diff --git a/eval/kaggle/agent_timing.py b/eval/kaggle/agent_timing.py
+index ed95dcf86acd7a38b4afdb2be6a50be572ca9fe9..0874676bd55fb2f6b8784f8d95db066056d2982f
+--- a/eval/kaggle/agent_timing.py
++++ b/eval/kaggle/agent_timing.py
+@@ -1093,6 +1093,9 @@
+                          image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
+             try:
+               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
++                result_error=(result.error[:4096] if result is not None and result.error else None),
++                agent_error_text=(evaluator.agent_error[:4096] if evaluator.agent_error else None),
++                verified_patch_bytes=(len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+                 **phase,
+                 wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+                 setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+@@ -1108,7 +1111,18 @@
+                 **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+                 timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+             except Exception as exc:
++                evidence = {}
++                for key, value in (
++                    ('result_error', lambda: result.error[:4096] if result is not None and result.error else None),
++                    ('agent_error_text', lambda: evaluator.agent_error[:4096] if evaluator.agent_error else None),
++                    ('verified_patch_bytes', lambda: len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
++                ):
++                    try:
++                        evidence[key] = value()
++                    except Exception:
++                        evidence[key] = None
+                 append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
++                                     **evidence,
+                                      **phase,
+                                      wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+                                      setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+diff --git a/eval/tests/test_agent_timing.py b/eval/tests/test_agent_timing.py
+index ff83725704a0d7ab6d799b99d70c92bb069995fd..710ad928453eba103aeb2d41c19a1fc54795b51f
+--- a/eval/tests/test_agent_timing.py
++++ b/eval/tests/test_agent_timing.py
+@@ -645,6 +645,9 @@
+         assert ev.verify_task is original_verify
+         return
+     assert row['verification_skipped'] is skip
++    assert {'result_error', 'agent_error_text', 'verified_patch_bytes'} <= row.keys()
++    assert row['result_error'] is None
++    assert row['verified_patch_bytes'] == (0 if failure in ('runner', 'setup') else len('diff --git a/repo/a.py b/repo/a.py\n'.encode('utf-8')))
+     assert (row['error'] is not None) is bool(failure)
+     verified = not skip and failure not in ('runner', 'setup')
+     assert row['resolved'] is verified
+@@ -657,6 +660,21 @@
+     assert all(getattr(ar, key) is originals[key] for key in ('asyncio', 'sandbox_start', 'sandbox_stop', 'sandbox_exec'))
+ 
+ 
++def test_row_build_fallback_retains_evidence_fields():
++    tree = ast.parse(Path(timing.__file__).read_text())
++    evaluate = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'evaluate')
++    row_try = next(n for n in ast.walk(evaluate) if isinstance(n, ast.Try)
++                   and any(isinstance(c, ast.keyword) and c.arg == 'verified_patch_bytes'
++                           for c in ast.walk(ast.Module(body=n.body, type_ignores=[]))))
++    handler = row_try.handlers[0]
++    evidence = next(n for n in handler.body if isinstance(n, ast.For))
++    assert {ast.literal_eval(item.elts[0]) for item in evidence.iter.elts} == {
++        'result_error', 'agent_error_text', 'verified_patch_bytes'}
++    assert any(isinstance(n, ast.keyword) and n.arg is None
++               and isinstance(n.value, ast.Name) and n.value.id == 'evidence'
++               for n in ast.walk(handler))
++
++
+ @pytest.mark.parametrize('key,value,check', [
+     ('phase1_wall_seconds', 296.00001, 'b_max_phase1'),
+     ('phase1_wall_seconds', 270.00001, 'c_mean_phase1'),
+
+exec
+/bin/bash -lc '/home/ubuntu/gemma-local/venv/bin/python3 -m pytest eval/tests -q' in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+ exited 1 in 0ms:
+/home/ubuntu/gemma-local/venv/bin/python3: No module named pytest
+
+exec
+/bin/bash -lc 'python3 -m pytest eval/tests/test_classify_rows.py eval/tests/test_agent_timing.py -q' in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+ exited 1 in 0ms:
+/usr/bin/python3: No module named pytest
+
+codex
+The implementation and synthetic tests are in place. Neither the requested interpreter nor system `python3` has `pytest` on its default path. I’ll look for an existing local installation so I can run the tests offline.
+exec
+/bin/bash -lc 'ls /home/ubuntu/gemma-local; ls /home/ubuntu; ls /tmp' in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+ succeeded in 0ms:
+fastapi_14258.json
+fastapi_14458.json
+imgrt-stub
+pyimg
+requests_7433.json
+rich_2725.json
+show.py
+venv
+wh
+bwrap-tests.txt
+etho-final-bwrap-1793817344
+etho-final-nobwrap-1793817344
+etho-ghclone-1793817825
+etho-kit
+etho-kit.zip
+etho-v-bwrap
+etho-v-nobwrap
+etho-v-nogit
+etho-zip-1793817825
+final-bwrap.log
+final-nobwrap.log
+fresh-public
+gemma-kit
+gemma-kit.zip
+gemma-local
+ghclone-bwrap.log
+google-cloud-sdk
+nobwrap-bin
+nobwrap-check.log
+nobwrap-fails.txt
+node_install.log
+nodesource.log
+nogit-check.log
+proof
+setup_vm.log
+tmpuvvi8q5e.secret
+v-bwrap.log
+v-nobwrap.log
+v-nogit.log
+work
+zip-nobwrap.log
+add_cpu.py
+cc-socks
+claude-1001
+codex-bwrap-synthetic-mount-targets-1001
+codex-daemon-1001
+edit_memguard.py
+edit_push.py
+edit_r4.py
+edit_setup.py
+edit_tests.py
+gemma-sandbox-limits-tests.py
+kernel-setup-pybx6em_
+memguard-fix-dry-run.log
+memguard-live-final-wnws0xkt
+memguard-live-rciumryo
+more_r4.py
+plan003-kernel-acceptance.json
+plan003-round3-acceptance.json
+plan003_kernel_setup_r4.json
+pytest-of-ubuntu
+rewrite_memguard.py
+rewrite_timing.py
+round2.py
+sandbox-limits-round3-eval.xml
+snap-private-tmp
+swegemma_sandbox_fd9686b4-b63_kugufs7j
+swegemma_sp_cache_v8
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-ModemManager.service-OEFLzB
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-etho-app.service-fGwNc1
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-polkit.service-Ig2nLs
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-systemd-logind.service-P50ZmG
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-systemd-resolved.service-V9cidO
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-systemd-timesyncd.service-udSMTt
+systemd-private-9f3fd7ae4596410d92689fa80dc35a0b-unified-monitoring-agent.service-8eiWLF
+tests_r4.py
+timing-instrumentation-ids.txt
+timing-kernel-push.0js6sL
+timing-kernel-push.0kG5B1
+timing-kernel-push.3lYRLj
+timing-kernel-push.471RWS
+timing-kernel-push.48DAZi
+timing-kernel-push.5tVTsN
+timing-kernel-push.7Mtana
+timing-kernel-push.7xEkdh
+timing-kernel-push.8usiIY
+timing-kernel-push.9UQNFe
+timing-kernel-push.BVsQHM
+timing-kernel-push.BergFV
+timing-kernel-push.CPVAzy
+timing-kernel-push.D2HwGt
+timing-kernel-push.E6H7Pn
+timing-kernel-push.G89D5f
+timing-kernel-push.GeWIA0
+timing-kernel-push.Im8VCi
+timing-kernel-push.IqwHfi
+timing-kernel-push.N4MKlZ
+timing-kernel-push.N4hX9e
+timing-kernel-push.Nw9J1h
+timing-kernel-push.OwKztB
+timing-kernel-push.U5fzrH
+timing-kernel-push.V3WuSV
+timing-kernel-push.WS1AsP
+timing-kernel-push.dDCG5s
+timing-kernel-push.kIrMrc
+timing-kernel-push.mgf6pG
+timing-kernel-push.nAM7eo
+timing-kernel-push.oFvftF
+timing-kernel-push.orJcYN
+timing-kernel-push.qH12hI
+timing-kernel-push.qQYyFW
+tmp5sjl4t25
+tmpw94fvsg6
+tmpyip8ilp2
+tmux-1001
+uv-8cd53785d5c5e8be.lock
+
+exec
+/bin/bash -lc 'git diff --stat; git diff -- eval/kaggle/agent_timing.py eval/tests/test_agent_timing.py' in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+ succeeded in 0ms:
+ eval/kaggle/agent_timing.py     | 14 ++++++++++++++
+ eval/tests/test_agent_timing.py | 18 ++++++++++++++++++
+ 2 files changed, 32 insertions(+)
+diff --git a/eval/kaggle/agent_timing.py b/eval/kaggle/agent_timing.py
+index ed95dcf..0874676 100644
+--- a/eval/kaggle/agent_timing.py
++++ b/eval/kaggle/agent_timing.py
+@@ -1093,6 +1093,9 @@ async def evaluate(config, journal, started, caps, totals):
+                          image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
+             try:
+               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
++                result_error=(result.error[:4096] if result is not None and result.error else None),
++                agent_error_text=(evaluator.agent_error[:4096] if evaluator.agent_error else None),
++                verified_patch_bytes=(len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+                 **phase,
+                 wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+                 setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+@@ -1108,7 +1111,18 @@ async def evaluate(config, journal, started, caps, totals):
+                 **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+                 timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+             except Exception as exc:
++                evidence = {}
++                for key, value in (
++                    ('result_error', lambda: result.error[:4096] if result is not None and result.error else None),
++                    ('agent_error_text', lambda: evaluator.agent_error[:4096] if evaluator.agent_error else None),
++                    ('verified_patch_bytes', lambda: len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
++                ):
++                    try:
++                        evidence[key] = value()
++                    except Exception:
++                        evidence[key] = None
+                 append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
++                                     **evidence,
+                                      **phase,
+                                      wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+                                      setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+diff --git a/eval/tests/test_agent_timing.py b/eval/tests/test_agent_timing.py
+index ff83725..710ad92 100644
+--- a/eval/tests/test_agent_timing.py
++++ b/eval/tests/test_agent_timing.py
+@@ -645,6 +645,9 @@ def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, s
+         assert ev.verify_task is original_verify
+         return
+     assert row['verification_skipped'] is skip
++    assert {'result_error', 'agent_error_text', 'verified_patch_bytes'} <= row.keys()
++    assert row['result_error'] is None
++    assert row['verified_patch_bytes'] == (0 if failure in ('runner', 'setup') else len('diff --git a/repo/a.py b/repo/a.py\n'.encode('utf-8')))
+     assert (row['error'] is not None) is bool(failure)
+     verified = not skip and failure not in ('runner', 'setup')
+     assert row['resolved'] is verified
+@@ -657,6 +660,21 @@ def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, s
+     assert all(getattr(ar, key) is originals[key] for key in ('asyncio', 'sandbox_start', 'sandbox_stop', 'sandbox_exec'))
+ 
+ 
++def test_row_build_fallback_retains_evidence_fields():
++    tree = ast.parse(Path(timing.__file__).read_text())
++    evaluate = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'evaluate')
++    row_try = next(n for n in ast.walk(evaluate) if isinstance(n, ast.Try)
++                   and any(isinstance(c, ast.keyword) and c.arg == 'verified_patch_bytes'
++                           for c in ast.walk(ast.Module(body=n.body, type_ignores=[]))))
++    handler = row_try.handlers[0]
++    evidence = next(n for n in handler.body if isinstance(n, ast.For))
++    assert {ast.literal_eval(item.elts[0]) for item in evidence.iter.elts} == {
++        'result_error', 'agent_error_text', 'verified_patch_bytes'}
++    assert any(isinstance(n, ast.keyword) and n.arg is None
++               and isinstance(n.value, ast.Name) and n.value.id == 'evidence'
++               for n in ast.walk(handler))
++
++
+ @pytest.mark.parametrize('key,value,check', [
+     ('phase1_wall_seconds', 296.00001, 'b_max_phase1'),
+     ('phase1_wall_seconds', 270.00001, 'c_mean_phase1'),
+
+exec
+/bin/bash -lc "rg --files /home/ubuntu/gemma-local/pyimg -g 'pytest/__init__.py' -g 'pytest.py' -g '*pytest*' | head -20; ls /home/ubuntu/gemma-local/pyimg" in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/pytest
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/__pycache__/pytest_timeout.cpython-312-pytest-9.2.0.pyc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/__pycache__/pytest_timeout.cpython-313-pytest-9.2.0.pyc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/__pycache__/pytest_timeout.cpython-313.pyc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pytest_timeout.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/__pycache__/pytester.cpython-312.pyc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/__pycache__/pytester.cpython-313.pyc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/__pycache__/pytester_assertions.cpython-313.pyc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pytester.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pytester_assertions.py
+cpython-3.13-linux-x86_64-gnu
+cpython-3.13.18-linux-x86_64-gnu
+
+exec
+/bin/bash -lc "/home/ubuntu/gemma-local/venv/bin/python3 -c 'import sys; sys.path.append(\"/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages\"); import pytest; sys.exit(pytest.main([\"eval/tests\", \"-q\"]))'" in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+ exited 1 in 18815ms:
+...............................................FF..FF.F................. [  9%]
+........................................................................ [ 18%]
+........................................s............................... [ 27%]
+.................................................................... [ 36%]
+.....................s.................................................. [ 45%]
+........................................................................ [ 54%]
+........................................................................ [ 63%]
+........................................................................ [ 72%]
+........................................................................ [ 81%]
+................................................................s....... [ 90%]
+..................ss...................................................  [100%]
+=================================== FAILURES ===================================
+___________ test_skip_verification_result_and_task_row[True-runner] ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-117/test_skip_verification_result_1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x756bdb368980>
+failure = 'runner', skip = True, budget_scenario = None
+
+    @pytest.mark.parametrize('failure', [None, 'runner', 'setup', 'cleanup'])
+    @pytest.mark.parametrize('skip', [True, False])
+    def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, skip, budget_scenario=None):
+        import asyncio
+        from contextvars import ContextVar
+        import dataclasses
+        import sys
+        from types import ModuleType
+        modules = {}
+        for name in ('swegemma', 'swegemma.evaluate', 'swegemma.models', 'swegemma.harness',
+                     'swegemma.harness.verification', 'swegemma.harness.agent_runner'):
+            modules[name] = ModuleType(name)
+            monkeypatch.setitem(sys.modules, name, modules[name])
+        ev, vf, ar, models = [modules['swegemma.' + n] for n in (
+            'evaluate', 'harness.verification', 'harness.agent_runner', 'models')]
+        class TaskResult(Entry):
+            tool_calls = 0
+            def model_dump(self, **kwargs):
+                return vars(self)
+        models.TaskResult = TaskResult
+        task = dataclasses.make_dataclass('Task', [('instance_id', str), ('repo', str),
+            ('patch', str), ('test_patch', str), ('FAIL_TO_PASS', tuple), ('PASS_TO_PASS', tuple),
+            ('test_files', tuple)])('task', 'org/repo', '', '', (), (), ())
+        result = asyncio.run(timing.skip_verification(None, None, task, None, agent_patch='diff'))
+        assert isinstance(result, TaskResult)
+        assert result.resolved is False and result.test_exit_code is None
+        assert result.agent_patch == 'diff' and result.error is None and result.trace is None
+        assert timing.harness_error(result, '') is None
+        assert timing.harness_error(result, 'Sandbox execution error: failed') == 'Harness task failure'
+        models.load_tasks = lambda path: [task]
+        verification_calls = []
+        async def original_verify(*a, **kw):
+            assert not skip, 'real verification must not run when skipped'
+            verification_calls.append((a, kw))
+            result = await timing.skip_verification(*a, **kw)
+            result.resolved, result.test_exit_code = True, 0
+            return result
+        ev.verify_task = original_verify
+        vf.strip_protected_files_from_patch = lambda patch, **kw: patch
+        vf._is_protected_test_or_config_path = lambda path: False
+        ar.asyncio = asyncio
+        async def sandbox(*a, **kw):
+            if failure == 'setup':
+                raise RuntimeError('container setup failed')
+            return 'sid'
+        ar.sandbox_start = ar.sandbox_stop = ar.sandbox_exec = sandbox
+        originals = dict(vars(ar))
+        class Evaluator:
+            def __init__(self, config):
+                assert budget_scenario is None, "measured task must not start"
+                def cleanup():
+                    if failure == 'cleanup':
+                        raise RuntimeError('cleanup failed')
+                self.docker = Entry(start=lambda: None, cleanup_all=cleanup)
+            async def _run_agent_sandbox(self, task, *args, **kw):
+                assert not task.patch and not task.test_patch
+                if failure == 'runner':
+                    raise RuntimeError('runner failed')
+                sid = await ar.sandbox_start(self.docker)
+                async with ar.asyncio.timeout(10):
+                    pass
+                await ar.sandbox_stop(self.docker, sid)
+                return 'diff --git a/repo/a.py b/repo/a.py\n', '', None
+            async def evaluate_task(self, task):
+                context = Entry(task=task, patch_submitted=False, llm_calls_used=0)
+                patch, error, trace = await self._run_agent_sandbox(task, context=context)
+                return await ev.verify_task(self.docker, None, task, None,
+                                            agent_patch=patch, agent_error=error, trace=trace)
+        ev.Evaluator = Evaluator
+        monkeypatch.setattr(timing, 'TASK_IDS', ['task'])
+        monkeypatch.setattr(timing, 'WORK', tmp_path)
+        monkeypatch.setattr(timing, 'SKIP_VERIFICATION', skip)
+        monkeypatch.setattr(timing, 'patch_subprocess_deps', lambda *a: None)
+        seen = []
+        monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or False)
+        totals = []
+        if budget_scenario:
+            # Review example: 5200 + 1.5*463 fits 6000, but P1's reservation does not.
+            # The second case admits P1, then catches an unexpectedly long fake probe.
+            clock = [5200.0 if budget_scenario == 'reserve' else 5000.0]
+            real_should_stop = load('agent_timing').should_stop
+            monkeypatch.setattr(timing.time, 'monotonic', lambda: clock[0])
+            monkeypatch.setenv('KERNEL_BUDGET_SECONDS', '6000')
+            monkeypatch.setattr(timing, 'STOCK_PROBE', True)
+            monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or real_should_stop(*a))
+            probes = []
+            def fake_probe(*args):
+                probes.append(True)
+                clock[0] += 360
+                return dict(total_s=360, error='deadline', steps_s={})
+            monkeypatch.setattr(timing, 'stock_setup_probe', fake_probe)
+            totals = [463.0]
+        with (tmp_path / 'journal').open('w+') as stream:
+            asyncio.run(timing.evaluate(Entry(tasks_path=None), stream, 0 if budget_scenario else timing.time.monotonic(),
+                        dict(max_time_minutes=1.4, verification_timeout_seconds=300), totals))
+            stream.seek(0)
+            row = json.loads(stream.read())
+        if budget_scenario:
+            assert row == {'_stopped': 'insufficient remaining budget for next task'}
+            assert len(probes) == (0 if budget_scenario == 'reserve' else 1)
+            assert len(seen) == (1 if budget_scenario == 'reserve' else 2)
+            assert totals == [463.0]
+            assert ev.verify_task is original_verify
+            return
+        assert row['verification_skipped'] is skip
+        assert {'result_error', 'agent_error_text', 'verified_patch_bytes'} <= row.keys()
+        assert row['result_error'] is None
+>       assert row['verified_patch_bytes'] == (0 if failure in ('runner', 'setup') else len('diff --git a/repo/a.py b/repo/a.py\n'.encode('utf-8')))
+E       assert None == 0
+
+eval/tests/test_agent_timing.py:650: AssertionError
+____________ test_skip_verification_result_and_task_row[True-setup] ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-117/test_skip_verification_result_2')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x756bdb2654e0>
+failure = 'setup', skip = True, budget_scenario = None
+
+    @pytest.mark.parametrize('failure', [None, 'runner', 'setup', 'cleanup'])
+    @pytest.mark.parametrize('skip', [True, False])
+    def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, skip, budget_scenario=None):
+        import asyncio
+        from contextvars import ContextVar
+        import dataclasses
+        import sys
+        from types import ModuleType
+        modules = {}
+        for name in ('swegemma', 'swegemma.evaluate', 'swegemma.models', 'swegemma.harness',
+                     'swegemma.harness.verification', 'swegemma.harness.agent_runner'):
+            modules[name] = ModuleType(name)
+            monkeypatch.setitem(sys.modules, name, modules[name])
+        ev, vf, ar, models = [modules['swegemma.' + n] for n in (
+            'evaluate', 'harness.verification', 'harness.agent_runner', 'models')]
+        class TaskResult(Entry):
+            tool_calls = 0
+            def model_dump(self, **kwargs):
+                return vars(self)
+        models.TaskResult = TaskResult
+        task = dataclasses.make_dataclass('Task', [('instance_id', str), ('repo', str),
+            ('patch', str), ('test_patch', str), ('FAIL_TO_PASS', tuple), ('PASS_TO_PASS', tuple),
+            ('test_files', tuple)])('task', 'org/repo', '', '', (), (), ())
+        result = asyncio.run(timing.skip_verification(None, None, task, None, agent_patch='diff'))
+        assert isinstance(result, TaskResult)
+        assert result.resolved is False and result.test_exit_code is None
+        assert result.agent_patch == 'diff' and result.error is None and result.trace is None
+        assert timing.harness_error(result, '') is None
+        assert timing.harness_error(result, 'Sandbox execution error: failed') == 'Harness task failure'
+        models.load_tasks = lambda path: [task]
+        verification_calls = []
+        async def original_verify(*a, **kw):
+            assert not skip, 'real verification must not run when skipped'
+            verification_calls.append((a, kw))
+            result = await timing.skip_verification(*a, **kw)
+            result.resolved, result.test_exit_code = True, 0
+            return result
+        ev.verify_task = original_verify
+        vf.strip_protected_files_from_patch = lambda patch, **kw: patch
+        vf._is_protected_test_or_config_path = lambda path: False
+        ar.asyncio = asyncio
+        async def sandbox(*a, **kw):
+            if failure == 'setup':
+                raise RuntimeError('container setup failed')
+            return 'sid'
+        ar.sandbox_start = ar.sandbox_stop = ar.sandbox_exec = sandbox
+        originals = dict(vars(ar))
+        class Evaluator:
+            def __init__(self, config):
+                assert budget_scenario is None, "measured task must not start"
+                def cleanup():
+                    if failure == 'cleanup':
+                        raise RuntimeError('cleanup failed')
+                self.docker = Entry(start=lambda: None, cleanup_all=cleanup)
+            async def _run_agent_sandbox(self, task, *args, **kw):
+                assert not task.patch and not task.test_patch
+                if failure == 'runner':
+                    raise RuntimeError('runner failed')
+                sid = await ar.sandbox_start(self.docker)
+                async with ar.asyncio.timeout(10):
+                    pass
+                await ar.sandbox_stop(self.docker, sid)
+                return 'diff --git a/repo/a.py b/repo/a.py\n', '', None
+            async def evaluate_task(self, task):
+                context = Entry(task=task, patch_submitted=False, llm_calls_used=0)
+                patch, error, trace = await self._run_agent_sandbox(task, context=context)
+                return await ev.verify_task(self.docker, None, task, None,
+                                            agent_patch=patch, agent_error=error, trace=trace)
+        ev.Evaluator = Evaluator
+        monkeypatch.setattr(timing, 'TASK_IDS', ['task'])
+        monkeypatch.setattr(timing, 'WORK', tmp_path)
+        monkeypatch.setattr(timing, 'SKIP_VERIFICATION', skip)
+        monkeypatch.setattr(timing, 'patch_subprocess_deps', lambda *a: None)
+        seen = []
+        monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or False)
+        totals = []
+        if budget_scenario:
+            # Review example: 5200 + 1.5*463 fits 6000, but P1's reservation does not.
+            # The second case admits P1, then catches an unexpectedly long fake probe.
+            clock = [5200.0 if budget_scenario == 'reserve' else 5000.0]
+            real_should_stop = load('agent_timing').should_stop
+            monkeypatch.setattr(timing.time, 'monotonic', lambda: clock[0])
+            monkeypatch.setenv('KERNEL_BUDGET_SECONDS', '6000')
+            monkeypatch.setattr(timing, 'STOCK_PROBE', True)
+            monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or real_should_stop(*a))
+            probes = []
+            def fake_probe(*args):
+                probes.append(True)
+                clock[0] += 360
+                return dict(total_s=360, error='deadline', steps_s={})
+            monkeypatch.setattr(timing, 'stock_setup_probe', fake_probe)
+            totals = [463.0]
+        with (tmp_path / 'journal').open('w+') as stream:
+            asyncio.run(timing.evaluate(Entry(tasks_path=None), stream, 0 if budget_scenario else timing.time.monotonic(),
+                        dict(max_time_minutes=1.4, verification_timeout_seconds=300), totals))
+            stream.seek(0)
+            row = json.loads(stream.read())
+        if budget_scenario:
+            assert row == {'_stopped': 'insufficient remaining budget for next task'}
+            assert len(probes) == (0 if budget_scenario == 'reserve' else 1)
+            assert len(seen) == (1 if budget_scenario == 'reserve' else 2)
+            assert totals == [463.0]
+            assert ev.verify_task is original_verify
+            return
+        assert row['verification_skipped'] is skip
+        assert {'result_error', 'agent_error_text', 'verified_patch_bytes'} <= row.keys()
+        assert row['result_error'] is None
+>       assert row['verified_patch_bytes'] == (0 if failure in ('runner', 'setup') else len('diff --git a/repo/a.py b/repo/a.py\n'.encode('utf-8')))
+E       assert None == 0
+
+eval/tests/test_agent_timing.py:650: AssertionError
+___________ test_skip_verification_result_and_task_row[False-runner] ___________
+
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-117/test_skip_verification_result_5')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x756bdb265470>
+failure = 'runner', skip = False, budget_scenario = None
+
+    @pytest.mark.parametrize('failure', [None, 'runner', 'setup', 'cleanup'])
+    @pytest.mark.parametrize('skip', [True, False])
+    def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, skip, budget_scenario=None):
+        import asyncio
+        from contextvars import ContextVar
+        import dataclasses
+        import sys
+        from types import ModuleType
+        modules = {}
+        for name in ('swegemma', 'swegemma.evaluate', 'swegemma.models', 'swegemma.harness',
+                     'swegemma.harness.verification', 'swegemma.harness.agent_runner'):
+            modules[name] = ModuleType(name)
+            monkeypatch.setitem(sys.modules, name, modules[name])
+        ev, vf, ar, models = [modules['swegemma.' + n] for n in (
+            'evaluate', 'harness.verification', 'harness.agent_runner', 'models')]
+        class TaskResult(Entry):
+            tool_calls = 0
+            def model_dump(self, **kwargs):
+                return vars(self)
+        models.TaskResult = TaskResult
+        task = dataclasses.make_dataclass('Task', [('instance_id', str), ('repo', str),
+            ('patch', str), ('test_patch', str), ('FAIL_TO_PASS', tuple), ('PASS_TO_PASS', tuple),
+            ('test_files', tuple)])('task', 'org/repo', '', '', (), (), ())
+        result = asyncio.run(timing.skip_verification(None, None, task, None, agent_patch='diff'))
+        assert isinstance(result, TaskResult)
+        assert result.resolved is False and result.test_exit_code is None
+        assert result.agent_patch == 'diff' and result.error is None and result.trace is None
+        assert timing.harness_error(result, '') is None
+        assert timing.harness_error(result, 'Sandbox execution error: failed') == 'Harness task failure'
+        models.load_tasks = lambda path: [task]
+        verification_calls = []
+        async def original_verify(*a, **kw):
+            assert not skip, 'real verification must not run when skipped'
+            verification_calls.append((a, kw))
+            result = await timing.skip_verification(*a, **kw)
+            result.resolved, result.test_exit_code = True, 0
+            return result
+        ev.verify_task = original_verify
+        vf.strip_protected_files_from_patch = lambda patch, **kw: patch
+        vf._is_protected_test_or_config_path = lambda path: False
+        ar.asyncio = asyncio
+        async def sandbox(*a, **kw):
+            if failure == 'setup':
+                raise RuntimeError('container setup failed')
+            return 'sid'
+        ar.sandbox_start = ar.sandbox_stop = ar.sandbox_exec = sandbox
+        originals = dict(vars(ar))
+        class Evaluator:
+            def __init__(self, config):
+                assert budget_scenario is None, "measured task must not start"
+                def cleanup():
+                    if failure == 'cleanup':
+                        raise RuntimeError('cleanup failed')
+                self.docker = Entry(start=lambda: None, cleanup_all=cleanup)
+            async def _run_agent_sandbox(self, task, *args, **kw):
+                assert not task.patch and not task.test_patch
+                if failure == 'runner':
+                    raise RuntimeError('runner failed')
+                sid = await ar.sandbox_start(self.docker)
+                async with ar.asyncio.timeout(10):
+                    pass
+                await ar.sandbox_stop(self.docker, sid)
+                return 'diff --git a/repo/a.py b/repo/a.py\n', '', None
+            async def evaluate_task(self, task):
+                context = Entry(task=task, patch_submitted=False, llm_calls_used=0)
+                patch, error, trace = await self._run_agent_sandbox(task, context=context)
+                return await ev.verify_task(self.docker, None, task, None,
+                                            agent_patch=patch, agent_error=error, trace=trace)
+        ev.Evaluator = Evaluator
+        monkeypatch.setattr(timing, 'TASK_IDS', ['task'])
+        monkeypatch.setattr(timing, 'WORK', tmp_path)
+        monkeypatch.setattr(timing, 'SKIP_VERIFICATION', skip)
+        monkeypatch.setattr(timing, 'patch_subprocess_deps', lambda *a: None)
+        seen = []
+        monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or False)
+        totals = []
+        if budget_scenario:
+            # Review example: 5200 + 1.5*463 fits 6000, but P1's reservation does not.
+            # The second case admits P1, then catches an unexpectedly long fake probe.
+            clock = [5200.0 if budget_scenario == 'reserve' else 5000.0]
+            real_should_stop = load('agent_timing').should_stop
+            monkeypatch.setattr(timing.time, 'monotonic', lambda: clock[0])
+            monkeypatch.setenv('KERNEL_BUDGET_SECONDS', '6000')
+            monkeypatch.setattr(timing, 'STOCK_PROBE', True)
+            monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or real_should_stop(*a))
+            probes = []
+            def fake_probe(*args):
+                probes.append(True)
+                clock[0] += 360
+                return dict(total_s=360, error='deadline', steps_s={})
+            monkeypatch.setattr(timing, 'stock_setup_probe', fake_probe)
+            totals = [463.0]
+        with (tmp_path / 'journal').open('w+') as stream:
+            asyncio.run(timing.evaluate(Entry(tasks_path=None), stream, 0 if budget_scenario else timing.time.monotonic(),
+                        dict(max_time_minutes=1.4, verification_timeout_seconds=300), totals))
+            stream.seek(0)
+            row = json.loads(stream.read())
+        if budget_scenario:
+            assert row == {'_stopped': 'insufficient remaining budget for next task'}
+            assert len(probes) == (0 if budget_scenario == 'reserve' else 1)
+            assert len(seen) == (1 if budget_scenario == 'reserve' else 2)
+            assert totals == [463.0]
+            assert ev.verify_task is original_verify
+            return
+        assert row['verification_skipped'] is skip
+        assert {'result_error', 'agent_error_text', 'verified_patch_bytes'} <= row.keys()
+        assert row['result_error'] is None
+>       assert row['verified_patch_bytes'] == (0 if failure in ('runner', 'setup') else len('diff --git a/repo/a.py b/repo/a.py\n'.encode('utf-8')))
+E       assert None == 0
+
+eval/tests/test_agent_timing.py:650: AssertionError
+___________ test_skip_verification_result_and_task_row[False-setup] ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-117/test_skip_verification_result_6')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x756bdb26c130>
+failure = 'setup', skip = False, budget_scenario = None
+
+    @pytest.mark.parametrize('failure', [None, 'runner', 'setup', 'cleanup'])
+    @pytest.mark.parametrize('skip', [True, False])
+    def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, skip, budget_scenario=None):
+        import asyncio
+        from contextvars import ContextVar
+        import dataclasses
+        import sys
+        from types import ModuleType
+        modules = {}
+        for name in ('swegemma', 'swegemma.evaluate', 'swegemma.models', 'swegemma.harness',
+                     'swegemma.harness.verification', 'swegemma.harness.agent_runner'):
+            modules[name] = ModuleType(name)
+            monkeypatch.setitem(sys.modules, name, modules[name])
+        ev, vf, ar, models = [modules['swegemma.' + n] for n in (
+            'evaluate', 'harness.verification', 'harness.agent_runner', 'models')]
+        class TaskResult(Entry):
+            tool_calls = 0
+            def model_dump(self, **kwargs):
+                return vars(self)
+        models.TaskResult = TaskResult
+        task = dataclasses.make_dataclass('Task', [('instance_id', str), ('repo', str),
+            ('patch', str), ('test_patch', str), ('FAIL_TO_PASS', tuple), ('PASS_TO_PASS', tuple),
+            ('test_files', tuple)])('task', 'org/repo', '', '', (), (), ())
+        result = asyncio.run(timing.skip_verification(None, None, task, None, agent_patch='diff'))
+        assert isinstance(result, TaskResult)
+        assert result.resolved is False and result.test_exit_code is None
+        assert result.agent_patch == 'diff' and result.error is None and result.trace is None
+        assert timing.harness_error(result, '') is None
+        assert timing.harness_error(result, 'Sandbox execution error: failed') == 'Harness task failure'
+        models.load_tasks = lambda path: [task]
+        verification_calls = []
+        async def original_verify(*a, **kw):
+            assert not skip, 'real verification must not run when skipped'
+            verification_calls.append((a, kw))
+            result = await timing.skip_verification(*a, **kw)
+            result.resolved, result.test_exit_code = True, 0
+            return result
+        ev.verify_task = original_verify
+        vf.strip_protected_files_from_patch = lambda patch, **kw: patch
+        vf._is_protected_test_or_config_path = lambda path: False
+        ar.asyncio = asyncio
+        async def sandbox(*a, **kw):
+            if failure == 'setup':
+                raise RuntimeError('container setup failed')
+            return 'sid'
+        ar.sandbox_start = ar.sandbox_stop = ar.sandbox_exec = sandbox
+        originals = dict(vars(ar))
+        class Evaluator:
+            def __init__(self, config):
+                assert budget_scenario is None, "measured task must not start"
+                def cleanup():
+                    if failure == 'cleanup':
+                        raise RuntimeError('cleanup failed')
+                self.docker = Entry(start=lambda: None, cleanup_all=cleanup)
+            async def _run_agent_sandbox(self, task, *args, **kw):
+                assert not task.patch and not task.test_patch
+                if failure == 'runner':
+                    raise RuntimeError('runner failed')
+                sid = await ar.sandbox_start(self.docker)
+                async with ar.asyncio.timeout(10):
+                    pass
+                await ar.sandbox_stop(self.docker, sid)
+                return 'diff --git a/repo/a.py b/repo/a.py\n', '', None
+            async def evaluate_task(self, task):
+                context = Entry(task=task, patch_submitted=False, llm_calls_used=0)
+                patch, error, trace = await self._run_agent_sandbox(task, context=context)
+                return await ev.verify_task(self.docker, None, task, None,
+                                            agent_patch=patch, agent_error=error, trace=trace)
+        ev.Evaluator = Evaluator
+        monkeypatch.setattr(timing, 'TASK_IDS', ['task'])
+        monkeypatch.setattr(timing, 'WORK', tmp_path)
+        monkeypatch.setattr(timing, 'SKIP_VERIFICATION', skip)
+        monkeypatch.setattr(timing, 'patch_subprocess_deps', lambda *a: None)
+        seen = []
+        monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or False)
+        totals = []
+        if budget_scenario:
+            # Review example: 5200 + 1.5*463 fits 6000, but P1's reservation does not.
+            # The second case admits P1, then catches an unexpectedly long fake probe.
+            clock = [5200.0 if budget_scenario == 'reserve' else 5000.0]
+            real_should_stop = load('agent_timing').should_stop
+            monkeypatch.setattr(timing.time, 'monotonic', lambda: clock[0])
+            monkeypatch.setenv('KERNEL_BUDGET_SECONDS', '6000')
+            monkeypatch.setattr(timing, 'STOCK_PROBE', True)
+            monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or real_should_stop(*a))
+            probes = []
+            def fake_probe(*args):
+                probes.append(True)
+                clock[0] += 360
+                return dict(total_s=360, error='deadline', steps_s={})
+            monkeypatch.setattr(timing, 'stock_setup_probe', fake_probe)
+            totals = [463.0]
+        with (tmp_path / 'journal').open('w+') as stream:
+            asyncio.run(timing.evaluate(Entry(tasks_path=None), stream, 0 if budget_scenario else timing.time.monotonic(),
+                        dict(max_time_minutes=1.4, verification_timeout_seconds=300), totals))
+            stream.seek(0)
+            row = json.loads(stream.read())
+        if budget_scenario:
+            assert row == {'_stopped': 'insufficient remaining budget for next task'}
+            assert len(probes) == (0 if budget_scenario == 'reserve' else 1)
+            assert len(seen) == (1 if budget_scenario == 'reserve' else 2)
+            assert totals == [463.0]
+            assert ev.verify_task is original_verify
+            return
+        assert row['verification_skipped'] is skip
+        assert {'result_error', 'agent_error_text', 'verified_patch_bytes'} <= row.keys()
+        assert row['result_error'] is None
+>       assert row['verified_patch_bytes'] == (0 if failure in ('runner', 'setup') else len('diff --git a/repo/a.py b/repo/a.py\n'.encode('utf-8')))
+E       assert None == 0
+
+eval/tests/test_agent_timing.py:650: AssertionError
+_______________ test_row_build_fallback_retains_evidence_fields ________________
+
+    def test_row_build_fallback_retains_evidence_fields():
+        tree = ast.parse(Path(timing.__file__).read_text())
+        evaluate = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'evaluate')
+        row_try = next(n for n in ast.walk(evaluate) if isinstance(n, ast.Try)
+                       and any(isinstance(c, ast.keyword) and c.arg == 'verified_patch_bytes'
+                               for c in ast.walk(ast.Module(body=n.body, type_ignores=[]))))
+>       handler = row_try.handlers[0]
+                  ^^^^^^^^^^^^^^^^^^^
+E       IndexError: list index out of range
+
+eval/tests/test_agent_timing.py:669: IndexError
+=========================== short test summary info ============================
+FAILED eval/tests/test_agent_timing.py::test_skip_verification_result_and_task_row[True-runner]
+FAILED eval/tests/test_agent_timing.py::test_skip_verification_result_and_task_row[True-setup]
+FAILED eval/tests/test_agent_timing.py::test_skip_verification_result_and_task_row[False-runner]
+FAILED eval/tests/test_agent_timing.py::test_skip_verification_result_and_task_row[False-setup]
+FAILED eval/tests/test_agent_timing.py::test_row_build_fallback_retains_evidence_fields
+5 failed, 777 passed, 5 skipped, 4 subtests passed in 17.26s
+
+apply patch
+patch: completed
+/home/ubuntu/work/gemma-wt/codex-plan007-classifier/eval/tests/test_agent_timing.py
+diff --git a/eval/kaggle/agent_timing.py b/eval/kaggle/agent_timing.py
+index ed95dcf86acd7a38b4afdb2be6a50be572ca9fe9..0874676bd55fb2f6b8784f8d95db066056d2982f
+--- a/eval/kaggle/agent_timing.py
++++ b/eval/kaggle/agent_timing.py
+@@ -1093,6 +1093,9 @@
+                          image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
+             try:
+               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
++                result_error=(result.error[:4096] if result is not None and result.error else None),
++                agent_error_text=(evaluator.agent_error[:4096] if evaluator.agent_error else None),
++                verified_patch_bytes=(len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+                 **phase,
+                 wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+                 setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+@@ -1108,7 +1111,18 @@
+                 **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+                 timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+             except Exception as exc:
++                evidence = {}
++                for key, value in (
++                    ('result_error', lambda: result.error[:4096] if result is not None and result.error else None),
++                    ('agent_error_text', lambda: evaluator.agent_error[:4096] if evaluator.agent_error else None),
++                    ('verified_patch_bytes', lambda: len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
++                ):
++                    try:
++                        evidence[key] = value()
++                    except Exception:
++                        evidence[key] = None
+                 append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
++                                     **evidence,
+                                      **phase,
+                                      wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+                                      setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+diff --git a/eval/tests/test_agent_timing.py b/eval/tests/test_agent_timing.py
+index ff83725704a0d7ab6d799b99d70c92bb069995fd..89a394814295fb28a91fe0f0c2320f8c52702be1
+--- a/eval/tests/test_agent_timing.py
++++ b/eval/tests/test_agent_timing.py
+@@ -645,6 +645,10 @@
+         assert ev.verify_task is original_verify
+         return
+     assert row['verification_skipped'] is skip
++    assert {'result_error', 'agent_error_text', 'verified_patch_bytes'} <= row.keys()
++    assert row['result_error'] is None
++    expected_bytes = None if failure in ('runner', 'setup') else len('diff --git a/repo/a.py b/repo/a.py\n'.encode('utf-8'))
++    assert row['verified_patch_bytes'] == expected_bytes
+     assert (row['error'] is not None) is bool(failure)
+     verified = not skip and failure not in ('runner', 'setup')
+     assert row['resolved'] is verified
+@@ -657,6 +661,21 @@
+     assert all(getattr(ar, key) is originals[key] for key in ('asyncio', 'sandbox_start', 'sandbox_stop', 'sandbox_exec'))
+ 
+ 
++def test_row_build_fallback_retains_evidence_fields():
++    tree = ast.parse(Path(timing.__file__).read_text())
++    evaluate = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'evaluate')
++    row_try = next(n for n in ast.walk(evaluate) if isinstance(n, ast.Try) and isinstance(n.body[0], ast.Expr)
++                   and any(isinstance(c, ast.keyword) and c.arg == 'verified_patch_bytes'
++                           for c in ast.walk(ast.Module(body=n.body, type_ignores=[]))))
++    handler = row_try.handlers[0]
++    evidence = next(n for n in handler.body if isinstance(n, ast.For))
++    assert {ast.literal_eval(item.elts[0]) for item in evidence.iter.elts} == {
++        'result_error', 'agent_error_text', 'verified_patch_bytes'}
++    assert any(isinstance(n, ast.keyword) and n.arg is None
++               and isinstance(n.value, ast.Name) and n.value.id == 'evidence'
++               for n in ast.walk(handler))
++
++
+ @pytest.mark.parametrize('key,value,check', [
+     ('phase1_wall_seconds', 296.00001, 'b_max_phase1'),
+     ('phase1_wall_seconds', 270.00001, 'c_mean_phase1'),
+
+exec
+/bin/bash -lc "/home/ubuntu/gemma-local/venv/bin/python3 -c 'import sys; sys.path.append(\"/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages\"); import pytest; sys.exit(pytest.main([\"eval/tests\", \"-q\"]))'" in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+ succeeded in 18154ms:
+........................................................................ [  9%]
+........................................................................ [ 18%]
+........................................s............................... [ 27%]
+.................................................................... [ 36%]
+.....................s.................................................. [ 45%]
+........................................................................ [ 54%]
+........................................................................ [ 63%]
+........................................................................ [ 72%]
+........................................................................ [ 81%]
+................................................................s....... [ 90%]
+..................ss...................................................  [100%]
+782 passed, 5 skipped, 4 subtests passed in 16.60s
+
+codex
+The full suite ran using the existing local `pytest` installation. The first run found two mistakes in my new test assertions: missing results should produce `None` patch bytes, and the source check selected the outer `try` block. I’ve corrected both; the full suite is running again. All classifier tests passed on the first run.
+exec
+/bin/bash -lc "git diff --check; git status --short; sed -n '1,220p' eval/kaggle/classify_rows.py" in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+ succeeded in 0ms:
+ M eval/kaggle/agent_timing.py
+ M eval/tests/test_agent_timing.py
+?? eval/kaggle/classify_rows.py
+?? eval/tests/test_classify_rows.py
+"""Frozen Plan 007 rev 2 classifier for timing journal rows (stdlib only)."""
+import argparse
+from collections import Counter
+import hashlib
+import json
+from pathlib import Path
+
+if __package__:
+    from .agent_timing import AGENT_OUTCOMES as AGENT_END
+else:
+    from agent_timing import AGENT_OUTCOMES as AGENT_END
+
+RECORD = 'uninstall-no-record-file'
+WRAPPER_H = ('Evaluation exception (', 'Cleanup exception (', 'trace parse (', 'Row build exception (')
+VERIFY_AGENT_PREFIXES = (
+    'Failed to apply agent patch:',
+    'Missing or empty JUnit XML report', 'Malformed JUnit XML report:',
+    'No <testsuite> elements found in JUnit XML',
+    'No passing tests recorded in JUnit XML', 'Test failures/errors recorded in JUnit XML',
+    'Required test node did not pass:',
+    'Pytest stdout summary indicates zero or no passing tests',
+    'Missing JUnit XML report (possible premature os._exit(0))',
+)
+REQUIRED = ('result_error', 'agent_error_text', 'verified_patch_bytes', 'setup_calls', 'exit_code', 'resolved')
+
+
+def agent_end(message):
+    text = (message or '').strip()
+    return next((name for name, pattern in AGENT_END if pattern.match(text)), None)
+
+
+def output_text(entry):
+    return (entry.get('stdout') or '') + (entry.get('stderr') or '')
+
+
+def classify(row: dict) -> dict:
+    """Classify one task row, preserving the stock verdict even for H rows."""
+    if 'instance_id' not in row:
+        raise ValueError('Meta row has no instance_id')
+    row_reasons = []
+    error = row.get('error')
+    if any(key not in row for key in REQUIRED):
+        row_reasons.append('r1:missing_schema')
+    if isinstance(error, str) and any(marker in error for marker in WRAPPER_H):
+        row_reasons.append('r2:wrapper_exception')
+    elif error is not None and error != 'Harness task failure':
+        row_reasons.append('r3:unexpected_error')
+    elif error is None or error == 'Harness task failure':
+        for message in (row.get('result_error'), row.get('agent_error_text')):
+            if message and agent_end(message) is None and not message.startswith(VERIFY_AGENT_PREFIXES):
+                row_reasons.append('r4:unrecognized_message' if error else 'r5:unrecognized_message')
+                break
+
+    setup_reasons = []
+    diagnostic = False
+    if row.get('missing_tool_deps'):
+        setup_reasons.append('s1:missing_tool_deps')
+    for entry in row.get('setup_calls', []):
+        step, rc = entry.get('step'), entry.get('rc')
+        if step not in ('pip_check', 'workspace_editable', 'setup.py'):
+            if rc != 0 and (rc is not None or (entry.get('duration_s') or 0) > 0 or entry.get('stderr')):
+                setup_reasons.append('s2:setup_step_failed')
+        elif step == 'workspace_editable' and rc != 0:
+            if RECORD in output_text(entry):
+                diagnostic = True
+            else:
+                setup_reasons.append('s4:workspace_editable_failed')
+        elif step == 'setup.py':
+            if rc != 0:
+                setup_reasons.append('s3:setup_py_failed')
+            earlier_offline_record = False
+            for sub in entry.get('subprocesses', []):
+                argv = sub.get('argv')
+                if not isinstance(argv, list) or '-e' not in argv or sub.get('rc') == 0:
+                    continue
+                if '--no-index' in argv and RECORD in output_text(sub):
+                    earlier_offline_record = diagnostic = True
+                elif '--no-index' not in argv and earlier_offline_record:
+                    pass
+                else:
+                    setup_reasons.append('s5:unexpected_editable_failure')
+    if row.get('setup_failed') is True and not setup_reasons and not diagnostic:
+        setup_reasons.append('s6:setup_failed_unexplained')
+    known_diag = diagnostic and not setup_reasons
+    reasons = row_reasons + setup_reasons
+    if known_diag:
+        reasons.append('known_diag:record_chain')
+    h = 'H-ROW' if row_reasons else ('H-SETUP' if setup_reasons else None)
+    patch_bytes = row.get('verified_patch_bytes')
+    patch_apply = (row.get('result_error') or '').startswith('Failed to apply agent patch:')
+    code = row.get('exit_code')
+    if h is None and patch_bytes is not None and patch_bytes > 0 and not patch_apply and not (
+        type(code) is int and code in (0, 1, 2, 3, 4, 5, 124)
+    ):
+        h = 'H-VERIFY'
+        reasons.append('verify:unexpected_exit_code')
+    resolved = bool(row.get('resolved'))
+    agent = None
+    if h is None:
+        if resolved:
+            agent = 'PASS'
+        elif patch_bytes == 0:
+            agent = 'NO_PATCH'
+        elif patch_apply:
+            agent = 'PATCH_APPLY'
+        elif code == 124:
+            agent = 'VERIFY_TIMEOUT_124'
+        elif code == 1:
+            agent = 'PYTEST_1'
+        elif code in (2, 3, 4, 5):
+            agent = 'PYTEST_2_5'
+        elif code == 0:
+            agent = 'EXIT0_UNRESOLVED'
+        else:
+            agent = 'OTHER_FAIL'
+    return dict(h=h, known_diag=known_diag, agent=agent,
+                agent_end=agent_end(row.get('agent_error_text')), resolved=resolved,
+                reasons=list(dict.fromkeys(reasons)))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('timing', type=Path)
+    parser.add_argument('--out', type=Path)
+    args = parser.parse_args()
+    payload = args.timing.read_bytes()
+    rows = []
+    for line in payload.decode('utf-8').splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if 'instance_id' in row:
+            rows.append(dict(instance_id=row['instance_id'], repo=row.get('repo'), **classify(row)))
+    result = dict(_schema='plan007_row_classes/v1',
+                  classifier_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                  input=str(args.timing), input_sha256=hashlib.sha256(payload).hexdigest(),
+                  n_rows=len(rows),
+                  counts=dict(h=dict(Counter(r['h'] for r in rows if r['h'] is not None)),
+                              agent=dict(Counter(r['agent'] for r in rows if r['agent'] is not None)),
+                              known_diag=sum(r['known_diag'] for r in rows)),
+                  h_rows=[r['instance_id'] for r in rows if r['h'] is not None], rows=rows)
+    output = json.dumps(result, indent=2) + '\n'
+    if args.out:
+        args.out.write_text(output, encoding='utf-8')
+    print(output, end='')
+
+
+if __name__ == '__main__':
+    main()
+
+codex
+Implemented Plan 007 rev 2 in four files: added the three journal fields to normal and defensive fallback rows, plus the classifier, CLI, and offline synthetic tests. Agent and stock verification paths remain unchanged.
+
+Tests: **782 passed, 5 skipped, 4 subtests passed**. `git diff --check` passed.
+
+Open issues: none. Sandbox prevented nothing; testing required adding the existing local pytest installation to the interpreter’s path. No commit created.
+tokens used
+53,585
