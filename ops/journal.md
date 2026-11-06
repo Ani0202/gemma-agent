@@ -374,3 +374,4 @@
 2026-11-06T15:10Z | merged 071749c on main as WIP b92f8f4 (arm3 modes not cleared); codex-build plan009-arm3-fix launched | ops/codex/build-plan009-arm3-fix.spec
 2026-11-06T15:18Z | codex-build plan009-arm3-fix done (c3e1489); Builder review: base=arm2 accepted any plan-008 verdict -> fixed ec541de (SHIP-ELIGIBLE only, per 009.md l.17-19) + 2 tests; suite 1569 pass/6 skip | ops/codex/build-plan009-arm3-fix.md
 2026-11-06T15:20Z | merged codex/plan009-arm3-fix -> main 7e47b5c (arm3 modes NOT cleared); launched codex-review-arm3fix-light | ops/jobs/codex-review-arm3fix-light.status
+2026-11-06T15:25Z | codex re-review 151940 of arm3 fix: BLOCKING (F1 chunk record reuse, F2 partial identity/zip unchecked, F3 smoke classifier unbound); codex-build plan009-arm3-fix2 launched | ops/codex/review-20261106T151940.md, ops/codex/build-plan009-arm3-fix2.spec
