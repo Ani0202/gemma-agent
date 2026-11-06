@@ -26,9 +26,8 @@
 ## Running jobs (14:57Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-identity2-light (re-review
   of eval/plan009_identity.py fix 1fd32d9: review 145209 BLOCKING 1 duplicate zip members -> content FAIL, 2 _schema always kept),
   codex-plan009-arm3-metrics (codex-build: arm3smoke + arm3 modes in eval/plan008_metrics.py, branch codex/plan009-arm3-metrics;
-  REVIEW the diff + run its tests, then codex-review before merge). PLAN 009 rev 2 CLEAN (review 145128) = FINAL.
-  identity re-run v2 schema 1fd32d9: v012/v013 PASS, agent.yaml de80dff5 same in v009/v011/v012/v013.
-  v012/v013 review 144907 CLEAN (in MANIFESTs). Arm-3 packed e5196a4: 31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096);
+  review diff+tests, codex-review, then merge). PLAN 009 rev 2 CLEAN (145128) = FINAL. Identity v2 1fd32d9: v012/v013 PASS.
+  v012/v013 review 144907 CLEAN. Arm-3 packed e5196a4: 31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096);
   31b-v013-p9b dist/31b-v013.zip sha256=06eff226d661c0528105a14d4fe0b69f67a8fb84fc52e654a0d54b6bc59a5dbb (v011+think 4096); load checks PASS.
 - DEC 078: approve; nothing changes. No FYIs for routine clean reviews (fold into next report/STATE). Idle order: (a) arm-3 addendum
   DONE eval/plans/009.md (1b0054a; base = v011 iff plan-008 SHIP-ELIGIBLE else v009; arm-3 = base + thinking 0->4096 only;
@@ -62,8 +61,7 @@
 - DEC 057: no new bundle carries a repo-named hint; v000-v002 (both tracks) carry the FastAPI hint -> reports must say so; LB may tilt FastAPI-ward. e4b-v003 = e4b-v002 + generic fixes minus that line (CPU draft).
   31b-v004 CPU DRAFT dist/31b-v004.zip 50537e1d... (v007 + quoting line), no slot (dec 061 ii); NB3 timeout empty patch unguaranteed (dec 056 item 6).
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU this week: 27.66/30 h per `kaggle quota` 13:26Z after main (+10.41); 2.34 h left. Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
-## Live caveats (dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035)
-- Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
+## Live caveats (dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035). Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
   (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
   results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
 - Director reminder 2026-11-06T23:02Z: GCP quota re-request line to Aniket (keep until a decision marks it done). Kaggle GPU kernels pin starter docker_image (py3.12, cp312). Hosted-LLM-API data Q OPEN; no new 3rd-party svc. One pending submission; no partial credit on timeout. Quota log before/after smoke+main (dec 063/064).
