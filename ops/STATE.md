@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 07:03Z (cycle 124, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 07:08Z (cycle 125, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -27,6 +27,9 @@
 ## Running jobs (07:03Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-plan007r3-light (rev 3 re-review of 2fc49b5).
 - REV 3 (2fc49b5): rev-2 review 065651 = 1 BLOCKING (fail-open on null/invalid patch evidence, 'Harness task failure' w/o messages).
   Fixed r6/r7 -> H-ROW; RE-FROZEN sha256=18afdbbd..af08 (plan 007 RE-FROZEN line); tests 794/4skip; arm F unchanged; Director noted 07:02Z.
+- DEC 063 (approve): freeze 18afdbbd approved. Classifier code SHA = b6e120f (cite in results header + smoke/main kernel manifest; line
+  added plan 007). Smoke ONLY if review r3 has 0 BLOCKING; new BLOCKING -> no patch+launch same cycle; miss 15:30Z -> after reset.
+  Log Kaggle quota before/after smoke + main. Dec 055 submit at 11-07T00:00Z has priority; plan-007 must not hold the Kaggle session then.
 - Plan 007 r1 review 064331: BLOCKING x3 (KNOWN-DIAG chain rejected 0/7 arm-F rows; agent-caused verify msgs + exit 124 became H;
   per-pass/filtered-patch evidence missing). REV 2: eval/plans/007.md classification rewritten -> eval/kaggle/classify_rows.py
   (codex-build plan007-classifier, spec ops/codex/build-plan007-classifier.spec) + 3 row fields in agent_timing.py (wrapper only).
