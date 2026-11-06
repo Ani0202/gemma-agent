@@ -254,3 +254,6 @@
 2026-11-06T02:36Z | review-p5cd-fix3-light CLEAN (correction 3 resolves; rules total); thinking_bound.py wording -> descriptive | ops/codex/review-20261106T023427.md
 2026-11-06T03:37Z | PLAN 005 ARM C DONE: V-valid, NO-GAIN (empty 3/8 vs B 4/8; disc 1/0; p1 0.5); label CONSISTENT (0/8 LB>1088, B 5/8); quota 11.43 h after (+2.01) | results/plan005_armC_vs_B.json results/kaggle_timing_31b_v005.json 822ae2f
 2026-11-06T03:37:59Z | PLAN 005 ARM D PUSHED (condition V+CONSISTENT met): gemma-31b-timing v4, 31b-v006-p5d b7b2eb3d (thinking off), waiter timing-31b-v006-wait-light; Director FYI | ops/budget/kaggle.md ops/mail/director/20261106T033834-14087-from-builder.md
+2026-11-06T04:31Z | arm D kernel (gemma-31b-timing v4) COMPLETE; outputs in runs/31b-v006-p5d-timing; quota 13.09 h after (+1.66) | ops/budget/kaggle.md
+2026-11-06T04:45Z | PLAN 005 ARM D: V, Md 8/8 (zero root thinking), empty 3/8 = C 3/8, disc C-only 1 / D-only 1 (p2 1.0), timeouts 3->2, agent clock sum 1599->925 s -> verdict PASS; more shell errors (cmd_error_shell 0->22) | results/plan005_armD_vs_C.json results/kaggle_timing_31b_v006.json results/thinking_bound_31b_v006.json results/trace_tool_errors_31b_v006.json
+2026-11-06T04:46Z | report 013 (C NO-GAIN + D PASS; asks design direction + ~1.2 h quota for arm E = D at cap 1.23) -> Director | ops/reports/013-plan005-armCD-result.md

@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 03:40Z (cycle 107, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-06 04:47Z (cycle 108, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
@@ -26,8 +26,11 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 ## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
-## Running jobs (03:38Z): lb-e4b-v002-wait-light (e4b still PENDING 03:11Z poll), memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z),
-  timing-31b-v006-wait-light (ARM D, kernel v4 pushed 03:37:59Z -> runs/31b-v006-p5d-timing).
+## Running jobs (04:47Z): lb-e4b-v002-wait-light (e4b still PENDING 04:11Z poll), memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z).
+- PLAN 005 ARM D DONE (c108): V, Md 8/8, empty 3/8 (=C), disc C-only 1 / D-only 1 -> PASS. Agent clock sum 1599->925 s; 3/8 runs end <=74 s;
+  more shell errors (cmd_error_shell 0->22). Files: results/plan005_armD_vs_C.json + {kaggle_timing,thinking_bound,trace_tool_errors}_31b_v006.json.
+  REPORT 013 -> Director: asks (A) thinking-off as 31B design direction (v004 = v002 + budget 0 + /tmp fix + hint removal, cap <=1.23),
+  (B, recommended) arm E = v006 at cap 1.23, ~1.2 h quota, pre-register Addendum E + pack 31b-v007 + codex-review, push by 21:00Z or drop.
 - PLAN 005 ARM C DONE (c107): V-valid; verdict NO-GAIN (empty 3/8 > 2/8; disc B-only 1 / C-only 0, p1=0.5); timeouts 5->3; label
   CONSISTENT (0/8 max LB>1088 vs B 5/8). Files: results/plan005_armC_vs_B.json (B vs C per-turn table), kaggle_timing/trace_tool_errors/
   thinking_bound _31b_v005.json. Director FYI sent 03:38Z. Arm D condition met -> pushed. Quota 11.43 h before D (C +2.01).
@@ -50,7 +53,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - KERNEL v5 (e4b, 87001e4): GATE FAIL (ctx overflow 7/8, max 305.6>296), two-strike STOP; legacy 'decision' field in results/kaggle_timing_e4b_v001.json is not the gate.
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
-- Kaggle GPU this week: 7.28/30 h per `kaggle quota` 01:00Z (plan 006 used +2.10). Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
+- Kaggle GPU this week: 13.09/30 h per `kaggle quota` 04:40Z (arm D +1.66). Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
 ## Live caveats
 - Standing: kernel = Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light suffix for waiters/asks/reviews only (dec 024); LORO 2-repo weak (dec 014).
 - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
@@ -75,6 +78,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - Forum question (dec 035): Aniket posts report 009 s6; Builder posts NOTHING; summarize any answer (no task data) in next report.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. Arm D done -> analysis (see Running jobs) + combined C+D report (dec 058 items 2/4; e4b line per verdict); budget row 'after'. Dec 055 FIRST.
+1. Dec on report 013 -> if arm E approved: Addendum E pre-reg, pack 31b-v007 (v006 + cap 1.23), codex-review, push by 21:00Z. Dec 055 FIRST at 00:00Z.
 2. e4b waiter final -> fill results/lb_e4b_v002.json + budget log, compute T. At 2026-11-07T00:00Z: run the dec 055 checklist above (priority).
-3. Addendum B ADK feasibility codex-ask (CPU); dec 038 paper evidence by Nov 9 23:59Z; plan 007; ops/patches cleanup (dec 045 item 4).
+3. CPU draft 31b-v004 (per 013 option A if approved); dec 038 paper evidence by Nov 9 23:59Z; plan 007; ops/patches cleanup (dec 045 item 4).
