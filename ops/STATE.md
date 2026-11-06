@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 14:32Z (cycle 151, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 14:34Z (cycle 152, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -23,7 +23,10 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (14:32Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z).
+## Running jobs (14:34Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-dec077-light (ONE targeted review of 9486a3b).
+- DEC 077 (ack D73.6): arm 2 = v011 no smoke. Item 2 DONE 9486a3b: builtin arm2 path exits 4 (no results) on any non-root submit_patch
+  response (raw scan, pairing-independent) + regression test; 106 tests pass; arm-1 traces 0/33 hits. Must be CLEAN before arm-2 METRICS run
+  (does not block launch). If NOT CLEAN: fix + report. Item 3: B3 fix before any gate arm pre-reg (low prio). Arm-2 launch = 1-line FYI only.
 - CYCLE 151: targeted re-review 142723 NOT CLEAN (residual B3: unpaired gate-authored inner submit_patch resp -> boundary None) -> D73.6 TRIGGERED:
   ARM 2 = v011 (dist/31b-v011.zip 4f5b078a...4938), NO smoke, no more v010 rounds; Director FYI'd. B3 moot for v011 (builtin submit_patch);
   fix B3 (+regression test, targeted review) before any gate arm uses metrics.
