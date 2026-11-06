@@ -365,3 +365,6 @@
 2026-11-06T14:51Z | codex review 144907 (v012/v013) CLEAN; review 144758 (plan 009 rev 1) BLOCKING 1: CONTENT must exclude root MANIFEST.md | ops/codex/review-20261106T144907.md, ops/codex/review-20261106T144758.md
 2026-11-06T14:51Z | plan 009 rev 2 d8b4c43 (MANIFEST.md exclusion only); re-review launched codex-review-plan009r2-light | eval/plans/009.md
 2026-11-06T14:52Z | identity script f5cb353: pack-check v012/v013 ZIP+CONTENT PASS; review launched codex-review-identity-light | results/plan009_bundle_identity.json
+2026-11-06T14:55Z | codex review 145128 plan 009 rev 2 CLEAN -> plan 009 FINAL | ops/codex/review-20261106T145128.md
+2026-11-06T14:55Z | codex review 145209 identity script BLOCKING (dup zip members; _schema lost on append) -> fixed 1fd32d9, tested, v012/v013 re-check PASS; re-review codex-review-identity2-light | eval/plan009_identity.py
+2026-11-06T14:56Z | codex-build plan009-arm3-metrics launched (arm3smoke + arm3 modes, plan 009 Metrics) | ops/codex/build-plan009-arm3-metrics.md
