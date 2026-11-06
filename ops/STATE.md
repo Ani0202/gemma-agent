@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 02:35Z (cycle 106, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-06 03:40Z (cycle 107, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
@@ -26,7 +26,14 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 ## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
-## Running jobs (02:17Z): lb-e4b-v002-wait-light, memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), timing-31b-v005-wait-light (arm C, kernel v3 pushed 02:34:16Z -> runs/31b-v005-p5c-timing); correction 3 review CLEAN.
+## Running jobs (03:38Z): lb-e4b-v002-wait-light (e4b still PENDING 03:11Z poll), memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z),
+  timing-31b-v006-wait-light (ARM D, kernel v4 pushed 03:37:59Z -> runs/31b-v006-p5d-timing).
+- PLAN 005 ARM C DONE (c107): V-valid; verdict NO-GAIN (empty 3/8 > 2/8; disc B-only 1 / C-only 0, p1=0.5); timeouts 5->3; label
+  CONSISTENT (0/8 max LB>1088 vs B 5/8). Files: results/plan005_armC_vs_B.json (B vs C per-turn table), kaggle_timing/trace_tool_errors/
+  thinking_bound _31b_v005.json. Director FYI sent 03:38Z. Arm D condition met -> pushed. Quota 11.43 h before D (C +2.01).
+  ARM D analysis when waiter mails: same 3 scripts on runs/31b-v006-p5d-timing (timing_summary --gate-mode stock-path --gate-vllm-seconds
+  600 --gate-max-phase1 277; trace_tool_errors.py <run> 31b-v006-p5d <out> eval/plans/004-gpu-retime-ids.txt; thinking_bound.py),
+  Md = zero root thinking_blocks in >=7/8; verdict vs arm C (D empty <= 3 and D-empty-only <= 1 -> PASS). Then combined C+D report.
 - PLAN 005 ARM B DONE (c105): verdict MECHANISM-ONLY per pre-registered rule (V pass: gates a/b/d/e PASS, trace exit 0; M met:
   write_outside_ws 8->0, edit_missing_param 19->6; E NOT met: empty 4/8 (A 4/8), discordant A-only 2 / B-only 2, sign p1=0.69).
   Files: results/trace_tool_errors_31b_v003.json, results/kaggle_timing_31b_v003.json; quota 9.42 h after (+2.14).
@@ -75,6 +82,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - Forum question (dec 035): Aniket posts report 009 s6; Builder posts NOTHING; summarize any answer (no task data) in next report.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. Arm C done -> trace_tool_errors + timing_summary + eval/thinking_bound.py (rules = correction 3, a428263); D if V+CONSISTENT, push by 21:00Z. Dec 055 FIRST.
+1. Arm D done -> analysis (see Running jobs) + combined C+D report (dec 058 items 2/4; e4b line per verdict); budget row 'after'. Dec 055 FIRST.
 2. e4b waiter final -> fill results/lb_e4b_v002.json + budget log, compute T. At 2026-11-07T00:00Z: run the dec 055 checklist above (priority).
 3. Addendum B ADK feasibility codex-ask (CPU); dec 038 paper evidence by Nov 9 23:59Z; plan 007; ops/patches cleanup (dec 045 item 4).

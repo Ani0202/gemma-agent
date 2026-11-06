@@ -252,3 +252,5 @@
 2026-11-06T02:34Z | review 023044: LB not proven -> correction 3 (LB descriptive; arm C verdict INVALID/PASS/NO-GAIN + label CONSISTENT/NOT-SHOWN; D gate = V + CONSISTENT) | eval/plans/005.md a428263
 2026-11-06T02:34:16Z | PLAN 005 ARM C PUSHED: aniket0202/gemma-31b-timing v3 (31b-v005-p5c e8fbcfdc, cap 4.0, budget 6000, NvidiaL4); quota before 9.42 h; waiter timing-31b-v005-wait-light; confirm review review-p5cd-fix3-light in parallel (rule-only) | ops/budget/kaggle.md
 2026-11-06T02:36Z | review-p5cd-fix3-light CLEAN (correction 3 resolves; rules total); thinking_bound.py wording -> descriptive | ops/codex/review-20261106T023427.md
+2026-11-06T03:37Z | PLAN 005 ARM C DONE: V-valid, NO-GAIN (empty 3/8 vs B 4/8; disc 1/0; p1 0.5); label CONSISTENT (0/8 LB>1088, B 5/8); quota 11.43 h after (+2.01) | results/plan005_armC_vs_B.json results/kaggle_timing_31b_v005.json 822ae2f
+2026-11-06T03:37:59Z | PLAN 005 ARM D PUSHED (condition V+CONSISTENT met): gemma-31b-timing v4, 31b-v006-p5d b7b2eb3d (thinking off), waiter timing-31b-v006-wait-light; Director FYI | ops/budget/kaggle.md ops/mail/director/20261106T033834-14087-from-builder.md
