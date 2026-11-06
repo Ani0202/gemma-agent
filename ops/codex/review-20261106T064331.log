@@ -2750,3 +2750,895 @@ exec
 1339:            caps = dict(timeout_seconds=int(section.get('timeout_seconds', 300)), verification_timeout_seconds=int(section.get('verification_timeout_seconds', 300)),
 1364:                append(journal, {'_done': dict(n=len(totals), total_seconds=distribution(totals), startup_seconds=startup)})
 
+exec
+/bin/bash -lc "sed -n '265,310p' eval/kaggle/agent_timing.py | nl -ba -v265; sed -n '410,640p' eval/kaggle/agent_timing.py | nl -ba -v410; sed -n '815,862p' eval/kaggle/agent_timing.py | nl -ba -v815; sed -n '1000,1135p' eval/kaggle/agent_timing.py | nl -ba -v1000" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   265	            return
+   266	        row['distributions'] = json.loads(result.stdout)
+   267	    except Exception as exc:
+   268	        row['dist_probe_error'] = type(exc).__name__
+   269	
+   270	
+   271	def setup_step(current, name, action, *, fatal=True):
+   272	    """Time setup steps and retain bounded output plus retry counts."""
+   273	    start = time.perf_counter()
+   274	    row = dict(step=name, start_offset_s=round(start-current['started'], 6),
+   275	               duration_s=0.0, rc=None, stdout='', stderr='', retrying_lines=0)
+   276	    current['setup_calls'].append(row)
+   277	    try:
+   278	        result = action()
+   279	        row['rc'] = getattr(result, 'exit_code', getattr(result, 'returncode', 0))
+   280	        setup_artifact(current, dict(step=name, stdout=getattr(result, 'stdout', '') or '',
+   281	                                     stderr=getattr(result, 'stderr', '') or ''))
+   282	        for field in ('stdout', 'stderr'):
+   283	            value = getattr(result, field, '') or ''
+   284	            row['retrying_lines'] += sum('Retrying' in line for line in value.splitlines())
+   285	            row[field] = value.encode('utf-8', errors='replace')[-2048:].decode('utf-8', errors='ignore')
+   286	        return result
+   287	    except Exception as exc:
+   288	        row.update(rc=-1, stderr=type(exc).__name__)
+   289	        if fatal:
+   290	            current['setup_failed'] = True
+   291	            raise
+   292	    finally:
+   293	        row['duration_s'] = round(time.perf_counter()-start, 6)
+   294	        current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+   295	        if fatal and row['rc'] != 0:
+   296	            current['setup_failed'] = True
+   297	
+   298	
+   299	def fallback_wheel(wheels, package):
+   300	    """Prefer the wheelhouse, then the running interpreter's ensurepip bundle."""
+   301	    from packaging.utils import parse_wheel_filename
+   302	    found = list(Path(wheels).glob(package + '-*-py3-none-any.whl'))
+   303	    if not found and package == 'pip':
+   304	        try:
+   305	            import ensurepip
+   306	            found = list((Path(ensurepip.__file__).parent / '_bundled').glob('pip-*.whl'))
+   307	        except ImportError:
+   308	            pass
+   309	    return max(found, key=lambda p: parse_wheel_filename(p.name)[1]) if found else None
+   310	
+   410	                            current = runtime.metadata
+   411	                            row['source'] = source
+   412	                if current is not None:
+   413	                    installed[name] = current
+   414	                    sources[name] = row['source']
+   415	                    row['version_installed'] = current['Version']
+   416	            entries.append(row)
+   417	            if current is not None:
+   418	                queue.append(current)
+   419	            elif name not in missing:
+   420	                missing.append(name)
+   421	    return entries, missing
+   422	
+   423	
+   424	# Capture setup.py's otherwise discarded subprocess output without changing setup.py.
+   425	# Write after EVERY call so an outer timeout still leaves completed calls visible.
+   426	SETUP_OBSERVER = r'''import json, runpy, subprocess, sys, time
+   427	from pathlib import Path
+   428	original = subprocess.run
+   429	calls = []
+   430	log = Path(__file__).with_name('setup_subprocesses.json')
+   431	log.write_text('[]')
+   432	full_log = log.with_name('setup_subprocesses_full.jsonl')
+   433	full_log.write_text('')
+   434	def run(*args, **kwargs):
+   435	    start = time.perf_counter()
+   436	    argv = args[0] if args else kwargs.get('args')
+   437	    result = None
+   438	    try:
+   439	        result = original(*args, **kwargs)
+   440	        return result
+   441	    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+   442	        result = exc
+   443	        raise
+   444	    finally:
+   445	        def decode(value):
+   446	            return value.decode(errors='replace') if isinstance(value, bytes) else (value or '')
+   447	        out, err = decode(getattr(result, 'stdout', '')), decode(getattr(result, 'stderr', ''))
+   448	        with full_log.open('a') as stream:
+   449	            stream.write(json.dumps(dict(argv=argv, stdout=out, stderr=err)) + '\n')
+   450	        calls.append(dict(argv=argv, duration_s=time.perf_counter()-start,
+   451	            start_offset_s=start-origin, rc=getattr(result, 'returncode', None),
+   452	            stdout=out.encode()[-2048:].decode(errors='ignore'),
+   453	            stderr=err.encode()[-2048:].decode(errors='ignore'),
+   454	            retrying_lines=sum('Retrying' in line for line in (out+'\n'+err).splitlines()),
+   455	            interpreter_version=sys.version))
+   456	        log.write_text(json.dumps(calls))
+   457	origin = time.perf_counter()
+   458	subprocess.run = run
+   459	sys.argv = sys.argv[1:]
+   460	runpy.run_path(sys.argv[0], run_name='__main__')
+   461	'''
+   462	
+   463	
+   464	def patch_subprocess_deps(data_dir, state=None):
+   465	    """Install scorer tools in each venv, using that interpreter's ABI, entirely offline."""
+   466	    import swegemma.harness.container_setup as cs
+   467	    from packaging.utils import parse_wheel_filename
+   468	    orig = getattr(cs.install_test_dependencies, '_timing_original', cs.install_test_dependencies)
+   469	    wheels = data_dir / 'wheels'
+   470	    if not wheels.is_dir():
+   471	        wheels = WHEELHOUSE
+   472	    setup = data_dir / 'sandbox' / 'setup.py'
+   473	    if not setup.exists():
+   474	        setup = next(iter(data_dir.rglob('setup.py')), setup)
+   475	
+   476	    def install(docker, container_id, repo='', *, fast_path=True, config=None):
+   477	        if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
+   478	            return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+   479	        current = state.get() if state is not None else dict(
+   480	            started=time.perf_counter(), setup_calls=[], setup_failed=False)
+   481	        fixed = os.environ.get('SETUP_FIX', '1') == '1'
+   482	        current['setup_fix'] = int(fixed)
+   483	        venv = docker.sandboxes[container_id]['venv']
+   484	        sp = next(iter(sorted(venv.glob('lib/python3*/site-packages'))))
+   485	        if not fixed:
+   486	            # Preserve the original injector's wheel selection and base tar exactly.
+   487	            def original_base():
+   488	                base, large, _modules, _requirements = cs._inspect_wheels_dir(wheels)
+   489	                if large:
+   490	                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+   491	                current['wheel_tags_chosen'] = [p.name for p in base]
+   492	                inject_base(cs, base, sp, current)
+   493	            setup_step(current, 'base_tar_extraction', original_base)
+   494	            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+   495	        else:
+   496	            # A subprocess venv otherwise exposes every kernel package via _host_env.pth.
+   497	            # Only the scorer's image tools and public base wheels belong here.
+   498	            def isolate_venv():
+   499	                for pth in sp.glob('_host_env.pth'):
+   500	                    pth.unlink()
+   501	                cfg = venv / 'pyvenv.cfg'
+   502	                if cfg.exists():
+   503	                    cfg.write_text(cfg.read_text().replace(
+   504	                        'include-system-site-packages = true', 'include-system-site-packages = false'))
+   505	            setup_step(current, 'venv_fidelity', isolate_venv)
+   506	            pip_wheel = fallback_wheel(wheels, 'pip')
+   507	            def bootstrap_pip():
+   508	                if pip_wheel:
+   509	                    current['setup_calls'][-1]['source'] = str(pip_wheel)
+   510	                    import zipfile
+   511	                    with zipfile.ZipFile(pip_wheel) as zf:
+   512	                        zf.extractall(sp)
+   513	                else:
+   514	                    current['setup_calls'][-1]['source'] = copy_runtime_package('pip', sp)
+   515	                    if current['setup_calls'][-1]['source'] == 'missing':
+   516	                        raise RuntimeError('No offline pip source available')
+   517	                return docker.exec(container_id, 'python3 -m pip --version', timeout=30)
+   518	            result = setup_step(current, 'pip_bootstrap', bootstrap_pip)
+   519	            if result.exit_code != 0:
+   520	                raise RuntimeError('Sandbox pip bootstrap failed')
+   521	            probe = ("import sys,json;from pip._vendor.packaging.tags import sys_tags;"
+   522	                     "from pip._vendor.packaging.markers import default_environment;"
+   523	                     "print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()],"
+   524	                     "'environment':default_environment()}))")
+   525	            result = setup_step(current, 'interpreter_probe', lambda: docker.exec(
+   526	                container_id, 'python3 -c ' + shlex.quote(probe), timeout=30))
+   527	            if result.exit_code != 0:
+   528	                raise RuntimeError('Sandbox interpreter probe failed')
+   529	            identity = json.loads(result.stdout)
+   530	            current['interpreter_version'] = identity['version']
+   531	            selected = compatible_wheels(wheels, identity['tags'])
+   532	            # The image pins pytest-timeout, even if a newer wheel is present.
+   533	            selected.pop('pytest-timeout', None)
+   534	            for path in pytest_timeout_wheels(wheels):
+   535	                if {str(t) for t in parse_wheel_filename(path.name)[3]} & set(identity['tags']):
+   536	                    selected['pytest-timeout'] = path
+   537	                    break
+   538	            current['wheel_tags_chosen'] = [p.name for p in selected.values()]
+   539	            def validate_tools():
+   540	                missing = [n for n in SCORER_TOOLS if n not in selected and n not in ('pip', 'pytest-timeout')]
+   541	                if missing:
+   542	                    raise RuntimeError('Required compatible tools missing: ' + ', '.join(missing))
+   543	            setup_step(current, 'tool_sources', validate_tools)
+   544	            def timeout_source():
+   545	                source = selected.get('pytest-timeout')
+   546	                current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
+   547	                if current['setup_calls'][-1]['source'] == 'missing':
+   548	                    raise RuntimeError('No offline pytest-timeout 2.1.0 source available')
+   549	            setup_step(current, 'pytest_timeout_source', timeout_source)
+   550	            def install_tools():
+   551	                for path in selected.values():
+   552	                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+   553	                tools = ['/wheels/' + selected[n].name for n in SCORER_TOOLS
+   554	                         if n in selected and n != 'pip']
+   555	                return docker.exec(container_id,
+   556	                    'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
+   557	                    ' '.join(shlex.quote(n) for n in tools), timeout=60)
+   558	            result = setup_step(current, 'tool_install', install_tools)
+   559	            if result.exit_code != 0:
+   560	                raise RuntimeError('Offline scorer tool installation failed')
+   561	            def tool_deps():
+   562	                from importlib.metadata import distributions
+   563	                roots = [wheel_metadata(selected[n]) for n in SCORER_TOOLS if n in selected]
+   564	                roots.extend(d.metadata for d in distributions(path=[str(sp)])
+   565	                             if d.metadata['Name'].lower() in ('pip', 'pytest-timeout')
+   566	                             and d.metadata['Name'].lower() not in selected)
+   567	                def install_dependency(path):
+   568	                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+   569	                    result = docker.exec(container_id,
+   570	                        'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
+   571	                        shlex.quote('/wheels/' + path.name), timeout=60)
+   572	                    setup_artifact(current, dict(step='tool_deps', wheel=path.name,
+   573	                        stdout=result.stdout, stderr=result.stderr))
+   574	                    current['setup_calls'][-1]['retrying_lines'] += sum(
+   575	                        'Retrying' in line for line in (result.stdout + '\n' + result.stderr).splitlines())
+   576	                    return result
+   577	                entries, missing = close_tool_dependencies(
+   578	                    roots, wheels, identity['tags'], identity['environment'], sp, install_dependency)
+   579	                current['setup_calls'][-1]['dependencies'] = entries
+   580	                current['missing_tool_deps'] = missing
+   581	                if missing:
+   582	                    current.update(status='failed', reason='missing_tool_deps')
+   583	                    raise RuntimeError('missing_tool_deps: ' + ', '.join(missing))
+   584	            setup_step(current, 'tool_deps', tool_deps)
+   585	            setup_step(current, 'pip_check', lambda: docker.exec(
+   586	                container_id, 'python3 -m pip check', timeout=30), fatal=False)
+   587	            # Docker's hook ignores failure, but observe the real pip rc and both streams.
+   588	            setup_step(current, 'workspace_editable', lambda: docker.exec(container_id,
+   589	                'python3 -m pip install --no-index --find-links=/wheels --no-build-isolation --no-deps -e /workspace',
+   590	                timeout=280), fatal=False)
+   591	            current['workspace_editable_rc'] = current['setup_calls'][-1]['rc']
+   592	            current['editable_failed'] = current['workspace_editable_rc'] != 0
+   593	            current['setup_failed'] |= current['editable_failed']
+   594	            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+   595	            def extract_base():
+   596	                base = [p for name, p in selected.items() if name not in BASE_SKIP]
+   597	                if any(p.stat().st_size >= cs._LARGE_WHEEL_THRESHOLD_BYTES for p in base):
+   598	                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+   599	                inject_base(cs, base, sp, current)
+   600	            setup_step(current, 'base_tar_extraction', extract_base)
+   601	            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+   602	        def run_setup():
+   603	            docker.copy_to(container_id, setup, '/tmp/setup.py')
+   604	            # All observer files are scratch files, never workspace patch inputs.
+   605	            observer = docker.sandboxes[container_id]['tmp'] / 'setup_observer.py'
+   606	            observer.write_text(SETUP_OBSERVER)
+   607	            return docker.exec(container_id, setup_command(repo, fast_path), timeout=280)
+   608	        try:
+   609	            setup_step(current, 'setup.py', run_setup)
+   610	        finally:
+   611	            log = docker.sandboxes[container_id]['tmp'] / 'setup_subprocesses.json'
+   612	            calls = json.loads(log.read_text()) if log.exists() else []
+   613	            full_log = log.with_name('setup_subprocesses_full.jsonl')
+   614	            if full_log.exists():
+   615	                for line in full_log.read_text().splitlines():
+   616	                    setup_artifact(current, dict(step='setup.py', **json.loads(line)))
+   617	            current['setup_subprocesses'] = calls
+   618	            setup_row = next(c for c in reversed(current['setup_calls']) if c['step'] == 'setup.py')
+   619	            setup_row['subprocesses'] = calls
+   620	            setup_row['retrying_lines'] += sum(c['retrying_lines'] for c in calls)
+   621	            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+   622	            editable = [c for c in calls if isinstance(c['argv'], list) and '-e' in c['argv']]
+   623	            current['editable_rc'] = editable[0]['rc'] if editable else None
+   624	            current['editable_final_rc'] = editable[-1]['rc'] if editable else None
+   625	            current['editable_failed'] = any(c['rc'] != 0 for c in editable) or current.get('workspace_editable_rc', 0) != 0
+   626	            current['setup_failed'] |= current['editable_failed']
+   627	            record_distributions(docker, container_id, repo, setup_row)
+   628	            if calls:
+   629	                current['interpreter_version'] = calls[0]['interpreter_version']
+   630	            else:
+   631	                current.setdefault('interpreter_version', None)
+   632	        current['status'] = 'failed' if current['setup_failed'] else 'passed'
+   633	        return current
+   634	    install._timing_original = orig
+   635	    for name, module in list(sys.modules.items()):
+   636	        if name.startswith('swegemma.') and hasattr(module, 'install_test_dependencies'):
+   637	            module.install_test_dependencies = install
+   638	    return install
+   639	
+   640	def classify_patch(patch, repo, protected=None, test_targets=()):
+   815	    return result
+   816	
+   817	
+   818	def phase1_fields(current, run_seconds, total, context, patch):
+   819	    def difference(end, start):
+   820	        return current[end] - current[start] if current.get(end) is not None and current.get(start) is not None else None
+   821	    phase1 = difference('sandbox_stop_end', 'sandbox_start_begin')
+   822	    source = 'sandbox_wrappers' if phase1 is not None else 'run_agent_sandbox'
+   823	    phase1 = run_seconds if phase1 is None else phase1
+   824	    submitted = bool(context.patch_submitted) if context is not None else None
+   825	    return dict(agent_timeout_seconds=current.get('agent_timeout_seconds'),
+   826	        agent_clock_seconds=difference('timeout_exit', 'timeout_enter'),
+   827	        agent_timeout_fired=current.get('agent_timeout_fired'),
+   828	        finalization_seconds=difference('sandbox_stop_end', 'timeout_exit'),
+   829	        finalization_exec=current.get('finalization_exec', []),
+   830	        teardown_seconds=current.get('sandbox_stop_duration'),
+   831	        phase1_wall_seconds=phase1, phase1_source=source,
+   832	        pre_agent_seconds=difference('timeout_enter', 'sandbox_start_begin'),
+   833	        post_phase1_seconds=total - phase1, patch_submitted=submitted,
+   834	        fallback_patch_used=(not submitted and bool(patch.strip())) if submitted is not None else None,
+   835	        verification_skipped=SKIP_VERIFICATION)
+   836	
+   837	
+   838	# Normal agent end states that swegemma reports through agent_error (agent_runner.py 0.2.11).
+   839	AGENT_OUTCOMES = (('timeout', re.compile(r'Agent exceeded session timeout\b')),
+   840	                  ('turns', re.compile(r'Agent exceeded (turns budget|maximum allowed LLM turns)\b')),
+   841	                  ('tool_calls', re.compile(r'Agent exceeded tool call budget\b')),
+   842	                  ('no_submit', re.compile(r'Agent completed execution without calling submit_patch\b')))
+   843	IMAGE_EMULATION_STEPS = ('venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'tool_sources',
+   844	                         'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check')
+   845	
+   846	
+   847	def agent_outcome(message):
+   848	    """Name of a known normal agent end state, else None (including for empty messages)."""
+   849	    text = (message or '').strip()
+   850	    return next((name for name, pattern in AGENT_OUTCOMES if pattern.match(text)), None)
+   851	
+   852	
+   853	def harness_error(result, agent_error):
+   854	    """Fail closed: any error that is not a known normal agent end state is a harness failure."""
+   855	    messages = [m for m in ((result.error if result is not None else None), agent_error) if m]
+   856	    return 'Harness task failure' if any(agent_outcome(m) is None for m in messages) else None
+   857	
+   858	
+   859	def platform_probe(host='pypi.org', port=443, timeout=10.0):
+   860	    """P2 (plan 006 addendum): docker presence, DNS, and one TCP connect. Sends no payload."""
+   861	    out = dict(docker_which=shutil.which('docker'), docker_sock=os.path.exists('/var/run/docker.sock'),
+   862	               host=host, port=port, dns=None, dns_seconds=None, tcp=None, tcp_seconds=None, tcp_errno=None)
+  1000	    with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as tf:
+  1001	        tf.extractall(destination, filter='data')
+  1002	    return hashlib.sha256(payload).hexdigest(), hashlib.sha256((destination / 'agent.yaml').read_bytes()).hexdigest()
+  1003	
+  1004	def append(stream, row):
+  1005	    stream.write(json.dumps(row, allow_nan=False) + '\n')
+  1006	    stream.flush(); os.fsync(stream.fileno())
+  1007	
+  1008	async def evaluate(config, journal, started, caps, totals):
+  1009	    from contextvars import ContextVar
+  1010	    from swegemma.evaluate import Evaluator
+  1011	    from swegemma.models import load_tasks
+  1012	    from swegemma.harness.verification import _is_protected_test_or_config_path
+  1013	    import swegemma.evaluate as ev
+  1014	    import swegemma.harness.verification as vf
+  1015	    import swegemma.harness.agent_runner as ar
+  1016	    state = ContextVar('timing')
+  1017	    original_asyncio = ar.asyncio
+  1018	    original_sandbox = {name: getattr(ar, name) for name in ('sandbox_start', 'sandbox_stop', 'sandbox_exec')}
+  1019	    ar.asyncio = AsyncioTimingProxy(original_asyncio, state)
+  1020	    for name, original in original_sandbox.items():
+  1021	        setattr(ar, name, observe_sandbox(original, state, name))
+  1022	    original_verify, original_strip = ev.verify_task, vf.strip_protected_files_from_patch
+  1023	    vf.strip_protected_files_from_patch = observe_patch_strip(original_strip, state)
+  1024	    async def verify(*args, **kwargs):
+  1025	        start = time.perf_counter()
+  1026	        try:
+  1027	            return await (skip_verification if SKIP_VERIFICATION else original_verify)(*args, **kwargs)
+  1028	        finally:
+  1029	            state.get()['verification'] = time.perf_counter() - start
+  1030	    ev.verify_task = verify
+  1031	    class TimingEvaluator(Evaluator):
+  1032	        agent_seconds, patch, trace, agent_error = 0.0, '', None, ''
+  1033	        def _hydrate_task_from_secret(self, task):
+  1034	            return task
+  1035	        def _get_secret_bundle_data(self):
+  1036	            return {}, {}, None
+  1037	        async def _run_agent_sandbox(self, task, *args, **kwargs):
+  1038	            safe = dataclasses.replace(task, patch='', test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=())
+  1039	            self.context = kwargs['context']
+  1040	            self.context.task = safe
+  1041	            start = time.perf_counter()
+  1042	            state.get()['agent_active'] = True
+  1043	            try:
+  1044	                self.patch, self.agent_error, self.trace = await super()._run_agent_sandbox(safe, *args, **kwargs)
+  1045	                return self.patch, self.agent_error, self.trace
+  1046	            finally:
+  1047	                self.agent_seconds = time.perf_counter() - start
+  1048	                state.get()['agent_active'] = False
+  1049	    try:
+  1050	        inventory = {t.instance_id: t for t in load_tasks(config.tasks_path)}
+  1051	        if len(set(TASK_IDS)) != len(TASK_IDS) or set(TASK_IDS) - inventory.keys():
+  1052	            raise ValueError('Duplicate or missing task IDs')
+  1053	        patch_subprocess_deps(DATA, state)
+  1054	        for iid in TASK_IDS:
+  1055	            if should_stop(time.monotonic()-started + (P1_DEADLINE_SECONDS + 30 if STOCK_PROBE else 0), caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+  1056	                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+  1057	                break
+  1058	            task = dataclasses.replace(inventory[iid], patch='')
+  1059	            stock = stock_setup_probe(config, iid, task.repo) if STOCK_PROBE else None
+  1060	            if STOCK_PROBE and should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+  1061	                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+  1062	                break
+  1063	            times = dict(instance_id=task.instance_id, verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+  1064	            state.set(times)
+  1065	            evaluator, result, error = TimingEvaluator(config), None, None
+  1066	            original_start = evaluator.docker.start
+  1067	            evaluator.docker.start = lambda: setup_step(times, 'venv', original_start)
+  1068	            start = time.perf_counter()
+  1069	            try:
+  1070	                result = await evaluator.evaluate_task(task)
+  1071	                error = harness_error(result, evaluator.agent_error)
+  1072	            except Exception as exc:
+  1073	                error = 'Evaluation exception (' + type(exc).__name__ + ')'
+  1074	            finally:
+  1075	                try:
+  1076	                    evaluator.docker.cleanup_all()
+  1077	                except Exception as exc:
+  1078	                    error = 'Cleanup exception (' + type(exc).__name__ + ')'
+  1079	            total = time.perf_counter() - start
+  1080	            totals.append(total)
+  1081	            patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch) or ''
+  1082	            try:
+  1083	                counts, tokens, seconds = trace_counts(evaluator.trace)
+  1084	            except Exception as exc:  # never lose the run over trace parsing
+  1085	                counts, tokens, seconds = {}, dict(prompt_tokens=None, completion_tokens=None), {}
+  1086	                error = (error or '') + ' trace parse (' + type(exc).__name__ + ')'
+  1087	            code = result.test_exit_code if result else None
+  1088	            raw_error = (result.error or '') if result else error or ''
+  1089	            phase = phase1_fields(times, evaluator.agent_seconds, total,
+  1090	                                  getattr(evaluator, 'context', None),
+  1091	                                  result.agent_patch if result else evaluator.patch)
+  1092	            phase.update(agent_outcome=agent_outcome(evaluator.agent_error or raw_error),
+  1093	                         image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
+  1094	            try:
+  1095	              append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+  1096	                **phase,
+  1097	                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+  1098	                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+  1099	                editable_failed=times.get('editable_failed', False),
+  1100	                setup_output_artifact=times.get('setup_output_artifact'),
+  1101	                missing_tool_deps=times.get('missing_tool_deps', []),
+  1102	                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+  1103	                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
+  1104	                llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
+  1105	                tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
+  1106	                completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
+  1107	                stock_setup=stock, llm_calls=llm_calls(evaluator.trace),
+  1108	                **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+  1109	                timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+  1110	            except Exception as exc:
+  1111	                append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+  1112	                                     **phase,
+  1113	                                     wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+  1114	                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+  1115	                editable_failed=times.get('editable_failed', False),
+  1116	                setup_output_artifact=times.get('setup_output_artifact'),
+  1117	                missing_tool_deps=times.get('missing_tool_deps', []),
+  1118	                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+  1119	                stock_setup=stock,
+  1120	                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
+  1121	            # Raw artifacts are diagnostics written after the row; never lose the remaining tasks over them.
+  1122	            try:
+  1123	                raw = WORK / 'runs' / iid
+  1124	                raw.mkdir(parents=True, exist_ok=True)
+  1125	                (raw / 'agent.patch').write_text(patch)
+  1126	                (raw / 'trace.json').write_text(json.dumps(evaluator.trace.to_dict(format='legacy') if evaluator.trace else {}, default=str))
+  1127	                (raw / 'result.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result else {'error': error}, default=str))
+  1128	            except Exception as exc:
+  1129	                append(journal, {'_artifact_error': dict(instance_id=iid, type=type(exc).__name__)})
+  1130	    finally:
+  1131	        ev.verify_task, vf.strip_protected_files_from_patch = original_verify, original_strip
+  1132	        ar.asyncio = original_asyncio
+  1133	        for name, original in original_sandbox.items():
+  1134	            setattr(ar, name, original)
+  1135	
+
+exec
+/bin/bash -lc "nl -ba eval/kaggle/timing_push.sh | head -n 145; nl -ba eval/tests/test_agent_timing.py | head -n 180; sed -n '1260,1378p' eval/kaggle/agent_timing.py | nl -ba -v1260; git status --short && git rev-parse HEAD && git diff -- eval/plans/007.md" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	#!/usr/bin/env bash
+     2	# Stage a self-contained private GPU timing or CPU setup kernel. --dry-run never invokes Kaggle.
+     3	set -euo pipefail
+     4	dry_run=false
+     5	skip_verification=1
+     6	stock_probe=1
+     7	seed_max=0
+     8	while [[ ${1:-} == --dry-run || ${1:-} == --with-verification || ${1:-} == --no-stock-probe || ${1:-} == --seed-max ]]; do
+     9	  case $1 in
+    10	    --dry-run) dry_run=true ;;
+    11	    --with-verification) skip_verification=0 ;;
+    12	    --no-stock-probe) stock_probe=0 ;;
+    13	    --seed-max) seed_max=${2:?--seed-max SECONDS}; [[ $seed_max =~ ^[0-9]+$ ]] || { echo '--seed-max takes whole seconds' >&2; exit 2; }; shift ;;
+    14	  esac
+    15	  shift
+    16	done
+    17	setup_only=0
+    18	setup_fix=1
+    19	if [[ ${1:-} == --setup-only ]]; then
+    20	  setup_only=1
+    21	  setup_fix=${2:?SETUP_FIX required}
+    22	  [[ $setup_fix == 0 || $setup_fix == 1 ]] || { echo 'SETUP_FIX must be 0 or 1' >&2; exit 2; }
+    23	  shift 2
+    24	  [[ $# -ge 2 && $# -le 3 ]] || { echo 'Usage: timing_push.sh [--dry-run] [--with-verification] [--no-stock-probe] --setup-only SETUP_FIX USER/SLUG IDS_FILE [BUDGET_SECONDS]' >&2; exit 2; }
+    25	  set -- "$1" - "$2" "${3:-1800}"
+    26	fi
+    27	if [[ $# -lt 3 || $# -gt 4 || ! $1 =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]]; then
+    28	  echo "Usage: $0 [--dry-run] [--with-verification] [--no-stock-probe] [--seed-max SECONDS] KAGGLE_USER/SLUG BUNDLE_DIR IDS_FILE [BUDGET_SECONDS]" >&2
+    29	  exit 2
+    30	fi
+    31	script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+    32	stage_dir=$(mktemp -d /tmp/timing-kernel-push.XXXXXX)
+    33	# Dry runs retain the generated artifact for inspection.
+    34	if ! $dry_run; then trap 'rm -rf -- "$stage_dir"' EXIT; fi
+    35	budget=${4:-10800}
+    36	python3 - "$script_dir" "$stage_dir" "$1" "$2" "$3" "$budget" "$setup_only" "$setup_fix" "$skip_verification" "$stock_probe" "$seed_max" <<'PY'
+    37	import ast
+    38	import base64
+    39	import gzip
+    40	import hashlib
+    41	import io
+    42	import json
+    43	from pathlib import Path
+    44	import re
+    45	import subprocess
+    46	import sys
+    47	import tarfile
+    48	
+    49	source, stage = map(Path, sys.argv[1:3])
+    50	kernel_id, bundle_arg, ids_arg, budget_arg, setup_only_arg, setup_fix_arg, skip_verification_arg, stock_probe_arg, seed_max_arg = sys.argv[3:]
+    51	setup_only = setup_only_arg == "1"
+    52	bundle, ids_file = Path(bundle_arg).resolve(), Path(ids_arg)
+    53	budget = int(budget_arg)
+    54	if budget <= 0:
+    55	    raise ValueError('Budget must be positive')
+    56	ids = [s.strip() for s in ids_file.read_text().splitlines() if s.strip() and not s.lstrip().startswith('#')]
+    57	if not ids or len(ids) != len(set(ids)) or any(not re.fullmatch(r'[A-Za-z0-9_.-]+', s) for s in ids):
+    58	    raise ValueError('Nonempty unique safe task IDs required')
+    59	# PyYAML is not required on the push host. agent.yaml uses a scalar model declaration.
+    60	buf = io.BytesIO()
+    61	model = None
+    62	if not setup_only:
+    63	    models = set()
+    64	    for path in [bundle / 'agent.yaml', *sorted((bundle / 'sub_agents').rglob('*.yaml')), *sorted((bundle / 'sub_agents').rglob('*.yml'))]:
+    65	        for line in path.read_text().splitlines():
+    66	            match = re.fullmatch(r'\s*model:\s*[\'"]?(gemma-4-(?:31b|12b|e4b|e2b)-it-qat-w4a16-ct)[\'"]?\s*(?:#.*)?', line)
+    67	            if match:
+    68	                models.add(match[1])
+    69	    if len(models) != 1:
+    70	        raise ValueError('Expected one allowed scalar model declaration')
+    71	    model = models.pop()
+    72	    buf = io.BytesIO()
+    73	    with gzip.GzipFile(fileobj=buf, mode='wb', mtime=0) as gz:
+    74	        with tarfile.open(fileobj=gz, mode='w') as tf:
+    75	            for path in sorted(bundle.rglob('*')):
+    76	                if path.is_symlink() or not (path.is_file() or path.is_dir()):
+    77	                    raise ValueError('Bundle contains symlink or special file')
+    78	                tf.add(path, arcname=path.relative_to(bundle).as_posix(), recursive=False)
+    79	# Official PyPI wheels the scorer image pip-installs online (Dockerfile.public line 9 and runtime deps)
+    80	# but the offline wheelhouse lacks; pinned by vendor/SHA256SUMS, provenance in docs/ATTRIBUTION.md.
+    81	extra_wheels = {}
+    82	for line in (source / 'vendor' / 'SHA256SUMS').read_text().splitlines():
+    83	    digest, name = line.split()
+    84	    data = (source / 'vendor' / name).read_bytes()
+    85	    if hashlib.sha256(data).hexdigest() != digest:
+    86	        raise ValueError('Vendored wheel sha256 mismatch: ' + name)
+    87	    extra_wheels[name] = [digest, base64.b64encode(data).decode()]
+    88	if 'pytest_timeout-2.1.0-py3-none-any.whl' not in extra_wheels:
+    89	    raise ValueError('Vendored pytest-timeout 2.1.0 wheel missing')
+    90	constants = dict(BUNDLE_B64=base64.b64encode(buf.getvalue()).decode(), TASK_IDS=ids, EXTRA_WHEELS=extra_wheels,
+    91	                 GIT_SHA=subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip(),
+    92	                 KERNEL_BUDGET_SECONDS=budget, SETUP_ONLY=setup_only, SETUP_FIX=int(setup_fix_arg),
+    93	                 SKIP_VERIFICATION=skip_verification_arg == "1",
+    94	                 STOCK_PROBE=stock_probe_arg == "1",
+    95	                 OBSERVED_MAX_SEED_SECONDS=float(seed_max_arg))
+    96	text = (source / 'agent_timing.py').read_text()
+    97	lines = text.splitlines(keepends=True)
+    98	for node in reversed(ast.parse(text).body):
+    99	    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id in constants:
+   100	        key = node.targets[0].id
+   101	        lines[node.lineno-1:node.end_lineno] = [f'{key} = {constants.pop(key)!r}\n']
+   102	if constants:
+   103	    raise ValueError('Missing template constants')
+   104	generated = ''.join(lines)
+   105	compile(generated, 'agent_timing.py', 'exec')
+   106	(stage / 'agent_timing.py').write_text(generated)
+   107	# No network per task constraint. Assumption: Kaggle model_sources accepts versioned model handles.
+   108	metadata = dict(id=kernel_id, title=kernel_id.split('/')[1], code_file='agent_timing.py', language='python',
+   109	                kernel_type='script', is_private=True, enable_gpu=not setup_only, enable_internet=False,
+   110	                dataset_sources=['metric/gemma-4-developer-agent-wheelhouse'],
+   111	                competition_sources=['gemma-4-developer-agent'], model_sources=[] if setup_only else [f'google/gemma-4/Other/{model}/2'], kernel_sources=[],
+   112	                # Pin the starter notebook's image (Python 3.12; wheelhouse binaries are cp312).
+   113	                # Source: kaggle kernels pull ryanholbrook/getting-started-gemma-4-developer-agent -m (2026-11-05).
+   114	                docker_image='gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461')
+   115	(stage / 'kernel-metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
+   116	print(json.dumps(metadata, indent=2))
+   117	print(f'Generated script: {len(generated.encode())} bytes; stage: {stage}')
+   118	print('CPU setup check; no model; starter image pinned' if setup_only else
+   119	      'Metadata assumption (offline): model_sources uses google/gemma-4/Other/<model>/2 (starter casing); docker_image pinned to starter')
+   120	PY
+   121	if $dry_run; then
+   122	  echo "Dry run: no push. Staged: $stage_dir"
+   123	elif [[ $setup_only == 1 ]]; then
+   124	  kaggle kernels push -p "$stage_dir" -t "$((budget + 1800))"
+   125	else
+   126	  # 'NvidiaL4' is the starter notebook's machine_shape; unknown names (e.g. NvidiaL4X4) silently fall back to T4 x2.
+   127	  kaggle kernels push -p "$stage_dir" --accelerator NvidiaL4 -t "$((budget + 1800))"
+   128	  shape_dir=$(mktemp -d /tmp/timing-kernel-shape.XXXXXX)
+   129	  kaggle kernels pull "$1" -p "$shape_dir" -m >/dev/null
+   130	  shape=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["machine_shape"])' "$shape_dir/kernel-metadata.json")
+   131	  rm -rf -- "$shape_dir"
+   132	  echo "Server machine_shape: $shape"
+   133	  if [[ $shape != NvidiaL4 ]]; then echo "WARNING: accelerator is $shape, not NvidiaL4; kernel will abort at the GPU check" >&2; fi
+   134	fi
+     1	"""Offline timing-kernel generation, instrumentation and runtime-gate checks."""
+     2	import ast
+     3	import base64
+     4	import hashlib
+     5	import importlib.util
+     6	import json
+     7	from pathlib import Path
+     8	import py_compile
+     9	import subprocess
+    10	from types import SimpleNamespace as Entry
+    11	
+    12	import pytest
+    13	
+    14	ROOT = Path(__file__).resolve().parents[2]
+    15	
+    16	
+    17	def load(name):
+    18	    spec = importlib.util.spec_from_file_location(name, ROOT / 'eval/kaggle' / f'{name}.py')
+    19	    module = importlib.util.module_from_spec(spec)
+    20	    spec.loader.exec_module(module)
+    21	    return module
+    22	
+    23	
+    24	timing = load('agent_timing')
+    25	summary = load('timing_summary')
+    26	
+    27	
+    28	def test_generated_script_and_bundle(tmp_path):
+    29	    bundle = tmp_path / 'bundle'
+    30	    bundle.mkdir()
+    31	    (bundle / 'agent.yaml').write_text('model: gemma-4-e4b-it-qat-w4a16-ct\n')
+    32	    (bundle / 'prompt.md').write_text('example prompt')
+    33	    ids = tmp_path / 'ids'
+    34	    ids.write_text('task-1\ntask-2\n')
+    35	    proc = subprocess.run(['bash', str(ROOT / 'eval/kaggle/timing_push.sh'), '--dry-run',
+    36	                           'example/timing-test', str(bundle), str(ids), '1000'], check=True, capture_output=True, text=True)
+    37	    stage = Path(proc.stdout.split('Dry run: no push. Staged: ')[1].strip())
+    38	    try:
+    39	        generated = stage / 'agent_timing.py'
+    40	        py_compile.compile(str(generated), cfile=str(tmp_path / 'compiled.pyc'), doraise=True)
+    41	        tree = ast.parse(generated.read_text())
+    42	        constants = {n.targets[0].id: ast.literal_eval(n.value) for n in tree.body
+    43	                     if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
+    44	                     and n.targets[0].id in ('BUNDLE_B64', 'TASK_IDS', 'GIT_SHA', 'KERNEL_BUDGET_SECONDS')}
+    45	        assert constants['TASK_IDS'] == ['task-1', 'task-2']
+    46	        assert constants['KERNEL_BUDGET_SECONDS'] == 1000
+    47	        assert len(constants['GIT_SHA']) == 40
+    48	        for n in ast.walk(tree):
+    49	            if isinstance(n, ast.ImportFrom):
+    50	                assert not n.level and not n.module.startswith(('eval', 'gold_calibration', 'run_agent_eval'))
+    51	            if isinstance(n, ast.Import):
+    52	                assert all(not a.name.startswith(('eval.', 'gold_calibration', 'run_agent_eval')) for a in n.names)
+    53	        digest, yaml_digest = timing.extract_bundle(constants['BUNDLE_B64'], tmp_path / 'extracted')
+    54	        assert digest == hashlib.sha256(base64.b64decode(constants['BUNDLE_B64'])).hexdigest()
+    55	        assert yaml_digest == hashlib.sha256((bundle / 'agent.yaml').read_bytes()).hexdigest()
+    56	        assert (tmp_path / 'extracted/prompt.md').read_text() == 'example prompt'
+    57	        metadata = json.loads((stage / 'kernel-metadata.json').read_text())
+    58	        assert metadata['model_sources'] == ['google/gemma-4/Other/gemma-4-e4b-it-qat-w4a16-ct/2']
+    59	        assert metadata['docker_image'].startswith('gcr.io/kaggle-private-byod/python@sha256:')
+    60	        assert metadata['kernel_type'] == 'script'
+    61	        assert metadata['enable_gpu'] is True and metadata['enable_internet'] is False
+    62	    finally:
+    63	        import shutil
+    64	        shutil.rmtree(stage)
+    65	
+    66	
+    67	def trace_entry(event, timestamp, command='', tool='run_command'):
+    68	    return Entry(event_type=event, timestamp=timestamp, tool_name=tool, tool_args={'command': command}, usage=None)
+    69	
+    70	
+    71	@pytest.mark.parametrize('command', ['pytest -q', 'python -m unittest', 'tox', 'nox -s test', './run_tests.sh'])
+    72	def test_test_run_classification(command):
+    73	    trace = Entry(entries=[trace_entry('tool_call', 1, command), trace_entry('tool_response', 4),
+    74	                           trace_entry('tool_call', 5, 'ls'), trace_entry('tool_response', 7),
+    75	                           trace_entry('tool_call', 8, command, 'read_file'), trace_entry('tool_response', 9, tool='read_file')])
+    76	    assert timing.test_run_stats(trace, 10) == dict(n=1, total_seconds=3, share_of_agent_seconds=.3)
+    77	    assert timing.tool_seconds(trace.entries)['run_command'] == dict(n=2, total=5, max=3)
+    78	    assert timing.trace_counts(trace)[1] == dict(prompt_tokens=None, completion_tokens=None)
+    79	
+    80	
+    81	def test_unmatched_test_call_and_fifo():
+    82	    trace = Entry(entries=[trace_entry('tool_call', 1, 'ls'), trace_entry('tool_call', 2, 'pytest'),
+    83	                           trace_entry('tool_response', 4), trace_entry('tool_response', 7),
+    84	                           trace_entry('tool_call', 8, 'pytest')])
+    85	    assert timing.test_run_stats(trace, 10) == dict(n=2, total_seconds=5, share_of_agent_seconds=.5)
+    86	
+    87	
+    88	def test_timebox_boundary():
+    89	    assert not timing.should_stop(100, 5, 300, 0, 1000)
+    90	    assert timing.should_stop(100.01, 5, 300, 0, 1000)
+    91	    assert timing.should_stop(100, 5, 300, 601, 1000)
+    92	    # plan 007: explicit setup reserve (3 passes with verification) and smoke-seeded observed max
+    93	    assert timing.setup_reserve_seconds(True) == timing.SETUP_PASS_SECONDS
+    94	    assert timing.setup_reserve_seconds(False) == 3 * timing.SETUP_PASS_SECONDS
+    95	    assert not timing.should_stop(0, 3.5, 300, 0, 1.5 * (210 + 300 + 720))
+    96	    assert timing.should_stop(0.01, 3.5, 300, 0, 1.5 * (210 + 300 + 720), 720)
+    97	    assert not timing.should_stop(0.01, 3.5, 300, 0, 1.5 * (210 + 300 + 720))
+    98	
+    99	
+   100	@pytest.fixture(autouse=True)
+   101	def _kernel_work_dir(monkeypatch, tmp_path):
+   102	    """Kernel writes (e.g. extra_wheels) go to a temp dir, never /kaggle/working; tests may override."""
+   103	    monkeypatch.setattr(timing, 'WORK', tmp_path / 'kernel-work')
+   104	
+   105	
+   106	def journal(path, cap=5.04, startup=1800, seconds=302.4):
+   107	    header = dict(_schema='kaggle_timing_v1', task_ids=['a', 'b'], caps={'max_time_minutes': cap})
+   108	    rows = [dict(instance_id=iid, wall_seconds={'total': seconds}, test_run=dict(n=n, share_of_agent_seconds=share),
+   109	                 empty_patch=n == 0, test_files_edited=['tests/test_a.py'] if n else [], stray_files=['x'] if n else [])
+   110	            for iid, n, share in [('a', 0, 0), ('b', 2, .5)]]
+   111	    path.write_text('\n'.join(json.dumps(r) for r in [header, {'_vllm': {'startup_seconds': startup}}, *rows, {'_done': {'n': 2}}]) + '\n')
+   112	
+   113	
+   114	def test_summary_boundary_and_cli(tmp_path):
+   115	    path, output = tmp_path / 'timing.jsonl', tmp_path / 'summary.json'
+   116	    journal(path)
+   117	    result = summary.summarize(path)
+   118	    assert result['legacy_projection_decision'] == 'PASS'
+   119	    assert result['projected_minutes'] == 660
+   120	    assert result['cap_worst_case_minutes'] == 660
+   121	    assert result['test_run_share']['p90'] == .45
+   122	    assert result['test_runs_per_task']['mean'] == 1
+   123	    assert result['test_runs_per_task']['max'] == 2
+   124	    assert result['n'] == 2 and result['vllm_startup_seconds'] == 1800
+   125	    assert result['empty_patch_count'] == result['test_files_edited_count'] == result['stray_files_count'] == 1
+   126	    subprocess.run(['python3', str(ROOT / 'eval/kaggle/timing_summary.py'), str(path), '--output', str(output)], check=True, capture_output=True)
+   127	    assert json.loads(output.read_text())['_schema'] == 'kaggle_timing_summary_v1'
+   128	    journal(path, seconds=302.40001)
+   129	    assert summary.summarize(path)['legacy_projection_decision'] == 'FAIL'
+   130	    journal(path, cap=5.04001)
+   131	    assert summary.summarize(path)['legacy_projection_decision'] == 'FAIL'
+   132	
+   133	
+   134	def test_summary_rejects_dropped_or_duplicate_rows(tmp_path):
+   135	    path = tmp_path / 'timing.jsonl'
+   136	    journal(path)
+   137	    rows = path.read_text().splitlines()
+   138	    path.write_text('\n'.join(rows[:2] + rows[3:]))
+   139	    with pytest.raises(ValueError, match='Done count'):
+   140	        summary.summarize(path)
+   141	
+   142	
+   143	def test_kernel_exception_still_writes_header_and_done(tmp_path, monkeypatch):
+   144	    import io
+   145	    import tarfile
+   146	    stream = io.BytesIO()
+   147	    with tarfile.open(fileobj=stream, mode='w:gz') as archive:
+   148	        payload = b'model: gemma-4-e4b-it-qat-w4a16-ct\n'
+   149	        info = tarfile.TarInfo('agent.yaml')
+   150	        info.size = len(payload)
+   151	        archive.addfile(info, io.BytesIO(payload))
+   152	    monkeypatch.setattr(timing, 'BUNDLE_B64', base64.b64encode(stream.getvalue()).decode())
+   153	    monkeypatch.setattr(timing, 'WORK', tmp_path)
+   154	    monkeypatch.setattr(timing, 'BUNDLE', tmp_path / 'bundle')
+   155	    def fail_install():
+   156	        raise RuntimeError('TASK_TEXT_SECRET')
+   157	    monkeypatch.setattr(timing, 'install', fail_install)
+   158	    with pytest.raises(RuntimeError):
+   159	        timing.main()
+   160	    text = (tmp_path / 'timing.jsonl').read_text()
+   161	    rows = [json.loads(line) for line in text.splitlines()]
+   162	    assert rows[0]['_schema'] == 'kaggle_timing_v1'
+   163	    assert rows[0]['agent_yaml_sha256'] == hashlib.sha256(payload).hexdigest()
+   164	    assert rows[-1]['_done']['n'] == 0
+   165	    assert rows[-1]['_done']['startup_seconds'] is None
+   166	    assert rows[-2] == {'_stopped': 'Kernel exception (RuntimeError)'}
+   167	    assert 'TASK_TEXT_SECRET' not in text
+   168	
+   169	
+   170	
+   171	def test_wheels_follow_sandbox_abi(tmp_path):
+   172	    for name in ['native-1-cp312-cp312-manylinux_2_17_x86_64.whl',
+   173	                 'native-2-cp313-cp313-manylinux_2_17_x86_64.whl',
+   174	                 'native-3-cp312-cp312-win_amd64.whl', 'pure-1-py3-none-any.whl']:
+   175	        (tmp_path / name).touch()
+   176	    selected = timing.compatible_wheels(tmp_path, ['cp312-cp312-manylinux_2_17_x86_64', 'py3-none-any'])
+   177	    assert selected['native'].name.startswith('native-1-')
+   178	    assert selected['pure'].name == 'pure-1-py3-none-any.whl'
+   179	
+   180	
+  1260	            append(journal, dict(_stopped=type(exc).__name__))
+  1261	            raise
+  1262	        finally:
+  1263	            append(journal, dict(_done=dict(n=n)))
+  1264	
+  1265	
+  1266	def main():
+  1267	    os.environ.setdefault('SETUP_FIX', str(SETUP_FIX))
+  1268	    if os.environ['SETUP_FIX'] not in ('0', '1'):
+  1269	        raise ValueError('SETUP_FIX must be 0 or 1')
+  1270	    if SETUP_ONLY:
+  1271	        os.environ.setdefault('SETUP_ONLY', '1')
+  1272	    if os.environ.get('SETUP_ONLY') == '1':
+  1273	        return setup_only_main()
+  1274	    started, totals, servers, startup = time.monotonic(), [], [], None
+  1275	    WORK.mkdir(exist_ok=True, parents=True)
+  1276	    with (WORK / 'timing.jsonl').open('w') as journal:
+  1277	        header = dict(_schema='kaggle_timing_v1', git_sha=GIT_SHA, task_ids=TASK_IDS, concurrency=1,
+  1278	                      created_utc=datetime.now(timezone.utc).isoformat(), caps=None,
+  1279	                      bundle_sha256=None, agent_yaml_sha256=None, gpu_names=[], gpu_count=0,
+  1280	                      mcp_import_ok=None, vllm_startup_seconds=None, platform_probe=None,
+  1281	                      fields=dict(instance_id='Task ID', repo='Repository', wall_seconds='Agent (including setup), verification, total wall seconds',
+  1282	                          vllm_startup_seconds='Header: perf_counter seconds spent starting vLLM; null on startup failure',
+  1283	                          verification_skipped='Container B and verification tests skipped',
+  1284	                          agent_outcome='timeout/turns/tool_calls/no_submit from agent_error, or null',
+  1285	                          image_emulation_seconds='Setup steps emulating image layers the scorer image already has (inside Phase-1)',
+  1286	                          agent_timeout_seconds='Delay passed to agent_runner asyncio.timeout, or null',
+  1287	                          agent_clock_seconds='Timeout context exit minus enter (perf_counter), or null',
+  1288	                          agent_timeout_fired='Real timeout expired or exit TimeoutError; null if not entered',
+  1289	                          finalization_seconds='Sandbox stop end minus timeout exit, or null',
+  1290	                          finalization_exec='Post-timeout sandbox_exec calls: cmd (first 40 chars), duration_s, rc or exception type',
+  1291	                          teardown_seconds='sandbox_stop duration including failed stop, or null',
+  1292	                          phase1_wall_seconds='sandbox_start begin to sandbox_stop end, otherwise _run_agent_sandbox duration',
+  1293	                          phase1_source='sandbox_wrappers or run_agent_sandbox fallback',
+  1294	                          pre_agent_seconds='Timeout enter minus sandbox_start begin, or null',
+  1295	                          post_phase1_seconds='Total wall seconds minus phase1_wall_seconds',
+  1296	                          patch_submitted='Context patch_submitted; null if no context',
+  1297	                          fallback_patch_used='No submitted patch and non-empty returned harness patch; null if no context',
+  1298	                          sandbox_setup_seconds='Sum of measured setup steps', setup_calls='Bounded setup command timings/output', setup_failed='Any setup failure', resolved='Harness verdict', exit_code='Verification exit code or null',
+  1299	                          error='Sanitized failure category or null', llm_turns='LLM calls or null', tool_calls='Total and per_tool requests',
+  1300	                          tool_seconds='Per-tool n,total,max call->response seconds, FIFO per name', test_run='Test requests n, matched total_seconds, share_of_agent_seconds',
+  1301	                          prompt_tokens='Trace usage or null', completion_tokens='Trace usage or null', completion_tokens_per_second='Completion usage / agent seconds or null',
+  1302	                          patch_bytes='UTF-8 diff bytes before stripping', patch_files='Diff paths', test_files_edited='Protected/test target paths',
+  1303	                          stray_files='New files outside package Python source', empty_patch='Blank diff', timed_out='Timeout error or exit 124',
+  1304	                          platform_probe='Header (P2): docker binary/socket, DNS + one 10 s TCP connect to pypi.org:443, no payload',
+  1305	                          stock_setup='P1: stock subprocess setup sequence on the same snapshot, run before the task (outside its Phase-1): total_s, steps_s, error',
+  1306	                          llm_calls='P3: per usage-bearing trace entry: t since first entry, gap_s since previous entry, tokens'))
+  1307	        # Write the header even if installation or extraction fails; enrich before startup.
+  1308	        try:
+  1309	            header['bundle_sha256'], header['agent_yaml_sha256'] = extract_bundle(BUNDLE_B64, BUNDLE)
+  1310	            print('bundle_sha256=', header['bundle_sha256'], 'agent_yaml_sha256=', header['agent_yaml_sha256'], flush=True)
+  1311	            header['platform_probe'] = platform_probe()  # P2: <= ~20 s, no payload
+  1312	            print('platform_probe=', header['platform_probe'], flush=True)
+  1313	            gpu_preflight()  # cheap fail-fast before the multi-minute install (torch check below stays authoritative)
+  1314	            install()
+  1315	            check_hook_targets()  # fail before vLLM startup if the wheelhouse swegemma lacks the hook targets
+  1316	            if os.environ.get('SETUP_FIX') == '1':  # only the fixed path installs the line-9 tools
+  1317	                check_tool_sources(DATA / 'wheels' if (DATA / 'wheels').is_dir() else WHEELHOUSE)  # same choice as patch_subprocess_deps
+  1318	            try:
+  1319	                import mcp  # noqa: F401
+  1320	                header['mcp_import_ok'] = True
+  1321	            except Exception:
+  1322	                header['mcp_import_ok'] = False
+  1323	            print('import mcp:', header['mcp_import_ok'], flush=True)
+  1324	            import torch
+  1325	            import yaml
+  1326	            import litellm
+  1327	            from google.adk.agents.context_cache_config import ContextCacheConfig
+  1328	            from google.adk.apps._configs import EventsCompactionConfig
+  1329	            from swegemma.config import EvalConfig, build_submission_limits
+  1330	            litellm.drop_params = True
+  1331	            header.update(gpu_count=torch.cuda.device_count(), gpu_names=[torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])
+  1332	            # Fail fast (saves quota) if Kaggle fell back to another accelerator (v2 silently got T4 x2).
+  1333	            if header['gpu_count'] < 4 or not all('L4' in n for n in header['gpu_names']):
+  1334	                raise WrongAccelerator('expected 4x L4')
+  1335	            cfg_file = next((BUNDLE / n for n in ('eval_config.yaml', 'eval_config.yml') if (BUNDLE / n).is_file()), None)
+  1336	            raw = (yaml.safe_load(cfg_file.read_text()) or {}) if cfg_file else {}
+  1337	            section = raw.get('evaluation', raw)
+  1338	            turns = section.get('max_turns', section.get('max_llm_calls'))
+  1339	            caps = dict(timeout_seconds=int(section.get('timeout_seconds', 300)), verification_timeout_seconds=int(section.get('verification_timeout_seconds', 300)),
+  1340	                        max_tool_calls=int(section.get('max_tool_calls', 100)), max_time_minutes=float(section.get('max_time_minutes', 60.0)), max_turns=int(turns) if turns is not None else None)
+  1341	            header['caps'] = caps
+  1342	            server, adapters, model, startup = start_server(servers)
+  1343	            header['vllm_startup_seconds'] = startup
+  1344	            append(journal, header)
+  1345	            append(journal, {'_vllm': dict(startup_seconds=startup)})
+  1346	            models = server.create_model_registry(aliases=[model], model_prefix='openai/', api_key=os.environ.get('LOCAL_API_KEY', 'EMPTY'))
+  1347	            limits, constraints = build_submission_limits()
+  1348	            config = EvalConfig(tasks_path=DATA / 'tasks.jsonl', snapshots_dir=DATA / 'snapshots', results_dir=WORK / 'runs', submission_dir=BUNDLE,
+  1349	                models=models, sandbox='subprocess', **caps, limits=limits, generation_constraints=constraints, adapter_manifest=adapters,
+  1350	                context_cache_config=ContextCacheConfig(min_tokens=2048, ttl_seconds=1800, cache_intervals=10),
+  1351	                events_compaction_config=EventsCompactionConfig(compaction_interval=15, overlap_size=2, token_threshold=14336, event_retention_size=5),
+  1352	                graph_dir=str(DATA / 'graphs'), embeddings_dir=str(DATA / 'embeddings'), wheels_dir=DATA / 'wheels', verbose=False)
+  1353	            asyncio.run(evaluate(config, journal, started, caps, totals))
+  1354	        except BaseException as exc:
+  1355	            if journal.tell() == 0:
+  1356	                append(journal, header)
+  1357	            append(journal, {'_stopped': 'Kernel exception (' + type(exc).__name__ + ')'})
+  1358	            raise
+  1359	        finally:
+  1360	            try:
+  1361	                for server in servers:
+  1362	                    server.stop()
+  1363	            finally:
+  1364	                append(journal, {'_done': dict(n=len(totals), total_seconds=distribution(totals), startup_seconds=startup)})
+  1365	
+  1366	if __name__ == '__main__':
+  1367	    main()
+785947e0b91ce9eb0085e1339a22dab51b7105bf
+
