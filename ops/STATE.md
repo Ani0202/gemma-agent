@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-05 23:18Z (cycle 100, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-06 01:05Z (cycle 101, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
@@ -24,7 +24,9 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 ## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
-## Running jobs (23:48Z): timing-31b-wait-light (kernel aniket0202/gemma-31b-timing v1 pushed 23:47Z -> runs/31b-v001-t4-timing), memguard-light.
+## Running jobs (01:05Z): lb-e4b-v002-wait-light, memguard-light. Plan 006 DONE: results/kaggle_timing_31b_v001.json, all gates PASS, G1 HOLDS -> report 010 (NEEDS_DECISION).
+- Report 010 veto (pre-registered 01:05Z): T = e4b complete_utc - 00:11:23Z; T > 8 h or e4b time-fail -> do NOT submit 31b-v002.
+- 31B cap 4.0 quality: 6/8 timeout, 4/8 empty diff (all no-edit timeouts) -> plan 005 is the lever.
 - KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
   dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
 - Kernel stack (fix5/probes/gate/finfix/fix7) MERGED to main 2db5f51 (all reviews clean).
@@ -33,7 +35,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - Dec 022 item 4 = plan 005 (ops/codex/ask-20261105T181222.md; draft bundles/drafts/item4-system.md; empty submit loses all; needs GPU).
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
-- Kaggle GPU this week: 5.18/30 h per `kaggle quota` 21:05Z. Plan 006 cap 4.0 ~2.4 quota-h (-> ~7.6). Log: ops/budget/kaggle.md. Resets Sat 00:00Z.
+- Kaggle GPU this week: 7.28/30 h per `kaggle quota` 01:00Z (plan 006 used +2.10). Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
 ## Live caveats
 - Job naming (dec 024): waiters, codex-ask and codex-review jobs end in -light; builds, test suites and evals never do.
 - LORO with only 2 repos (rich, fastapi) is weak; report 002 must say so (dec 014 item 3).
@@ -70,9 +72,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - OPEN eval-design question (dec 034 item 6): under H1, test deps come from the scorer's own site-packages, not setup.py. Before local
   pass-rate evals start, pre-register which environment the local sandbox models and why. Don't act on it before then.
 ## Next 3
-1. Guard v6 LIVE (b9caae4). Failed submit w/o ref -> dec 049 item 2 reconcile (pending cleared only by decision). BLOCKING scope = no-auth /
-   wrong sha / 2nd same day / retry after ambiguous; rest -> ops/backlog-guard.md (ordering, repeat path, dup keys). Patches v1-v5 in
-   ops/patches/superseded/. DEC 050: on waiter `kaggle quota` -> budget log; no other heavy jobs until plan 006 done (plan 005/007 prep OK).
-2. Plan 006 PUSHED (stack merged 2db5f51, tests 712p). On completion: timing_summary --gate-mode stock-path --gate-vllm-seconds 600 ->
-   schema-headed results file -> report 010 (G1 legs; lead with h1_composite; dec 047). Gate (b) formula kept (dec 047).
-3. After report 010: plan 005 (dec 022 item 4) + plan 007 (dec 039) = first quality levers; ops/patches cleanup (dec 045 item 4).
+1. Await Director ruling on report 010 (SUBMIT 31b-v002 w/ veto). On e4b score: fill results/lb_e4b_v002.json + budget log, compute T.
+   Before any 31B submit: dec 054 SUBMIT_KERNEL commit; server list check; guard v6 (b9caae4).
+2. Dec 050 heavy-job hold lifted (plan 006 done): plan 005 (dec 022 item 4: truncation-safe diff / no-edit timeouts) + plan 007 (dec 039).
+3. ops/patches cleanup (dec 045 item 4); dec 038 paper evidence (results files schema-headed) by Nov 9 23:59Z.

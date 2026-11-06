@@ -218,3 +218,5 @@
 2026-11-06T00:16:43Z | dec 053: 31b-v002 gate leg 2 review launched (review-31b-v002-light, scoped); SUBMIT line rules recorded | ops/decisions/053-20261106T001423-17615-from-builder.md
 2026-11-06T00:18:18Z | 31b-v002 review CLEAN (gate leg 2); NON-BLOCKING: config.env SUBMIT_KERNEL is the e4b kernel -> Director asked A (config swap) / B (per-track guard) | ops/codex/review-20261106T001642.md
 2026-11-06T00:19:10Z | dec 054: SUBMIT_KERNEL per-submission config commit (option A modified); option B -> backlog | ops/decisions/054-20261106T001818-11529-from-builder.md
+2026-11-06T01:05Z | plan 006 31B timing COMPLETE: gates a/b/d/e PASS (b 243.4<=277, vLLM 364 s), P2 no docker, P1 max 5.3 s -> G1 HOLDS; 6/8 timeout, 4/8 empty diff; quota 7.28/30 h | results/kaggle_timing_31b_v001.json
+2026-11-06T01:05Z | report 010: SUBMIT 31b-v002 requested, conditional on e4b final + pre-registered veto T>8h | ops/reports/010-31b-timing-g1.md
