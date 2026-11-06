@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 14:34Z (cycle 152, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 14:40Z (cycle 153, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -23,10 +23,10 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (14:34Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-dec077-light (ONE targeted review of 9486a3b).
+## Running jobs (14:40Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z). codex-review-dec077-light DONE: CLEAN (ops/codex/review-20261106T143319.md).
 - DEC 077 (ack D73.6): arm 2 = v011 no smoke. Item 2 DONE 9486a3b: builtin arm2 path exits 4 (no results) on any non-root submit_patch
-  response (raw scan, pairing-independent) + regression test; 106 tests pass; arm-1 traces 0/33 hits. Must be CLEAN before arm-2 METRICS run
-  (does not block launch). If NOT CLEAN: fix + report. Item 3: B3 fix before any gate arm pre-reg (low prio). Arm-2 launch = 1-line FYI only.
+  response (raw scan, pairing-independent) + regression test; 106 tests pass; arm-1 traces 0/33 hits. Targeted review CLEAN 14:35Z -> arm-2 metrics UNBLOCKED.
+  Pre-launch prep verified 14:40Z: dist/31b-v011.zip sha 4f5b078a == MANIFEST; launch = eval/kaggle/timing_push.sh per 008.md l.42 w/ bundles/31b/v011. Item 3: B3 fix before any gate arm pre-reg (low prio). Arm-2 launch = 1-line FYI only.
 - CYCLE 151: re-review 142723 NOT CLEAN (B3) -> D73.6 TRIGGERED: ARM 2 = v011 (dist/31b-v011.zip 4f5b078a...4938), NO smoke; B3 moot for v011.
 - DEC 076: D73.6 stands; single-run-dir exit 3 kept; arm 2 = ONE session; D73.7 chunk rule c93967b. DEC 075: MANIFEST v010 fix b0785a30; CLEAN review -> FYI only.
 - DEC 074 APPROVE D73: D73.5 (submit_unverifiable counts AGAINST arm 2; metrics arm2 mode must implement - d73 build only REPORTS it, add after merge)
@@ -76,4 +76,5 @@
 ## Next 3
 1. Dec 055 31b-v002 submit 11-07T00:00Z FIRST (checklist in Best bundles); kaggle quota log after reset.
 2. Then arm-2 v011 full 33-id run, ONE session (D73.7), post-reset quota; verify kernel/runner config points at v011 sha first.
-3. Nov 8 slot proposal (due 11-07T12:00Z); arm-3 thinking addendum (dec 070 item 5) due 11-07T18:00Z; dec 038 paper evidence by Nov 9.
+3. Idle until window: draft arm-3 thinking addendum pre-data (dec 070 item 5, due 11-07T18:00Z); then B3 fix (dec 077 item 3, low prio, codex-build).
+   Nov 8 slot proposal due 11-07T12:00Z (needs v002 LB); dec 038 paper evidence by Nov 9.

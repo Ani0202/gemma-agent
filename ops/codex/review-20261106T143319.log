@@ -1646,3 +1646,902 @@ exec
 exec
 /bin/bash -lc 'git diff 9486a3b HEAD -- eval/plan008_metrics.py eval/tests/test_plan008_metrics.py' in /home/ubuntu/work/gemma
  succeeded in 0ms:
+exec
+/bin/bash -lc "nl -ba eval/plan008_metrics.py | sed -n '420,690p'" in /home/ubuntu/work/gemma
+exec
+/bin/bash -lc "nl -ba eval/tests/test_plan008_metrics.py | sed -n '1,130p;325,430p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	"""Offline synthetic checks for the binding plan-008 definitions. No task content."""
+     2	import json
+     3	from pathlib import Path
+     4	import subprocess
+     5	import sys
+     6	
+     7	import pytest
+     8	
+     9	ROOT_DIR = Path(__file__).resolve().parents[2]
+    10	sys.path.insert(0, str(ROOT_DIR / 'eval'))
+    11	import plan008_metrics as m
+    12	import plan007_arm1_summary as old
+    13	
+    14	YAML = ROOT_DIR / m.GATE_YAML
+    15	SYNTHETIC_IDS = {'smoke': ['synthetic'], 'arm2': ['synthetic']}
+    16	
+    17	
+    18	@pytest.fixture(autouse=True)
+    19	def synthetic_inventory(monkeypatch):
+    20	    # Synthetic runs use synthetic ids; registered-id behaviour is tested explicitly below.
+    21	    ids = {k: list(v) for k, v in SYNTHETIC_IDS.items()}
+    22	    monkeypatch.setattr(m, 'expected_ids', lambda kind: ids[kind])
+    23	    return ids
+    24	
+    25	
+    26	def yaml_sha(name):
+    27	    import hashlib
+    28	    return hashlib.sha256((ROOT_DIR / m.BUNDLE_YAMLS[name]).read_bytes()).hexdigest()
+    29	
+    30	
+    31	def call(tool, args=None, author=m.ROOT):
+    32	    return dict(type='tool_call', author=author, tool=tool, args=args or {})
+    33	
+    34	
+    35	def response(tool, result, author=m.ROOT):
+    36	    return dict(type='tool_response', author=author, tool=tool,
+    37	                result=json.dumps(result) if not isinstance(result, str) else result)
+    38	
+    39	
+    40	def invoke(tool, args=None, result=None, author=m.ROOT):
+    41	    return [call(tool, args, author), response(tool, result, author)]
+    42	
+    43	
+    44	def gate(reply='SUBMITTED', reason='changes', size=23):
+    45	    es = [call('submit_patch', {'request': 'submit'})]
+    46	    es += invoke('run_command', {'command': m._gate_command(YAML)},
+    47	                 {'status': 'ok', 'stdout': 'GATE call=1 kept_files=1\n' +
+    48	                  ('VERDICT=EDIT_FIRST' if reply.startswith('NOT SUBMITTED') else f'VERDICT=SUBMIT reason={reason}')}, 'submit_patch')
+    49	    if not reply.startswith('NOT SUBMITTED'):
+    50	        result = {'error': 'synthetic'} if reply.startswith('SUBMIT FAILED') else {'status': 'ok', 'patch_size': size}
+    51	        es += invoke('submit_patch', result=result, author='submit_patch')
+    52	    es += [response('submit_patch', {'raw': reply})]
+    53	    return es
+    54	
+    55	
+    56	def row(**kw):
+    57	    return dict(dict(verified_patch_bytes=23, agent_clock_seconds=210, patch_submitted=True), **kw)
+    58	
+    59	
+    60	def statuses(criteria):
+    61	    return {k: v['status'] for k, v in criteria.items()}
+    62	
+    63	
+    64	def test_root_filter_and_repeats(tmp_path):
+    65	    es = []
+    66	    for _ in range(5):
+    67	        es += gate()
+    68	    roots = m.root_tool_calls(es)
+    69	    assert len(roots) == 5
+    70	    assert all(m._reply(c['response']) == 'SUBMITTED' for c in roots)
+    71	    assert m.identical_runs_root(es) == dict(max_run=5, runs_ge3=1, runs_ge5=1, repeated_calls=4)
+    72	    path = tmp_path / 'trace.json'
+    73	    path.write_text(json.dumps({'entries': es}))
+    74	    assert old.identical_runs(path)['max_run'] == 1
+    75	    assert m.identical_runs_root([])['max_run'] == 0
+    76	
+    77	
+    78	def test_pairing_fifo_author_and_missing():
+    79	    es = [call('run_command'), call('run_command', author='code_analyzer_agent'),
+    80	          response('run_command', 'nested', 'code_analyzer_agent'),
+    81	          response('run_command', 'root'), call('read_file')]
+    82	    pairs = m.root_tool_calls(es)
+    83	    assert [c['response'] for c in pairs] == ['root', None]
+    84	    assert m.root_tool_calls(es, 'code_analyzer_agent')[0]['response'] == 'nested'
+    85	    es = [call('read_file'), call('read_file'), response('read_file', 'one'), response('read_file', 'two')]
+    86	    assert [c['response'] for c in m.root_tool_calls(es)] == ['one', 'two']
+    87	
+    88	
+    89	@pytest.mark.parametrize('command', ['pytest -q', 'python -m unittest', 'tox -e py'])
+    90	def test_success_boundary(command):
+    91	    es = gate(m.BOUNCE) + invoke('edit_file') + invoke('run_command', {'command': command}) + gate()
+    92	    assert m.successful_submit_index(es) == 3
+    93	    assert m.submitted_without_test(es) is False
+    94	    # A test between the bounce and success counts, even with no edit.
+    95	    assert m.submitted_without_test(gate(m.BOUNCE) + invoke('run_command', {'command': command}) + gate()) is False
+    96	
+    97	
+    98	def test_no_test_and_never_success():
+    99	    assert m.submitted_without_test(gate()) is True
+   100	    assert m.submitted_without_test(gate() + invoke('run_command', {'command': 'pytest'})) is True
+   101	    assert m.submitted_without_test(gate(m.BOUNCE)) is None
+   102	    assert m.submitted_without_test([]) is None
+   103	    assert m.submitted_without_test(invoke('submit_patch', result={'status': 'error', 'patch_size': 4})) is None
+   104	    assert m.submitted_without_test(invoke('submit_patch', result={'status': 'ok', 'patch_size': 0})) is True
+   105	    assert m.successful_submit_index(gate('SUBMIT FAILED: failure')) is None
+   106	    # Nested tests and incidental substrings do not count.
+   107	    es = invoke('run_command', {'command': 'pytest'}, author='code_analyzer_agent')
+   108	    es += invoke('run_command', {'command': 'echo pytestish; unittest'}) + gate()
+   109	    assert m.submitted_without_test(es) is True
+   110	
+   111	
+   112	def test_gate_descriptives():
+   113	    es = gate(m.BOUNCE) + invoke('edit_file') + gate(m.BOUNCE) + gate(reason='forced')
+   114	    d = m.gate_descriptives(es)
+   115	    assert {k: v for k, v in d.items() if k != 'gate_run_cmds'} == dict(
+   116	        gate_calls=3, bounces=2, forced=1, check_error=0, submit_failed=0,
+   117	        bounce_no_followup=0, gate_llm_limit=0, unacknowledged_inner_submits=0, gate_internal_visible=True)
+   118	    assert d['gate_run_cmds'] == [m._gate_command(YAML)] * 3
+   119	    assert m.gate_descriptives(gate(m.BOUNCE))['bounce_no_followup'] == 1
+   120	    assert m.gate_descriptives(gate(reason='check_error'))['check_error'] == 1
+   121	    assert m.gate_descriptives(gate('SUBMIT FAILED: error'))['submit_failed'] == 1
+   122	    hidden = invoke('submit_patch', result={'raw': 'SUBMITTED'})
+   123	    assert m.gate_descriptives(hidden)['gate_internal_visible'] is False
+   124	
+   125	
+   126	NEW = 'diff --git a/a.py b/a.py\nnew file mode 100644\n--- /dev/null\n+++ b/a.py\n@@ -0,0 +1 @@\n+x\n'
+   127	MOD = 'diff --git a/b.py b/b.py\nindex 123..456 100644\n--- a/b.py\n+++ b/b.py\n'
+   128	
+   129	
+   130	@pytest.mark.parametrize('patch,expected', [('', False), (' \n', False), ('hello', False),
+   325	def test_smoke_real_strip_with_task_extras(tmp_path, monkeypatch):
+   326	    monkeypatch.chdir(ROOT_DIR)
+   327	    from swegemma.harness.verification import strip_protected_files_from_patch
+   328	    source = NEW.replace('+x', '+é')
+   329	    protected = NEW.replace('a.py', 'custom/checks.py')
+   330	    raw = source + protected
+   331	    tasks = task_inventory(tmp_path, protected)
+   332	    assert m.load_task_test_files(tasks) == {'synthetic': ['custom/checks.py']}
+   333	    scored = strip_protected_files_from_patch(raw, extra_protected_paths=['custom/checks.py'])
+   334	    assert scored == source
+   335	    r = row(verified_patch_bytes=len(scored.encode()))
+   336	    run, artifacts = make_run(tmp_path, gate(size=len(scored)), r, patch=raw)
+   337	    assert m.smoke_metrics(run, tasks)['overall'] == 'PASS'
+   338	    # Without loadable task test_files, criterion ii must fail closed.
+   339	    assert m.smoke_metrics(run, tmp_path / 'missing')['rows'][0]['criteria']['ii']['status'] == 'UNVERIFIABLE'
+   340	    other_tasks = json.loads(tasks.read_text())
+   341	    other_tasks['instance_id'] = 'other'
+   342	    tasks.write_text(json.dumps(other_tasks) + '\n')
+   343	    assert m.smoke_metrics(run, tasks)['rows'][0]['criteria']['ii']['status'] == 'UNVERIFIABLE'
+   344	    artifacts.joinpath('agent.patch').unlink()
+   345	    assert m.smoke_metrics(run, tasks)['overall'] == 'FAIL'
+   346	
+   347	
+   348	@pytest.mark.parametrize('clock', [-1, float('nan'), float('inf'), '210', True])
+   349	def test_smoke_clock_invalid(clock):
+   350	    assert check(row(agent_clock_seconds=clock), gate())['iv']['status'] == 'UNVERIFIABLE'
+   351	
+   352	
+   353	def test_deadline_between_capture_and_ack():
+   354	    es = gate()[:-1]
+   355	    r = row(agent_error_text='Agent exceeded session timeout (3.5 min)')
+   356	    assert m.successful_submit_index(es) == 0
+   357	    assert m.submitted_without_test(es) is True
+   358	    assert m.gate_descriptives(es, r)['unacknowledged_inner_submits'] == 1
+   359	    assert m.submit_evidence(r, es)['submit_unverifiable'] is False
+   360	    assert check(r, es)['iii']['status'] == 'FAIL'  # smoke still requires canonical reply
+   361	    # A test after the root gate call is outside the safety boundary.
+   362	    es[3:3] = invoke('run_command', {'command': 'pytest'})
+   363	    assert m.submitted_without_test(es) is None  # the root call closes the enclosing interval
+   364	
+   365	
+   366	@pytest.mark.parametrize('flag,success,unverifiable', [(True, True, False), (False, False, False),
+   367	    (False, True, True), (True, False, True), (None, True, True), (None, False, True)])
+   368	def test_submit_consistency(flag, success, unverifiable):
+   369	    es = gate()[:-1] if success else gate(m.BOUNCE)
+   370	    evidence = m.submit_evidence(row(patch_submitted=flag), es)
+   371	    assert evidence['submit_unverifiable'] is unverifiable
+   372	    assert evidence['successful_submit'] is success
+   373	    if flag is None:
+   374	        assert evidence['patch_submitted'] is success
+   375	        assert evidence['patch_submitted_source'] == 'derived_from_harness_response'
+   376	
+   377	
+   378	def test_gate_llm_limit_attribution():
+   379	    es = gate()[:3]
+   380	    r = row(patch_submitted=False, agent_error_text='Agent exceeded turns budget (50 turns)')
+   381	    assert m.gate_descriptives(es, r)['gate_llm_limit'] == 1
+   382	    assert m.gate_descriptives([], r)['gate_llm_limit'] == 0
+   383	    assert m.gate_descriptives(gate(m.BOUNCE), r)['gate_llm_limit'] == 0
+   384	    assert m.gate_descriptives(es + [dict(type='error', author='submit_patch', content='LlmCallsLimitExceededError')])['gate_llm_limit'] == 1
+   385	
+   386	
+   387	@pytest.mark.parametrize('nested', [True, False])
+   388	@pytest.mark.parametrize('builtin', [True, False])
+   389	def test_arm2_cli(tmp_path, monkeypatch, nested, builtin):
+   390	    monkeypatch.chdir(ROOT_DIR)
+   391	    es = invoke('submit_patch', result={'patch_size': len(NEW)}) if builtin else gate(size=len(NEW))[:-1]
+   392	    run, _ = make_run(tmp_path, es, nested=nested,
+   393	                      header={'_schema': 'synthetic', 'agent_yaml_sha256': yaml_sha('v011' if builtin else 'v010')})
+   394	    dest = tmp_path / 'out.json'
+   395	    assert m.main(['metrics', 'arm2', str(run), str(dest)]) == 0
+   396	    out = json.loads(dest.read_text())
+   397	    totals = out['totals']
+   398	    assert totals['mechanism2'] == totals['mechanism1_empty'] == totals['count_no_successful_submit'] == 0
+   399	    assert totals['submitted_without_test'] == 1
+   400	    assert totals['submit_unverifiable'] == 0
+   401	    if builtin:
+   402	        assert all(totals[k] == 'n/a (no gate)' for k in m.GATE_COUNTS)
+   403	    else:
+   404	        assert totals['unacknowledged_inner_submits'] == 1
+   405	        assert totals['untracked_only_submits'] == 0  # D72 descriptive still requires acknowledgement
+   406	    assert 'gate_run_cmds' not in dest.read_text()
+   407	    assert NEW not in dest.read_text()
+   408	
+   409	
+   410	def test_arm2_mismatch_and_derived_flag(tmp_path, monkeypatch):
+   411	    monkeypatch.chdir(ROOT_DIR)
+   412	    run, artifacts = make_run(tmp_path, gate()[:-1], row(patch_submitted=False))
+   413	    out = m.arm2_metrics(run)
+   414	    assert out['totals']['submitted_without_test'] == 1
+   415	    assert out['totals']['submit_unverifiable'] == 1
+   416	    assert out['submit_unverifiable_rows'] == ['synthetic']
+   417	    # D73.5: patch_submitted False on an unverifiable row ALSO counts as no-submit.
+   418	    assert out['totals']['count_no_successful_submit'] == 1
+   419	    assert out['totals']['count_no_successful_submit_observed'] == 0
+   420	    r = json.loads((run / 'timing.jsonl').read_text())
+   421	    del r['patch_submitted']
+   422	    (run / 'timing.jsonl').write_text(json.dumps(r) + '\n')
+   423	    assert m.arm2_metrics(run)['rows'][0]['patch_submitted_source'] == 'derived_from_harness_response'
+   424	    artifacts.joinpath('trace.json').unlink()
+   425	    out = m.arm2_metrics(run)
+   426	    assert out['n_rows'] == 1
+   427	    assert out['totals']['submit_unverifiable'] == 1
+   428	    # Missing trace: no candidate boundary, derived flag False -> counted in both (worst case).
+   429	    assert out['totals']['submitted_without_test'] == 1
+   430	    assert out['totals']['count_no_successful_submit'] == 1
+
+ succeeded in 0ms:
+   420	
+   421	
+   422	def _schema(mode, paths):
+   423	    return dict(name='plan008_metrics/v1', mode=mode, definitions=DEFINITIONS,
+   424	                script_sha256=base.sha(__file__),
+   425	                input_shas={str(p): base.sha(p) for p in dict.fromkeys(map(Path, paths))})
+   426	
+   427	
+   428	def base_metrics():
+   429	    rows, paths = [], [base.ARM_IDS, base.__file__, 'eval/plan007_report.py']
+   430	    for part, timing, d4path, a2path in base.PARTS:
+   431	        d4, a2 = [json.loads(Path(p).read_text()) for p in (d4path, a2path)]
+   432	        assert d4['classifier_sha256'] == base.D4_SHA and a2['classifier_sha256'] == base.A2_SHA
+   433	        assert d4['input_sha256'] == base.sha(timing) == a2['input_sha256']
+   434	        ts = base.load_rows(timing)
+   435	        cs, als = base.unique_map(d4['rows'], d4path), base.unique_map(a2['rows'], a2path)
+   436	        assert set(cs) == set(als) == {r['instance_id'] for r in ts}
+   437	        paths.extend((timing, d4path, a2path))
+   438	        for t in ts:
+   439	            iid = t['instance_id']
+   440	            base.assert_paired(cs[iid], t)
+   441	            base.assert_paired(als[iid], t)
+   442	            trace = Path(timing).parent / 'runs' / iid / 'trace.json'
+   443	            entries = json.loads(trace.read_text())['entries']
+   444	            paths.append(trace)
+   445	            rep = identical_runs_root(entries)
+   446	            rows.append(dict(instance_id=iid, part=part, **rep, mechanism2=rep['max_run'] >= 5,
+   447	                             mechanism1_empty=t.get('verified_patch_bytes') == 0,
+   448	                             submitted_without_test=submitted_without_test(entries, gate_mode=False)))
+   449	    assert [r['instance_id'] for r in rows] == base.ids_file(base.ARM_IDS)
+   450	    totals = dict(mechanism2=sum(r['mechanism2'] for r in rows),
+   451	                  mechanism1_empty=sum(r['mechanism1_empty'] for r in rows),
+   452	                  submitted_without_test=sum(r['submitted_without_test'] is True for r in rows),
+   453	                  count_no_successful_submit=sum(r['submitted_without_test'] is None for r in rows),
+   454	                  max_run=max((r['max_run'] for r in rows), default=0),
+   455	                  runs_ge3=sum(r['runs_ge3'] for r in rows), runs_ge5=sum(r['runs_ge5'] for r in rows),
+   456	                  repeated_calls=sum(r['repeated_calls'] for r in rows))
+   457	    assert totals['mechanism2'] == 17, 'arm-1 mechanism2 baseline changed'
+   458	    assert totals['mechanism1_empty'] == 12, 'arm-1 empty baseline changed'
+   459	    assert totals['submitted_without_test'] == 23, 'arm-1 safety baseline changed'
+   460	    assert totals['count_no_successful_submit'] == 7, 'arm-1 no-submit baseline changed'
+   461	    return dict(_schema=_schema('base', paths), n_rows=len(rows), totals=totals, rows=rows)
+   462	
+   463	
+   464	def load_task_test_files(tasks_path):
+   465	    # Match agent_timing.evaluate / run_agent_eval.run: the Task property derives
+   466	    # these paths from test_patch. Never use gold patch or test text as agent input.
+   467	    from swegemma.models import load_tasks
+   468	    tasks = load_tasks(Path(tasks_path))
+   469	    inventory = {t.instance_id: list(t.test_files) for t in tasks}
+   470	    if len(inventory) != len(tasks):
+   471	        raise ValueError('duplicate task IDs')
+   472	    return inventory
+   473	
+   474	
+   475	def _tasks_path():
+   476	    if os.environ.get('PLAN008_TASKS_PATH'):
+   477	        return Path(os.environ['PLAN008_TASKS_PATH'])
+   478	    kaggle = Path('/kaggle/input/competitions/gemma-4-developer-agent/tasks.jsonl')
+   479	    return kaggle if kaggle.is_file() else Path('data/raw/tasks.jsonl')
+   480	
+   481	
+   482	def _artifacts(run_dir, iid):
+   483	    # Kaggle: runs/<iid>; local eval runner: <iid>.
+   484	    nested = Path(run_dir) / 'runs' / iid
+   485	    return nested if nested.is_dir() else Path(run_dir) / iid
+   486	
+   487	
+   488	def smoke_metrics(run_dir, tasks_path=None):
+   489	    timing = Path(run_dir) / 'timing.jsonl'
+   490	    paths, rows = [timing, GATE_YAML], []
+   491	    tasks_path = Path(tasks_path) if tasks_path is not None else _tasks_path()
+   492	    if tasks_path.is_file():
+   493	        paths.append(tasks_path)
+   494	    try:
+   495	        test_files = load_task_test_files(tasks_path)
+   496	    except Exception:
+   497	        test_files = {}  # criterion ii is UNVERIFIABLE for every missing task
+   498	    for row in base.load_rows(timing):
+   499	        artifacts = _artifacts(run_dir, row['instance_id'])
+   500	        trace, patch = artifacts / 'trace.json', artifacts / 'agent.patch'
+   501	        if trace.is_file():
+   502	            paths.append(trace)
+   503	        entries = json.loads(trace.read_text()).get('entries', []) if trace.is_file() else []
+   504	        scored = None
+   505	        loaded = row['instance_id'] in test_files
+   506	        if patch.is_file():
+   507	            paths.append(patch)
+   508	            if loaded:
+   509	                from swegemma.harness.verification import strip_protected_files_from_patch
+   510	                try:
+   511	                    scored = strip_protected_files_from_patch(patch.read_bytes().decode('utf-8'),
+   512	                                extra_protected_paths=test_files[row['instance_id']])
+   513	                except (OSError, UnicodeError, ValueError):
+   514	                    scored = None
+   515	        desc = gate_descriptives(entries, row)
+   516	        desc.pop('gate_run_cmds')
+   517	        rows.append(dict(instance_id=row['instance_id'],
+   518	                         criteria=smoke_check(row, entries, GATE_YAML, scored, loaded), **desc))
+   519	    inv = inventory([r['instance_id'] for r in rows], expected_ids('smoke'))
+   520	    passed = inv['complete'] and bool(rows) and all(c['status'] == 'PASS' for r in rows for c in r['criteria'].values())
+   521	    return dict(_schema=_schema('smoke', paths), n_rows=len(rows), inventory=inv,
+   522	                overall='PASS' if passed else 'FAIL', rows=rows)
+   523	
+   524	
+   525	GATE_COUNTS = ('gate_calls', 'bounces', 'forced', 'check_error', 'submit_failed',
+   526	               'bounce_no_followup', 'gate_llm_limit', 'unacknowledged_inner_submits', 'untracked_only_submits')
+   527	
+   528	
+   529	class IncompleteRun(ValueError):
+   530	    pass
+   531	
+   532	
+   533	class GateResponseInBuiltinRun(ValueError):
+   534	    """Dec 077 item 2: B3 (unpaired gate-authored inner responses) is unfixed, so the
+   535	    builtin (v011) arm-2 path refuses any non-root submit_patch response. STOP, report."""
+   536	
+   537	
+   538	def nonroot_submit_responses(entries):
+   539	    """Raw scan, independent of call pairing: indices of submit_patch responses whose
+   540	    author is not the root agent (missing author counts as non-root)."""
+   541	    return [i for i, e in enumerate(entries)
+   542	            if e.get('type') in ('tool_response', 'tool_result')
+   543	            and e.get('tool') == 'submit_patch' and e.get('author') != ROOT]
+   544	
+   545	
+   546	def arm2_metrics(run_dir):
+   547	    timing = Path(run_dir) / 'timing.jsonl'
+   548	    paths, rows, inputs = [timing], [], []
+   549	    for row in base.load_rows(timing):
+   550	        artifacts = _artifacts(run_dir, row['instance_id'])
+   551	        trace = artifacts / 'trace.json'
+   552	        if trace.is_file():
+   553	            paths.append(trace)
+   554	        entries = json.loads(trace.read_text()).get('entries', []) if trace.is_file() else []
+   555	        inputs.append((row, entries, artifacts))
+   556	    # Builtin responses carry patch_size; gate requests carry request, children
+   557	    # have author submit_patch. Header/directory labels cover runs with no calls.
+   558	    headers = [json.loads(line) for line in timing.read_text().splitlines() if line.strip()
+   559	               and 'instance_id' not in json.loads(line)]
+   560	    inv = inventory([row['instance_id'] for row, _, _ in inputs], expected_ids('arm2'))
+   561	    if not inv['complete']:
+   562	        raise IncompleteRun(inv)
+   563	    bundle, bundle_source = selected_bundle(headers)
+   564	    gate_events = (any(
+   565	        e.get('author') == 'submit_patch' or
+   566	        (e.get('author') == ROOT and e.get('tool') == 'submit_patch' and
+   567	         (isinstance(e.get('args'), dict) and 'request' in e['args'] or
+   568	          _reply(e.get('result')) in ('SUBMITTED', BOUNCE)))
+   569	        for _, entries, _ in inputs for e in entries))
+   570	    has_gate = bundle == 'v010' if bundle else gate_events
+   571	    if not has_gate:
+   572	        bad = [row['instance_id'] for row, entries, _ in inputs if nonroot_submit_responses(entries)]
+   573	        if bad:
+   574	            raise GateResponseInBuiltinRun(dict(rows=bad, selected_bundle=bundle))
+   575	    for row, entries, artifacts in inputs:
+   576	        rep = identical_runs_root(entries)
+   577	        desc = gate_descriptives(entries, row) if has_gate else {}
+   578	        desc.pop('gate_run_cmds', None)
+   579	        if has_gate:
+   580	            # D72's untracked-only descriptive requires a canonical acknowledgement;
+   581	            # the D73 SAFETY boundary below needs only an inner harness capture.
+   582	            acknowledged = any(g['canonical_reply'] == 'SUBMITTED' for g in gate_invocations(entries))
+   583	            desc['untracked_only_submits'] = None if acknowledged else False
+   584	            if acknowledged:
+   585	                result = artifacts / 'result.json'
+   586	                if not result.is_file():
+   587	                    result = artifacts / 'output.json'
+   588	                scored = None
+   589	                if result.is_file():
+   590	                    paths.append(result)
+   591	                    scored = json.loads(result.read_text()).get('agent_patch')
+   592	                patch = artifacts / 'agent.patch'
+   593	                if scored is None and patch.is_file():
+   594	                    paths.append(patch)
+   595	                    try:
+   596	                        from swegemma.harness.verification import strip_protected_files_from_patch
+   597	                        tasks_path = _tasks_path()
+   598	                        if tasks_path.is_file():
+   599	                            paths.append(tasks_path)
+   600	                        tests = load_task_test_files(tasks_path)[row['instance_id']]
+   601	                        scored = strip_protected_files_from_patch(patch.read_bytes().decode('utf-8'), extra_protected_paths=tests)
+   602	                    except Exception:
+   603	                        scored = None
+   604	                if isinstance(scored, str):
+   605	                    desc['untracked_only_submits'] = untracked_only(scored)
+   606	        else:
+   607	            desc = dict.fromkeys((*GATE_COUNTS, 'gate_internal_visible'), 'n/a (no gate)')
+   608	        rows.append(dict(instance_id=row['instance_id'], **rep, mechanism2=rep['max_run'] >= 5,
+   609	                         mechanism1_empty=row.get('verified_patch_bytes') == 0,
+   610	                         submitted_without_test=submitted_without_test(entries, has_gate),
+   611	                         **submit_evidence(row, entries, has_gate, (artifacts / 'trace.json').is_file()), **desc))
+   612	    for r, (_, entries, _) in zip(rows, inputs):
+   613	        d735_counts(r, entries)
+   614	    totals = dict(mechanism2=sum(r['mechanism2'] for r in rows),
+   615	                  mechanism1_empty=sum(r['mechanism1_empty'] for r in rows),
+   616	                  # D73.5 (ship-rule numbers): unverifiable rows count against arm 2.
+   617	                  submitted_without_test=sum(r['swt_d735'] for r in rows),
+   618	                  count_no_successful_submit=sum(r['no_submit_d735'] for r in rows),
+   619	                  submitted_without_test_observed=sum(r['submitted_without_test'] is True for r in rows),
+   620	                  count_no_successful_submit_observed=sum(r['submitted_without_test'] is None for r in rows),
+   621	                  max_run=max((r['max_run'] for r in rows), default=0),
+   622	                  runs_ge3=sum(r['runs_ge3'] for r in rows), runs_ge5=sum(r['runs_ge5'] for r in rows),
+   623	                  repeated_calls=sum(r['repeated_calls'] for r in rows),
+   624	                  submit_unverifiable=sum(r['submit_unverifiable'] for r in rows))
+   625	    for key in GATE_COUNTS:
+   626	        totals[key] = (sum(r[key] for r in rows if r[key] is not None) if has_gate else 'n/a (no gate)')
+   627	    totals['untracked_only_unverifiable'] = sum(r.get('untracked_only_submits') is None for r in rows) if has_gate else 'n/a (no gate)'
+   628	    return dict(_schema=_schema('arm2', paths), n_rows=len(rows), inventory=inv,
+   629	                selected_bundle=bundle, selected_bundle_source=bundle_source,
+   630	                gate_layout=has_gate, gate_events_observed=gate_events,
+   631	                bundle_identity_conflict=bundle is not None and gate_events != has_gate,
+   632	                totals=totals,
+   633	                submit_unverifiable_rows=[r['instance_id'] for r in rows if r['submit_unverifiable']],
+   634	                d735_rule='submit_unverifiable rows: submitted_without_test unless root test before earliest candidate boundary (none = counted); patch_submitted not True -> also no_successful_submit',
+   635	                rows=rows)
+   636	
+   637	
+   638	def main(argv=None):
+   639	    argv = sys.argv if argv is None else argv
+   640	    if len(argv) == 3 and argv[1] == 'base':
+   641	        out = base_metrics()
+   642	    elif len(argv) == 4 and argv[1] in ('smoke', 'arm2'):
+   643	        try:
+   644	            out = (smoke_metrics if argv[1] == 'smoke' else arm2_metrics)(argv[2])
+   645	        except IncompleteRun as e:
+   646	            print('INCOMPLETE arm2 inventory; no results written:', json.dumps(e.args[0]))
+   647	            return 3
+   648	        except GateResponseInBuiltinRun as e:
+   649	            print('STOP: gate-authored submit_patch response in builtin arm2 run (dec 077); '
+   650	                  'no results written; report to Director:', json.dumps(e.args[0]))
+   651	            return 4
+   652	    else:
+   653	        print(__doc__)
+   654	        return 2
+   655	    Path(argv[-1]).write_text(json.dumps(out, indent=2) + '\n')
+   656	    print(json.dumps(out.get('totals', dict(n_rows=out['n_rows'], overall=out.get('overall')))))
+   657	    return 0
+   658	
+   659	
+   660	if __name__ == '__main__':
+   661	    sys.exit(main())
+
+exec
+/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_plan008_metrics.py -q' in /home/ubuntu/work/gemma
+ exited 1 in 21ms:
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pytest/__main__.py", line 9, in <module>
+    raise SystemExit(_console_main())
+                     ~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 286, in _console_main
+    code = _main(prog=_get_prog_name(sys.argv))
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 253, in _main
+    config = _prepareconfig(new_args, plugins, prog=prog)
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 443, in _prepareconfig
+    config: Config = pluginmanager.hook.pytest_cmdline_parse(
+                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        pluginmanager=pluginmanager, args=args
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_caller.py", line 197, in __call__
+    return self._hookexec(
+           ~~~~~~~~~~~~~~^
+        self.name, self._hookimpls.copy(), call_kwargs, firstresult
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_manager.py", line 183, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 195, in _multicall
+    raise exception
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 167, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/helpconfig.py", line 126, in pytest_cmdline_parse
+    config = yield
+             ^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 147, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 1397, in pytest_cmdline_parse
+    self.parse(args)
+    ~~~~~~~~~~^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 1791, in parse
+    self.hook.pytest_load_initial_conftests(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        early_config=self, args=args, parser=self._parser
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_caller.py", line 197, in __call__
+    return self._hookexec(
+           ~~~~~~~~~~~~~~^
+        self.name, self._hookimpls.copy(), call_kwargs, firstresult
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_manager.py", line 183, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 195, in _multicall
+    raise exception
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 167, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/warnings.py", line 114, in pytest_load_initial_conftests
+    return (yield)
+            ^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 141, in _multicall
+    next(function_gen)  # first yield
+    ~~~~^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 170, in pytest_load_initial_conftests
+    capman.start_global_capturing()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 779, in start_global_capturing
+    self._global_capturing = _get_multicapture(self._method)
+                             ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 720, in _get_multicapture
+    return MultiCapture(in_=FDCapture(0), out=FDCapture(1), err=FDCapture(2))
+                                              ~~~~~~~~~^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 493, in __init__
+    TemporaryFile(buffering=0),
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 686, in TemporaryFile
+    prefix, suffix, dir, output_type = _sanitize_params(prefix, suffix, dir)
+                                       ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 128, in _sanitize_params
+    dir = gettempdir()
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 366, in gettempdir
+    return _os.fsdecode(_gettempdir())
+                        ~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 359, in _gettempdir
+    tempdir = _get_default_tempdir()
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 223, in _get_default_tempdir
+    raise FileNotFoundError(_errno.ENOENT,
+                            "No usable temporary directory found in %s" %
+                            dirlist)
+FileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma']
+
+codex
+The selected-bundle logic forces `has_gate=False` for v011, even when gate events are present. The new guard then scans responses directly, before computing metrics. The regression’s `paired=False` cases do omit the inner call.
+
+The requested pytest command failed before collection because the read-only sandbox has no writable temporary directory. I’ll run the tests that need no filesystem writes and check the guard with synthetic traces held in memory.
+exec
+/bin/bash -lc 'rg -n "tool_result|tool_response|agent_yaml_sha256|author" eval/agent_timing.py eval/run_agent_eval.py | head -100' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+rg: eval/agent_timing.py: No such file or directory (os error 2)
+eval/run_agent_eval.py:397:        raise ValueError('Only frozen dev IDs are authorized; split contains non-dev IDs')
+
+exec
+/bin/bash -lc "nl -ba eval/tests/test_plan008_metrics.py | sed -n '235,285p'; nl -ba eval/plan007_arm1_summary.py | sed -n '30,95p'; rg -n 'def load_rows|agent_yaml_sha256' eval/plan007_arm1_summary.py eval/agent_timing.py" in /home/ubuntu/work/gemma
+ exited 2 in 0ms:
+   235	
+   236	def test_smoke_cli_counts_only(tmp_path, monkeypatch, capsys):
+   237	    monkeypatch.chdir(ROOT_DIR)
+   238	    tasks = task_inventory(tmp_path)
+   239	    monkeypatch.setenv('PLAN008_TASKS_PATH', str(tasks))
+   240	    run, artifacts = make_run(tmp_path, gate(size=len(NEW)), row(verified_patch_bytes=len(NEW.encode())))
+   241	    dest = tmp_path / 'out.json'
+   242	    assert m.main(['metrics', 'smoke', str(run), str(dest)]) == 0
+   243	    out = json.loads(dest.read_text())
+   244	    assert out['overall'] == 'PASS'
+   245	    assert 'gate_run_cmds' not in out['rows'][0]
+   246	    assert NEW not in dest.read_text()
+   247	    assert m._gate_command(YAML) not in dest.read_text()
+   248	    assert out['_schema']['script_sha256'] == old.sha(m.__file__)
+   249	    assert len(out['_schema']['input_shas']) == 5
+   250	    assert set(json.loads(capsys.readouterr().out)) == {'n_rows', 'overall'}
+   251	    r = dict(row(patch_submitted=False, agent_timeout_fired=True), instance_id='synthetic', fallback_patch_bytes=len(NEW))
+   252	    (run / 'timing.jsonl').write_text(json.dumps(r) + '\n')
+   253	    (artifacts / 'trace.json').write_text(json.dumps({'entries': []}))
+   254	    assert m.main(['metrics', 'smoke', str(run), str(dest)]) == 0
+   255	    out = json.loads(dest.read_text())
+   256	    assert out['overall'] == 'FAIL'
+   257	    assert out['rows'][0]['criteria']['i']['status'] == 'FAIL'
+   258	
+   259	
+   260	@pytest.mark.parametrize('args', [{}, {'request': ''}, {'request': None},
+   261	    {'request': 1}, {'request': []}, {'request': 'submit', 'extra': 1}, [], None])
+   262	def test_malformed_root_gate_args(args):
+   263	    es = gate()
+   264	    es[0]['args'] = args
+   265	    assert check(row(), es)['iii']['status'] == 'FAIL'
+   266	    # Even submit_patch({}) can execute successfully in ADK; evidence still fails schema.
+   267	    assert m.successful_submit_index(es) == 0
+   268	
+   269	
+   270	@pytest.mark.parametrize('index,args', [(1, {}), (1, {'command': 'other'}),
+   271	    (1, {'command': m._gate_command(YAML), 'extra': 1}), (1, []),
+   272	    (3, {'extra': 1}), (3, None), (3, [])])
+   273	def test_malformed_child_args(index, args):
+   274	    es = gate()
+   275	    es[index]['args'] = args
+   276	    assert check(row(), es)['iii']['status'] == 'FAIL'
+   277	
+   278	
+   279	def test_canonical_replies_and_mirrored_display():
+   280	    es = gate(m.BOUNCE)
+   281	    es.append(dict(type='final', author=m.ROOT, content=m.BOUNCE))
+   282	    es.append(dict(type='final', author='submit_patch', content=m.BOUNCE))
+   283	    es += gate(m.BOUNCE)
+   284	    es.append(dict(type='final', author=m.ROOT, content=m.BOUNCE))
+   285	    es += gate()
+    30	D4_SHA = 'd4cdf0f012659c685789add3b8e5687362ba01673344bdc1f1bad97f81d8ae5e'
+    31	A2_SHA = 'a208a02343b43556e990271b8757044fdf51515f27ff9a067cd3af14c1fd4e6b'
+    32	
+    33	
+    34	def sha(path):
+    35	    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    36	
+    37	
+    38	def wilson(k, n, z=1.959963984540054):
+    39	    if n == 0:
+    40	        return None
+    41	    p = k / n
+    42	    d = 1 + z * z / n
+    43	    c = (p + z * z / (2 * n)) / d
+    44	    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    45	    return [round(max(0.0, c - h), 4), round(min(1.0, c + h), 4)]
+    46	
+    47	
+    48	def rate(k, n):
+    49	    return dict(k=k, n=n, rate=round(k / n, 4) if n else None, wilson95=wilson(k, n))
+    50	
+    51	
+    52	def pct(vals, q):
+    53	    vals = sorted(v for v in vals if v is not None)
+    54	    if not vals:
+    55	        return None
+    56	    i = (len(vals) - 1) * q
+    57	    lo, hi = math.floor(i), math.ceil(i)
+    58	    return round(vals[lo] + (vals[hi] - vals[lo]) * (i - lo), 1)
+    59	
+    60	
+    61	def load_rows(path):
+    62	    out = []
+    63	    for line in Path(path).read_text().splitlines():
+    64	        if not line.strip():
+    65	            continue
+    66	        r = json.loads(line)
+    67	        if 'instance_id' in r:
+    68	            out.append(r)
+    69	        elif not any(m <= set(r) for m in META_KEYS):
+    70	            raise AssertionError(f'unrecognized non-row record in {path}: keys {sorted(r)[:8]}')
+    71	    ids = [r['instance_id'] for r in out]
+    72	    assert len(ids) == len(set(ids)), f'duplicate instance_id rows in {path}'
+    73	    return out
+    74	
+    75	
+    76	def unique_map(rows, what):
+    77	    ids = [r['instance_id'] for r in rows]
+    78	    assert len(ids) == len(set(ids)), f'duplicate classifier rows in {what}'
+    79	    return {r['instance_id']: r for r in rows}
+    80	
+    81	
+    82	def ids_file(path):
+    83	    return [ln.strip() for ln in Path(path).read_text().splitlines()
+    84	            if ln.strip() and not ln.lstrip().startswith('#')]
+    85	
+    86	
+    87	def keys_of_max(d):
+    88	    """(tool, args) key of the first longest identical run (same key as identical_runs)."""
+    89	    best, cur, prev = (0, None), 0, object()
+    90	    for e in d.get('entries') or []:
+    91	        if e.get('type') != 'tool_call':
+    92	            continue
+    93	        key = (e.get('tool'), json.dumps(e.get('args', e.get('arguments')), sort_keys=True))
+    94	        cur = cur + 1 if key == prev else 1
+    95	        prev = key
+rg: eval/agent_timing.py: No such file or directory (os error 2)
+eval/plan007_arm1_summary.py:61:def load_rows(path):
+
+exec
+/bin/bash -lc "PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B - <<'PY'
+import pytest
+class ReadOnlyTests:
+    def pytest_collection_modifyitems(self, config, items):
+        excluded = [item for item in items if 'tmp_path' in item.fixturenames]
+        items[:] = [item for item in items if 'tmp_path' not in item.fixturenames]
+        config.hook.pytest_deselected(items=excluded)
+raise SystemExit(pytest.main(['eval/tests/test_plan008_metrics.py', '-q', '-s', '-p', 'no:cacheprovider'], plugins=[ReadOnlyTests()]))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 73ms:
+...................................................................................
+83 passed, 23 deselected in 0.06s
+
+exec
+/bin/bash -lc 'git show 9486a3b --check' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+commit 9486a3b8a523d4932b37a0e6fab056029f7c5e99
+Author: Aniket <agrawalaniket02@gmail.com>
+Date:   Fri Nov 6 14:33:12 2026 +0000
+
+    plan008 metrics: dec 077 item 2 failure-safe — builtin arm2 path exits 4 on any non-root submit_patch response (+regression test)
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_014u5C9X4dmNqhoiSKe7TVpQ
+
+
+exec
+/bin/bash -lc "nl -ba eval/tests/test_plan008_metrics.py | sed -n '196,236p'; rg --files -g '*agent_timing*' -g '"'!data/**'"' -g '"'!runs/**'"' -g '"'!ops/**'"'; rg -n 'tool_result|tool_response' eval/trace_tools.py eval/trace*.py" in /home/ubuntu/work/gemma
+ exited 2 in 0ms:
+   196	def test_smoke_iv_and_v_fail():
+   197	    assert check(row(agent_clock_seconds=210.01), gate(), YAML)['iv']['status'] == 'FAIL'
+   198	    # Agent wall time is not the timeout-context clock.
+   199	    r = row(agent_clock_seconds=None)
+   200	    r['wall_seconds'] = {'agent': 1}
+   201	    assert check(r, gate(), YAML)['iv']['status'] == 'UNVERIFIABLE'
+   202	    assert check(row(), gate(m.BOUNCE) * 3 + gate(), YAML)['v']['status'] == 'FAIL'
+   203	
+   204	
+   205	def test_smoke_unverifiable_and_no_exemption():
+   206	    hidden = invoke('submit_patch', result={'raw': 'SUBMITTED'})
+   207	    assert check(row(), hidden)['i']['status'] == 'UNVERIFIABLE'
+   208	    r = row(patch_submitted=False, agent_timeout_fired=True)
+   209	    r['fallback_patch_bytes'] = 23
+   210	    cs = check(r, [])
+   211	    assert cs['i']['status'] == 'FAIL'
+   212	    assert cs['ii']['status'] == 'UNVERIFIABLE'
+   213	    assert check(r, gate(m.BOUNCE))['ii']['status'] == 'UNVERIFIABLE'
+   214	
+   215	
+   216	def make_run(tmp_path, entries, r=None, patch=NEW, nested=True, header=None):
+   217	    run = tmp_path / 'run'
+   218	    artifacts = run / 'runs' / 'synthetic' if nested else run / 'synthetic'
+   219	    artifacts.mkdir(parents=True)
+   220	    r = dict(row() if r is None else r, instance_id='synthetic')
+   221	    lines = ([json.dumps(header)] if header else []) + [json.dumps(r)]
+   222	    (run / 'timing.jsonl').write_text('\n'.join(lines) + '\n')
+   223	    (artifacts / 'trace.json').write_text(json.dumps({'entries': entries}))
+   224	    (artifacts / 'agent.patch').write_text(patch)
+   225	    (artifacts / 'result.json').write_text(json.dumps({'agent_patch': patch}))
+   226	    return run, artifacts
+   227	
+   228	
+   229	def task_inventory(tmp_path, test_patch=''):
+   230	    path = tmp_path / 'tasks.jsonl'
+   231	    path.write_text(json.dumps(dict(instance_id='synthetic', repo='synthetic/repo', base_commit='abc',
+   232	                                   problem_statement='', patch='', test_patch=test_patch)) + '\n')
+   233	    return path
+   234	
+   235	
+   236	def test_smoke_cli_counts_only(tmp_path, monkeypatch, capsys):
+eval/kaggle/agent_timing.py
+eval/tests/test_agent_timing.py
+rg: eval/trace_tools.py: No such file or directory (os error 2)
+eval/trace_tool_errors.py:91:            elif e["type"] == "tool_response":
+
+exec
+/bin/bash -lc "PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B - <<'PY'
+import contextlib, copy, hashlib, importlib.util, io, itertools, json, subprocess, sys, types
+from pathlib import Path
+from unittest.mock import patch
+import pytest
+sys.path.insert(0, str(Path('eval').resolve()))
+import plan008_metrics as m
+spec = importlib.util.spec_from_file_location('review_tests', 'eval/tests/test_plan008_metrics.py')
+t = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(t)
+previous = types.ModuleType('previous_metrics')
+previous.__file__ = m.__file__
+exec(compile(subprocess.check_output(['git', 'show', '9486a3b"'^:eval/plan008_metrics.py'"']), m.__file__, 'exec'), previous.__dict__)
+files, dirs, writes = {}, set(), []
+virtual_root = '/__codex_review_memory__'
+def virtual(p):
+    return str(p).startswith(virtual_root + '/') or str(p) == virtual_root
+original = {name: getattr(Path, name) for name in ['mkdir', 'is_dir', 'is_file', 'exists', 'read_text', 'read_bytes', 'write_text']}
+def mkdir(p, *args, **kwargs):
+    assert virtual(p), p
+    dirs.update(map(str, [p, *p.parents]))
+def write_text(p, data, *args, **kwargs):
+    assert virtual(p), p
+    files[str(p)] = data
+    writes.append(str(p))
+    return len(data)
+def read_text(p, *args, **kwargs):
+    return files[str(p)] if virtual(p) else original['read_text'](p, *args, **kwargs)
+def read_bytes(p, *args, **kwargs):
+    return files[str(p)].encode() if virtual(p) else original['read_bytes'](p, *args, **kwargs)
+def is_file(p):
+    return str(p) in files if virtual(p) else original['is_file'](p)
+def is_dir(p):
+    return str(p) in dirs if virtual(p) else original['is_dir'](p)
+def exists(p):
+    return str(p) in files or str(p) in dirs if virtual(p) else original['exists'](p)
+replacements = dict(mkdir=mkdir, write_text=write_text, read_text=read_text, read_bytes=read_bytes, is_file=is_file, is_dir=is_dir, exists=exists)
+with contextlib.ExitStack() as stack:
+    for name, func in replacements.items():
+        stack.enter_context(patch.object(Path, name, func))
+    stack.enter_context(patch.object(m, 'expected_ids', lambda kind: ['synthetic']))
+    stack.enter_context(patch.object(previous, 'expected_ids', lambda kind: ['synthetic']))
+    for i, (author, paired) in enumerate(itertools.product(['submit_patch', 'other_agent', None], [True, False])):
+        with pytest.MonkeyPatch.context() as mp, contextlib.redirect_stdout(io.StringIO()):
+            t.test_arm2_builtin_rejects_nonroot_submit_response(Path(virtual_root) / f'regression{i}', mp, author, paired)
+    print('Committed regression: 6/6 parametrizations passed using memory-backed paths.')
+    cases = 0
+    absent = object()
+    for kind, author, paired, result in itertools.product(['tool_response', 'tool_result'], ['submit_patch', 'other_agent', None, '', absent], [False, True], [{'patch_size': 1}, {'status': 'error'}, '']):
+        inner = dict(type=kind, tool='submit_patch', result=result)
+        if author is not absent:
+            inner['author'] = author
+        entries = [t.call('run_command', {'command': 'pytest'})]
+        if paired:
+            c = dict(type='tool_call', tool='submit_patch', args={})
+            if author is not absent:
+                c['author'] = author
+            entries.append(c)
+        entries.append(inner)
+        run, _ = t.make_run(Path(virtual_root) / f'matrix{cases}', entries, header={'_schema': 'synthetic', 'agent_yaml_sha256': t.yaml_sha('v011')})
+        dest = run / 'metrics.json'
+        before = len(writes)
+        with patch.object(m, 'identical_runs_root', side_effect=AssertionError('metrics computed before STOP')), contextlib.redirect_stdout(io.StringIO()):
+            assert m.main(['metrics', 'arm2', str(run), str(dest)]) == 4
+        assert not dest.exists() and len(writes) == before
+        cases += 1
+    print(f'Raw guard matrix: {cases}/{cases} passed; CLI exit 4, no output write, no metric computation.')
+    valid = [[], t.invoke('submit_patch', result={'patch_size': 10}), t.invoke('run_command', {'command': 'pytest'}) + t.invoke('submit_patch', result={'patch_size': 10}), t.invoke('submit_patch', result={'error': 'failure'}), t.invoke('read_file', author='other_agent')]
+    parity = 0
+    for bundle in ['v011', 'v010']:
+        for i, entries in enumerate(valid if bundle == 'v011' else [t.gate(), t.gate(m.BOUNCE), t.gate()[:-1]]):
+            for nested in [True, False]:
+                run, _ = t.make_run(Path(virtual_root) / f'valid{parity}', entries, nested=nested, header={'_schema': 'synthetic', 'agent_yaml_sha256': t.yaml_sha(bundle)})
+                current, prior = m.arm2_metrics(run), previous.arm2_metrics(run)
+                assert current == prior, (bundle, i, nested)
+                assert current['gate_layout'] is (bundle == 'v010')
+                parity += 1
+    print(f'Valid-trace differential: {parity}/{parity} complete outputs equal parent (same script provenance supplied).')
+print('No filesystem writes performed.')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 37ms:
+Committed regression: 6/6 parametrizations passed using memory-backed paths.
+Raw guard matrix: 60/60 passed; CLI exit 4, no output write, no metric computation.
+Valid-trace differential: 16/16 complete outputs equal parent (same script provenance supplied).
+No filesystem writes performed.
+
+codex
+**BLOCKING:** None.
+
+**Non-blocking:** None.
+
+**Questions:** None.
+
+- The raw scan accepts both `tool_response` and `tool_result`, rejects every non-root author—including missing/null authors—and never depends on call pairing ([eval/plan008_metrics.py:538](/home/ubuntu/work/gemma/eval/plan008_metrics.py:538)).
+- Selected bundle `v011` always forces `has_gate=False`, regardless of gate events; it cannot skip the guard. Unidentified bundles retain the existing event-based fallback ([eval/plan008_metrics.py:563](/home/ubuntu/work/gemma/eval/plan008_metrics.py:563)).
+- Rejection occurs before metric computation. The CLI returns **4** before reaching the output write ([guard:571](/home/ubuntu/work/gemma/eval/plan008_metrics.py:571), [CLI:648](/home/ubuntu/work/gemma/eval/plan008_metrics.py:648)).
+- The regression genuinely exercises unpaired responses: `paired=False` inserts no matching non-root call ([eval/tests/test_plan008_metrics.py:603](/home/ubuntu/work/gemma/eval/tests/test_plan008_metrics.py:603)).
+- The change is stricter-only. Metric definitions remain unchanged; 16 valid-trace comparisons against the parent produced identical outputs with script provenance normalized.
+
+Verification: **83 pytest tests passed; 23 filesystem-dependent tests deselected.** All six committed regression variants passed using memory-backed paths, plus 60 adversarial guard cases verifying exit 4, no writes, and no metric computation. The exact requested pytest command failed before collection because the read-only sandbox provides no writable temporary directory; I could not independently reproduce the full 106-pass run.
+
+CLEAN
+tokens used
+43,726
