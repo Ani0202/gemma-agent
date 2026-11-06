@@ -1,7 +1,8 @@
 """Per-task lower bound on ROOT thinking tokens per turn (plan 005 Addenda C/D correction 2).
+DESCRIPTIVE only (plan 005 correction 3): not a proven bound.
 A turn = a root usage-bearing entry plus the root entries sharing its timestamp. Every token decodes to >= 1 char, so
 non-thinking tokens <= chars(visible text) + chars(json tool args) + OVERHEAD per tool call; hence
-thinking_tokens >= completion_tokens - those chars - OVERHEAD*n_calls. Also reports max thinking-text chars.
+residual = completion_tokens - those chars - OVERHEAD*n_calls (a lower bound only if every token is recorded). Also reports max thinking-text chars.
 Usage: thinking_bound.py <run_dir> [<out.json>]"""
 import json, sys, glob, os
 ROOT = "swe_baseline_agent"; OVERHEAD = 32
@@ -36,7 +37,7 @@ if __name__ == "__main__":
     for p in sorted(glob.glob(os.path.join(run, "runs", "*", "trace.json"))):
         rows[p.split(os.sep)[-2]] = task(p)
     out = {"_schema": "thinking_bound_v1", "run": run, "overhead_tokens_per_call": OVERHEAD,
-           "fields": {"max_thinking_lb": "max over root turns of completion_tokens - chars(visible text + tool name + json args) - 32*max(calls,1); a proven lower bound on thinking tokens",
+           "fields": {"max_thinking_lb": "max over root turns of completion_tokens - chars(visible text + tool name + json args) - 32*max(calls,1); DESCRIPTIVE residual (not a proven bound: unrecorded whitespace and tool-call serialization tokens; plan 005 correction 3)",
                       "max_thinking_chars": "longest root thinking block (chars)", "thinking_blocks": "root thinking entries with non-empty content",
                       "max_completion": "max root per-turn completion_tokens", "root_usage_turns": "root usage-bearing turns", "has_summary": "trace summary present"},
            "tasks": rows}

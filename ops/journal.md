@@ -251,3 +251,4 @@
 2026-11-06T02:31Z | confirm review 022757: chars threshold not a proven bound -> correction 2 (proven LB on thinking tokens; eval/thinking_bound.py; arm B 5/8 over 1088); review-p5cd-fix2-light running | eval/plans/005.md c97b1a5 results/thinking_bound_31b_v003.json
 2026-11-06T02:34Z | review 023044: LB not proven -> correction 3 (LB descriptive; arm C verdict INVALID/PASS/NO-GAIN + label CONSISTENT/NOT-SHOWN; D gate = V + CONSISTENT) | eval/plans/005.md a428263
 2026-11-06T02:34:16Z | PLAN 005 ARM C PUSHED: aniket0202/gemma-31b-timing v3 (31b-v005-p5c e8fbcfdc, cap 4.0, budget 6000, NvidiaL4); quota before 9.42 h; waiter timing-31b-v005-wait-light; confirm review review-p5cd-fix3-light in parallel (rule-only) | ops/budget/kaggle.md
+2026-11-06T02:36Z | review-p5cd-fix3-light CLEAN (correction 3 resolves; rules total); thinking_bound.py wording -> descriptive | ops/codex/review-20261106T023427.md
