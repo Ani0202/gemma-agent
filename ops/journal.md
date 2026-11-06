@@ -296,3 +296,4 @@
 2026-11-06T07:09Z | Review r3 (070228) 1 BLOCKING: verdict evidence fail-open; fixed rev 4 r8/r9/contradictory_resolved, RE-FROZEN sha a208a023, tests 819/4; review r4 launched; Director FYI'd | eval/plans/007.md, ops/codex/review-20261106T070228.md
 2026-11-06T07:09Z | dec 064 read: freeze a208a023 approved, classifier SHA 0d49b1c; review loop capped at rev 5 (exhaustive list); waiting on codex-review-plan007r4-light | ops/decisions/064-20261106T070748-12473-from-builder.md
 2026-11-06T07:13:27Z | r4 review 070737: 3 BLOCKING; fixed in 9d0a8b4 (rev 5 candidate sha 21c3d46e, not frozen); rev-5 final exhaustive review launched (dec 064 item 3) | ops/codex/review-20261106T070737.md
+2026-11-06T07:27Z | r5 exhaustive review not clean (19 BLOCKING + 2 false-H); all folded via codex-build plan007-rev5-fold; no rev 6 (dec 064 i3) | ops/codex/review-20261106T071306.md

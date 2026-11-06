@@ -2917,3 +2917,2334 @@ Traceback (most recent call last):
                             dirlist)
 FileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma']
 
+exec
+/bin/bash -lc "sed -n '1,70p' eval/tests/test_classify_rows.py; rg -n 'AGENT_OUTCOMES|def setup_step|result_error=|agent_error_text=|error =|setup_calls.*append|def classify_agent' eval/kaggle/agent_timing.py; sed -n '100,180p' eval/kaggle/agent_timing.py; sed -n '520,650p' eval/kaggle/agent_timing.py; sed -n '960,1135p' eval/kaggle/agent_timing.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+"""Offline synthetic tests for the frozen Plan 007 row classifier."""
+import hashlib
+from importlib import import_module
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
+classifier = import_module('eval.kaggle.classify_rows')
+timing = import_module('eval.kaggle.agent_timing')
+
+
+def row(**updates):
+    return dict(dict(instance_id='task-1', repo='example/repo', result_error=None,
+                     agent_error_text=None, verified_patch_bytes=10, setup_calls=[],
+                     exit_code=0, resolved=False, error=None, setup_failed=False), **updates)
+
+
+def editable(offline=True, record=True, rc=1):
+    return dict(argv=['pip', 'install', '-e', '/workspace'] + (['--no-index'] if offline else []),
+                rc=rc, stdout='' if offline else 'subprocess-exited-with-error',
+                stderr=classifier.RECORD if record else 'other failure')
+
+
+def chain():
+    return dict(step='setup.py', rc=0,
+                subprocesses=[editable(), editable(offline=False, record=False)])
+
+
+def test_agent_patterns_are_stock():
+    assert [(n, p.pattern, p.flags) for n, p in classifier.AGENT_END] == [
+        (n, p.pattern, p.flags) for n, p in timing.AGENT_OUTCOMES]
+
+
+@pytest.mark.parametrize('passes', [1, 3])
+def test_record_chain_all_passes(passes):
+    result = classifier.classify(row(setup_calls=[chain() for _ in range(passes)],
+                                     setup_failed=True, editable_failed=True))
+    assert result['h'] is None
+    assert result['known_diag'] is True
+
+
+@pytest.mark.parametrize('subprocesses', [
+    [editable(record=False)], [editable(offline=False, record=False)],
+    [editable(offline=False, record=False), editable()],
+])
+def test_unexpected_editable_failure(subprocesses):
+    result = classifier.classify(row(setup_calls=[dict(step='setup.py', rc=0, subprocesses=subprocesses)]))
+    assert result['h'] == 'H-SETUP'
+    assert result['known_diag'] is False
+    assert 's5:unexpected_editable_failure' in result['reasons']
+
+
+def test_later_pass_failure_is_retained():
+    calls = [chain(), dict(step='setup.py', rc=0, subprocesses=[editable(record=False)])]
+    result = classifier.classify(row(setup_calls=calls))
+    assert result['h'] == 'H-SETUP'
+    assert result['known_diag'] is False
+
+
+@pytest.mark.parametrize('updates,reason', [
+    (dict(setup_calls=[dict(step='tool_deps', rc=-1)]), 's2:setup_step_failed'),
+    (dict(missing_tool_deps=['x']), 's1:missing_tool_deps'),
+    (dict(setup_failed=True), 's6:setup_failed_unexplained'),
+    (dict(setup_calls=[dict(step='setup.py', rc=1)]), 's3:setup_py_failed'),
+    (dict(setup_calls=[dict(step='workspace_editable', rc=1)]), 's4:workspace_editable_failed'),
+])
+def test_setup_failures(updates, reason):
+271:def setup_step(current, name, action, *, fatal=True):
+276:    current['setup_calls'].append(row)
+839:AGENT_OUTCOMES = (('timeout', re.compile(r'Agent exceeded session timeout\b')),
+850:    return next((name for name, pattern in AGENT_OUTCOMES if pattern.match(text)), None)
+943:        error = 'deadline'
+945:        error = type(exc).__name__
+955:            error = 'deadline'
+957:            error = error or 'cleanup ' + type(exc).__name__
+960:                error = 'deadline'
+1032:        agent_seconds, patch, trace, agent_error = 0.0, '', None, ''
+1065:            evaluator, result, error = TimingEvaluator(config), None, None
+1071:                error = harness_error(result, evaluator.agent_error)
+1073:                error = 'Evaluation exception (' + type(exc).__name__ + ')'
+1078:                    error = 'Cleanup exception (' + type(exc).__name__ + ')'
+1086:                error = (error or '') + ' trace parse (' + type(exc).__name__ + ')'
+1088:            raw_error = (result.error or '') if result else error or ''
+1096:                result_error=(result.error[:4096] if result is not None and result.error else None),
+1097:                agent_error_text=(evaluator.agent_error[:4096] if evaluator.agent_error else None),
+    target.mkdir(parents=True, exist_ok=True)
+    for name, (digest, payload) in EXTRA_WHEELS.items():
+        data = base64.b64decode(payload)
+        if hashlib.sha256(data).hexdigest() != digest or '/' in name or name.startswith('.'):
+            raise RuntimeError('Embedded wheel failed verification: ' + name)
+        (target / name).write_bytes(data)
+    return target
+
+
+def pytest_timeout_wheels(wheels):
+    """Wheelhouse pytest-timeout 2.1.0 first, then the embedded official wheel."""
+    return [*sorted(Path(wheels).glob('pytest_timeout-2.1.0-*.whl')),
+            *sorted(extra_wheels().glob('pytest_timeout-2.1.0-*.whl'))]
+
+
+def missing_tool_closure(wheels, tags=None, runtime=True):
+    """Mirror the sandbox tool_deps walk: compatible_wheels (wheelhouse, then embedded), then runtime copy.
+
+    tags default to the kernel interpreter's, which is the sandbox venv's interpreter on Kaggle.
+    """
+    from packaging.markers import default_environment
+    from packaging.requirements import Requirement
+    from packaging.tags import sys_tags
+    from packaging.utils import canonicalize_name, parse_wheel_filename
+    tags = [str(t) for t in sys_tags()] if tags is None else tags
+    extra = extra_wheels()
+    selected = compatible_wheels(wheels, tags)
+    roots = [wheel_metadata(selected[canonicalize_name(n)]) for n in SCORER_TOOLS
+             if n not in ('pip', 'pytest-timeout') and canonicalize_name(n) in selected]
+    timeout = [p for p in pytest_timeout_wheels(wheels)
+               if any(str(t) in tags for t in parse_wheel_filename(p.name)[3])]
+    roots.extend(wheel_metadata(p) for p in timeout[:1])
+    env, seen, missing, queue = dict(default_environment(), extra=''), set(), [], list(roots)
+    while queue:
+        metadata = queue.pop()
+        key = (canonicalize_name(metadata['Name']), metadata['Version'])
+        if key in seen:
+            continue
+        seen.add(key)
+        for raw in metadata.get_all('Requires-Dist', []):
+            req = Requirement(raw)
+            if req.marker and not req.marker.evaluate(env):
+                continue
+            name = canonicalize_name(req.name)
+            candidate = compatible_wheels(wheels, tags, req).get(name) or compatible_wheels(extra, tags, req).get(name)
+            if candidate:
+                queue.append(wheel_metadata(candidate))
+                continue
+            found = runtime_copyable(name) if runtime else None
+            if found is not None and found[0].version in req.specifier:
+                queue.append(found[0].metadata)
+            elif name not in missing:
+                missing.append(name)
+    return missing
+
+
+def check_tool_sources(wheels):
+    """Before vLLM starts: every Dockerfile.public line-9 tool needs an offline wheel (or pip fallback)."""
+    from packaging.utils import canonicalize_name, parse_wheel_filename
+    names = set()
+    for w in Path(wheels).glob('*.whl'):
+        try:
+            names.add(canonicalize_name(parse_wheel_filename(w.name)[0]))
+        except Exception:
+            continue
+    missing = [n for n in SCORER_TOOLS if n not in ('pip', 'pytest-timeout') and canonicalize_name(n) not in names]
+    if not pytest_timeout_wheels(wheels):
+        missing.append('pytest-timeout==2.1.0')
+    if fallback_wheel(wheels, 'pip') is None and runtime_copyable('pip') is None:  # same sources as bootstrap_pip
+        missing.append('pip')
+    missing.extend(missing_tool_closure(wheels))
+    if missing:
+        raise RuntimeError('Offline scorer tool sources missing: ' + ', '.join(missing))
+    return sorted(names)
+
+
+SCORER_TOOLS = ('pip', 'pdm-backend', 'setuptools', 'wheel', 'poetry-core',
+                'hatchling', 'flit-core', 'editables', 'pytest', 'pytest-timeout', 'typer')
+BASE_SKIP = {'pytest', 'pytest-timeout', 'pytest-asyncio', 'pytest-httpbin',
+             'pytest-xdist', 'pluggy', 'pip', 'setuptools', 'wheel'}
+
+                raise RuntimeError('Sandbox pip bootstrap failed')
+            probe = ("import sys,json;from pip._vendor.packaging.tags import sys_tags;"
+                     "from pip._vendor.packaging.markers import default_environment;"
+                     "print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()],"
+                     "'environment':default_environment()}))")
+            result = setup_step(current, 'interpreter_probe', lambda: docker.exec(
+                container_id, 'python3 -c ' + shlex.quote(probe), timeout=30))
+            if result.exit_code != 0:
+                raise RuntimeError('Sandbox interpreter probe failed')
+            identity = json.loads(result.stdout)
+            current['interpreter_version'] = identity['version']
+            selected = compatible_wheels(wheels, identity['tags'])
+            # The image pins pytest-timeout, even if a newer wheel is present.
+            selected.pop('pytest-timeout', None)
+            for path in pytest_timeout_wheels(wheels):
+                if {str(t) for t in parse_wheel_filename(path.name)[3]} & set(identity['tags']):
+                    selected['pytest-timeout'] = path
+                    break
+            current['wheel_tags_chosen'] = [p.name for p in selected.values()]
+            def validate_tools():
+                missing = [n for n in SCORER_TOOLS if n not in selected and n not in ('pip', 'pytest-timeout')]
+                if missing:
+                    raise RuntimeError('Required compatible tools missing: ' + ', '.join(missing))
+            setup_step(current, 'tool_sources', validate_tools)
+            def timeout_source():
+                source = selected.get('pytest-timeout')
+                current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
+                if current['setup_calls'][-1]['source'] == 'missing':
+                    raise RuntimeError('No offline pytest-timeout 2.1.0 source available')
+            setup_step(current, 'pytest_timeout_source', timeout_source)
+            def install_tools():
+                for path in selected.values():
+                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+                tools = ['/wheels/' + selected[n].name for n in SCORER_TOOLS
+                         if n in selected and n != 'pip']
+                return docker.exec(container_id,
+                    'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
+                    ' '.join(shlex.quote(n) for n in tools), timeout=60)
+            result = setup_step(current, 'tool_install', install_tools)
+            if result.exit_code != 0:
+                raise RuntimeError('Offline scorer tool installation failed')
+            def tool_deps():
+                from importlib.metadata import distributions
+                roots = [wheel_metadata(selected[n]) for n in SCORER_TOOLS if n in selected]
+                roots.extend(d.metadata for d in distributions(path=[str(sp)])
+                             if d.metadata['Name'].lower() in ('pip', 'pytest-timeout')
+                             and d.metadata['Name'].lower() not in selected)
+                def install_dependency(path):
+                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+                    result = docker.exec(container_id,
+                        'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
+                        shlex.quote('/wheels/' + path.name), timeout=60)
+                    setup_artifact(current, dict(step='tool_deps', wheel=path.name,
+                        stdout=result.stdout, stderr=result.stderr))
+                    current['setup_calls'][-1]['retrying_lines'] += sum(
+                        'Retrying' in line for line in (result.stdout + '\n' + result.stderr).splitlines())
+                    return result
+                entries, missing = close_tool_dependencies(
+                    roots, wheels, identity['tags'], identity['environment'], sp, install_dependency)
+                current['setup_calls'][-1]['dependencies'] = entries
+                current['missing_tool_deps'] = missing
+                if missing:
+                    current.update(status='failed', reason='missing_tool_deps')
+                    raise RuntimeError('missing_tool_deps: ' + ', '.join(missing))
+            setup_step(current, 'tool_deps', tool_deps)
+            setup_step(current, 'pip_check', lambda: docker.exec(
+                container_id, 'python3 -m pip check', timeout=30), fatal=False)
+            # Docker's hook ignores failure, but observe the real pip rc and both streams.
+            setup_step(current, 'workspace_editable', lambda: docker.exec(container_id,
+                'python3 -m pip install --no-index --find-links=/wheels --no-build-isolation --no-deps -e /workspace',
+                timeout=280), fatal=False)
+            current['workspace_editable_rc'] = current['setup_calls'][-1]['rc']
+            current['editable_failed'] = current['workspace_editable_rc'] != 0
+            current['setup_failed'] |= current['editable_failed']
+            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+            def extract_base():
+                base = [p for name, p in selected.items() if name not in BASE_SKIP]
+                if any(p.stat().st_size >= cs._LARGE_WHEEL_THRESHOLD_BYTES for p in base):
+                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+                inject_base(cs, base, sp, current)
+            setup_step(current, 'base_tar_extraction', extract_base)
+            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+        def run_setup():
+            docker.copy_to(container_id, setup, '/tmp/setup.py')
+            # All observer files are scratch files, never workspace patch inputs.
+            observer = docker.sandboxes[container_id]['tmp'] / 'setup_observer.py'
+            observer.write_text(SETUP_OBSERVER)
+            return docker.exec(container_id, setup_command(repo, fast_path), timeout=280)
+        try:
+            setup_step(current, 'setup.py', run_setup)
+        finally:
+            log = docker.sandboxes[container_id]['tmp'] / 'setup_subprocesses.json'
+            calls = json.loads(log.read_text()) if log.exists() else []
+            full_log = log.with_name('setup_subprocesses_full.jsonl')
+            if full_log.exists():
+                for line in full_log.read_text().splitlines():
+                    setup_artifact(current, dict(step='setup.py', **json.loads(line)))
+            current['setup_subprocesses'] = calls
+            setup_row = next(c for c in reversed(current['setup_calls']) if c['step'] == 'setup.py')
+            setup_row['subprocesses'] = calls
+            setup_row['retrying_lines'] += sum(c['retrying_lines'] for c in calls)
+            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+            editable = [c for c in calls if isinstance(c['argv'], list) and '-e' in c['argv']]
+            current['editable_rc'] = editable[0]['rc'] if editable else None
+            current['editable_final_rc'] = editable[-1]['rc'] if editable else None
+            current['editable_failed'] = any(c['rc'] != 0 for c in editable) or current.get('workspace_editable_rc', 0) != 0
+            current['setup_failed'] |= current['editable_failed']
+            record_distributions(docker, container_id, repo, setup_row)
+            if calls:
+                current['interpreter_version'] = calls[0]['interpreter_version']
+            else:
+                current.setdefault('interpreter_version', None)
+        current['status'] = 'failed' if current['setup_failed'] else 'passed'
+        return current
+    install._timing_original = orig
+    for name, module in list(sys.modules.items()):
+        if name.startswith('swegemma.') and hasattr(module, 'install_test_dependencies'):
+            module.install_test_dependencies = install
+    return install
+
+def classify_patch(patch, repo, protected=None, test_targets=()):
+    """Parse file headers outside hunks, including quoted paths and renames."""
+    files, new = set(), set()
+    current, added, in_hunk = set(), False, False
+    def path_value(raw):
+        raw = raw.split('\t', 1)[0]
+        value = json.loads(raw) if raw.startswith('"') else raw
+        return value[2:] if value.startswith(('a/', 'b/')) else value
+    for line in patch.splitlines() + ['diff --git ']:
+        if line.startswith('diff --git '):
+            files.update(current)
+                error = 'deadline'
+            if old_timer is not None:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            if old_handler is not None:
+                signal.signal(signal.SIGALRM, old_handler)
+            if old_timer is not None:
+                if old_timer[0]:
+                    signal.setitimer(signal.ITIMER_REAL,
+                                     max(.001, old_timer[0] - (time.perf_counter() - t0)), old_timer[1])
+    return dict(total_s=round(time.perf_counter() - t0, 3), steps_s=steps, error=error)
+
+def llm_calls(trace, limit=200):
+    """P3 (plan 006 addendum): one row per trace entry carrying usage (ADK attaches usage once per
+    model event), with the gap since the previous entry of any type (approx. model latency)."""
+    rows, prev = [], None
+    entries = trace.entries if trace else []
+    first = entries[0].timestamp if entries else None
+    for e in entries:
+        if e.usage:
+            rows.append(dict(t=round(e.timestamp - first, 3), gap_s=round(e.timestamp - prev, 3) if prev is not None else None,
+                             event_type=e.event_type,
+                             completion_tokens=e.usage.get('completion_tokens'), prompt_tokens=e.usage.get('prompt_tokens')))
+        prev = e.timestamp
+    return rows[:limit]
+
+def image_emulation_seconds(setup_calls):
+    """Seconds spent emulating Dockerfile.public image layers the scorer image already has."""
+    return sum(c.get('duration_s') or 0 for c in setup_calls if c.get('step') in IMAGE_EMULATION_STEPS)
+
+def distribution(values):
+    values = sorted(values)
+    def percentile(q):
+        x = (len(values) - 1) * q
+        lo = int(x)
+        return values[lo] + (values[min(lo + 1, len(values)-1)] - values[lo]) * (x-lo)
+    return dict(mean=sum(values)/len(values), p50=percentile(.5), p90=percentile(.9), max=max(values)) if values else dict.fromkeys(('mean', 'p50', 'p90', 'max'))
+
+def extract_bundle(encoded, destination):
+    payload = base64.b64decode(encoded, validate=True)
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as tf:
+        tf.extractall(destination, filter='data')
+    return hashlib.sha256(payload).hexdigest(), hashlib.sha256((destination / 'agent.yaml').read_bytes()).hexdigest()
+
+def append(stream, row):
+    stream.write(json.dumps(row, allow_nan=False) + '\n')
+    stream.flush(); os.fsync(stream.fileno())
+
+async def evaluate(config, journal, started, caps, totals):
+    from contextvars import ContextVar
+    from swegemma.evaluate import Evaluator
+    from swegemma.models import load_tasks
+    from swegemma.harness.verification import _is_protected_test_or_config_path
+    import swegemma.evaluate as ev
+    import swegemma.harness.verification as vf
+    import swegemma.harness.agent_runner as ar
+    state = ContextVar('timing')
+    original_asyncio = ar.asyncio
+    original_sandbox = {name: getattr(ar, name) for name in ('sandbox_start', 'sandbox_stop', 'sandbox_exec')}
+    ar.asyncio = AsyncioTimingProxy(original_asyncio, state)
+    for name, original in original_sandbox.items():
+        setattr(ar, name, observe_sandbox(original, state, name))
+    original_verify, original_strip = ev.verify_task, vf.strip_protected_files_from_patch
+    vf.strip_protected_files_from_patch = observe_patch_strip(original_strip, state)
+    async def verify(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return await (skip_verification if SKIP_VERIFICATION else original_verify)(*args, **kwargs)
+        finally:
+            state.get()['verification'] = time.perf_counter() - start
+    ev.verify_task = verify
+    class TimingEvaluator(Evaluator):
+        agent_seconds, patch, trace, agent_error = 0.0, '', None, ''
+        def _hydrate_task_from_secret(self, task):
+            return task
+        def _get_secret_bundle_data(self):
+            return {}, {}, None
+        async def _run_agent_sandbox(self, task, *args, **kwargs):
+            safe = dataclasses.replace(task, patch='', test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=())
+            self.context = kwargs['context']
+            self.context.task = safe
+            start = time.perf_counter()
+            state.get()['agent_active'] = True
+            try:
+                self.patch, self.agent_error, self.trace = await super()._run_agent_sandbox(safe, *args, **kwargs)
+                return self.patch, self.agent_error, self.trace
+            finally:
+                self.agent_seconds = time.perf_counter() - start
+                state.get()['agent_active'] = False
+    try:
+        inventory = {t.instance_id: t for t in load_tasks(config.tasks_path)}
+        if len(set(TASK_IDS)) != len(TASK_IDS) or set(TASK_IDS) - inventory.keys():
+            raise ValueError('Duplicate or missing task IDs')
+        patch_subprocess_deps(DATA, state)
+        for iid in TASK_IDS:
+            if should_stop(time.monotonic()-started + (P1_DEADLINE_SECONDS + 30 if STOCK_PROBE else 0), caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+                break
+            task = dataclasses.replace(inventory[iid], patch='')
+            stock = stock_setup_probe(config, iid, task.repo) if STOCK_PROBE else None
+            if STOCK_PROBE and should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+                break
+            times = dict(instance_id=task.instance_id, verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+            state.set(times)
+            evaluator, result, error = TimingEvaluator(config), None, None
+            original_start = evaluator.docker.start
+            evaluator.docker.start = lambda: setup_step(times, 'venv', original_start)
+            start = time.perf_counter()
+            try:
+                result = await evaluator.evaluate_task(task)
+                error = harness_error(result, evaluator.agent_error)
+            except Exception as exc:
+                error = 'Evaluation exception (' + type(exc).__name__ + ')'
+            finally:
+                try:
+                    evaluator.docker.cleanup_all()
+                except Exception as exc:
+                    error = 'Cleanup exception (' + type(exc).__name__ + ')'
+            total = time.perf_counter() - start
+            totals.append(total)
+            patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch) or ''
+            try:
+                counts, tokens, seconds = trace_counts(evaluator.trace)
+            except Exception as exc:  # never lose the run over trace parsing
+                counts, tokens, seconds = {}, dict(prompt_tokens=None, completion_tokens=None), {}
+                error = (error or '') + ' trace parse (' + type(exc).__name__ + ')'
+            code = result.test_exit_code if result else None
+            raw_error = (result.error or '') if result else error or ''
+            phase = phase1_fields(times, evaluator.agent_seconds, total,
+                                  getattr(evaluator, 'context', None),
+                                  result.agent_patch if result else evaluator.patch)
+            phase.update(agent_outcome=agent_outcome(evaluator.agent_error or raw_error),
+                         image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
+            try:
+              append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+                result_error=(result.error[:4096] if result is not None and result.error else None),
+                agent_error_text=(evaluator.agent_error[:4096] if evaluator.agent_error else None),
+                verified_patch_bytes=(len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+                **phase,
+                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                editable_failed=times.get('editable_failed', False),
+                setup_output_artifact=times.get('setup_output_artifact'),
+                missing_tool_deps=times.get('missing_tool_deps', []),
+                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
+                llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
+                tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
+                completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
+                stock_setup=stock, llm_calls=llm_calls(evaluator.trace),
+                **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+                timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+            except Exception as exc:
+                evidence = {}
+                for key, value in (
+                    ('result_error', lambda: result.error[:4096] if result is not None and result.error else None),
+                    ('agent_error_text', lambda: evaluator.agent_error[:4096] if evaluator.agent_error else None),
+                    ('verified_patch_bytes', lambda: len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+                ):
+                    try:
+                        evidence[key] = value()
+                    except Exception:
+                        evidence[key] = None
+                append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+                                     **evidence,
+                                     **phase,
+                                     wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                editable_failed=times.get('editable_failed', False),
+                setup_output_artifact=times.get('setup_output_artifact'),
+                missing_tool_deps=times.get('missing_tool_deps', []),
+                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                stock_setup=stock,
+                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
+            # Raw artifacts are diagnostics written after the row; never lose the remaining tasks over them.
+
+exec
+/bin/bash -lc "cat ops/codex/review-20261106T070737.md; rg -n 'verify_task|Missing or empty JUnit|Failed to apply agent patch|Agent exceeded|Without|without calling submit_patch' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+**BLOCKING**
+
+1. **Explicit verification failures can still become PASS.** At [classify_rows.py:110](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:110), consistency checks only exclude patch-apply errors. On an otherwise complete row, `resolved=True`, `exit_code=0`, positive patch bytes, and `result_error="Required test node did not pass: t::x"` produces **`h=None, agent=PASS`**, including under `"Harness task failure"`. Every other recognized JUnit failure prefix reproduces this. Mark stock success accompanied by an explicit verification failure H-VERIFY; preserve stock `resolved` and legitimate `EXIT0_UNRESOLVED`.
+
+2. **Malformed message fields bypass H or crash classification.** The truthiness check at [classify_rows.py:51](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:51) silently accepts `False`, `0`, `[]`, and `{}` in either message field. Otherwise valid rows reach `EXIT0_UNRESOLVED` without H. A recognized companion message also lets malformed evidence through under `"Harness task failure"`. Truthy non-string values instead raise `AttributeError`; the final reporting call can raise even after H was established ([classify_rows.py:132](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:132)). Validate both fields as string-or-None before inspecting or reporting them; malformed values should yield H-ROW.
+
+3. **Malformed setup evidence reaches agent outcomes.** At [classify_rows.py:70](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:70), `setup_calls={}`, `setup_calls=""`, and `setup_calls=[{}]` all produce **no H, `EXIT0_UNRESOLVED`**. A `setup.py` entry with `rc=False` also passes because `False == 0`. Other malformed shapes raise exceptions. Validate the list, entry and nested subprocess shapes, and return-code types before classification. Preserve legitimate empty lists and documented not-run entries.
+
+These are synthetic reproductions; they are not observed arm F failures.
+
+**NON-BLOCKING**
+
+1. **Every prior-table case is closed.** The new guards correctly reject non-bool/null `resolved`, non-int exit codes, and the listed success contradictions. Regression coverage includes all prior combinations ([test_classify_rows.py:241](/home/ubuntu/work/gemma/eval/tests/test_classify_rows.py:241)).
+
+2. **No false H found in the requested legitimate cases.** Confirmed `NO_PATCH` and `PATCH_APPLY` with null/−1 exits, `EXIT0_UNRESOLVED`, `VERIFY_TIMEOUT_124`, and all four recognized agent-end messages in either field under `"Harness task failure"`. Non-string top-level `error` values correctly receive H-ROW ([classify_rows.py:46](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:46)).
+
+3. **Freeze and artifact checks pass.** The classifier matches the full `a208a023…` hash at [007.md:85](/home/ubuntu/work/gemma/eval/plans/007.md:85). The [arm F JSON](/home/ubuntu/work/gemma/results/plan007_classifier_armF_check.json:3) differs from its predecessor only in `classifier_sha256`; CLI regeneration matches exactly.
+
+4. **Pre-registration is otherwise sufficient for smoke.** The fixed 33-dev order, first-three smoke IDs, budget, gate and rerun policy are concrete. Smoke remains blocked by the findings above and the clean-review requirement at [007.md:92](/home/ubuntu/work/gemma/eval/plans/007.md:92).
+
+**Questions:** None.
+
+Validation: **105 passed, 1 deselected** using read-only-compatible classifier tests. The exact requested full-suite command could not start because pytest could not create temporary files. The CLI temporary-file test was excluded; read-only arm F CLI regeneration passed. All four reviewed files match `fcb6d6f`.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:792:                                f'Agent exceeded turns budget ({config.budget.turns} turns)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:794:                                else 'Agent exceeded maximum allowed LLM turns'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:870:                                agent_error = f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:929:                                agent_error = f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:938:                                    f'Agent exceeded tool call budget ({context.budget.tool_calls} calls)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:950:                                    f'Agent exceeded turns budget ({config.budget.turns} turns)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:952:                                    else 'Agent exceeded maximum allowed LLM turns'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1003:                            'Task %s: Agent ended turn without calling submit_patch (nudge %d/%d). Prompting continuation.',
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1029:                    f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1034:                    f'Agent exceeded turns budget ({config.budget.turns} turns)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1036:                    else 'Agent exceeded maximum allowed LLM turns'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1082:                            'Agent completed execution without calling submit_patch.'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1096:                        'Agent completed execution without calling submit_patch.'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py:27:from swegemma.harness.verification import save_trace_artifact, verify_task
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py:365:        verify_sig = inspect.signature(verify_task)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py:372:        res = await verify_task(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:276:        return False, 'Missing or empty JUnit XML report (possible premature exit)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:345:async def verify_task(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:470:                        'Failed to apply agent patch on task %s: %s',
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:474:                    agent_error = f'Failed to apply agent patch: {err_detail}'
+
+codex
+The rev-5 guards close the three prior reproductions, and the arm-F JSON diff changes only the classifier hash. I’m checking cross-field contradictions and CLI handling next. The requested pytest command could not start because the read-only sandbox provides no writable temporary directory; I’ll run the tests that can execute without one.
+exec
+/bin/bash -lc "nl -ba eval/kaggle/agent_timing.py | sed -n '240,320p'; nl -ba eval/kaggle/agent_timing.py | sed -n '830,875p'; sed -n '275,460p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py; sed -n '345,690p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   240	        tf.extractall(destination, filter='data')
+   241	
+   242	
+   243	def record_distributions(docker, container_id, repo, row):
+   244	    # Query the same interpreter and metadata selection pip uses, never host metadata.
+   245	    package = repo.rsplit('/', 1)[-1].lower()
+   246	    probe = """import json
+   247	from importlib.metadata import distribution, PackageNotFoundError
+   248	names = NAMES
+   249	result = {}
+   250	for name in names:
+   251	    try:
+   252	        d = distribution(name)
+   253	        result[name] = dict(location=str(d.locate_file('')), version=d.version,
+   254	                            metadata_location=str(d._path), record_exists=d.read_text('RECORD') is not None)
+   255	    except PackageNotFoundError:
+   256	        result[name] = dict(location=None, version=None, metadata_location=None, record_exists=False)
+   257	print(json.dumps(result))
+   258	""".replace('NAMES', repr([package]))
+   259	    # Diagnostic only: a probe problem must never change the harness path.
+   260	    try:
+   261	        result = docker.exec(container_id, 'python3 -c ' + shlex.quote(probe), timeout=30)
+   262	        row['dist_probe_rc'] = result.exit_code
+   263	        if result.exit_code != 0:
+   264	            row['dist_probe_error'] = 'rc'
+   265	            return
+   266	        row['distributions'] = json.loads(result.stdout)
+   267	    except Exception as exc:
+   268	        row['dist_probe_error'] = type(exc).__name__
+   269	
+   270	
+   271	def setup_step(current, name, action, *, fatal=True):
+   272	    """Time setup steps and retain bounded output plus retry counts."""
+   273	    start = time.perf_counter()
+   274	    row = dict(step=name, start_offset_s=round(start-current['started'], 6),
+   275	               duration_s=0.0, rc=None, stdout='', stderr='', retrying_lines=0)
+   276	    current['setup_calls'].append(row)
+   277	    try:
+   278	        result = action()
+   279	        row['rc'] = getattr(result, 'exit_code', getattr(result, 'returncode', 0))
+   280	        setup_artifact(current, dict(step=name, stdout=getattr(result, 'stdout', '') or '',
+   281	                                     stderr=getattr(result, 'stderr', '') or ''))
+   282	        for field in ('stdout', 'stderr'):
+   283	            value = getattr(result, field, '') or ''
+   284	            row['retrying_lines'] += sum('Retrying' in line for line in value.splitlines())
+   285	            row[field] = value.encode('utf-8', errors='replace')[-2048:].decode('utf-8', errors='ignore')
+   286	        return result
+   287	    except Exception as exc:
+   288	        row.update(rc=-1, stderr=type(exc).__name__)
+   289	        if fatal:
+   290	            current['setup_failed'] = True
+   291	            raise
+   292	    finally:
+   293	        row['duration_s'] = round(time.perf_counter()-start, 6)
+   294	        current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+   295	        if fatal and row['rc'] != 0:
+   296	            current['setup_failed'] = True
+   297	
+   298	
+   299	def fallback_wheel(wheels, package):
+   300	    """Prefer the wheelhouse, then the running interpreter's ensurepip bundle."""
+   301	    from packaging.utils import parse_wheel_filename
+   302	    found = list(Path(wheels).glob(package + '-*-py3-none-any.whl'))
+   303	    if not found and package == 'pip':
+   304	        try:
+   305	            import ensurepip
+   306	            found = list((Path(ensurepip.__file__).parent / '_bundled').glob('pip-*.whl'))
+   307	        except ImportError:
+   308	            pass
+   309	    return max(found, key=lambda p: parse_wheel_filename(p.name)[1]) if found else None
+   310	
+   311	
+   312	def runtime_copyable(name):
+   313	    """(dist, files) if copy_runtime_package can copy this runtime package, else None. Copies nothing."""
+   314	    from importlib.metadata import distribution, PackageNotFoundError
+   315	    try:
+   316	        dist = distribution(name)
+   317	    except PackageNotFoundError:
+   318	        return None
+   319	    if name == 'pytest-timeout' and dist.version != '2.1.0':
+   320	        return None
+   830	        teardown_seconds=current.get('sandbox_stop_duration'),
+   831	        phase1_wall_seconds=phase1, phase1_source=source,
+   832	        pre_agent_seconds=difference('timeout_enter', 'sandbox_start_begin'),
+   833	        post_phase1_seconds=total - phase1, patch_submitted=submitted,
+   834	        fallback_patch_used=(not submitted and bool(patch.strip())) if submitted is not None else None,
+   835	        verification_skipped=SKIP_VERIFICATION)
+   836	
+   837	
+   838	# Normal agent end states that swegemma reports through agent_error (agent_runner.py 0.2.11).
+   839	AGENT_OUTCOMES = (('timeout', re.compile(r'Agent exceeded session timeout\b')),
+   840	                  ('turns', re.compile(r'Agent exceeded (turns budget|maximum allowed LLM turns)\b')),
+   841	                  ('tool_calls', re.compile(r'Agent exceeded tool call budget\b')),
+   842	                  ('no_submit', re.compile(r'Agent completed execution without calling submit_patch\b')))
+   843	IMAGE_EMULATION_STEPS = ('venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'tool_sources',
+   844	                         'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check')
+   845	
+   846	
+   847	def agent_outcome(message):
+   848	    """Name of a known normal agent end state, else None (including for empty messages)."""
+   849	    text = (message or '').strip()
+   850	    return next((name for name, pattern in AGENT_OUTCOMES if pattern.match(text)), None)
+   851	
+   852	
+   853	def harness_error(result, agent_error):
+   854	    """Fail closed: any error that is not a known normal agent end state is a harness failure."""
+   855	    messages = [m for m in ((result.error if result is not None else None), agent_error) if m]
+   856	    return 'Harness task failure' if any(agent_outcome(m) is None for m in messages) else None
+   857	
+   858	
+   859	def platform_probe(host='pypi.org', port=443, timeout=10.0):
+   860	    """P2 (plan 006 addendum): docker presence, DNS, and one TCP connect. Sends no payload."""
+   861	    out = dict(docker_which=shutil.which('docker'), docker_sock=os.path.exists('/var/run/docker.sock'),
+   862	               host=host, port=port, dns=None, dns_seconds=None, tcp=None, tcp_seconds=None, tcp_errno=None)
+   863	    box = {}
+   864	    def resolve():
+   865	        try:
+   866	            box['addrs'] = sorted({ai[4][0] for ai in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)})
+   867	        except Exception as exc:
+   868	            box['error'] = type(exc).__name__
+   869	    start = time.perf_counter()
+   870	    worker = threading.Thread(target=resolve, daemon=True)
+   871	    worker.start(); worker.join(timeout)
+   872	    out['dns_seconds'] = round(time.perf_counter() - start, 3)
+   873	    if worker.is_alive():
+   874	        out['dns'], out['tcp'] = 'timeout', 'skipped'
+   875	        return out
+            _, _, secret_dir = self._get_secret_bundle_data()
+            if secret_dir is not None and (secret_dir / 'sandbox' / 'snapshots').is_dir():
+                snapshot_path, base_snapshot_path, patch_path = resolve_task_snapshot_paths(
+                    secret_dir / 'sandbox' / 'snapshots', task.instance_id, task.repo
+                )
+        if not snapshot_path.exists():
+            err_msg = f'Snapshot file not found: {self.config.snapshots_dir / f"{task.instance_id}.tar.gz"} or .tgz'
+            duration = time.perf_counter() - start_time
+            if dashboard is not None and slot_id is not None:
+                dashboard.task_completed(slot_id, False, duration, err_msg)
+            return TaskResult(
+                instance_id=task.instance_id,
+                repo=task.repo,
+                resolved=False,
+                agent_patch='',
+                test_output='',
+                test_exit_code=-1,
+                duration_seconds=duration,
+                error=err_msg,
+                task_index=task_index,
+            )
+
+        # -------------------------------------------------------------------
+        # Phase 1: Sandbox Execution (Container A)
+        # -------------------------------------------------------------------
+        if self.config.skip_agent_patch:
+            agent_patch = ''
+            agent_error = None
+            trace: SessionTrace | None = SessionTrace()
+        else:
+            run_kwargs: dict[str, Any] = {
+                'slot_id': slot_id,
+                'dashboard': dashboard,
+                'context': context,
+            }
+            sig = inspect.signature(self._run_agent_sandbox)
+            if 'base_snapshot_path' in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            ):
+                run_kwargs['base_snapshot_path'] = base_snapshot_path
+                run_kwargs['patch_path'] = patch_path
+            agent_patch, agent_error, trace = await self._run_agent_sandbox(
+                task,
+                snapshot_path,
+                task_index,
+                total_tasks,
+                **run_kwargs,
+            )
+
+        if agent_error and not agent_patch:
+            json_path = save_trace_artifact(
+                trace, self.config.results_dir, task.instance_id
+            )
+            duration = time.perf_counter() - start_time
+            llm_calls = context.llm_calls_used
+            if dashboard is not None and slot_id is not None:
+                dashboard.task_completed(
+                    slot_id,
+                    False,
+                    duration,
+                    agent_error,
+                    agent_duration=context.agent_elapsed_seconds if context else None,
+                )
+            return TaskResult(
+                instance_id=task.instance_id,
+                repo=task.repo,
+                resolved=False,
+                agent_patch='',
+                test_output='',
+                test_exit_code=-1,
+                duration_seconds=duration,
+                error=agent_error,
+                trace_json_path=json_path,
+                total_llm_calls=llm_calls,
+                tool_calls=context.tool_calls_used,
+                task_index=task_index,
+            )
+
+        # -------------------------------------------------------------------
+        # Phase 2: Evaluation Container (Container B)
+        # -------------------------------------------------------------------
+        context.set_phase('Verifying')
+        context.set_activity('Running test suite...')
+
+        verify_kwargs: dict[str, Any] = {
+            'agent_patch': agent_patch,
+            'agent_error': agent_error,
+            'trace': trace,
+            'start_time': start_time,
+        }
+        verify_sig = inspect.signature(verify_task)
+        if 'base_snapshot_path' in verify_sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in verify_sig.parameters.values()
+        ):
+            verify_kwargs['base_snapshot_path'] = base_snapshot_path
+            verify_kwargs['patch_path'] = patch_path
+
+        res = await verify_task(
+            self.docker,
+            self.config,
+            task,
+            snapshot_path,
+            **verify_kwargs,
+        )
+        llm_calls = context.llm_calls_used
+        res.total_llm_calls = llm_calls
+        res.tool_calls = context.tool_calls_used
+        res.task_index = task_index
+        if dashboard is not None and slot_id is not None:
+            dashboard.task_completed(
+                slot_id,
+                res.resolved,
+                res.duration_seconds,
+                res.error,
+                agent_duration=context.agent_elapsed_seconds if context else None,
+            )
+        return res
+
+    async def run(self) -> EvaluationResult:
+        """Run evaluation across all configured tasks."""
+        tasks = [
+            self._hydrate_task_from_secret(t)
+            for t in load_tasks(self.config.tasks_path)
+        ]
+        if self.config.task_ids:
+            task_set = set(self.config.task_ids)
+            tasks = [t for t in tasks if t.instance_id in task_set]
+
+        if self.config.num_shards and self.config.num_shards > 0:
+            shard_idx = self.config.shard_index or 0
+            tasks = [
+                t
+                for idx, t in enumerate(tasks)
+                if idx % self.config.num_shards == shard_idx
+            ]
+            logger.info(
+                'Running shard %d/%d (%d tasks)',
+                shard_idx + 1,
+                self.config.num_shards,
+                len(tasks),
+            )
+
+        logger.debug('Starting evaluation on %d tasks...', len(tasks))
+        results: list[TaskResult] = []
+        concurrency = max(1, self.config.concurrency or 1)
+
+        display_mode = getattr(self.config, 'display_mode', 'auto')
+        if display_mode == 'single' and concurrency > 1:
+            logger.warning(
+                '--display single is not compatible with --concurrency %d; '
+                'falling back to dashboard mode.',
+                concurrency,
+            )
+            display_mode = 'dashboard'
+            self.config.display_mode = 'dashboard'
+
+        use_dashboard = display_mode == 'dashboard' or (
+            display_mode == 'auto' and concurrency > 1
+        )
+
+        async def _run_task_worker(
+            i: int,
+            task: Task,
+            lock: asyncio.Lock,
+            *,
+            slot: int | None = None,
+            active_dashboard: Any | None = None,
+        ) -> TaskResult:
+            worker_start = time.perf_counter()
+            context: SwegemmaContext | None = None
+            res: TaskResult | None = None
+            try:
+                context = SwegemmaContext(
+                    docker_manager=self.docker,
+                    container_id='',
+                    problem_statement=task.problem_statement,
+                    hints_text=getattr(task, 'hints_text', '') or '',
+                    task=task,
+                    repo=task.repo,
+                    graph_dir=self.config.graph_dir,
+                    embeddings_dir=self.config.embeddings_dir,
+                    budget=self.config.budget,
+                    harness=self.config.harness,
+                )
+                eval_kwargs: dict[str, Any] = {
+                    'task_index': i,
+async def verify_task(
+    docker: BaseSandboxManager,
+    config: EvalConfig,
+    task: Task,
+    snapshot_path: Path,
+    *,
+    base_snapshot_path: Path | None = None,
+    patch_path: Path | None = None,
+    fast_path: bool = True,
+    agent_patch: str = '',
+    agent_error: str | None = None,
+    trace: SessionTrace | None = None,
+    start_time: float = 0.0,
+) -> TaskResult:
+    """Verifies a generated patch inside the clean evaluation container (Container B)."""
+    is_synthetic_mock_repo = (
+        task.repo.startswith('test/mock_repo') and task.base_commit == '123456'
+    )
+    if (
+        not task.test_patch.strip()
+        and not getattr(task, 'FAIL_TO_PASS', ())
+        and not getattr(task, 'PASS_TO_PASS', ())
+        and not getattr(task, 'test_files', None)
+        and not is_synthetic_mock_repo
+    ):
+        json_path = save_trace_artifact(trace, config.results_dir, task.instance_id)
+        return TaskResult(
+            instance_id=task.instance_id,
+            repo=task.repo,
+            resolved=False,
+            agent_patch=agent_patch,
+            test_output='',
+            test_exit_code=-1,
+            duration_seconds=time.perf_counter() - start_time,
+            error='Missing test specification (empty test_patch and FAIL_TO_PASS; secret hydration failed or unavailable)',
+            trace=trace,
+            trace_json_path=json_path,
+        )
+
+    eval_id = await sandbox_start(docker)
+    try:
+        # Setup wheels in container
+        await asyncio.to_thread(setup_container_wheels, docker, eval_id, config)
+
+        # Copy snapshot into eval container and extract (supports base + patch)
+        await asyncio.to_thread(
+            extract_snapshot,
+            docker,
+            eval_id,
+            snapshot_path,
+            patch_path=patch_path,
+            base_snapshot_path=base_snapshot_path,
+        )
+
+        # Setup synthetic environment stubs if provided by sandbox setup
+        await asyncio.to_thread(setup_synthetic_hardware, docker, eval_id)
+
+        # Configure git exclude to ignore bytecode and test cache artifacts
+        await asyncio.to_thread(setup_git_exclude, docker, eval_id)
+
+        # Install editable package
+        await asyncio.to_thread(install_editable_package, docker, eval_id)
+
+        # Install test dependencies (fast-path by default)
+        await asyncio.to_thread(
+            install_test_dependencies,
+            docker,
+            eval_id,
+            task.repo,
+            fast_path=fast_path,
+            config=config,
+        )
+
+        # Configure pytest.ini and conftest.py for hermetic test discovery
+        await asyncio.to_thread(
+            setup_workspace_test_config,
+            docker,
+            eval_id,
+            repo=task.repo,
+        )
+
+        # Create clean baseline commit so git checkout has a reliable HEAD
+        await asyncio.to_thread(setup_baseline_commit, docker, eval_id, 'eval_baseline')
+
+        target_test_files = (
+            list(task.test_files)
+            if task.test_files
+            else extract_test_files_from_patch(task.test_patch)
+        )
+
+        effective_agent_patch = (
+            strip_protected_files_from_patch(
+                agent_patch, extra_protected_paths=target_test_files
+            )
+            if not is_synthetic_mock_repo
+            else agent_patch
+        )
+
+        # Apply agent patch if present
+        if effective_agent_patch.strip():
+            with tempfile.NamedTemporaryFile('w', suffix='.patch', delete=False) as f:
+                f.write(
+                    effective_agent_patch
+                    if effective_agent_patch.endswith('\n')
+                    else effective_agent_patch + '\n'
+                )
+                patch_host_path = Path(f.name)
+
+            try:
+                await asyncio.to_thread(
+                    docker.copy_to, eval_id, patch_host_path, '/tmp/'
+                )
+                exit_code, stdout, stderr = await asyncio.to_thread(
+                    apply_patch_in_container,
+                    docker,
+                    eval_id,
+                    f'/tmp/{patch_host_path.name}',
+                )
+                if exit_code != 0:
+                    err_detail = stderr or stdout
+                    if 'Patch file not found:' in err_detail:
+                        raise ContainerSetupError(
+                            f'Agent patch file missing in container on task {task.instance_id}: {err_detail}'
+                        )
+                    logger.error(
+                        'Failed to apply agent patch on task %s: %s',
+                        task.instance_id,
+                        err_detail,
+                    )
+                    agent_error = f'Failed to apply agent patch: {err_detail}'
+                    json_path = save_trace_artifact(
+                        trace, config.results_dir, task.instance_id
+                    )
+                    return TaskResult(
+                        instance_id=task.instance_id,
+                        repo=task.repo,
+                        resolved=False,
+                        agent_patch=agent_patch,
+                        test_output=err_detail,
+                        test_exit_code=exit_code,
+                        duration_seconds=time.perf_counter() - start_time,
+                        error=agent_error,
+                        trace=trace,
+                        trace_json_path=json_path,
+                    )
+            finally:
+                patch_host_path.unlink(missing_ok=True)
+
+        # Collect any test files, conftest.py, or runner config files touched by agent_patch (including deleted/renamed sources)
+        agent_touched_files = extract_test_files_from_patch(agent_patch)
+        if agent_patch.strip():
+            for raw_line in agent_patch.splitlines():
+                if raw_line.startswith('diff --git '):
+                    m_git = re.match(r'^diff --git "?a/(.*?)"? "?b/(.*?)"?$', raw_line)
+                    if m_git:
+                        for grp in (m_git.group(1), m_git.group(2)):
+                            if grp and grp not in agent_touched_files:
+                                agent_touched_files.append(grp)
+                elif raw_line.startswith(('--- a/', '+++ b/')):
+                    rel_p = raw_line[6:].strip().strip('"')
+                    if rel_p and rel_p != '/dev/null' and rel_p not in agent_touched_files:
+                        agent_touched_files.append(rel_p)
+                elif raw_line.startswith('rename from '):
+                    rel_p = raw_line[len('rename from ') :].strip().strip('"')
+                    if rel_p and rel_p not in agent_touched_files:
+                        agent_touched_files.append(rel_p)
+            git_status_res = await sandbox_exec(
+                docker,
+                eval_id,
+                'cd /workspace && (git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null) || true',
+            )
+            for line in (git_status_res.stdout or '').splitlines():
+                rel_line = line.strip()
+                if rel_line and rel_line not in agent_touched_files:
+                    agent_touched_files.append(rel_line)
+
+        protected_agent_files = [
+            p for p in agent_touched_files if _is_protected_test_or_config_path(p)
+        ]
+        files_to_reset = list(
+            dict.fromkeys(
+                target_test_files
+                + protected_agent_files
+                + [
+                    'conftest.py',
+                    'pytest.ini',
+                    'sitecustomize.py',
+                    'usercustomize.py',
+                    '_swegemma_stubs.py',
+                ]
+            )
+        )
+
+        # Reset test and config files to baseline to prevent test tampering or conflicts with test_patch
+        if files_to_reset:
+            test_files_quoted = [shlex.quote(p) for p in files_to_reset]
+            test_files_str = ' '.join(test_files_quoted)
+            checkout_cmd = (
+                f'cd /workspace && tracked=$(git ls-tree -r --name-only HEAD -- {test_files_str} 2>/dev/null) '
+                f'&& [ -n "$tracked" ] && git ls-tree -r -z --name-only HEAD -- {test_files_str} '
+                f'| xargs -0 git checkout HEAD -- 2>/dev/null || true'
+            )
+            clean_cmd = (
+                f'cd /workspace && git clean -f -- {test_files_str} 2>/dev/null || true'
+            )
+            await sandbox_exec(docker, eval_id, checkout_cmd)
+            await sandbox_exec(docker, eval_id, clean_cmd)
+
+        # Apply test patch (verification tests)
+        if task.test_patch.strip():
+            with tempfile.NamedTemporaryFile('w', suffix='.patch', delete=False) as f:
+                f.write(
+                    task.test_patch
+                    if task.test_patch.endswith('\n')
+                    else task.test_patch + '\n'
+                )
+                test_patch_host_path = Path(f.name)
+
+            try:
+                await asyncio.to_thread(
+                    docker.copy_to, eval_id, test_patch_host_path, '/tmp/'
+                )
+                exit_code, stdout, stderr = await asyncio.to_thread(
+                    apply_patch_in_container,
+                    docker,
+                    eval_id,
+                    f'/tmp/{test_patch_host_path.name}',
+                )
+                if exit_code != 0:
+                    err_detail = stderr or stdout
+                    if 'Patch file not found:' in err_detail:
+                        raise ContainerSetupError(
+                            f'Test patch file missing in container on task {task.instance_id}: {err_detail}'
+                        )
+                    logger.error(
+                        'Failed to apply test patch on task %s: %s',
+                        task.instance_id,
+                        err_detail,
+                    )
+                    json_path = save_trace_artifact(
+                        trace, config.results_dir, task.instance_id
+                    )
+                    return TaskResult(
+                        instance_id=task.instance_id,
+                        repo=task.repo,
+                        resolved=False,
+                        agent_patch=agent_patch,
+                        test_output='',
+                        test_exit_code=-1,
+                        duration_seconds=time.perf_counter() - start_time,
+                        error=f'Failed to apply test_patch: {err_detail}',
+                        trace_json_path=json_path,
+                    )
+            finally:
+                test_patch_host_path.unlink(missing_ok=True)
+
+        # Refresh workspace paths, stubs, and pytest config after patches add new files/imports
+        await asyncio.to_thread(
+            install_test_dependencies,
+            docker,
+            eval_id,
+            task.repo,
+            fast_path=fast_path,
+            config=config,
+        )
+        await asyncio.to_thread(
+            setup_workspace_test_config,
+            docker,
+            eval_id,
+            repo=task.repo,
+            overwrite=True,
+        )
+
+        # Run pytest on verification test files (excluding conftest.py from positional test args)
+        pytest_targets = [
+            p
+            for p in target_test_files
+            if Path(p).name != 'conftest.py' and p.endswith('.py')
+        ] or target_test_files
+        test_files_quoted = [shlex.quote(p) for p in pytest_targets]
+        test_files_str = ' '.join(test_files_quoted) if test_files_quoted else '.'
+        junit_xml_path = f'/tmp/_swegemma_junit_{uuid.uuid4().hex[:12]}.xml'
+        await sandbox_exec(docker, eval_id, f'rm -f {junit_xml_path}')
+        pytest_cmd = (
+            f'cd /workspace && PYTHONSAFEPATH=1 PYTHONNOUSERSITE=1 python3 -s -m pytest {test_files_str} '
+            f'--junitxml={junit_xml_path} '
+            '-p no:anyio -o timeout=0 '
+            '-o python_classes="Test* *Test" -q'
+        )
+        verification_timeout = getattr(
+            config.harness, 'verification_timeout_seconds', None
+        )
+        if verification_timeout is None:
+            verification_timeout = config.harness.command_timeout_seconds
+        test_res = await sandbox_exec(
+            docker,
+            eval_id,
+            pytest_cmd,
+            timeout=verification_timeout,
+        )
+
+        resolved = test_res.exit_code == 0
+        junit_error: str | None = None
+        if resolved:
+            xml_res = await sandbox_exec(
+                docker,
+                eval_id,
+                f'cat {junit_xml_path} 2>/dev/null || true',
+            )
+            xml_content = xml_res.stdout or ''
+            is_real_sandbox = type(docker).__name__ in {
+                'ContainerManager',
+                'SubprocessManager',
+                'DockerSandbox',
+                'SubprocessSandbox',
+            }
+            stdout_text = (test_res.stdout or '').lower()
+            stdout_invalid = (
+                bool(re.search(r'\b0 passed\b', stdout_text))
+                or 'no tests ran' in stdout_text
+                or 'collected 0 items' in stdout_text
+                or (stdout_text.strip() != '' and 'passed' not in stdout_text)
+            )
+            if xml_content.strip():
+                junit_ok, junit_reason = _validate_junit_xml(
+                    xml_content,
+                    fail_to_pass=getattr(task, 'FAIL_TO_PASS', ()),
+                    pass_to_pass=getattr(task, 'PASS_TO_PASS', ()),
+                    test_patch=getattr(task, 'test_patch', ''),
+                )
+                if not junit_ok:
+                    resolved = False
+                    junit_error = junit_reason
+                elif stdout_invalid:
+                    resolved = False
+                    junit_error = 'Pytest stdout summary indicates zero or no passing tests'
+            elif is_real_sandbox or stdout_invalid or not stdout_text.strip():
+                resolved = False
+                junit_error = 'Missing JUnit XML report (possible premature os._exit(0))'
+
+        duration = time.perf_counter() - start_time
+
+        json_path = save_trace_artifact(trace, config.results_dir, task.instance_id)
+
+        return TaskResult(
+            instance_id=task.instance_id,
+
+exec
+/bin/bash -lc "git rev-parse HEAD; git diff 9d0a8b4 -- eval/kaggle/classify_rows.py eval/kaggle/agent_timing.py eval/tests/test_classify_rows.py eval/plans/007.md results/plan007_classifier_armF_check.json; rg -n '"'^def test_|tmp_path|pytest_plugins|conftest'"' eval/tests/test_classify_rows.py; rg --files eval/tests -g '*conftest*'; rg -n 'setup_step\\(' eval/kaggle/agent_timing.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+87199e23f2dfa32b4e7a875cb4ee39c32b229a55
+32:def test_agent_patterns_are_stock():
+38:def test_record_chain_all_passes(passes):
+49:def test_unexpected_editable_failure(subprocesses):
+56:def test_later_pass_failure_is_retained():
+70:def test_setup_failures(updates, reason):
+78:def test_not_run_step(duration, stderr, expected):
+83:def test_workspace_record_and_pip_check():
+96:def test_verification_agent_errors(message, code, expected):
+103:def test_all_verification_agent_prefixes(prefix):
+111:def test_verification_outcomes(code, expected):
+124:def test_unrecognized_messages(field, message, error, reason):
+132:def test_wrapper_errors_preserve_stock_verdict(error):
+137:def test_other_row_error():
+142:def test_invalid_verification_codes(code):
+147:def test_non_int_verification_codes_are_h_row(code):
+153:def test_no_patch_with_agent_end():
+165:def test_agent_end_is_descriptive(name, message):
+171:def test_schema_guard(key):
+177:def test_pass_and_other_fail():
+183:def test_invalid_patch_evidence_is_h(patch_bytes, code):
+190:def test_unexplained_harness_failure_is_h(texts):
+196:def test_explained_harness_failure_not_h(message):
+201:def test_zero_patch_without_exit_code_is_no_patch():
+206:def test_precedence_and_orthogonal_diagnostic():
+214:def test_meta_rejected():
+219:def test_cli(tmp_path):
+220:    source, output = tmp_path / 'timing.jsonl', tmp_path / 'classes.json'
+252:def test_invalid_verdict_evidence_is_h_row(updates, reason):
+265:def test_contradictory_resolved_is_h(updates):
+271:def test_contradictory_resolved_reason():
+276:def test_stock_resolved_preserved_on_h_row():
+289:def test_legitimate_verdicts_not_h(updates, agent):
+299:def test_resolved_with_verify_failure_is_h_verify(field, error, prefix):
+306:def test_unresolved_with_verify_failure_stays_agent(field):
+314:def test_non_string_message_is_h_row(field, value, error):
+320:def test_non_string_message_with_recognized_companion_is_h_row():
+338:def test_malformed_setup_evidence_is_h_row(calls):
+349:def test_legitimate_setup_evidence_not_h(calls):
+355:def test_invalid_missing_tool_deps_is_h_row(deps):
+360:def test_missing_tool_deps_list():
+367:def test_invalid_setup_failed_is_h_row(flag):
+372:def test_non_dict_row_rejected():
+377:def test_cli_rejects_duplicate_ids(tmp_path):
+378:    source = tmp_path / 'timing.jsonl'
+271:def setup_step(current, name, action, *, fatal=True):
+493:            setup_step(current, 'base_tar_extraction', original_base)
+505:            setup_step(current, 'venv_fidelity', isolate_venv)
+518:            result = setup_step(current, 'pip_bootstrap', bootstrap_pip)
+525:            result = setup_step(current, 'interpreter_probe', lambda: docker.exec(
+543:            setup_step(current, 'tool_sources', validate_tools)
+549:            setup_step(current, 'pytest_timeout_source', timeout_source)
+558:            result = setup_step(current, 'tool_install', install_tools)
+584:            setup_step(current, 'tool_deps', tool_deps)
+585:            setup_step(current, 'pip_check', lambda: docker.exec(
+588:            setup_step(current, 'workspace_editable', lambda: docker.exec(container_id,
+600:            setup_step(current, 'base_tar_extraction', extract_base)
+609:            setup_step(current, 'setup.py', run_setup)
+1067:            evaluator.docker.start = lambda: setup_step(times, 'venv', original_start)
+1231:        sid = setup_step(current, 'venv', manager.start)
+1234:        setup_step(current, 'setup_container_wheels', lambda: cs.setup_container_wheels(manager, sid, config))
+1236:        setup_step(current, 'extract_snapshot', lambda: cs.extract_snapshot(
+1238:        setup_step(current, 'setup_git_exclude', lambda: cs.setup_git_exclude(manager, sid))
+1240:            setup_step(current, 'install_editable_package', lambda: cs.install_editable_package(manager, sid))
+1247:            setup_step(current, 'teardown', manager.cleanup_all)
+
+exec
+/bin/bash -lc "sed -n '685,735p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py; sed -n '265,345p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py; rg -n 'SETUP_OBSERVER|subprocesses|retrying_lines|returncode' eval/kaggle/agent_timing.py | head -50; sed -n '370,455p' eval/kaggle/agent_timing.py; nl -ba eval/tests/test_classify_rows.py | sed -n '294,390p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+        duration = time.perf_counter() - start_time
+
+        json_path = save_trace_artifact(trace, config.results_dir, task.instance_id)
+
+        return TaskResult(
+            instance_id=task.instance_id,
+            repo=task.repo,
+            resolved=resolved,
+            agent_patch=agent_patch,
+            test_output=f'STDOUT:\n{test_res.stdout}\nSTDERR:\n{test_res.stderr}',
+            test_exit_code=test_res.exit_code,
+            duration_seconds=duration,
+            error=(junit_error or agent_error) if not resolved else None,
+            trace=trace,
+            trace_json_path=json_path,
+        )
+    except ContainerSetupError:
+        raise
+    except Exception as e:
+        logger.exception(
+            'Error during evaluation container run for task %s', task.instance_id
+        )
+        return TaskResult(
+            instance_id=task.instance_id,
+            repo=task.repo,
+            resolved=False,
+            agent_patch=agent_patch,
+            test_output='',
+            test_exit_code=-1,
+            duration_seconds=time.perf_counter() - start_time,
+            error=f'Evaluation error: {e}',
+            trace=trace,
+        )
+    finally:
+        await sandbox_stop(docker, eval_id)
+
+def _validate_junit_xml(
+    xml_content: str,
+    fail_to_pass: tuple[str, ...] = (),
+    pass_to_pass: tuple[str, ...] = (),
+    test_patch: str = '',
+) -> tuple[bool, str | None]:
+    """Validate JUnit XML report to prevent os._exit(0), conftest, or skip-all exploits."""
+    import xml.etree.ElementTree as ET
+
+    if not xml_content or not xml_content.strip():
+        return False, 'Missing or empty JUnit XML report (possible premature exit)'
+    try:
+        root = ET.fromstring(xml_content)
+    except ET.ParseError as e:
+        return False, f'Malformed JUnit XML report: {e}'
+
+    suites = [root] if root.tag == 'testsuite' else list(root.findall('.//testsuite'))
+    if not suites:
+        return False, 'No <testsuite> elements found in JUnit XML'
+
+    total_tests = sum(int(s.attrib.get('tests', 0)) for s in suites)
+    total_failures = sum(int(s.attrib.get('failures', 0)) for s in suites)
+    total_errors = sum(int(s.attrib.get('errors', 0)) for s in suites)
+    total_skipped = sum(int(s.attrib.get('skipped', 0)) for s in suites)
+    passed_tests = total_tests - total_failures - total_errors - total_skipped
+
+    if total_tests <= 0 or passed_tests <= 0:
+        return (
+            False,
+            f'No passing tests recorded in JUnit XML (total={total_tests}, passed={passed_tests}, skipped={total_skipped})',
+        )
+    if total_failures > 0 or total_errors > 0:
+        return (
+            False,
+            f'Test failures/errors recorded in JUnit XML (failures={total_failures}, errors={total_errors})',
+        )
+
+    required_nodes = list(fail_to_pass) + list(pass_to_pass)
+    if not required_nodes and test_patch:
+        required_nodes = _extract_test_functions_from_patch(test_patch)
+    if required_nodes:
+        passed_names: set[str] = set()
+        failed_or_skipped_names: set[str] = set()
+        for tc in root.findall('.//testcase'):
+            name = tc.attrib.get('name', '')
+            classname = tc.attrib.get('classname', '')
+            candidates = {name}
+            if '[' in name:
+                candidates.add(name.split('[', 1)[0])
+            if classname:
+                candidates.add(f'{classname}::{name}')
+                candidates.add(f'{classname}.{name}')
+                mod_path = classname.replace('.', '/') + '.py'
+                candidates.add(f'{mod_path}::{name}')
+            if (
+                tc.find('failure') is None
+                and tc.find('error') is None
+                and tc.find('skipped') is None
+            ):
+                passed_names.update(candidates)
+            else:
+                failed_or_skipped_names.update(candidates)
+        for req in required_nodes:
+            req_short = req.split('::')[-1]
+            req_base = req_short.split('[', 1)[0]
+            has_pass = any(
+                _node_matches_requirement(p, req, req_short, req_base)
+                for p in passed_names
+            )
+            has_non_pass = any(
+                _node_matches_requirement(np, req, req_short, req_base)
+                for np in failed_or_skipped_names
+            )
+            if not has_pass or has_non_pass:
+                return False, f'Required test node did not pass: {req}'
+
+    return True, None
+
+
+async def verify_task(
+89:    print('langsmith uninstall rc=', result.returncode, flush=True)
+275:               duration_s=0.0, rc=None, stdout='', stderr='', retrying_lines=0)
+279:        row['rc'] = getattr(result, 'exit_code', getattr(result, 'returncode', 0))
+284:            row['retrying_lines'] += sum('Retrying' in line for line in value.splitlines())
+294:        current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+426:SETUP_OBSERVER = r'''import json, runpy, subprocess, sys, time
+430:log = Path(__file__).with_name('setup_subprocesses.json')
+432:full_log = log.with_name('setup_subprocesses_full.jsonl')
+451:            start_offset_s=start-origin, rc=getattr(result, 'returncode', None),
+454:            retrying_lines=sum('Retrying' in line for line in (out+'\n'+err).splitlines()),
+574:                    current['setup_calls'][-1]['retrying_lines'] += sum(
+606:            observer.write_text(SETUP_OBSERVER)
+611:            log = docker.sandboxes[container_id]['tmp'] / 'setup_subprocesses.json'
+613:            full_log = log.with_name('setup_subprocesses_full.jsonl')
+617:            current['setup_subprocesses'] = calls
+619:            setup_row['subprocesses'] = calls
+620:            setup_row['retrying_lines'] += sum(c['retrying_lines'] for c in calls)
+621:            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+1105:                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+1106:                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
+1132:                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+1134:                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
+1225:                   editable_rc=None, retrying_lines=0, interpreter_version=None,
+1226:                   wheel_tags_chosen=[], setup_subprocesses=[])
+        if name in installed and installed[name]['Version'] == str(version):
+            sources[name] = str(path)
+    visited, entries, missing = set(), [], []
+    while queue:
+        metadata = queue.pop(0)
+        key = (canonicalize_name(metadata['Name']), metadata['Version'])
+        if key in visited:
+            continue
+        visited.add(key)
+        for raw in metadata.get_all('Requires-Dist', []):
+            req = Requirement(raw)
+            if req.marker and not req.marker.evaluate(dict(environment, extra='')):
+                continue
+            name = canonicalize_name(req.name)
+            current = installed.get(name)
+            row = dict(name=name, required_spec=str(req.specifier), requirement=raw,
+                       source='missing', version_installed=None)
+            if current is not None and current['Version'] in req.specifier:
+                row.update(source=sources.get(name, 'sandbox metadata'),
+                           version_installed=current['Version'])
+            else:
+                # Wheelhouse first, then the embedded official PyPI wheels (pip-installed like the image), then runtime copy.
+                candidate = compatible_wheels(wheels, tags, req).get(name) or compatible_wheels(extra_wheels(), tags, req).get(name)
+                current = None
+                if candidate:
+                    result = install_wheel(candidate)
+                    row['rc'] = result.exit_code
+                    for field in ('stdout', 'stderr'):
+                        row[field] = (getattr(result, field, '') or '').encode()[-2048:].decode(errors='ignore')
+                    if result.exit_code == 0:
+                        current = wheel_metadata(candidate)
+                        row['source'] = str(candidate)
+                else:
+                    try:
+                        runtime = distribution(name)
+                    except PackageNotFoundError:
+                        runtime = None
+                    if runtime is not None and runtime.version in req.specifier:
+                        source = copy_runtime_package(name, destination)
+                        if source != 'missing':
+                            current = runtime.metadata
+                            row['source'] = source
+                if current is not None:
+                    installed[name] = current
+                    sources[name] = row['source']
+                    row['version_installed'] = current['Version']
+            entries.append(row)
+            if current is not None:
+                queue.append(current)
+            elif name not in missing:
+                missing.append(name)
+    return entries, missing
+
+
+# Capture setup.py's otherwise discarded subprocess output without changing setup.py.
+# Write after EVERY call so an outer timeout still leaves completed calls visible.
+SETUP_OBSERVER = r'''import json, runpy, subprocess, sys, time
+from pathlib import Path
+original = subprocess.run
+calls = []
+log = Path(__file__).with_name('setup_subprocesses.json')
+log.write_text('[]')
+full_log = log.with_name('setup_subprocesses_full.jsonl')
+full_log.write_text('')
+def run(*args, **kwargs):
+    start = time.perf_counter()
+    argv = args[0] if args else kwargs.get('args')
+    result = None
+    try:
+        result = original(*args, **kwargs)
+        return result
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        result = exc
+        raise
+    finally:
+        def decode(value):
+            return value.decode(errors='replace') if isinstance(value, bytes) else (value or '')
+        out, err = decode(getattr(result, 'stdout', '')), decode(getattr(result, 'stderr', ''))
+        with full_log.open('a') as stream:
+            stream.write(json.dumps(dict(argv=argv, stdout=out, stderr=err)) + '\n')
+        calls.append(dict(argv=argv, duration_s=time.perf_counter()-start,
+            start_offset_s=start-origin, rc=getattr(result, 'returncode', None),
+            stdout=out.encode()[-2048:].decode(errors='ignore'),
+            stderr=err.encode()[-2048:].decode(errors='ignore'),
+            retrying_lines=sum('Retrying' in line for line in (out+'\n'+err).splitlines()),
+            interpreter_version=sys.version))
+   294	# Rev 5 (codex review 20261106T070737 BLOCKING 1-3).
+   295	@pytest.mark.parametrize('field', ['result_error', 'agent_error_text'])
+   296	@pytest.mark.parametrize('error', [None, 'Harness task failure'])
+   297	@pytest.mark.parametrize('prefix', [p for p in classifier.VERIFY_AGENT_PREFIXES
+   298	                                    if not p.startswith('Failed to apply agent patch:')])
+   299	def test_resolved_with_verify_failure_is_h_verify(field, error, prefix):
+   300	    result = classifier.classify(row(resolved=True, exit_code=0, error=error, **{field: prefix + ' t::x'}))
+   301	    assert result['h'] == 'H-VERIFY' and result['agent'] is None and result['resolved'] is True
+   302	    assert 'verify:resolved_with_verify_failure' in result['reasons']
+   303	
+   304	
+   305	@pytest.mark.parametrize('field', ['result_error', 'agent_error_text'])
+   306	def test_unresolved_with_verify_failure_stays_agent(field):
+   307	    result = classifier.classify(row(exit_code=0, **{field: 'Required test node did not pass: t::x'}))
+   308	    assert result['h'] is None and result['agent'] == 'EXIT0_UNRESOLVED'
+   309	
+   310	
+   311	@pytest.mark.parametrize('field', ['result_error', 'agent_error_text'])
+   312	@pytest.mark.parametrize('value', [False, 0, [], {}, True, 1, ['x'], {'a': 1}, 1.5])
+   313	@pytest.mark.parametrize('error', [None, 'Harness task failure'])
+   314	def test_non_string_message_is_h_row(field, value, error):
+   315	    result = classifier.classify(row(error=error, **{field: value}))
+   316	    assert result['h'] == 'H-ROW' and result['agent'] is None
+   317	    assert 'r10:invalid_message_type' in result['reasons']
+   318	
+   319	
+   320	def test_non_string_message_with_recognized_companion_is_h_row():
+   321	    result = classifier.classify(row(error='Harness task failure', result_error=False,
+   322	                                     agent_error_text='Required test node did not pass: t::x'))
+   323	    assert result['h'] == 'H-ROW' and 'r10:invalid_message_type' in result['reasons']
+   324	
+   325	
+   326	@pytest.mark.parametrize('calls', [
+   327	    {}, '', 'x', None, 0, [{}], [[]], ['setup.py'], [dict(step='')], [dict(step=1)],
+   328	    [dict(step='setup.py', rc=False)], [dict(step='setup.py', rc=True)], [dict(step='pip_check', rc=0.0)],
+   329	    [dict(step='setup.py', rc=0, stdout=1)], [dict(step='setup.py', rc=0, stderr=[])],
+   330	    [dict(step='setup.py', rc=0, duration_s='1')], [dict(step='setup.py', rc=0, duration_s=-1.0)],
+   331	    [dict(step='setup.py', rc=0, duration_s=float('nan'))],
+   332	    [dict(step='setup.py', rc=0, subprocesses={})], [dict(step='setup.py', rc=0, subprocesses=[{}])],
+   333	    [dict(step='setup.py', rc=0, subprocesses=[dict(argv='pip install -e .', rc=1)])],
+   334	    [dict(step='setup.py', rc=0, subprocesses=[dict(argv=['pip', 1], rc=1)])],
+   335	    [dict(step='setup.py', rc=0, subprocesses=[dict(argv=['pip'], rc=False)])],
+   336	    [dict(step='setup.py', rc=0, subprocesses=[dict(argv=['pip'], rc=0, stderr=0)])],
+   337	])
+   338	def test_malformed_setup_evidence_is_h_row(calls):
+   339	    result = classifier.classify(row(setup_calls=calls))
+   340	    assert result['h'] == 'H-ROW' and result['agent'] is None
+   341	    assert 'r11:invalid_setup_evidence' in result['reasons']
+   342	
+   343	
+   344	@pytest.mark.parametrize('calls', [
+   345	    [], [dict(step='pip_check', duration_s=0.0, rc=None, stdout='', stderr='', retrying_lines=0)],
+   346	    [dict(step='setup.py', duration_s=1.5, rc=0, stdout='', stderr='', subprocesses=[])],
+   347	    [dict(step='workspace_editable', duration_s=1, rc=0, stdout=None, stderr=None)],
+   348	])
+   349	def test_legitimate_setup_evidence_not_h(calls):
+   350	    result = classifier.classify(row(setup_calls=calls))
+   351	    assert result['h'] is None and result['agent'] == 'EXIT0_UNRESOLVED'
+   352	
+   353	
+   354	@pytest.mark.parametrize('deps', ['x', 1, True, {}, {'a': 1}, [1], [None]])
+   355	def test_invalid_missing_tool_deps_is_h_row(deps):
+   356	    result = classifier.classify(row(missing_tool_deps=deps))
+   357	    assert result['h'] == 'H-ROW' and 'r12:invalid_missing_tool_deps' in result['reasons']
+   358	
+   359	
+   360	def test_missing_tool_deps_list():
+   361	    assert classifier.classify(row(missing_tool_deps=[]))['h'] is None
+   362	    assert classifier.classify(row(missing_tool_deps=None))['h'] is None
+   363	    assert classifier.classify(row(missing_tool_deps=['pytest']))['h'] == 'H-SETUP'
+   364	
+   365	
+   366	@pytest.mark.parametrize('flag', [0, 1, 'true', [], {}])
+   367	def test_invalid_setup_failed_is_h_row(flag):
+   368	    result = classifier.classify(row(setup_failed=flag))
+   369	    assert result['h'] == 'H-ROW' and 'r13:invalid_setup_failed' in result['reasons']
+   370	
+   371	
+   372	def test_non_dict_row_rejected():
+   373	    with pytest.raises(TypeError):
+   374	        classifier.classify(['instance_id'])
+   375	
+   376	
+   377	def test_cli_rejects_duplicate_ids(tmp_path):
+   378	    source = tmp_path / 'timing.jsonl'
+   379	    source.write_text(json.dumps(row()) + '\n' + json.dumps(row()) + '\n')
+   380	    proc = subprocess.run([sys.executable, str(Path(classifier.__file__)), str(source)],
+   381	                          capture_output=True, text=True)
+   382	    assert proc.returncode != 0 and 'Duplicate instance_id' in proc.stderr
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_classify_rows.py -q -s -p no:cacheprovider -k 'not cli'" in /home/ubuntu/work/gemma
+ succeeded in 105ms:
+..........................................................................................................................................................................................................................
+218 passed, 2 deselected in 0.10s
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+import hashlib,json,subprocess
+from pathlib import Path
+from eval.kaggle import classify_rows as c
+p=Path('eval/kaggle/classify_rows.py')
+old=json.loads(subprocess.check_output(['git','show','fcb6d6f:results/plan007_classifier_armF_check.json']))
+new=json.loads(Path('results/plan007_classifier_armF_check.json').read_text())
+print('artifact_changed_keys', [k for k in old.keys()|new.keys() if old.get(k)"'!=new.get(k)])
+print('"'classifier_sha', hashlib.sha256(p.read_bytes()).hexdigest())
+base=dict(instance_id='t', repo='x/y', result_error=None, agent_error_text=None, verified_patch_bytes=10,setup_calls=[],exit_code=0,resolved=True,error=None,setup_failed=False,missing_tool_deps=[])
+cases={
+ 'bad_id':{'instance_id':None}, 'bad_repo':{'repo':[]},
+ 'no_patch_impossible_code':{'resolved':False,'verified_patch_bytes':0,'exit_code':999},
+ 'patch_apply_exit0':{'resolved':False,'result_error':'Failed to apply agent patch: x'},
+ 'no_patch_verify_error':{'resolved':False,'verified_patch_bytes':0,'exit_code':None,'result_error':'Required test node did not pass: t::x'},
+ 'junit_wrong_code':{'resolved':False,'exit_code':124,'result_error':'Required test node did not pass: t::x'},
+ 'pass_result_agent_error':{'result_error':'Agent exceeded tool call budget'},
+ 'conflicting_agent_end':{'resolved':False,'exit_code':1,'result_error':'Agent exceeded tool call budget','agent_error_text':'Agent exceeded turns budget'},
+ 'conflicting_verify_messages':{'resolved':False,'exit_code':1,'result_error':'Failed to apply agent patch: x','agent_error_text':'Required test node did not pass: t::x'},
+ 'missing_setup_rc':{'setup_calls':[{'step':'tool_install','duration_s':0,'stdout':'','stderr':''}]},
+ 'missing_setup_stdout':{'setup_calls':[{'step':'tool_install','rc':0}]},
+ 'blank_setup_step':{'setup_calls':[{'step':' ','rc':0}]},
+ 'unknown_setup_step':{'setup_calls':[{'step':'made_up','rc':0}]},
+ 'pip_check_negative':{'setup_calls':[{'step':'pip_check','rc':-1,'stderr':'RuntimeError'}]},
+ 'pip_check_no_rc':{'setup_calls':[{'step':'pip_check','rc':None,'duration_s':1,'stderr':'RuntimeError'}]},
+ 'noneditable_sub_fail':{'setup_calls':[{'step':'setup.py','rc':0,'subprocesses':[{'argv':['pip','install','pkg'],'rc':1}]}]},
+ 'subprocess_elsewhere':{'setup_calls':[{'step':'tool_install','rc':0,'subprocesses':[{'argv':['pip','install','-e','.'],'rc':1}]}]},
+ 'sub_missing_rc':{'setup_calls':[{'step':'setup.py','rc':0,'subprocesses':[{'argv':['pip','install','-e','.','--no-index'],'stderr':c.RECORD}]}]},
+ 'sub_empty_argv':{'setup_calls':[{'step':'setup.py','rc':0,'subprocesses':[{'argv':[],'rc':1}]}]},
+ 'bad_diag_command':{'setup_failed':True,'setup_calls':[{'step':'setup.py','rc':0,'subprocesses':[{'argv':['not-pip','-e','--no-index'],'rc':1,'stderr':c.RECORD}]}]},
+ 'diag_swallows_failure':{'setup_failed':True,'setup_calls':[{'step':'workspace_editable','rc':1,'stderr':c.RECORD},{'step':'pip_check','rc':-1,'stderr':'RuntimeError'}]},
+ 'diag_without_fallback':{'setup_failed':True,'setup_calls':[{'step':'setup.py','rc':0,'subprocesses':[{'argv':['pip','install','-e','.','--no-index'],'rc':1,'stderr':c.RECORD}]}]},
+ 'bad_sub_duration':{'setup_calls':[{'step':'setup.py','rc':0,'subprocesses':[{'argv':['pip'],'rc':0,'duration_s':'bad'}]}]},
+}
+for name,mods in cases.items():
+ row=base|mods
+ try: print(name,json.dumps(c.classify(row)))
+ except Exception as e: print(name,type(e).__name__,str(e))
+for step in ['tool_deps','setup.py','workspace_editable','pip_check']:
+ row=base|dict(setup_calls=[dict(step=step,rc=None,duration_s=0,stdout='',stderr='')])
+ print('not_run_'+step,json.dumps(c.classify(row)))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+artifact_changed_keys ['classifier_sha256']
+classifier_sha 21c3d46e9b44853779ac710a6aa7eb6c6d29ccb24df854836e078d5d455015a0
+bad_id {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+bad_repo {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+no_patch_impossible_code {"h": null, "known_diag": false, "agent": "NO_PATCH", "agent_end": null, "resolved": false, "reasons": []}
+patch_apply_exit0 {"h": null, "known_diag": false, "agent": "PATCH_APPLY", "agent_end": null, "resolved": false, "reasons": []}
+no_patch_verify_error {"h": null, "known_diag": false, "agent": "NO_PATCH", "agent_end": null, "resolved": false, "reasons": []}
+junit_wrong_code {"h": null, "known_diag": false, "agent": "VERIFY_TIMEOUT_124", "agent_end": null, "resolved": false, "reasons": []}
+pass_result_agent_error {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+conflicting_agent_end {"h": null, "known_diag": false, "agent": "PYTEST_1", "agent_end": "turns", "resolved": false, "reasons": []}
+conflicting_verify_messages {"h": null, "known_diag": false, "agent": "PATCH_APPLY", "agent_end": null, "resolved": false, "reasons": []}
+missing_setup_rc {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+missing_setup_stdout {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+blank_setup_step {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+unknown_setup_step {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+pip_check_negative {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+pip_check_no_rc {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+noneditable_sub_fail {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+subprocess_elsewhere {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+sub_missing_rc {"h": null, "known_diag": true, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": ["known_diag:record_chain"]}
+sub_empty_argv {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+bad_diag_command {"h": null, "known_diag": true, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": ["known_diag:record_chain"]}
+diag_swallows_failure {"h": null, "known_diag": true, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": ["known_diag:record_chain"]}
+diag_without_fallback {"h": null, "known_diag": true, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": ["known_diag:record_chain"]}
+bad_sub_duration {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+not_run_tool_deps {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+not_run_setup.py {"h": "H-SETUP", "known_diag": false, "agent": null, "agent_end": null, "resolved": true, "reasons": ["s3:setup_py_failed"]}
+not_run_workspace_editable {"h": "H-SETUP", "known_diag": false, "agent": null, "agent_end": null, "resolved": true, "reasons": ["s4:workspace_editable_failed"]}
+not_run_pip_check {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+
+exec
+/bin/bash -lc "rg -n 'subprocess.run|pip.check|install.*editable|--no-index|check=' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py | head -80; sed -n '455,505p' eval/kaggle/agent_timing.py; rg --files /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma | rg '(setup.*\\.py"'$|Dockerfile)'"'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+289:            subprocess.run(
+291:                check=True,
+506:def install_editable_package(docker: BaseSandboxManager, container_id: str) -> None:
+516:        'pip install --no-index --find-links=/wheels --no-build-isolation --no-deps -e /workspace 2>/dev/null || true',
+766:        r = subprocess.run(c, cwd=workspace, capture_output=True, text=True)
+814:            r_dry = subprocess.run(dry_cmd, cwd=workspace, capture_output=True, text=True)
+816:                r_apply = subprocess.run(c, cwd=workspace, capture_output=True, text=True)
+832:            r_dry = subprocess.run(dry_cmd, cwd=workspace, capture_output=True, text=True)
+834:                r_apply = subprocess.run(c, cwd=workspace, capture_output=True, text=True)
+958:    install_editable_package(docker, container_id)
+            interpreter_version=sys.version))
+        log.write_text(json.dumps(calls))
+origin = time.perf_counter()
+subprocess.run = run
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+'''
+
+
+def patch_subprocess_deps(data_dir, state=None):
+    """Install scorer tools in each venv, using that interpreter's ABI, entirely offline."""
+    import swegemma.harness.container_setup as cs
+    from packaging.utils import parse_wheel_filename
+    orig = getattr(cs.install_test_dependencies, '_timing_original', cs.install_test_dependencies)
+    wheels = data_dir / 'wheels'
+    if not wheels.is_dir():
+        wheels = WHEELHOUSE
+    setup = data_dir / 'sandbox' / 'setup.py'
+    if not setup.exists():
+        setup = next(iter(data_dir.rglob('setup.py')), setup)
+
+    def install(docker, container_id, repo='', *, fast_path=True, config=None):
+        if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
+            return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+        current = state.get() if state is not None else dict(
+            started=time.perf_counter(), setup_calls=[], setup_failed=False)
+        fixed = os.environ.get('SETUP_FIX', '1') == '1'
+        current['setup_fix'] = int(fixed)
+        venv = docker.sandboxes[container_id]['venv']
+        sp = next(iter(sorted(venv.glob('lib/python3*/site-packages'))))
+        if not fixed:
+            # Preserve the original injector's wheel selection and base tar exactly.
+            def original_base():
+                base, large, _modules, _requirements = cs._inspect_wheels_dir(wheels)
+                if large:
+                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+                current['wheel_tags_chosen'] = [p.name for p in base]
+                inject_base(cs, base, sp, current)
+            setup_step(current, 'base_tar_extraction', original_base)
+            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+        else:
+            # A subprocess venv otherwise exposes every kernel package via _host_env.pth.
+            # Only the scorer's image tools and public base wheels belong here.
+            def isolate_venv():
+                for pth in sp.glob('_host_env.pth'):
+                    pth.unlink()
+                cfg = venv / 'pyvenv.cfg'
+                if cfg.exists():
+                    cfg.write_text(cfg.read_text().replace(
+                        'include-system-site-packages = true', 'include-system-site-packages = false'))
+            setup_step(current, 'venv_fidelity', isolate_venv)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+import io,json,sys,contextlib
+from unittest.mock import patch
+from eval.kaggle import classify_rows as c
+b=dict(instance_id='t',repo='x/y',result_error=None,agent_error_text=None,verified_patch_bytes=10,setup_calls=[],exit_code=0,resolved=True,error=None,setup_failed=False)
+cases={
+'nonobject': [b, ['instance_id']],
+'missing_id': [b, {k:v for k,v in b.items() if k"'!='"'instance_id'}],
+'invalid_id': [b|{'instance_id':None}],
+'kernel_void':[{'_schema':'kaggle_timing_v1','task_ids':['t'],'vllm_startup_seconds':None,'mcp_import_ok':False},b,{'_stopped':'Kernel exception (RuntimeError)'}],
+'missing_tasks':[{'_schema':'kaggle_timing_v1','task_ids':['t','missing'],'vllm_startup_seconds':1},b,{'_done':{'n':2}}],
+}
+for name,rows in cases.items():
+ payload=('\\n'.join(map(json.dumps,rows))+'\\n').encode()
+ with patch.object(sys,'argv',['classify_rows.py','/mock/timing.jsonl']),patch.object(c.Path,'read_bytes',lambda p:payload if str(p)=='/mock/timing.jsonl' else b'classifier'),contextlib.redirect_stdout(io.StringIO()) as out:
+  c.main()
+ result=json.loads(out.getvalue())
+ print(name,'n_rows',result['n_rows'],'counts',result['counts'])
+# Parse duplicates at the JSON boundary, leaving the ordinary classifier unchanged.
+line=json.dumps(b)[:-1]+',\"result_error\":\"Evaluation error: hidden\",\"result_error\":null}'
+print('duplicate_json_key',c.classify(json.loads(line)))
+# Missing optional keys.
+for k in ['error','setup_failed','missing_tool_deps']:
+ row=b.copy();row.pop(k,None)
+ print('missing_'+k,c.classify(row))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+nonobject n_rows 1 counts {'h': {}, 'agent': {'PASS': 1}, 'known_diag': 0}
+missing_id n_rows 1 counts {'h': {}, 'agent': {'PASS': 1}, 'known_diag': 0}
+invalid_id n_rows 1 counts {'h': {}, 'agent': {'PASS': 1}, 'known_diag': 0}
+kernel_void n_rows 1 counts {'h': {}, 'agent': {'PASS': 1}, 'known_diag': 0}
+missing_tasks n_rows 1 counts {'h': {}, 'agent': {'PASS': 1}, 'known_diag': 0}
+duplicate_json_key {'h': None, 'known_diag': False, 'agent': 'PASS', 'agent_end': None, 'resolved': True, 'reasons': []}
+missing_error {'h': None, 'known_diag': False, 'agent': 'PASS', 'agent_end': None, 'resolved': True, 'reasons': []}
+missing_setup_failed {'h': None, 'known_diag': False, 'agent': 'PASS', 'agent_end': None, 'resolved': True, 'reasons': []}
+missing_missing_tool_deps {'h': None, 'known_diag': False, 'agent': 'PASS', 'agent_end': None, 'resolved': True, 'reasons': []}
+
+codex
+I found more cases where contradictory evidence reaches an agent outcome: patch-apply failure with exit 0, JUnit failure with a nonzero pytest exit, and stock success with a result error. The CLI also silently skips non-object rows and rows missing `instance_id`. The classifier tests that can run read-only pass: 218 passed, 2 deselected.
+exec
+/bin/bash -lc "rg -n 'def observe_patch_strip|effective_patch|verified_patch|raw_patch' eval/kaggle/agent_timing.py; sed -n '700,750p' eval/kaggle/agent_timing.py; sed -n '740,855p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/container_setup.py; git show --format=fuller --no-patch 9d0a8b4" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+703:def observe_patch_strip(original, state):
+710:                current['raw_patch'] = patch
+1081:            patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch) or ''
+1098:                verified_patch_bytes=(len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+1118:                    ('verified_patch_bytes', lambda: len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+            stat['max'] = round(max(stat['max'], dt), 3)
+    return out
+
+def observe_patch_strip(original, state):
+    """Retain the agent's diff before the harness removes protected edits."""
+    def strip(patch, *pos, **kw):
+        current = state.get(None)
+        filtered = original(patch, *pos, **kw)
+        if current is not None and current.get('agent_active'):
+            if patch != current.get('filtered_patch'):
+                current['raw_patch'] = patch
+            current['filtered_patch'] = filtered
+        return filtered
+    return strip
+
+def test_run_stats(trace, agent_seconds):
+    pending, n, total = {}, 0, 0.0
+    for e in trace.entries if trace else []:
+        if e.event_type == 'tool_call':
+            command = (e.tool_args or {}).get('command', '')
+            is_test = e.tool_name == 'run_command' and any(s in command for s in ('pytest', 'unittest', 'tox', 'nox', 'run_tests'))
+            n += int(is_test)
+            pending.setdefault(e.tool_name, []).append((e.timestamp, is_test))
+        elif e.event_type == 'tool_response' and pending.get(e.tool_name):
+            start, is_test = pending[e.tool_name].pop(0)
+            if is_test:
+                total += max(0.0, e.timestamp - start)
+    return dict(n=n, total_seconds=total, share_of_agent_seconds=total / agent_seconds if agent_seconds else None)
+
+def should_stop(elapsed, cap_minutes, verification_timeout, observed_max, budget, setup_reserve=0):
+    return elapsed + 1.5 * max(cap_minutes * 60 + verification_timeout + setup_reserve, observed_max) > budget
+
+
+def setup_reserve_seconds(skip_verification):
+    return SETUP_PASS_SECONDS * (1 if skip_verification else 3)
+
+
+class AsyncioTimingProxy:
+    """Observe only agent_runner's timeout context, without changing asyncio itself."""
+    def __init__(self, original, state):
+        self._original, self._state = original, state
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
+
+    def timeout(self, *args, **kwargs):
+        cm = self._original.timeout(*args, **kwargs)
+        state = self._state
+        delay = args[0] if args else kwargs.get('delay')
+
+        class ObservedTimeout:
+                else:
+                    raw_after = content[6:]
+                    p_sub, tab, timestamp = raw_after.partition("\t")
+                    rest = f"\t{timestamp}" if tab else ""
+                    quoted = False
+                r_sub = os.path.relpath(os.path.realpath(workspace / p_sub), workspace)
+                check_safe_rel_path(r_sub)
+                if r_sub != p_sub:
+                    mod = True
+                q_sub = quote_path("b", r_sub) if (quoted or " " in r_sub) else f"b/{r_sub}"
+                lines.append(f"+++ {q_sub}{rest}{nl}")
+                continue
+            except Exception:
+                pass
+
+        lines.append(line)
+
+    if not mod:
+        return p
+    norm_p = p.with_suffix(".norm.patch")
+    norm_p.write_text("".join(lines))
+    return norm_p
+
+errors = []
+def try_cmd(c: list[str]) -> bool:
+    try:
+        r = subprocess.run(c, cwd=workspace, capture_output=True, text=True)
+        if r.returncode == 0:
+            sys.exit(0)
+        errors.append(f"{' '.join(c)} failed ({r.returncode}):\n{r.stderr}\n{r.stdout}")
+    except FileNotFoundError as fnf:
+        errors.append(f"{c[0]} not found: {fnf}")
+    return False
+
+# Pass 1: Raw patch with -p1 strategies ONLY
+for c in [
+    ["git", "apply", str(p_path)],
+    ["git", "apply", "-3", str(p_path)],
+    ["git", "apply", "--ignore-space-change", "--ignore-whitespace", str(p_path)],
+    ["git", "apply", "--recount", str(p_path)],
+]:
+    try_cmd(c)
+
+# Pass 2: Normalized patch with -p1 strategies ONLY
+norm_p = normalize_patch(p_path)
+if norm_p != p_path:
+    for c in [
+        ["git", "apply", str(norm_p)],
+        ["git", "apply", "-3", str(norm_p)],
+        ["git", "apply", "--ignore-space-change", "--ignore-whitespace", str(norm_p)],
+        ["git", "apply", "--recount", str(norm_p)],
+    ]:
+        try_cmd(c)
+
+# Pass 3: -p0 strategies on raw and normalized patches ONLY if both -p1 passes fail (for prefixless patches)
+p0_targets = [p_path, norm_p] if norm_p != p_path else [p_path]
+for target in p0_targets:
+    for c in [
+        ["git", "apply", "-p0", str(target)],
+        ["git", "apply", "-p0", "-3", str(target)],
+        ["git", "apply", "-p0", "--ignore-space-change", "--ignore-whitespace", str(target)],
+        ["git", "apply", "-p0", "--recount", str(target)],
+    ]:
+        try_cmd(c)
+
+# Pass 4: Non-interactive patch fallback with --dry-run validation (try -p1 first, then -p0)
+patch_targets = [norm_p, p_path] if norm_p != p_path else [p_path]
+for target in patch_targets:
+    for c in [
+        ["patch", "-p1", "--batch", "--forward", "-i", str(target)],
+        ["patch", "-p1", "-l", "--batch", "--forward", "-i", str(target)],
+    ]:
+        dry_cmd = c + ["--dry-run"]
+        try:
+            r_dry = subprocess.run(dry_cmd, cwd=workspace, capture_output=True, text=True)
+            if r_dry.returncode == 0:
+                r_apply = subprocess.run(c, cwd=workspace, capture_output=True, text=True)
+                if r_apply.returncode == 0:
+                    sys.exit(0)
+                errors.append(f"{' '.join(c)} apply failed ({r_apply.returncode}):\n{r_apply.stderr}\n{r_apply.stdout}")
+            else:
+                errors.append(f"{' '.join(dry_cmd)} dry-run failed ({r_dry.returncode}):\n{r_dry.stderr}\n{r_dry.stdout}")
+        except FileNotFoundError as fnf:
+            errors.append(f"{c[0]} not found: {fnf}")
+
+for target in patch_targets:
+    for c in [
+        ["patch", "-p0", "--batch", "--forward", "-i", str(target)],
+        ["patch", "-p0", "-l", "--batch", "--forward", "-i", str(target)],
+    ]:
+        dry_cmd = c + ["--dry-run"]
+        try:
+            r_dry = subprocess.run(dry_cmd, cwd=workspace, capture_output=True, text=True)
+            if r_dry.returncode == 0:
+                r_apply = subprocess.run(c, cwd=workspace, capture_output=True, text=True)
+                if r_apply.returncode == 0:
+                    sys.exit(0)
+                errors.append(f"{' '.join(c)} apply failed ({r_apply.returncode}):\n{r_apply.stderr}\n{r_apply.stdout}")
+            else:
+                errors.append(f"{' '.join(dry_cmd)} dry-run failed ({r_dry.returncode}):\n{r_dry.stderr}\n{r_dry.stdout}")
+        except FileNotFoundError as fnf:
+            errors.append(f"{c[0]} not found: {fnf}")
+
+sys.stderr.write("\n".join(errors) + "\n")
+sys.exit(1)
+'''
+    cmd = (
+        f'python3 -S -c {shlex.quote(script)} {shlex.quote(workspace_dir)} '
+        f'{shlex.quote(patch_path_in_container)}'
+    )
+    try:
+        res = docker.exec(container_id, cmd)
+        exit_code = res.exit_code if res.exit_code is not None else -1
+        return exit_code, res.stdout, res.stderr
+    finally:
+        if patch_path_in_container.startswith('/tmp/'):
+commit 9d0a8b4f70e2e8cc1d714e9b2ba46a1237f72880
+Author:     Aniket <agrawalaniket02@gmail.com>
+AuthorDate: Fri Nov 6 07:12:57 2026 +0000
+Commit:     Aniket <agrawalaniket02@gmail.com>
+CommitDate: Fri Nov 6 07:12:57 2026 +0000
+
+    plan 007 rev 5 candidate: fix codex r4 BLOCKING 1-3 (verify-failure+resolved, message/setup type validation) [not frozen]
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_014u5C9X4dmNqhoiSKe7TVpQ
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+import itertools,json
+from eval.kaggle import classify_rows as c
+base=dict(instance_id='t',repo='x/y',result_error=None,agent_error_text=None,verified_patch_bytes=10,setup_calls=[],exit_code=0,resolved=False,error=None,setup_failed=False,missing_tool_deps=[])
+# Type partitions: missing and every JSON scalar/container family.
+values=[None,False,True,0,1,-1,0.0,1.5,'', 'x', [],{},[1],{'x':1}]
+checks={
+'result_error':lambda x:x is None or isinstance(x,str),
+'agent_error_text':lambda x:x is None or isinstance(x,str),
+'verified_patch_bytes':lambda x:type(x)is int and x>=0,
+'exit_code':lambda x:x is None or type(x)is int,
+'resolved':lambda x:type(x)is bool,
+'error':lambda x:x is None or x=='Harness task failure',
+'setup_failed':lambda x:x is None or type(x)is bool,
+'missing_tool_deps':lambda x:x is None or (isinstance(x,list) and all(isinstance(d,str) for d in x)),
+'setup_calls':c.setup_shape_ok,
+}
+misses=[]
+for field,valid in checks.items():
+ for value in values:
+  if valid(value): continue
+  try:r=c.classify(base|{field:value})
+  except Exception as e:misses.append((field,repr(value),type(e).__name__));continue
+  if r['h'] is None:misses.append((field,repr(value),r['agent']))
+print('type_guard_misses',misses)
+# Actual supported agent end states, both fields, generic harness failure, and legitimate code families.
+ends=['Agent exceeded session timeout (3 min)','Agent exceeded turns budget (50 turns)','Agent exceeded maximum allowed LLM turns','Agent exceeded tool call budget (40 calls)','Agent completed execution without calling submit_patch.']
+falseh=[];n=0
+for end,field,code,pbytes in itertools.product(ends,['result_error','agent_error_text'],[0,1,2,3,4,5,124],[1,10]):
+ n+=1;row=base|{field:end,'error':'Harness task failure','exit_code':code,'verified_patch_bytes':pbytes}
+ r=c.classify(row)
+ if r['h']:falseh.append((field,code,pbytes,r))
+for code in [None,-1]:
+ for pbytes,msg in [(0,None),(10,'Failed to apply agent patch: x')]:
+  n+=1;r=c.classify(base|{'verified_patch_bytes':pbytes,'exit_code':code,'result_error':msg,'error':'Harness task failure' if msg else None})
+  if r['h']:falseh.append((pbytes,msg,code,r))
+print('legitimate_family_cases',n,'false_h',falseh)
+# Concrete setup holes and false H.
+for name,updates in {
+'split_marker':{'setup_calls':[{'step':'workspace_editable','rc':1,'stdout':'uninstall-no-','stderr':'record-file'}]},
+'null_diagnostic':{'setup_calls':[{'step':'workspace_editable','rc':None,'duration_s':0,'stderr':c.RECORD}]},
+'unexplained_flag_masked':{'setup_failed':True,'setup_calls':[{'step':'workspace_editable','rc':1,'stderr':c.RECORD},{'step':'setup.py','rc':0}]},
+'notrun_editable_sub':{'setup_calls':[{'step':'setup.py','rc':0,'subprocesses':[{'argv':['pip','install','-e','.'],'rc':None,'stdout':'','stderr':''}]}]},
+'huge_duration':{'setup_calls':[{'step':'venv','rc':0,'duration_s':10**400}]},
+}.items():
+ try: print(name,c.classify(base|updates))
+ except Exception as e:print(name,type(e).__name__,str(e))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+type_guard_misses []
+legitimate_family_cases 144 false_h []
+split_marker {'h': None, 'known_diag': True, 'agent': 'EXIT0_UNRESOLVED', 'agent_end': None, 'resolved': False, 'reasons': ['known_diag:record_chain']}
+null_diagnostic {'h': None, 'known_diag': True, 'agent': 'EXIT0_UNRESOLVED', 'agent_end': None, 'resolved': False, 'reasons': ['known_diag:record_chain']}
+unexplained_flag_masked {'h': None, 'known_diag': True, 'agent': 'EXIT0_UNRESOLVED', 'agent_end': None, 'resolved': False, 'reasons': ['known_diag:record_chain']}
+notrun_editable_sub {'h': 'H-SETUP', 'known_diag': False, 'agent': None, 'agent_end': None, 'resolved': False, 'reasons': ['s5:unexpected_editable_failure']}
+huge_duration OverflowError int too large to convert to float
+
+exec
+/bin/bash -lc "rg -n 'setup_observer|SETUP_OBSERVER|workspace_editable|rc=None|not.run|subprocesses' eval/tests | head -100; nl -ba eval/kaggle/classify_rows.py | sed -n '25,115p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+eval/tests/test_classify_rows.py:29:                subprocesses=[editable(), editable(offline=False, record=False)])
+eval/tests/test_classify_rows.py:45:@pytest.mark.parametrize('subprocesses', [
+eval/tests/test_classify_rows.py:49:def test_unexpected_editable_failure(subprocesses):
+eval/tests/test_classify_rows.py:50:    result = classifier.classify(row(setup_calls=[dict(step='setup.py', rc=0, subprocesses=subprocesses)]))
+eval/tests/test_classify_rows.py:57:    calls = [chain(), dict(step='setup.py', rc=0, subprocesses=[editable(record=False)])]
+eval/tests/test_classify_rows.py:68:    (dict(setup_calls=[dict(step='workspace_editable', rc=1)]), 's4:workspace_editable_failed'),
+eval/tests/test_classify_rows.py:78:def test_not_run_step(duration, stderr, expected):
+eval/tests/test_classify_rows.py:79:    result = classifier.classify(row(setup_calls=[dict(step='tool_deps', rc=None, duration_s=duration, stderr=stderr)]))
+eval/tests/test_classify_rows.py:85:        dict(step='workspace_editable', rc=1, stdout=classifier.RECORD),
+eval/tests/test_classify_rows.py:332:    [dict(step='setup.py', rc=0, subprocesses={})], [dict(step='setup.py', rc=0, subprocesses=[{}])],
+eval/tests/test_classify_rows.py:333:    [dict(step='setup.py', rc=0, subprocesses=[dict(argv='pip install -e .', rc=1)])],
+eval/tests/test_classify_rows.py:334:    [dict(step='setup.py', rc=0, subprocesses=[dict(argv=['pip', 1], rc=1)])],
+eval/tests/test_classify_rows.py:335:    [dict(step='setup.py', rc=0, subprocesses=[dict(argv=['pip'], rc=False)])],
+eval/tests/test_classify_rows.py:336:    [dict(step='setup.py', rc=0, subprocesses=[dict(argv=['pip'], rc=0, stderr=0)])],
+eval/tests/test_classify_rows.py:345:    [], [dict(step='pip_check', duration_s=0.0, rc=None, stdout='', stderr='', retrying_lines=0)],
+eval/tests/test_classify_rows.py:346:    [dict(step='setup.py', duration_s=1.5, rc=0, stdout='', stderr='', subprocesses=[])],
+eval/tests/test_classify_rows.py:347:    [dict(step='workspace_editable', duration_s=1, rc=0, stdout=None, stderr=None)],
+eval/tests/test_agent_timing.py:253:        'workspace_editable', 'base_tar_extraction', 'setup.py']
+eval/tests/test_agent_timing.py:256:    assert commands[-2].startswith('python3 /tmp/setup_observer.py /tmp/setup.py')
+eval/tests/test_agent_timing.py:257:    for step in ('workspace_editable', 'base_tar_extraction', 'setup.py'):
+eval/tests/test_agent_timing.py:502:        expected = dict(cmd='a' * 40, duration_s=4, rc=None if error else 9)
+eval/tests/test_agent_timing.py:575:        assert not skip, 'real verification must not run when skipped'
+eval/tests/test_agent_timing.py:696:                       rc=0, retrying_lines=2, subprocesses=[dict(
+eval/tests/test_agent_timing.py:901:    records[2]['setup_calls'] = [dict(step='setup.py', duration_s=1, rc=0, retrying_lines=5, subprocesses=[dict(
+eval/tests/test_agent_timing.py:1079:    ([dict(cmd='git diff', duration_s=.1, rc=0), dict(cmd='git add', duration_s=None, rc=None, exception='TimeoutError')], False),
+eval/tests/test_agent_timing.py:1080:    ([dict(cmd='git diff', duration_s=.1, rc=None)], False),      # unknown result fails closed
+eval/tests/test_setup_check.py:28:    wrapper = tmp_path / 'setup_observer.py'
+eval/tests/test_setup_check.py:29:    wrapper.write_text(timing.SETUP_OBSERVER)
+eval/tests/test_setup_check.py:37:    call, = json.loads((tmp_path / 'setup_subprocesses.json').read_text())
+eval/tests/test_setup_check.py:39:    full, = [json.loads(line) for line in (tmp_path / 'setup_subprocesses_full.jsonl').read_text().splitlines()]
+eval/tests/test_setup_check.py:82:            (scratch / 'setup_subprocesses.json').write_text(json.dumps([
+eval/tests/test_setup_check.py:92:    assert commands[1] == 'python3 /tmp/setup_observer.py /tmp/setup.py --fast-path example/repo'
+eval/tests/test_setup_check.py:97:    assert current['setup_calls'][-1]['subprocesses'] == current['setup_subprocesses']
+eval/tests/test_setup_check.py:135:               setup_failed=False, setup_subprocesses=[dict(argv=['python', '-m', 'pip', '-e'],
+eval/tests/test_kernel_probes.py:127:V5_RICH_3067 = {"instance_id": "rich_3067", "repo": "Textualize/rich", "phase1_wall_seconds": 303.241871703, "image_emulation_seconds": 11.522305, "agent_clock_seconds": 84.00572919699994, "finalization_seconds": 0.15654274799999257, "total": 303.2490266929999, "setup_calls": [{"step": "venv", "duration_s": 0.387685}, {"step": "venv_fidelity", "duration_s": 0.000311}, {"step": "pip_bootstrap", "duration_s": 0.542832}, {"step": "interpreter_probe", "duration_s": 0.104123}, {"step": "tool_sources", "duration_s": 2e-05}, {"step": "pytest_timeout_source", "duration_s": 7e-06}, {"step": "tool_install", "duration_s": 2.832135}, {"step": "tool_deps", "duration_s": 7.725879}, {"step": "pip_check", "duration_s": 0.316998}, {"step": "workspace_editable", "duration_s": 1.233287}, {"step": "base_tar_extraction", "duration_s": 0.515932}, {"step": "setup.py", "duration_s": 202.194855}]}  # copied from results/kaggle_timing_e4b_v001.json (main) tasks[rich_3067]
+eval/tests/test_kernel_probes.py:211:    rows[1]['setup_calls'] += [dict(step='workspace_editable', duration_s=1.2),
+eval/tests/test_kernel_probes.py:213:                               dict(step='workspace_editable', duration_s=.1)]
+eval/tests/test_kernel_probes.py:219:    assert out['gate']['b_note'] == ('conservative: stock-path residual still includes workspace_editable and '
+    25	REQUIRED = ('result_error', 'agent_error_text', 'verified_patch_bytes', 'setup_calls', 'exit_code', 'resolved')
+    26	
+    27	
+    28	def agent_end(message):
+    29	    text = message.strip() if isinstance(message, str) else ''
+    30	    return next((name for name, pattern in AGENT_END if pattern.match(text)), None)
+    31	
+    32	
+    33	def output_text(entry):
+    34	    return (entry.get('stdout') or '') + (entry.get('stderr') or '')
+    35	
+    36	
+    37	def opt_str(value):
+    38	    return value is None or isinstance(value, str)
+    39	
+    40	
+    41	def opt_rc(value):
+    42	    return value is None or type(value) is int
+    43	
+    44	
+    45	def setup_shape_ok(calls):
+    46	    """setup_calls must be a list of step dicts as written by agent_timing.setup_step (empty list allowed)."""
+    47	    if not isinstance(calls, list):
+    48	        return False
+    49	    for entry in calls:
+    50	        if not isinstance(entry, dict) or not isinstance(entry.get('step'), str) or not entry['step']:
+    51	            return False
+    52	        if not (opt_rc(entry.get('rc')) and opt_str(entry.get('stdout')) and opt_str(entry.get('stderr'))):
+    53	            return False
+    54	        duration = entry.get('duration_s')
+    55	        if duration is not None and (type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0):
+    56	            return False
+    57	        subs = entry.get('subprocesses', [])
+    58	        if not isinstance(subs, list):
+    59	            return False
+    60	        for sub in subs:
+    61	            if not isinstance(sub, dict) or not isinstance(sub.get('argv'), list):
+    62	                return False
+    63	            if not all(isinstance(arg, str) for arg in sub['argv']):
+    64	                return False
+    65	            if not (opt_rc(sub.get('rc')) and opt_str(sub.get('stdout')) and opt_str(sub.get('stderr'))):
+    66	                return False
+    67	    return True
+    68	
+    69	
+    70	def classify(row: dict) -> dict:
+    71	    """Classify one task row, preserving the stock verdict even for H rows."""
+    72	    if not isinstance(row, dict):
+    73	        raise TypeError('Row is not a JSON object')
+    74	    if 'instance_id' not in row:
+    75	        raise ValueError('Meta row has no instance_id')
+    76	    row_reasons = []
+    77	    error = row.get('error')
+    78	    if any(key not in row for key in REQUIRED):
+    79	        row_reasons.append('r1:missing_schema')
+    80	    if isinstance(error, str) and any(marker in error for marker in WRAPPER_H):
+    81	        row_reasons.append('r2:wrapper_exception')
+    82	    elif error is not None and error != 'Harness task failure':
+    83	        row_reasons.append('r3:unexpected_error')
+    84	    messages = (row.get('result_error'), row.get('agent_error_text'))
+    85	    if not all(opt_str(m) for m in messages):
+    86	        row_reasons.append('r10:invalid_message_type')
+    87	    elif error is None or error == 'Harness task failure':
+    88	        for message in messages:
+    89	            if message and agent_end(message) is None and not message.startswith(VERIFY_AGENT_PREFIXES):
+    90	                row_reasons.append('r4:unrecognized_message' if error else 'r5:unrecognized_message')
+    91	                break
+    92	        if error and not any(isinstance(m, str) and m.strip() for m in messages):
+    93	            row_reasons.append('r6:unexplained_harness_failure')
+    94	    patch_evidence = row.get('verified_patch_bytes')
+    95	    if 'verified_patch_bytes' in row and not (type(patch_evidence) is int and patch_evidence >= 0):
+    96	        row_reasons.append('r7:invalid_patch_evidence')
+    97	    stock_resolved = row.get('resolved')
+    98	    if 'resolved' in row and type(stock_resolved) is not bool:
+    99	        row_reasons.append('r8:invalid_resolved')
+   100	    code = row.get('exit_code')
+   101	    if 'exit_code' in row and code is not None and type(code) is not int:
+   102	        row_reasons.append('r9:invalid_exit_code')
+   103	
+   104	    calls = row.get('setup_calls', [])
+   105	    if not setup_shape_ok(calls):
+   106	        row_reasons.append('r11:invalid_setup_evidence')
+   107	        calls = []
+   108	    deps = row.get('missing_tool_deps')
+   109	    if not (deps is None or (isinstance(deps, list) and all(isinstance(d, str) for d in deps))):
+   110	        row_reasons.append('r12:invalid_missing_tool_deps')
+   111	    if row.get('setup_failed') is not None and type(row.get('setup_failed')) is not bool:
+   112	        row_reasons.append('r13:invalid_setup_failed')
+   113	
+   114	    setup_reasons = []
+   115	    diagnostic = False
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+from eval.kaggle import classify_rows as c
+b=dict(instance_id='t',repo='x/y',result_error=None,agent_error_text=None,verified_patch_bytes=10,setup_calls=[],exit_code=0,resolved=True,error=None,setup_failed=False,missing_tool_deps=[])
+def sub(path,rc,offline=False,err=''):
+ return dict(argv=['python3','-m','pip','install','-e',path]+(['--no-index'] if offline else []),rc=rc,stdout='',stderr=err)
+rows={
+'unrelated_online':b|dict(setup_calls=[dict(step='setup.py',rc=0,subprocesses=[sub('/workspace',1,True,c.RECORD),sub('/workspace',0),sub('/other',1,err='No space left on device')])]),
+'null_with_stdout':b|dict(setup_calls=[dict(step='tool_install',rc=None,duration_s=0,stdout='Failed to install wheels',stderr='')]),
+'missing_step_rc':b|dict(setup_calls=[dict(step='tool_install',duration_s=0,stdout='',stderr='')]),
+'empty_argv':b|dict(setup_calls=[dict(step='setup.py',rc=0,subprocesses=[dict(argv=[],rc=1,stdout='',stderr='setup failed')])]),
+'fake_diag':b|dict(setup_failed=True,setup_calls=[dict(step='setup.py',rc=0,subprocesses=[dict(argv=['echo','-e','--no-index'],rc=1,stdout='',stderr=c.RECORD)])]),
+}
+for k,v in rows.items(): print(k,c.classify(v))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+unrelated_online {'h': None, 'known_diag': True, 'agent': 'PASS', 'agent_end': None, 'resolved': True, 'reasons': ['known_diag:record_chain']}
+null_with_stdout {'h': None, 'known_diag': False, 'agent': 'PASS', 'agent_end': None, 'resolved': True, 'reasons': []}
+missing_step_rc {'h': None, 'known_diag': False, 'agent': 'PASS', 'agent_end': None, 'resolved': True, 'reasons': []}
+empty_argv {'h': None, 'known_diag': False, 'agent': 'PASS', 'agent_end': None, 'resolved': True, 'reasons': []}
+fake_diag {'h': None, 'known_diag': True, 'agent': 'PASS', 'agent_end': None, 'resolved': True, 'reasons': ['known_diag:record_chain']}
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+import contextlib,io,json,sys
+from unittest.mock import patch
+from eval.kaggle import classify_rows as c
+b=dict(instance_id='t',repo='x/y',resolved=False,exit_code=0,verified_patch_bytes=10,result_error=None,agent_error_text=None,error=None,setup_calls=[],setup_failed=False,missing_tool_deps=[])
+def run(payload):
+ with patch.object(sys,'argv',['classify_rows.py','/mock/timing.jsonl']),patch.object(c.Path,'read_bytes',lambda p:payload if str(p)=='/mock/timing.jsonl' else b'classifier'),contextlib.redirect_stdout(io.StringIO()) as out:
+  c.main()
+ return json.loads(out.getvalue())
+try:run(('\\n'.join([json.dumps(b),json.dumps(b)])+'\\n').encode())
+except Exception as e:print('duplicate_id',type(e).__name__,str(e))
+# Final concrete cross-field reproductions.
+for name,updates in [
+ ('bad_id',dict(instance_id=None,resolved=True)),
+ ('missing_flags',{}),
+ ('zero_patch_bad_code',dict(verified_patch_bytes=0,exit_code=999)),
+ ('apply_no_patch',dict(verified_patch_bytes=0,result_error='Failed to apply agent patch: x',exit_code=-1)),
+ ('apply_exit0',dict(result_error='Failed to apply agent patch: x')),
+ ('junit_nonzero',dict(exit_code=1,result_error='Test failures/errors recorded in JUnit XML (failures=1, errors=0)')),
+ ('pass_result_error',dict(resolved=True,result_error='Agent exceeded turns budget (50 turns)')),
+ ('messages_disagree',dict(result_error='Agent exceeded turns budget (50 turns)',agent_error_text='Agent exceeded session timeout (3 min)',exit_code=1)),
+ ('unknown_step',dict(resolved=True,setup_calls=[dict(step=' ',rc=0)])),
+ ('absent_sub_rc',dict(resolved=True,setup_calls=[dict(step='setup.py',rc=0,subprocesses=[dict(argv=['pip','install','-e','/workspace','--no-index'],stderr=c.RECORD)])])),
+ ]:
+ row=b|updates
+ if name=='missing_flags':
+  row|={'resolved':True}
+  for key in ['error','setup_failed','missing_tool_deps']:row.pop(key)
+ print(name,json.dumps(row),json.dumps(c.classify(row)))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+duplicate_id ValueError Duplicate instance_id in one timing file: 't'
+bad_id {"instance_id": null, "repo": "x/y", "resolved": true, "exit_code": 0, "verified_patch_bytes": 10, "result_error": null, "agent_error_text": null, "error": null, "setup_calls": [], "setup_failed": false, "missing_tool_deps": []} {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+missing_flags {"instance_id": "t", "repo": "x/y", "resolved": true, "exit_code": 0, "verified_patch_bytes": 10, "result_error": null, "agent_error_text": null, "setup_calls": []} {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+zero_patch_bad_code {"instance_id": "t", "repo": "x/y", "resolved": false, "exit_code": 999, "verified_patch_bytes": 0, "result_error": null, "agent_error_text": null, "error": null, "setup_calls": [], "setup_failed": false, "missing_tool_deps": []} {"h": null, "known_diag": false, "agent": "NO_PATCH", "agent_end": null, "resolved": false, "reasons": []}
+apply_no_patch {"instance_id": "t", "repo": "x/y", "resolved": false, "exit_code": -1, "verified_patch_bytes": 0, "result_error": "Failed to apply agent patch: x", "agent_error_text": null, "error": null, "setup_calls": [], "setup_failed": false, "missing_tool_deps": []} {"h": null, "known_diag": false, "agent": "NO_PATCH", "agent_end": null, "resolved": false, "reasons": []}
+apply_exit0 {"instance_id": "t", "repo": "x/y", "resolved": false, "exit_code": 0, "verified_patch_bytes": 10, "result_error": "Failed to apply agent patch: x", "agent_error_text": null, "error": null, "setup_calls": [], "setup_failed": false, "missing_tool_deps": []} {"h": null, "known_diag": false, "agent": "PATCH_APPLY", "agent_end": null, "resolved": false, "reasons": []}
+junit_nonzero {"instance_id": "t", "repo": "x/y", "resolved": false, "exit_code": 1, "verified_patch_bytes": 10, "result_error": "Test failures/errors recorded in JUnit XML (failures=1, errors=0)", "agent_error_text": null, "error": null, "setup_calls": [], "setup_failed": false, "missing_tool_deps": []} {"h": null, "known_diag": false, "agent": "PYTEST_1", "agent_end": null, "resolved": false, "reasons": []}
+pass_result_error {"instance_id": "t", "repo": "x/y", "resolved": true, "exit_code": 0, "verified_patch_bytes": 10, "result_error": "Agent exceeded turns budget (50 turns)", "agent_error_text": null, "error": null, "setup_calls": [], "setup_failed": false, "missing_tool_deps": []} {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+messages_disagree {"instance_id": "t", "repo": "x/y", "resolved": false, "exit_code": 1, "verified_patch_bytes": 10, "result_error": "Agent exceeded turns budget (50 turns)", "agent_error_text": "Agent exceeded session timeout (3 min)", "error": null, "setup_calls": [], "setup_failed": false, "missing_tool_deps": []} {"h": null, "known_diag": false, "agent": "PYTEST_1", "agent_end": "timeout", "resolved": false, "reasons": []}
+unknown_step {"instance_id": "t", "repo": "x/y", "resolved": true, "exit_code": 0, "verified_patch_bytes": 10, "result_error": null, "agent_error_text": null, "error": null, "setup_calls": [{"step": " ", "rc": 0}], "setup_failed": false, "missing_tool_deps": []} {"h": null, "known_diag": false, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": []}
+absent_sub_rc {"instance_id": "t", "repo": "x/y", "resolved": true, "exit_code": 0, "verified_patch_bytes": 10, "result_error": null, "agent_error_text": null, "error": null, "setup_calls": [{"step": "setup.py", "rc": 0, "subprocesses": [{"argv": ["pip", "install", "-e", "/workspace", "--no-index"], "stderr": "uninstall-no-record-file"}]}], "setup_failed": false, "missing_tool_deps": []} {"h": null, "known_diag": true, "agent": "PASS", "agent_end": null, "resolved": true, "reasons": ["known_diag:record_chain"]}
+
+codex
+The audit also found gaps in setup evidence: unknown return codes can qualify as known diagnostics, concatenating stdout and stderr can create the diagnostic marker, and one offline failure can excuse a later unrelated editable failure. The requested not-run shapes produce false H-SETUP for `setup.py` and `workspace_editable`. The requested NO_PATCH/PATCH_APPLY null/−1 exits and recognized agent-end cases remain non-H.
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+import hashlib,json,subprocess,sys
+from pathlib import Path
+from eval.kaggle import classify_rows as c
+b=dict(instance_id='t',repo='x/y',resolved=True,exit_code=0,verified_patch_bytes=10,result_error=None,agent_error_text=None,error=None,setup_calls=[],setup_failed=False,missing_tool_deps=[])
+ends=['Agent exceeded session timeout (3 min)','Agent exceeded turns budget (50 turns)','Agent exceeded maximum allowed LLM turns','Agent exceeded tool call budget (40 calls)','Agent completed execution without calling submit_patch.']
+print('passing_fallback_agent_ends',[(e,c.classify(b|{'agent_error_text':e})['h']) for e in ends])
+for x in [True,False]:
+ row=b|{'resolved':x,'setup_calls':[{'step':'tool_deps','duration_s':0,'rc':None,'stdout':'','stderr':''}]}
+ print('legitimate_notrun_generic',x,c.classify(row)['h'])
+p=Path('runs/31b-v008-p5f-timing/timing.jsonl')
+if p.exists():
+ proc=subprocess.run([sys.executable,'eval/kaggle/classify_rows.py',str(p)],text=True,capture_output=True,check=True)
+ generated=json.loads(proc.stdout)
+ stored=json.loads(Path('results/plan007_classifier_armF_check.json').read_text())
+ print('armF_regeneration_equal',generated==stored,'counts',generated['counts'])
+else:print('armF_raw_unavailable')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+passing_fallback_agent_ends [('Agent exceeded session timeout (3 min)', None), ('Agent exceeded turns budget (50 turns)', None), ('Agent exceeded maximum allowed LLM turns', None), ('Agent exceeded tool call budget (40 calls)', None), ('Agent completed execution without calling submit_patch.', None)]
+legitimate_notrun_generic True None
+legitimate_notrun_generic False None
+armF_regeneration_equal True counts {'h': {'H-ROW': 8}, 'agent': {}, 'known_diag': 7}
+
+codex
+**BLOCKING — rev 5 closes the three prior reproductions, but is not ready to freeze.**
+
+The remaining paths below are grouped by invariant. Each reproducing row means `B | overrides`, using:
+
+```python
+B = dict(
+    instance_id="t", repo="x/y", resolved=True, exit_code=0,
+    verified_patch_bytes=10, result_error=None, agent_error_text=None,
+    error=None, setup_calls=[], setup_failed=False, missing_tool_deps=[],
+)
+P = "Failed to apply agent patch: x"
+J = "Required test node did not pass: t::x"
+D = "uninstall-no-record-file"
+T = "Agent exceeded turns budget (50 turns)"
+U = "Agent exceeded session timeout (3 min)"
+```
+
+All examples are synthetic.
+
+1. **Stock success still accepts a nonempty agent-end `result_error`.** `{"result_error": T}` → **PASS, no H**. Stock verification clears `TaskResult.error` on success; a descriptive end state in `agent_error_text` is legitimate, but an error in the successful result is contradictory. The new success guard checks only verification prefixes. [classify_rows.py:162](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:162), [agent_timing.py:1096](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:1096).
+
+2. **The two message fields can contradict each other.** `{"resolved": False, "exit_code": 1, "result_error": T, "agent_error_text": U}` → **PYTEST_1, no H**. Both messages pass independently, although stock propagation cannot turn the recorded timeout into a different turns-budget result error. Incompatible verification messages likewise pass independently. [classify_rows.py:87](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:87).
+
+3. **JUnit failure messages accept contradictory verification exits.** `{"resolved": False, "exit_code": 1, "result_error": J}` → **PYTEST_1, no H**. These checks run after pytest exit **0**; exits 1–5 or 124 contradict that evidence. Zero-patch rows also bypass the check with null/−1 exits. Preserve legitimate exit-0 unresolved rows. An existing test explicitly blesses a JUnit failure with exit 1. [classify_rows.py:152](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:152), [test_classify_rows.py:94](/home/ubuntu/work/gemma/eval/tests/test_classify_rows.py:94).
+
+4. **Patch-apply failure is not checked against successful application or absent patch bytes.** `{"resolved": False, "result_error": P}` → **PATCH_APPLY, no H**, despite exit 0. Separately, setting `verified_patch_bytes=0, exit_code=-1` produces **NO_PATCH**, despite a claimed attempted patch application. The stock apply-failure branch requires a nonempty patch and nonzero application exit. [classify_rows.py:151](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:151), [classify_rows.py:170](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:170).
+
+5. **Zero patch bytes exempt every integer exit from verification validation.** `{"resolved": False, "verified_patch_bytes": 0, "exit_code": 999}` → **NO_PATCH, no H**. Preserve legitimate null/−1 exits, but do not accept arbitrary exits solely because the patch is empty. [classify_rows.py:152](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:152).
+
+6. **Missing producer-level observations silently become null.** Delete `error`, `setup_failed`, and `missing_tool_deps` from `B` → **PASS, no H**. The producer emits these fields, but `REQUIRED` excludes them and `.get()` conflates missing evidence with explicit nullable values. [classify_rows.py:25](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:25), [classify_rows.py:108](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:108).
+
+7. **Setup-entry guards still accept missing observations.** `{"setup_calls": [{"step": "tool_install", "duration_s": 0, "stdout": "", "stderr": ""}]}` → **PASS, no H**, although `rc` is absent. Missing stdout/stderr/duration also pass; missing subprocess `rc` can even qualify as a known diagnostic. Require key presence separately from allowing explicit null/not-run values. [classify_rows.py:52](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:52), [classify_rows.py:65](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:65).
+
+8. **Semantic setup shapes remain unchecked.** `{"setup_calls": [{"step": "setup.py", "rc": 0, "subprocesses": [{"argv": [], "rc": 1, "stderr": "failed"}]}]}` → **PASS, no H**. Empty/blank command arguments, whitespace-only or unknown step names, and subprocess evidence attached to unrelated steps are also accepted. These cannot establish the claimed producer invocation merely by satisfying container types. [classify_rows.py:50](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:50), [classify_rows.py:61](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:61), [classify_rows.py:134](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:134).
+
+9. **Invalid task identity reaches counted outcomes.** `{"instance_id": None, "repo": []}` → **PASS, no H**, including through the CLI. Blank/non-string IDs and absent/non-string repositories are unvalidated, undermining task accounting and pairing. [classify_rows.py:74](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:74), [classify_rows.py:203](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:203).
+
+10. **The generic not-run predicate ignores stdout.** `{"setup_calls": [{"step": "tool_install", "rc": None, "duration_s": 0, "stdout": "Failed to install wheels", "stderr": ""}]}` → **PASS, no H**. An unknown return code plus recorded output is treated as an untouched entry because only duration and stderr are considered. [classify_rows.py:121](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:121).
+
+11. **Unknown return codes can earn the diagnostic exemption.** `{"setup_calls": [{"step": "workspace_editable", "rc": None, "duration_s": 1, "stderr": D}]}` → **PASS, `known_diag=True`**. The equivalent offline editable subprocess with null/missing `rc` also qualifies. A marker does not establish the return code of an executed attempt. [classify_rows.py:123](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:123), [classify_rows.py:134](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:134).
+
+12. **Concatenating streams can manufacture the diagnostic marker.** `{"setup_calls": [{"step": "workspace_editable", "rc": 1, "stdout": "uninstall-no-", "stderr": "record-file"}]}` → **PASS, `known_diag=True`**. Neither stream contains the marker. The same construction works for offline subprocess diagnostics. [classify_rows.py:33](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:33), [classify_rows.py:124](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:124).
+
+13. **Arbitrary commands can manufacture a known editable diagnostic.** `{"setup_failed": True, "setup_calls": [{"step": "setup.py", "rc": 0, "subprocesses": [{"argv": ["echo", "-e", "--no-index"], "rc": 1, "stderr": D}]}]}` → **PASS, `known_diag=True`**. Merely containing `-e` and `--no-index` is enough to suppress the unexplained setup-failure flag. [classify_rows.py:134](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:134), [classify_rows.py:142](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:142).
+
+14. **One offline diagnostic excuses later unrelated online failures.** This override produces **PASS, `known_diag=True`**:
+
+    ```python
+    {"setup_calls": [{"step": "setup.py", "rc": 0, "subprocesses": [
+        {"argv": ["pip", "install", "-e", "/workspace", "--no-index"],
+         "rc": 1, "stderr": D},
+        {"argv": ["pip", "install", "-e", "/workspace"], "rc": 0},
+        {"argv": ["pip", "install", "-e", "/other"],
+         "rc": 1, "stderr": "No space left on device"},
+    ]}]}
+    ```
+
+    `earlier_offline_record` is never consumed/reset, and fallback command/target identity is not checked. [classify_rows.py:131](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:131).
+
+15. **CLI filtering defeats the new direct-call rejection.** JSONL containing `B` followed by `["instance_id"]`, or a task-shaped object missing `instance_id`, succeeds with **one PASS and no H**. The malformed row disappears. `classify()` now raises correctly, but the CLI never calls it for these inputs. Only recognized metadata records should be skipped. [classify_rows.py:199](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:199).
+
+16. **Duplicate JSON keys silently overwrite adverse evidence.** Feed this single JSONL row:
+
+    ```python
+    json.dumps(B)[:-1] + ',"error":"Evaluation exception (X)","error":null}'
+    ```
+
+    It produces **PASS, no H** because `json.loads()` retains the final value. Duplicate-key rejection must happen during parsing; duplicate-ID rejection does not cover this. [classify_rows.py:199](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:199).
+
+17. **CLI journal accounting is unchecked.** Input records `{"_schema":"kaggle_timing_v1","task_ids":["t","u"]}`, `B`, `{"_done":{"n":2}}` produce **one PASS and no H**, despite a claimed second completed row being missing. Unexpected IDs and interior gaps are likewise unchecked. Legitimate completed prefixes must remain allowed; `_done.n` disagreement is distinct from an intentionally unrun suffix. [classify_rows.py:200](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:200).
+
+18. **CLI ignores explicit evidence that the kernel is void.** Input records `{"_schema":"kaggle_timing_v1","task_ids":["t"],"vllm_startup_seconds":null,"mcp_import_ok":false}`, `B` produce **PASS, no H**. The plan explicitly makes “vLLM not up” void the kernel, but the classifier drops that evidence. [classify_rows.py:200](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:200), [007.md:67](/home/ubuntu/work/gemma/eval/plans/007.md:67).
+
+19. **A valid JSON integer can crash setup validation.** `{"setup_calls": [{"step": "venv", "rc": 0, "duration_s": 10**400}]}` raises **OverflowError** in `math.isfinite()`. This is an additional availability defect, rather than a false verdict: malformed evidence aborts classification instead of yielding H-ROW. [classify_rows.py:55](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:55).
+
+**False H on the requested legitimate not-run shapes — also blocking**
+
+1. `B | {"resolved": False, "setup_calls": [{"step": "setup.py", "rc": None, "duration_s": 0, "stdout": "", "stderr": ""}]}` → **H-SETUP, `s3:setup_py_failed`**. The not-run exception is absent for this step. [classify_rows.py:129](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:129).
+
+2. The same row with `step="workspace_editable"` → **H-SETUP, `s4:workspace_editable_failed`**. [classify_rows.py:123](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:123).
+
+No false H reproduced for the requested NO_PATCH/PATCH_APPLY null/−1 exits, EXIT0_UNRESOLVED, VERIFY_TIMEOUT_124, recognized agent-end messages under `"Harness task failure"`, empty `setup_calls`, or generic not-run entries with null rc and empty output.
+
+**NON-BLOCKING**
+
+1. **Prior BLOCKING 1–3 reproductions are closed.** The verification-failure/success contradiction and malformed message/setup types now receive H; direct non-dict calls and duplicate CLI IDs are rejected. The regression tests cover those fixes. [test_classify_rows.py:294](/home/ubuntu/work/gemma/eval/tests/test_classify_rows.py:294).
+
+2. **Candidate and artifact checks pass.** The candidate hash matches `21c3d46e…015a0`; the result JSON differs from its predecessor only in `classifier_sha256`. Raw arm-F CLI regeneration matches the committed JSON exactly: **8 H-ROW, 7 known diagnostics**. The plan correctly labels rev 5 **not frozen**. [007.md:93](/home/ubuntu/work/gemma/eval/plans/007.md:93), [arm-F check](/home/ubuntu/work/gemma/results/plan007_classifier_armF_check.json:3).
+
+3. **Validation:** read-only-compatible classifier tests: **218 passed, 2 deselected**. The exact requested full-suite command failed before collection because pytest could not create a temporary file in the read-only sandbox. The 933-pass full-suite claim was therefore not independently verified here. No files were changed.
+
+**Questions:** None.
+tokens used
+81,939
