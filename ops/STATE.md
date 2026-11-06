@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 04:46Z (cycle 110, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-06 04:50Z (cycle 111, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
@@ -30,8 +30,8 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   (prompt sections, thinking_budget, cap, quoting line) + which are screened; (b) describe minimal alt, DON'T pack unless asked; (c) label
   quoting line UNSCREENED (covered only by later paired v004-vs-v002). Item 2: dec 059 last line superseded; Nov 7 31B submit write-up
   must note v002 LB = ONLY result carrying the FastAPI hint caveat. Item 3: repeat metric added to plan 007 (Addendum). Priority unchanged.
-## Running jobs (04:46Z): timing-31b-v007-wait-light (arm E kernel gemma-31b-timing v5, pushed 04:37:21Z; outputs -> runs/31b-v007-p5e-timing),
-  codex-review-v004-light, lb-e4b-v002-wait-light (e4b PENDING 04:11Z poll), memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z).
+## Running jobs (04:50Z): timing-31b-v007-wait-light (arm E kernel gemma-31b-timing v5, pushed 04:37:21Z; outputs -> runs/31b-v007-p5e-timing),
+  lb-e4b-v002-wait-light (e4b PENDING 04:41Z poll), memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z).
 - DEC 059 (on report 013): B approved. ARM E = 31b-v007-p5e (bundles/31b/v007, dist/31b-v007.zip 3a62f41fa5417ee5b129e845296c5a8e44d496f1d22501d5b3a4b29667be3c6f,
   v006 + cap 1.23 only; light review-20261106T043550 no BLOCKING). Addendum E rule: not V -> INVALID; V & E empty<=4/8 & E-empty-only(vs D)<=2
   -> USABLE; else CAP-BOUND (+1 line: dec 056 item 6 = binding blocker for 31B final at cap<=1.23). Descriptive: timeouts, tasks w/ first ok
@@ -41,6 +41,9 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   v007 + 1 quoting/no-repeat line (v002 + thinking 0 + plan-005 prompt + cap 1.23). DEVIATION from literal item 1 (full arm-B prompt kept)
   -> argue in arm-E report, offer minimal alt. No slot until v002 LB exists; v004 vs repeat-v002 needs paired evidence. Correction sent:
   arms B-E have no FastAPI line (dec 057 caveat = v000-v002 only).
+- codex-review v004 DONE (ops/codex/review-20261106T043840.md): BLOCKING none (not submission clearance). NB1 = dec 060 deviation (in report 014);
+  NB2 system.md:33 `python3 ... | tail` lacks pipefail (inherited from arm B/E prompt) -> list in report 014 as unscreened candidate, v004 NOT repacked;
+  NB3 timeout empty patch unguaranteed (dec 056 item 6). Cap 1.23 = zero margin under S assumptions. Full compiler validation blocked by sandbox.
 - PLAN 005 ARM D DONE (c108): V, Md 8/8, empty 3/8 (=C), disc 1/1 -> PASS. results/plan005_armD_vs_C.json + *_31b_v006.json. Report 013.
 - DEC 058 (arm C/D push cmd: eval/kaggle/timing_push.sh aniket0202/gemma-31b-timing <bundle> eval/plans/004-gpu-retime-ids.txt 6000; M2 declined).
 - DEC 057 (FastAPI/docs_src hint): dec 055 UNCHANGED (don't touch 31b-v002/zip/kernel). Standing rule: no new bundle/draft carries any
@@ -77,4 +80,4 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 ## Next 3
 1. Dec 055 checklist at 2026-11-07T00:00Z FIRST (e4b waiter final -> results/lb_e4b_v002.json, T, veto). Arm E never blocks it.
 2. Arm E done -> analysis per Addendum E + report 014 (verdict, item 4 checks, dec 060 item 1 a-c byte-diff list, review result).
-3. codex-review-v004 result -> fix BLOCKINGs; dec 038 paper evidence by Nov 9 23:59Z; plan 007 pre-reg (thinking on/off paired arm); ops/patches cleanup.
+3. Dec 038 paper evidence by Nov 9 23:59Z; plan 007 pre-reg (thinking on/off paired arm); ops/patches cleanup.
