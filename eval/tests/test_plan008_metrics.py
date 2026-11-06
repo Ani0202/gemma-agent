@@ -598,3 +598,27 @@ def test_registered_ids_files():
     assert m.registered_ids(ROOT_DIR / m.SMOKE_IDS) == ['rich_3063', 'fastapi_14258']
     ids = m.registered_ids(ROOT_DIR / m.ARM2_IDS)
     assert len(ids) == len(set(ids)) == 33 and ids[0] == 'rich_3063'
+
+
+@pytest.mark.parametrize('author', ['submit_patch', 'other_agent', None])
+@pytest.mark.parametrize('paired', [True, False])
+def test_arm2_builtin_rejects_nonroot_submit_response(tmp_path, monkeypatch, author, paired):
+    # dec 077 item 2 (codex B3): builtin v011 path must STOP on any non-root submit_patch
+    # response, including an UNPAIRED one (no matching call), never compute around it.
+    monkeypatch.chdir(ROOT_DIR)
+    inner = response('submit_patch', {'status': 'ok', 'patch_size': len(NEW)}, author)
+    if author is None:
+        inner.pop('author')
+    es = invoke('submit_patch', result={'patch_size': len(NEW)})
+    es = es[:1] + ([call('submit_patch', None, author)] if paired and author else []) + [inner] + es[1:]
+    run, _ = make_run(tmp_path, es, header={'_schema': 'synthetic', 'agent_yaml_sha256': yaml_sha('v011')})
+    with pytest.raises(m.GateResponseInBuiltinRun) as err:
+        m.arm2_metrics(run)
+    assert err.value.args[0] == dict(rows=['synthetic'], selected_bundle='v011')
+    dest = tmp_path / 'out.json'
+    assert m.main(['metrics', 'arm2', str(run), str(dest)]) == 4 and not dest.exists()
+    # Root-only builtin trace (same bundle) still passes: the guard is stricter-only.
+    run2, _ = make_run(tmp_path / 'ok', invoke('submit_patch', result={'patch_size': len(NEW)}),
+                       header={'_schema': 'synthetic', 'agent_yaml_sha256': yaml_sha('v011')})
+    assert m.nonroot_submit_responses(json.loads((run2 / 'runs' / 'synthetic' / 'trace.json').read_text())['entries']) == []
+    assert m.main(['metrics', 'arm2', str(run2), str(tmp_path / 'ok.json')]) == 0

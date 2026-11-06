@@ -3,6 +3,9 @@
 
 Usage: plan008_metrics.py base OUT_JSON | smoke RUN_DIR OUT_JSON | arm2 RUN_DIR OUT_JSON
 
+Exit: 0 ok, 2 usage, 3 incomplete arm2 inventory, 4 builtin arm2 run holds a non-root
+submit_patch response (dec 077 failure-safe; STOP and report). 3/4 write no results.
+
 Smoke loads task.test_files with swegemma.models.load_tasks, as both eval runners do.
 Tasks default to data/raw/tasks.jsonl (local) or the Kaggle competition tasks.jsonl;
 PLAN008_TASKS_PATH overrides that location for downloaded runs. Missing tasks fail smoke.
@@ -527,6 +530,19 @@ class IncompleteRun(ValueError):
     pass
 
 
+class GateResponseInBuiltinRun(ValueError):
+    """Dec 077 item 2: B3 (unpaired gate-authored inner responses) is unfixed, so the
+    builtin (v011) arm-2 path refuses any non-root submit_patch response. STOP, report."""
+
+
+def nonroot_submit_responses(entries):
+    """Raw scan, independent of call pairing: indices of submit_patch responses whose
+    author is not the root agent (missing author counts as non-root)."""
+    return [i for i, e in enumerate(entries)
+            if e.get('type') in ('tool_response', 'tool_result')
+            and e.get('tool') == 'submit_patch' and e.get('author') != ROOT]
+
+
 def arm2_metrics(run_dir):
     timing = Path(run_dir) / 'timing.jsonl'
     paths, rows, inputs = [timing], [], []
@@ -552,6 +568,10 @@ def arm2_metrics(run_dir):
           _reply(e.get('result')) in ('SUBMITTED', BOUNCE)))
         for _, entries, _ in inputs for e in entries))
     has_gate = bundle == 'v010' if bundle else gate_events
+    if not has_gate:
+        bad = [row['instance_id'] for row, entries, _ in inputs if nonroot_submit_responses(entries)]
+        if bad:
+            raise GateResponseInBuiltinRun(dict(rows=bad, selected_bundle=bundle))
     for row, entries, artifacts in inputs:
         rep = identical_runs_root(entries)
         desc = gate_descriptives(entries, row) if has_gate else {}
@@ -625,6 +645,10 @@ def main(argv=None):
         except IncompleteRun as e:
             print('INCOMPLETE arm2 inventory; no results written:', json.dumps(e.args[0]))
             return 3
+        except GateResponseInBuiltinRun as e:
+            print('STOP: gate-authored submit_patch response in builtin arm2 run (dec 077); '
+                  'no results written; report to Director:', json.dumps(e.args[0]))
+            return 4
     else:
         print(__doc__)
         return 2
