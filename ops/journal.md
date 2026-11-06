@@ -288,3 +288,4 @@
 2026-11-06T06:39Z | codex review of plan 007 (e547980): BLOCKING x4 (editable_failed gate vs known RECORD strip; error/rerun rules; arm-2 second look; should_stop omits setup) | ops/codex/review-20261106T063014.md
 2026-11-06T06:42Z | plan 007 rev 1 + kernel stop-guard fix (SETUP_PASS_SECONDS x3 reserve, --seed-max), 712 pass/4 skip; still before any plan-007 run | c6f0b66 eval/plans/007.md
 2026-11-06T06:43Z | codex re-review launched on c6f0b66 | ops/jobs/codex-review-plan007r1-light
+2026-11-06T06:51:31Z | plan 007 r1 review 064331: BLOCKING x3; rev 2 classification written (eval/plans/007.md), codex-build plan007-classifier launched | ops/codex/review-20261106T064331.md
