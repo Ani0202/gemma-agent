@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 07:41Z (cycle 133, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 08:10Z (cycle 134, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -23,23 +23,15 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (07:31Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z),
-  passrate-31b-v009-smoke-wait-light (smoke kernel gemma-31b-passrate v1, pushed 07:28:20Z, PRE-FOLD 078f4ea; downloads to
-  runs/31b-v009-p7a1-smoke + SEAL.sha256). Blind gate ready (expected rows arg REQUIRED: 3).
-- DEC 065: smoke decoupled from the fold. On download: journal + kaggle.md the SEAL hashes FIRST; then ONLY blind gate output
-  (python3 -I eval/plan007_blind_gate.py <timing.jsonl> eval/plan007_pinned/classify_rows_a208a023.py a208a023...4e6b 3).
-  NO pass/fail/resolved/patch viewing until re-frozen classifier has a Director note. HOLD (vLLM up, 3 rows, 0 H) -> main ids 4..33
-  (--seed-max ceil max total), KERNEL_BUDGET so week <= 29.5 h AND kernel ends by 23:30Z, else after reset. Fold diff touching
-  agent_timing.py/kernel path -> main uses pre-fold 078f4ea too. Plan-007 header deviation note added. Report 016 names run commits.
-- DEC 066: blind-gate review = ONE codex pass; fold only BLOCKING that leak pass/fail/resolved/patch or miscount H/mechanics under
-  a208a023, run its tests, use it, NO 2nd review; other findings -> report 016 residuals. Smoke lands first -> seal+journal+kaggle.md, wait,
-  no hand-inspection of timing.jsonl. Main push deadline = 23:30Z - KERNEL_BUDGET - 45 min, else after reset AND after dec 055 submit.
-  Log quota after smoke in kaggle.md BEFORE sizing main.
-- DEC 067 (report 016 APPROVED A): d4cdf0f0...ae5e (code bb0131f, merge 19a6de0, pinned classify_rows_d4cdf0f0.py) = GOVERNING
-  classifier for plan 007; a208a023 counts alongside for transparency. LAST freeze, no rev 6 (residuals = footnotes). Gate unchanged:
-  blind gate under a208a023 HOLD -> main ids 4..33 on kernel commit 078f4ea (name it in kernel manifest + results header).
-  Results header also: agent_timing.py sha256 0dc1c972...dc96 (same at 078f4ea/HEAD). UNBLIND smoke under d4cdf0f0 ONLY after main
-  pushed (or main ruled out pre-reset); journal the time; nothing about main may change from smoke outcomes. Noted in eval/plans/007.md.
+## Running jobs (08:10Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z),
+  passrate-31b-v009-main-wait-light (MAIN kernel gemma-31b-passrate v2 pushed 08:08:22Z, ids 4..33 eval/plans/007-main-ids.txt,
+  seed-max 803, KERNEL_BUDGET 21000 s, from worktree ../gemma-wt/plan007-main-078f4ea @078f4ea; ETA ~14:10Z; downloads to
+  runs/31b-v009-p7a1-main + SEAL.sha256). Smoke DONE: sealed (SEAL 85fb5648..), gate HOLD, UNBLINDED 08:08:43Z: 0/3 resolved;
+  d4cdf0f0 rich_3063 H-VERIFY (empty patch + exit 1 = classifier l.239 assumption, no kernel defect) -> report 017 NEEDS_DECISION (rec A:
+  no rerun, footnote, sensitivity line both ways). results/plan007_arm1_smoke_{d4cdf0f0,a208a023}.json.
+- DEC 065-067 (DONE through main push): d4cdf0f0 = GOVERNING plan-007 classifier (last freeze, no rev 6; a208a023 counts alongside);
+  main on kernel 078f4ea; results header must name 078f4ea, classifier sha, agent_timing.py sha 0dc1c972...dc96 + dec-065 deviation note.
+  Nothing about main changes from smoke outcomes. Chunk 2 (unrun suffix) after reset AND after dec 055 submit, same bundle/code, seed-max from all rows.
 - DEC 062 (report 015 approved, A): T stays 0.2 everywhere; no T 0.6 arm in plan 007; repeat guard = design note only (DONE draft
   eval/plans/007-repeat-guard.md); item 4: plan-007 arm 1 may use expiring quota IF pre-reg reviewed + pushed by 11-06T15:30Z, else after reset.
 - PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
@@ -58,7 +50,7 @@
 - DEC 057: no new bundle/draft carries any repo-named hint; dec 055 v002 untouched. e4b-v003 = e4b-v002 + generic prompt fixes
   minus the FastAPI line (CPU draft). Reports MUST state v000-v002 (both tracks) carry the hint; LB scores may tilt FastAPI-ward.
 ## Quota / spend
-- GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU this week: 16.02/30 h per `kaggle quota` ~06:27Z after arm F (+1.53). Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
+- GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU this week: 17.25/30 h per `kaggle quota` 08:07Z after smoke (+1.23); main expected +~12 h -> ~29.2. Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
 ## Live caveats (dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035)
 - Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
   (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
@@ -75,6 +67,7 @@
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. Smoke done -> seal hashes -> blind gate -> (HOLD) push main ids 4..33 sized to quota/23:30Z; seal + journal; quota before/after.
-2. After main push: journal unblind time, classify smoke under d4cdf0f0 (+a208a023 counts). Dec 055 31b-v002 submit 11-07T00:00Z FIRST.
+1. Main done -> seal+journal SEAL, quota after in kaggle.md; classify under d4cdf0f0 (+a208a023); results header: kernel 078f4ea,
+   classifier d4cdf0f0, agent_timing.py sha 0dc1c972; apply dec on report 017; plan-007 arm-1 report (33 rows, Wilson, per repo).
+2. Dec 055 31b-v002 submit 11-07T00:00Z FIRST (checklist in Best bundles). Chunk 2 of any unrun ids after reset AND after submit.
 3. Nov 8 slot proposal (due 11-07T12:00Z); dec 038 paper evidence by Nov 9.
