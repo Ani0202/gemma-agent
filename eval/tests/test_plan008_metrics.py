@@ -12,6 +12,20 @@ import plan008_metrics as m
 import plan007_arm1_summary as old
 
 YAML = ROOT_DIR / m.GATE_YAML
+SYNTHETIC_IDS = {'smoke': ['synthetic'], 'arm2': ['synthetic']}
+
+
+@pytest.fixture(autouse=True)
+def synthetic_inventory(monkeypatch):
+    # Synthetic runs use synthetic ids; registered-id behaviour is tested explicitly below.
+    ids = {k: list(v) for k, v in SYNTHETIC_IDS.items()}
+    monkeypatch.setattr(m, 'expected_ids', lambda kind: ids[kind])
+    return ids
+
+
+def yaml_sha(name):
+    import hashlib
+    return hashlib.sha256((ROOT_DIR / m.BUNDLE_YAMLS[name]).read_bytes()).hexdigest()
 
 
 def call(tool, args=None, author=m.ROOT):
@@ -376,7 +390,7 @@ def test_arm2_cli(tmp_path, monkeypatch, nested, builtin):
     monkeypatch.chdir(ROOT_DIR)
     es = invoke('submit_patch', result={'patch_size': len(NEW)}) if builtin else gate(size=len(NEW))[:-1]
     run, _ = make_run(tmp_path, es, nested=nested,
-                      header={'_schema': 'synthetic', 'bundle': 'v011' if builtin else 'v010'})
+                      header={'_schema': 'synthetic', 'agent_yaml_sha256': yaml_sha('v011' if builtin else 'v010')})
     dest = tmp_path / 'out.json'
     assert m.main(['metrics', 'arm2', str(run), str(dest)]) == 0
     out = json.loads(dest.read_text())
@@ -470,8 +484,9 @@ def test_arm2_acknowledged_untracked_evidence(tmp_path, monkeypatch, missing):
     assert out['totals']['untracked_only_unverifiable'] == int(missing == 'tasks')
 
 
-def test_arm2_multirow_totals(tmp_path, monkeypatch):
+def test_arm2_multirow_totals(tmp_path, monkeypatch, synthetic_inventory):
     monkeypatch.chdir(ROOT_DIR)
+    synthetic_inventory['arm2'][:] = ['synthetic0', 'synthetic1', 'synthetic2']
     run = tmp_path / 'v010'
     run.mkdir()
     sequences = [invoke('read_file') * 5 + invoke('run_command', {'command': 'pytest'}) + gate()[:-1],
@@ -515,13 +530,71 @@ def test_real_base_cli(tmp_path):
     assert out['totals']['count_no_successful_submit'] == 7
 
 
-@pytest.mark.parametrize('unverifiable,observed,flag,swt,nosub', [
-    (False, True, True, True, False), (False, False, True, False, False), (False, None, False, False, True),
+TESTED = invoke('run_command', {'command': 'pytest -q'})
+
+
+@pytest.mark.parametrize('unverifiable,observed,flag,es,swt,nosub', [
+    (False, True, True, [], True, False), (False, False, True, [], False, False), (False, None, False, [], False, True),
     # D73.5: unverifiable rows count against arm 2.
-    (True, True, True, True, False), (True, True, False, True, True),
-    (True, False, True, False, False), (True, False, False, False, True),  # test before boundary
-    (True, None, True, True, False), (True, None, False, True, True),  # no candidate boundary
+    (True, True, True, gate() + TESTED, True, False), (True, True, False, gate() + TESTED, True, True),
+    (True, False, True, TESTED + gate(), False, False), (True, False, False, TESTED + gate(), False, True),  # test before boundary
+    (True, False, True, gate() + TESTED + gate(), True, False),  # test only after the earliest candidate
+    (True, None, True, TESTED, True, False), (True, None, False, TESTED, True, True),  # no candidate boundary
+    (True, None, True, TESTED + invoke('submit_patch', result={'patch_size': 1}, author='submit_patch'), False, False),  # B3
 ])
-def test_d735_counts(unverifiable, observed, flag, swt, nosub):
-    r = m.d735_counts(dict(submit_unverifiable=unverifiable, submitted_without_test=observed, patch_submitted=flag))
+def test_d735_counts(unverifiable, observed, flag, es, swt, nosub):
+    r = m.d735_counts(dict(submit_unverifiable=unverifiable, submitted_without_test=observed, patch_submitted=flag), es)
     assert (r['swt_d735'], r['no_submit_d735']) == (swt, nosub)
+
+
+def test_d735_boundary_without_enclosing_root(tmp_path, monkeypatch):
+    # codex D73.6 B3: root pytest, then a gate-authored inner success whose enclosing root call is absent.
+    monkeypatch.chdir(ROOT_DIR)
+    inner = invoke('submit_patch', result={'status': 'ok', 'patch_size': len(NEW)}, author='submit_patch')
+    es = TESTED + inner
+    assert m.earliest_candidate_index(es) == len(TESTED) + 1
+    run, _ = make_run(tmp_path, es, row(patch_submitted=True))
+    out = m.arm2_metrics(run)
+    r = out['rows'][0]
+    assert r['submit_unverifiable'] is True and r['swt_d735'] is False
+    assert out['totals']['submitted_without_test'] == 0
+    run2, _ = make_run(tmp_path / 'b', inner + TESTED, row(patch_submitted=True))
+    assert m.arm2_metrics(run2)['totals']['submitted_without_test'] == 1
+
+
+def test_selected_bundle_ignores_free_text(tmp_path, monkeypatch):
+    # codex D73.6 B2: a v010 smoke-verdict reference must not mark a v011 run as gated.
+    monkeypatch.chdir(ROOT_DIR)
+    es = TESTED + invoke('submit_patch', result={'patch_size': len(NEW)})
+    hdr = {'_schema': 'synthetic', 'agent_yaml_sha256': yaml_sha('v011'),
+           'smoke_verdict': 'results/plan008_v010_smoke.json', 'bundle': 'v010'}
+    run, _ = make_run(tmp_path, es, header=hdr)
+    out = m.arm2_metrics(run)
+    assert (out['selected_bundle'], out['gate_layout']) == ('v011', False)
+    assert out['totals']['submitted_without_test'] == 0 and out['totals']['submit_unverifiable'] == 0
+    assert m.selected_bundle([{'agent_yaml_sha256': yaml_sha('v010')}])[0] == 'v010'
+    assert m.selected_bundle([{'bundle': 'v010'}])[0] is None
+    assert m.selected_bundle([{'agent_yaml_sha256': yaml_sha('v010')}, {'agent_yaml_sha256': yaml_sha('v011')}])[0] is None
+
+
+def test_inventory_required(tmp_path, monkeypatch, synthetic_inventory):
+    # codex D73.6 B1: missing registered ids never yield decision-ready results.
+    monkeypatch.chdir(ROOT_DIR)
+    synthetic_inventory['smoke'][:] = ['synthetic', 'absent']
+    synthetic_inventory['arm2'][:] = ['synthetic', 'absent']
+    run, _ = make_run(tmp_path, gate(size=len(NEW)), patch=NEW)
+    out = m.smoke_metrics(run, tmp_path / 'missing')
+    assert out['overall'] == 'FAIL' and out['inventory']['missing'] == ['absent']
+    with pytest.raises(m.IncompleteRun):
+        m.arm2_metrics(run)
+    dest = tmp_path / 'out.json'
+    assert m.main(['metrics', 'arm2', str(run), str(dest)]) == 3 and not dest.exists()
+    synthetic_inventory['arm2'][:] = []
+    with pytest.raises(m.IncompleteRun):  # extra id
+        m.arm2_metrics(run)
+
+
+def test_registered_ids_files():
+    assert m.registered_ids(ROOT_DIR / m.SMOKE_IDS) == ['rich_3063', 'fastapi_14258']
+    ids = m.registered_ids(ROOT_DIR / m.ARM2_IDS)
+    assert len(ids) == len(set(ids)) == 33 and ids[0] == 'rich_3063'

@@ -7,6 +7,7 @@ Smoke loads task.test_files with swegemma.models.load_tasks, as both eval runner
 Tasks default to data/raw/tasks.jsonl (local) or the Kaggle competition tasks.jsonl;
 PLAN008_TASKS_PATH overrides that location for downloaded runs. Missing tasks fail smoke.
 """
+import hashlib
 import json
 import math
 import os
@@ -20,6 +21,11 @@ import plan007_arm1_summary as base
 
 ROOT = 'swe_baseline_agent'
 GATE_YAML = Path('bundles/31b/v010/sub_agents/submit_gate.yaml')
+SMOKE_IDS = Path('eval/plans/008-smoke-ids.txt')
+ARM2_IDS = Path('eval/plans/007-arm1-ids.txt')
+# Authoritative bundle identity = kernel header agent_yaml_sha256 (agent_timing.extract_bundle).
+# v011 agent.yaml is byte-identical to v009 (arm 1), so arm-1 runs identify as builtin.
+BUNDLE_YAMLS = {'v010': Path('bundles/31b/v010/agent.yaml'), 'v011': Path('bundles/31b/v011/agent.yaml')}
 TEST = re.compile(r'\bpytest\b|-m\s+unittest\b|\btox\b')
 BOUNCE = ('NOT SUBMITTED: no non-test source file is changed. Make your source edit with '
           'edit_file (or a /tmp Python script), confirm it with git diff --stat, then call submit_patch again.')
@@ -27,13 +33,16 @@ DEFINITIONS = {
     'mechanism1_empty': 'verified_patch_bytes == 0 (plan007 empty definition)',
     'mechanism2': 'rows with max_run >= 5; root-author tool calls only; same tool and sort_keys JSON args; nested calls excluded before runs',
     'repeated_calls': 'sum(length - 1) over root identical runs',
-    'submitted_without_test': 'successful root submit with no prior root run_command matching \\bpytest\\b|-m\\s+unittest\\b|\\btox\\b; no success excluded and counted separately',
+    'submitted_without_test': 'PRIMARY total (ship rule, D73.5) = observed rows (successful root submit with no prior root run_command matching \\bpytest\\b|-m\\s+unittest\\b|\\btox\\b) PLUS every submit_unverifiable row without a root test run before its earliest candidate boundary; submitted_without_test_observed = observed rows only, no-success rows excluded there and counted in count_no_successful_submit_observed',
+    'count_no_successful_submit': 'PRIMARY total (D73.5) = verifiable rows with no successful submit PLUS unverifiable rows whose patch_submitted is not True; *_observed = rows with no observed successful submit',
+    'inventory': 'smoke requires exactly the ids in eval/plans/008-smoke-ids.txt (else overall FAIL); arm2 requires exactly the 33 ids in eval/plans/007-arm1-ids.txt (else no output, exit 3)',
+    'selected_bundle': 'header agent_yaml_sha256 matched against bundles/31b/v010|v011/agent.yaml; only if absent/unrecognized, gate event evidence; free-text header/dir labels never used',
     'success': 'first root harness patch_size response (builtin), or gate-authored inner harness patch_size response attributed to its enclosing root submit; acknowledgement not required',
     'submit_unverifiable': 'inner/builtin success vs explicit patch_submitted mismatch, or flag unavailable; missing flag derived from harness response only, not acknowledgement; rows counted and listed',
     'smoke': '008.md D73.2 i-v; missing evidence UNVERIFIABLE; overall PASS requires every criterion PASS',
     'gate_descriptives': 'root submit calls; reply-prefix bounces/failures; gate run_command response forced/check_error counts; terminal bounces; internal visibility',
     'gate_llm_limit': 'gate-authored limit evidence, or an unacknowledged enclosing gate with the runner turns-budget error; inferred from saved evidence',
-    'gate_detection': 'v010 header label or gate request/reply/child events; otherwise builtin layout and gate counts n/a',
+    'gate_detection': 'selected_bundle v010 = gate, v011 = builtin; unidentified -> gate request/reply/child events; otherwise builtin layout and gate counts n/a',
     'untracked_only': 'D72.2: canonical SUBMITTED reply and nonempty scored patch with all sections declaring new file mode; absent scored-patch evidence reported separately',
 }
 
@@ -189,21 +198,72 @@ def submitted_without_test(entries, gate_mode=None):
                    for c in root_tool_calls(entries)[:index])
 
 
-def d735_counts(r):
+def earliest_candidate_index(entries):
+    """D73.5 boundary, independent of successful-root attribution: the earliest of
+    (a) any gate-authored inner submit_patch harness response carrying patch_size,
+    (b) the root submit call enclosing such a response (gate_invocations interval),
+    (c) any root submit_patch call whose own response carries patch_size (builtin).
+    Extra candidates only move the boundary earlier (stricter). None = no candidate."""
+    cands = [p['response_index'] for p in _pairs(entries)
+             if p.get('author') == 'submit_patch' and p.get('tool') == 'submit_patch'
+             and p['response_index'] is not None and _patch_size(p['response']) is not None]
+    cands += [g['entry_index'] for g in gate_invocations(entries) if g['inner_successes']]
+    cands += [c['entry_index'] for c in root_tool_calls(entries)
+              if c.get('tool') == 'submit_patch' and _patch_size(c['response']) is not None]
+    return min(cands, default=None)
+
+
+def tested_before(entries, index):
+    return index is not None and any(
+        c.get('tool') == 'run_command' and TEST.search(_command(c)) and c['entry_index'] < index
+        for c in root_tool_calls(entries))
+
+
+def d735_counts(r, entries):
     """D73.5 (dec 074 item 2): a submit_unverifiable row counts as submitted_without_test
-    unless a root test run precedes the earliest candidate boundary. The observed value
-    already tests root calls before the enclosing root submit call (the earlier of the
-    two candidates), so False is kept; no candidate (None) = worst case = counted. If
-    patch_submitted is False it ALSO counts in no_successful_submit. Verifiable rows keep
-    the observed D73.3 values. Mutates and returns the row."""
+    unless a root test run precedes the earliest candidate boundary (computed from the
+    trace, not from the observed success; the observed success is itself a candidate, so
+    the boundary is never later than it). No candidate = worst case = counted. If
+    patch_submitted is not True it ALSO counts in no_successful_submit. Verifiable rows keep the observed D73.3 values.
+    Mutates and returns the row."""
     obs = r['submitted_without_test']
     if r['submit_unverifiable']:
-        r['swt_d735'] = obs is not False
+        boundary = earliest_candidate_index(entries)
+        r['d735_boundary_entry'] = boundary
+        r['swt_d735'] = not tested_before(entries, boundary)
         r['no_submit_d735'] = r['patch_submitted'] is not True
     else:
         r['swt_d735'] = obs is True
         r['no_submit_d735'] = obs is None
     return r
+
+
+def registered_ids(path):
+    return [l.strip() for l in Path(path).read_text().splitlines() if l.strip() and not l.lstrip().startswith('#')]
+
+
+def expected_ids(kind):
+    return registered_ids(SMOKE_IDS if kind == 'smoke' else ARM2_IDS)
+
+
+def inventory(ids, expected):
+    seen = set(ids)
+    out = dict(expected=len(expected), observed=len(ids),
+               missing=[i for i in expected if i not in seen],
+               extra=sorted(seen - set(expected)),
+               duplicates=sorted({i for i in ids if ids.count(i) > 1}),
+               order_matches=list(ids) == list(expected))
+    out['complete'] = not (out['missing'] or out['extra'] or out['duplicates'])
+    return out
+
+
+def selected_bundle(headers):
+    """(name, source). Only the kernel header agent_yaml_sha256 is authoritative."""
+    shas = {h['agent_yaml_sha256'] for h in headers if isinstance(h.get('agent_yaml_sha256'), str)}
+    known = {hashlib.sha256(p.read_bytes()).hexdigest(): n for n, p in BUNDLE_YAMLS.items() if p.is_file()}
+    if len(shas) == 1 and next(iter(shas)) in known:
+        return known[next(iter(shas))], 'header.agent_yaml_sha256'
+    return None, 'unidentified (%s)' % ('no agent_yaml_sha256' if not shas else 'unrecognized or conflicting agent_yaml_sha256')
 
 
 def _command(c):
@@ -453,12 +513,18 @@ def smoke_metrics(run_dir, tasks_path=None):
         desc.pop('gate_run_cmds')
         rows.append(dict(instance_id=row['instance_id'],
                          criteria=smoke_check(row, entries, GATE_YAML, scored, loaded), **desc))
-    passed = bool(rows) and all(c['status'] == 'PASS' for r in rows for c in r['criteria'].values())
-    return dict(_schema=_schema('smoke', paths), n_rows=len(rows), overall='PASS' if passed else 'FAIL', rows=rows)
+    inv = inventory([r['instance_id'] for r in rows], expected_ids('smoke'))
+    passed = inv['complete'] and bool(rows) and all(c['status'] == 'PASS' for r in rows for c in r['criteria'].values())
+    return dict(_schema=_schema('smoke', paths), n_rows=len(rows), inventory=inv,
+                overall='PASS' if passed else 'FAIL', rows=rows)
 
 
 GATE_COUNTS = ('gate_calls', 'bounces', 'forced', 'check_error', 'submit_failed',
                'bounce_no_followup', 'gate_llm_limit', 'unacknowledged_inner_submits', 'untracked_only_submits')
+
+
+class IncompleteRun(ValueError):
+    pass
 
 
 def arm2_metrics(run_dir):
@@ -475,13 +541,17 @@ def arm2_metrics(run_dir):
     # have author submit_patch. Header/directory labels cover runs with no calls.
     headers = [json.loads(line) for line in timing.read_text().splitlines() if line.strip()
                and 'instance_id' not in json.loads(line)]
-    header_text = json.dumps(headers)
-    has_gate = ('v010' in header_text or 'v010' in Path(run_dir).name or any(
+    inv = inventory([row['instance_id'] for row, _, _ in inputs], expected_ids('arm2'))
+    if not inv['complete']:
+        raise IncompleteRun(inv)
+    bundle, bundle_source = selected_bundle(headers)
+    gate_events = (any(
         e.get('author') == 'submit_patch' or
         (e.get('author') == ROOT and e.get('tool') == 'submit_patch' and
          (isinstance(e.get('args'), dict) and 'request' in e['args'] or
           _reply(e.get('result')) in ('SUBMITTED', BOUNCE)))
         for _, entries, _ in inputs for e in entries))
+    has_gate = bundle == 'v010' if bundle else gate_events
     for row, entries, artifacts in inputs:
         rep = identical_runs_root(entries)
         desc = gate_descriptives(entries, row) if has_gate else {}
@@ -519,8 +589,8 @@ def arm2_metrics(run_dir):
                          mechanism1_empty=row.get('verified_patch_bytes') == 0,
                          submitted_without_test=submitted_without_test(entries, has_gate),
                          **submit_evidence(row, entries, has_gate, (artifacts / 'trace.json').is_file()), **desc))
-    for r in rows:
-        d735_counts(r)
+    for r, (_, entries, _) in zip(rows, inputs):
+        d735_counts(r, entries)
     totals = dict(mechanism2=sum(r['mechanism2'] for r in rows),
                   mechanism1_empty=sum(r['mechanism1_empty'] for r in rows),
                   # D73.5 (ship-rule numbers): unverifiable rows count against arm 2.
@@ -535,7 +605,11 @@ def arm2_metrics(run_dir):
     for key in GATE_COUNTS:
         totals[key] = (sum(r[key] for r in rows if r[key] is not None) if has_gate else 'n/a (no gate)')
     totals['untracked_only_unverifiable'] = sum(r.get('untracked_only_submits') is None for r in rows) if has_gate else 'n/a (no gate)'
-    return dict(_schema=_schema('arm2', paths), n_rows=len(rows), totals=totals,
+    return dict(_schema=_schema('arm2', paths), n_rows=len(rows), inventory=inv,
+                selected_bundle=bundle, selected_bundle_source=bundle_source,
+                gate_layout=has_gate, gate_events_observed=gate_events,
+                bundle_identity_conflict=bundle is not None and gate_events != has_gate,
+                totals=totals,
                 submit_unverifiable_rows=[r['instance_id'] for r in rows if r['submit_unverifiable']],
                 d735_rule='submit_unverifiable rows: submitted_without_test unless root test before earliest candidate boundary (none = counted); patch_submitted not True -> also no_successful_submit',
                 rows=rows)
@@ -546,7 +620,11 @@ def main(argv=None):
     if len(argv) == 3 and argv[1] == 'base':
         out = base_metrics()
     elif len(argv) == 4 and argv[1] in ('smoke', 'arm2'):
-        out = (smoke_metrics if argv[1] == 'smoke' else arm2_metrics)(argv[2])
+        try:
+            out = (smoke_metrics if argv[1] == 'smoke' else arm2_metrics)(argv[2])
+        except IncompleteRun as e:
+            print('INCOMPLETE arm2 inventory; no results written:', json.dumps(e.args[0]))
+            return 3
     else:
         print(__doc__)
         return 2
