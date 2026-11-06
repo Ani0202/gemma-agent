@@ -26,8 +26,7 @@
 ## Running jobs (15:26Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-plan009-arm3-fix2
   (fixes re-review 151940 BLOCKING: F1 one identity record per push via new --push-event DIR=EVENT, no chunkN wildcard;
   F2 complete v2 identity records + single registered zip sha == MANIFEST; F3 arm3 recomputes smoke with current classifier +
-  classifier sha bound. Spec ops/codex/build-plan009-arm3-fix2.spec). arm3/arm3smoke NOT CLEARED until a re-review is CLEAN.
-  Prior: fix1 c3e1489+ec541de merged 7e47b5c (suite 1569 pass/6 skip); re-review 151940 BLOCKING (3).
+  classifier sha bound; spec ops/codex/build-plan009-arm3-fix2.spec). NOT CLEARED until re-review CLEAN. Fix1 merged 7e47b5c.
   DONE: identity 145500 CLEAN (1fd32d9) -> plan009_identity.py cleared. PLAN 009 rev 2 CLEAN (145128) = FINAL.
   v012/v013 review 144907 CLEAN. Arm-3 packed e5196a4: 31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096);
   31b-v013-p9b dist/31b-v013.zip sha256=06eff226d661c0528105a14d4fe0b69f67a8fb84fc52e654a0d54b6bc59a5dbb (v011+think 4096); load checks PASS.
