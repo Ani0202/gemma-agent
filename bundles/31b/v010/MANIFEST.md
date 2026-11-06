@@ -17,7 +17,7 @@
 - bundle_load_check (real adk_submission compiler, stub tools): PASS; root tools end with code_analyzer_agent, submit_patch (AgentTool).
 zip sha256: fc24fcc3eeb98f1bdcd5914d61d597ed2b309d74eb64bed717a2ba5b47bd7c42
 - REPACK (plan 008 Addendum D72.1, codex review 20261106T133941 BLOCKING 1-2): gate check = harness protected-path rule (python3 one-liner
-  reimplementing verification._is_protected_test_or_config_path over `git diff --no-renames --name-only -z _swegemma_baseline`), outputs
+  reimplementing verification._is_protected_test_or_config_path over `git diff --name-status -z _swegemma_baseline` (D73.4: keep rename/copy entries only when neither path is protected)), outputs
   `GATE call= kept_files=` + `VERDICT=... reason=changes|forced|check_error`; counter failure-safe; SUBMIT FAILED on inner error; system.md
   "non-test source file" -> "non-test file" in the gate sentence. Previous zip c7a86295... VOID (never run). Load check PASS
   (results/bundle_load_check_31b_v010.json); tests eval/tests/test_submit_gate.py 58 pass.
