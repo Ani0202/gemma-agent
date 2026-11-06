@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 15:11Z (cycle 161, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 15:21Z (cycle 162, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -23,10 +23,10 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (15:11Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-plan009-arm3-fix
-  (fix of review 150446 BLOCKING 1-3 on arm3 modes: voided pairing/base validity -> INVALID; smoke json required + hash-bound + (i)
-  recomputed; identity/transport/agent_yaml/_vllm enforced). Spec ops/codex/build-plan009-arm3-fix.spec. Build 071749c merged on main
-  b92f8f4 as WIP (arm3/arm3smoke NOT CLEARED; legacy modes byte-identical per review).
+## Running jobs (15:21Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-arm3fix-light
+  (re-review of arm3 BLOCKING 1-3 fix: codex c3e1489 + Builder ec541de [base=arm2 valid ONLY with ruling file verdict SHIP-ELIGIBLE,
+  plan 009 l.17-19; raw arm2 output has no verdict key -> fails closed]; merged main 7e47b5c; suite 1569 pass/6 skip). arm3/arm3smoke
+  NOT CLEARED until CLEAN. arm3 CLI now needs --identity-json --bundle --transport DIR=SHA (every dir) --smoke-json [--base-verdict-json].
   DONE: identity 145500 CLEAN (1fd32d9) -> plan009_identity.py cleared. PLAN 009 rev 2 CLEAN (145128) = FINAL.
   v012/v013 review 144907 CLEAN. Arm-3 packed e5196a4: 31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096);
   31b-v013-p9b dist/31b-v013.zip sha256=06eff226d661c0528105a14d4fe0b69f67a8fb84fc52e654a0d54b6bc59a5dbb (v011+think 4096); load checks PASS.
@@ -74,7 +74,7 @@
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. codex-plan009-arm3-fix done: review diff, run suite, merge, then codex-review (-light); CLEAN -> arm3 modes cleared.
+1. codex-review-arm3fix-light: CLEAN -> journal arm3 modes cleared; BLOCKING -> spec + codex-build fix. If base=arm2 ever, write ruling file {verdict} after Director rules.
 2. Dec 055 31b-v002 submit 11-07T00:00Z FIRST (checklist in Best bundles); kaggle quota log after reset; then arm-2 v011 ONE session
    (verify kernel/runner names v011 sha 4f5b078a, journal, quota before/after, 1-line FYI).
 3. Nov 8 proposal from ops/drafts/nov8-slot-inputs.md by 11-07T12:00Z.
