@@ -30,8 +30,7 @@
   DEC 064 APPROVED freeze a208a023 (note on file); classifier code SHA = 0d49b1c (replaces b6e120f). Smoke gate = dec 063 item 3.
   DEC 064 item 3: STOP review loop. If r4 BLOCKING: fix, rev-5 review w/ 'enumerate ALL remaining paths... single list; do not stop at first',
   fold all into ONE re-freeze; if rev 5 not clean -> NO rev 6, report residuals + arm-F exposure to Director. Item 4: quota log before/after smoke; week <= 29.5 h.
-- REV 3 (2fc49b5, superseded by rev 4): rev-2 review 065651 = 1 BLOCKING (fail-open on null/invalid patch evidence, 'Harness task failure' w/o messages).
-  Fixed r6/r7 -> H-ROW; RE-FROZEN sha256=18afdbbd..af08 (plan 007 RE-FROZEN line); tests 794/4skip; arm F unchanged; Director noted 07:02Z.
+- REV 3 (2fc49b5) superseded by rev 4 (sha 18afdbbd, see journal).
 - DEC 063 (approve): freeze 18afdbbd approved. Classifier code SHA = b6e120f (cite in results header + smoke/main kernel manifest; line
   added plan 007). Smoke ONLY if review r3 has 0 BLOCKING; new BLOCKING -> no patch+launch same cycle; miss 15:30Z -> after reset.
   Log Kaggle quota before/after smoke + main. Dec 055 submit at 11-07T00:00Z has priority; plan-007 must not hold the Kaggle session then.
