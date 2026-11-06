@@ -323,3 +323,6 @@
 2026-11-06T13:26Z | blind gate main under d4cdf0f0 = FAIL (h_count 6; vllm up, 30/30 rows, max total 855.5 s) | eval/plan007_blind_gate.py
 2026-11-06T13:27Z | arm 1 (33) classified: PRIMARY 4/33 resolved (12.1%, Wilson 4.8-27.3); H-VERIFY 7 (all empty-patch+submit_patch shape; 6 main miss Addendum-B predicate only via known_diag reason) -> literal rule H>=5 INVALID; empty-patch 12/33; summary script 29e140e under codex review | results/plan007_arm1_summary.json ops/jobs/codex-review-arm1summary-light.status
 2026-11-06T13:30Z | report 018 NEEDS_DECISION (arm-1 validity: rec A VALID-by-ruling, next arm = empty-diff guard + edit-loop fix) | ops/reports/018-plan007-arm1-result.md
+2026-11-06T13:31Z | dec 069 read; codex 132715 BLOCKING (missing unscreened/dec060/dec062 lines) fixed + Addendum C (POST-HOC) committed 7ceb059; no prior number changed | eval/plans/007.md, results/plan007_arm1_summary.json
+2026-11-06T13:33Z | codex re-review 133120 CLEAN -> arm-1 PRIMARY 4/33 no longer provisional (ENV CONTROL caveat stays) | ops/codex/review-20261106T133120.md
+2026-11-06T13:35Z | 31b-v010 CPU draft: submit gate sub-agent (harness submit_patch unwrappable) + repeat ban + pipefail NB2; load check PASS, 16 gate tests pass | bundles/31b/v010/MANIFEST.md

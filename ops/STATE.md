@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 13:30Z (cycle 139, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 13:36Z (cycle 140, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -29,14 +29,18 @@
   sha a5c58a1d..., 50 tests; re-review 081435 CLEAN (0 BLOCKING); NB1 fixed (smoke test asserts equal id sets, no silent skips), 50 pass. Report script MUST call assert_paired before predicate. Report layout
   (a) primary all rows Wilson+per-repo (b) d4cdf0f0 counts (c) sens excl all H (d) sens excl H except empty-patch (e) a208a023; footnote l.239 once.
   HEADLINE empty-patch rate (vpb==0) Wilson, split timeout/non-timeout; per row llm_turns + tool mix only.
-## Running jobs (13:30Z): memguard-light (0 KILL), submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-arm1summary-light
-  (review of eval/plan007_arm1_summary.py @29e140e, sha c127dd31).
-- PLAN 007 ARM 1 DONE (33/33 rows; smoke 3 + main 30, no chunk 2). Main SEAL cd3ed918..2a5e, timing 63d8688d..8909.
-  PRIMARY 4/33 (12.1%, W 4.8-27.3; rich 4/27, fastapi 0/6). d4cdf0f0: H-VERIFY 7 (smoke rich_3063 + 6 main), all empty patch +
-  submit_patch called; 6 main miss the Addendum-B predicate only because reasons also has known_diag:record_chain -> LITERAL
-  rule (H>=5) = INVALID. Empty-patch 12/33 (2 timeout). a208a023: 0 H. results/plan007_arm1_summary.json (+ class files).
-  REPORT 018 NEEDS_DECISION (rec A: VALID by ruling; next arm = empty-diff submit guard + edit-loop fix, pre-reg first).
-  Numbers provisional until codex review clean; if BLOCKING -> fix, rerun script, tell Director.
+## Running jobs (13:36Z): memguard-light (0 KILL), submit-window-31b-light (fires 11-07T00:00:30Z).
+- DEC 069 (rep 018, A w/ conditions): arm 1 VALID by POST-HOC ruling = plan 007 Addendum C (7ceb059). PRIMARY 4/33 FINAL
+  (codex 132715 BLOCKING = missing descriptive lines -> fixed; re-review 133120 CLEAN). results/plan007_arm1_summary.json v2
+  (script sha 349b1bda...): a 4/33 (W 4.8-27.3), c 4/26, d 4/27 (literal), d' 4/33, empty 12/33 (2 to/10 non), unscreened 3/25,
+  thinking blocks 0, dec060 identical runs: 17/33 tasks max run >=5, max 38, 366 repeated; 11/12 empty rows have run >=5.
+  ENV CONTROL caveat l.152 on every arm-1 citation. Chunk 2 not needed (main covered all 30) -> journal before arm 2.
+- PLAN 008 / 31b-v010-p8 (dec 069 item 3) CPU DRAFT bundles/31b/v010 (MANIFEST): harness submit_patch can't be wrapped (no
+  callbacks; runner stops on first submit even if empty) -> root gets agent_tool gate NAMED submit_patch (run_command + real
+  submit_patch; fixed shell check, <=2 EDIT_FIRST then submit). Prompt: repeat-call ban + edit 2-fail -> /tmp script; NB2
+  pipefail l.33. bundle_load_check PASS; eval/tests/test_submit_gate.py 16 pass. Director FYI'd on design (awaiting objection).
+  TODO: eval/plans/008.md pre-reg, bin/pack, codex-review bundle+pre-reg, optional <=2-task Kaggle smoke before ~22:00Z
+  (2.34 h quota left; full arm 2 only after reset AND after dec 055 submit).
 - DEC 065-067 (DONE through main push): d4cdf0f0 = GOVERNING plan-007 classifier (last freeze, no rev 6; a208a023 counts alongside);
   main on kernel 078f4ea; results header must name 078f4ea, classifier sha, agent_timing.py sha 0dc1c972...dc96 + dec-065 deviation note.
   Nothing about main changes from smoke outcomes. Chunk 2 (unrun suffix) after reset AND after dec 055 submit, same bundle/code, seed-max from all rows.
@@ -75,6 +79,6 @@
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. Codex review of arm-1 summary -> fold BLOCKING if any; await dec on report 018 (arm-1 validity + next arm).
+1. Plan 008 pre-reg (dec 069 item 3 contents) + bin/pack v010 + codex-review (bundle + pre-reg); smoke <=2 tasks if done by ~22:00Z.
 2. Dec 055 31b-v002 submit 11-07T00:00Z FIRST (checklist in Best bundles).
-3. Nov 8 slot proposal (due 11-07T12:00Z); draft pre-reg for empty-diff-guard arm (CPU only); dec 038 paper evidence by Nov 9.
+3. Nov 8 slot proposal (due 11-07T12:00Z); arm-3 thinking addendum due 11-07T18:00Z; dec 038 paper evidence by Nov 9.
