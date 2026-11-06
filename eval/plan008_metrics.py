@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Plan 008 D71.2/D72.2 metrics. CPU/stdlib only; output contains counts, never task text.
+"""Plan 008 D73 metrics. CPU/offline only; output contains counts, never task text.
 
-Usage: plan008_metrics.py base OUT_JSON | smoke RUN_DIR OUT_JSON
+Usage: plan008_metrics.py base OUT_JSON | smoke RUN_DIR OUT_JSON | arm2 RUN_DIR OUT_JSON
+
+Smoke loads task.test_files with swegemma.models.load_tasks, as both eval runners do.
+Tasks default to data/raw/tasks.jsonl (local) or the Kaggle competition tasks.jsonl;
+PLAN008_TASKS_PATH overrides that location for downloaded runs. Missing tasks fail smoke.
 """
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
@@ -23,10 +28,13 @@ DEFINITIONS = {
     'mechanism2': 'rows with max_run >= 5; root-author tool calls only; same tool and sort_keys JSON args; nested calls excluded before runs',
     'repeated_calls': 'sum(length - 1) over root identical runs',
     'submitted_without_test': 'successful root submit with no prior root run_command matching \\bpytest\\b|-m\\s+unittest\\b|\\btox\\b; no success excluded and counted separately',
-    'success': 'first root submit with patch_size and no error, or gate reply starting SUBMITTED',
-    'smoke': '008.md D71.2 i-v and D72.2; missing evidence UNVERIFIABLE; overall PASS requires every criterion PASS',
+    'success': 'first root harness patch_size response (builtin), or gate-authored inner harness patch_size response attributed to its enclosing root submit; acknowledgement not required',
+    'submit_unverifiable': 'inner/builtin success vs explicit patch_submitted mismatch, or flag unavailable; missing flag derived from harness response only, not acknowledgement; rows counted and listed',
+    'smoke': '008.md D73.2 i-v; missing evidence UNVERIFIABLE; overall PASS requires every criterion PASS',
     'gate_descriptives': 'root submit calls; reply-prefix bounces/failures; gate run_command response forced/check_error counts; terminal bounces; internal visibility',
-    'untracked_only': 'nonempty patch with diff --git sections all declaring new file mode',
+    'gate_llm_limit': 'gate-authored limit evidence, or an unacknowledged enclosing gate with the runner turns-budget error; inferred from saved evidence',
+    'gate_detection': 'v010 header label or gate request/reply/child events; otherwise builtin layout and gate counts n/a',
+    'untracked_only': 'D72.2: canonical SUBMITTED reply and nonempty scored patch with all sections declaring new file mode; absent scored-patch evidence reported separately',
 }
 
 
@@ -108,16 +116,73 @@ def _patch_size(value):
     return None
 
 
-def successful_submit_index(entries):
+def gate_invocations(entries):
+    """Legacy traces lack event IDs: enclose children by root call/reply interval.
+
+    A missing acknowledgement ends at the next root call or trace end. This retains
+    inner captures interrupted by a deadline, without assigning them to a later call.
+    Only the root tool_response is a canonical gate reply.
+    """
+    pairs = _pairs(entries)
+    roots = [c for c in pairs if c.get('author') == ROOT]
+    gates = []
+    for i, c in enumerate(roots):
+        if c.get('tool') != 'submit_patch':
+            continue
+        end = roots[i + 1]['entry_index'] if i + 1 < len(roots) else len(entries)
+        reply_index = c['response_index']
+        canonical = (reply_index is not None and reply_index < end
+                     and entries[reply_index].get('type') == 'tool_response')
+        if canonical:
+            end = reply_index
+        children = [dict(p, response=None, response_index=None)
+                    if p['response_index'] is not None and p['response_index'] >= end else p
+                    for p in pairs if p.get('author') == 'submit_patch'
+                    and c['entry_index'] < p['entry_index'] < end]
+        inner = [p for p in children if p.get('tool') == 'submit_patch'
+                 and p['response_index'] is not None and p['response_index'] < end
+                 and _patch_size(p['response']) is not None]
+        gates.append(dict(c, root_index=i, children=children, inner_successes=inner,
+                          canonical_reply=_reply(c['response']) if canonical else '',
+                          canonical_index=reply_index if canonical else None))
+    return gates
+
+
+def successful_submit_index(entries, gate_mode=None):
+    gates = {g['entry_index']: g for g in gate_invocations(entries)}
     for i, c in enumerate(root_tool_calls(entries)):
-        if c.get('tool') == 'submit_patch' and (
-                _patch_size(c['response']) is not None or _reply(c['response']).startswith('SUBMITTED')):
+        if c.get('tool') != 'submit_patch':
+            continue
+        gate = gates[c['entry_index']]
+        args = c.get('args', c.get('arguments'))
+        is_gate = gate_mode if gate_mode is not None else bool(
+            gate['children'] or isinstance(args, dict) and 'request' in args
+            or gate['canonical_reply'] in ('SUBMITTED', BOUNCE)
+            or gate['canonical_reply'].startswith('SUBMIT FAILED'))
+        if (gate['inner_successes'] if is_gate else _patch_size(c['response']) is not None):
             return i
     return None
 
 
-def submitted_without_test(entries):
-    index = successful_submit_index(entries)
+def _terminal_flag(row, entries):
+    if type(row.get('patch_submitted')) is bool:
+        return row['patch_submitted'], 'row'
+    flags = [e['patch_submitted'] for e in entries if type(e.get('patch_submitted')) is bool]
+    return (flags[-1], 'trace') if flags else (None, 'derived_from_harness_response')
+
+
+def submit_evidence(row, entries, gate_mode=None, trace_loaded=True):
+    observed = successful_submit_index(entries, gate_mode) is not None
+    flag, source = _terminal_flag(row, entries)
+    known = type(flag) is bool
+    return dict(submit_unverifiable=not trace_loaded or not known or flag != observed,
+                patch_submitted=flag if known else observed,
+                patch_submitted_source=source,
+                successful_submit=observed)
+
+
+def submitted_without_test(entries, gate_mode=None):
+    index = successful_submit_index(entries, gate_mode)
     if index is None:
         return None
     return not any(c.get('tool') == 'run_command' and TEST.search(_command(c))
@@ -125,25 +190,36 @@ def submitted_without_test(entries):
 
 
 def _command(c):
-    return (c.get('args', c.get('arguments')) or {}).get('command', '')
+    args = c.get('args', c.get('arguments'))
+    return args.get('command', '') if isinstance(args, dict) and isinstance(args.get('command', ''), str) else ''
 
 
 def _response_text(value):
     return value if isinstance(value, str) else json.dumps(value)
 
 
-def gate_descriptives(entries):
+def gate_descriptives(entries, row=None):
     roots = root_tool_calls(entries)
-    submits = [(i, c) for i, c in enumerate(roots) if c.get('tool') == 'submit_patch']
-    cmds = [c for c in _pairs(entries) if c.get('author') == 'submit_patch' and c.get('tool') == 'run_command']
-    return dict(gate_calls=len(submits),
-                bounces=sum(_reply(c['response']).startswith('NOT SUBMITTED') for _, c in submits),
+    gates = gate_invocations(entries)
+    cmds = [c for g in gates for c in g['children'] if c.get('tool') == 'run_command']
+    limit = any('LlmCallsLimitExceeded' in _response_text(e) for e in entries
+                if e.get('author') == 'submit_patch')
+    if row and gates and gates[-1]['canonical_index'] is None and gates[-1]['root_index'] == len(roots) - 1:
+        limit |= row.get('agent_outcome') == 'turns'
+        limit |= any(re.search(r'LlmCallsLimitExceeded|exceeded turns budget|maximum allowed LLM turns', str(row.get(k, ''))) is not None
+                     for k in ('agent_error', 'agent_error_text', 'result_error', 'error'))
+    return dict(gate_calls=len(gates),
+                bounces=sum(g['canonical_reply'].startswith('NOT SUBMITTED') for g in gates),
                 forced=sum('reason=forced' in _response_text(c['response']) for c in cmds),
                 check_error=sum('reason=check_error' in _response_text(c['response']) for c in cmds),
-                submit_failed=sum(_reply(c['response']).startswith('SUBMIT FAILED') for _, c in submits),
-                bounce_no_followup=sum(i == len(roots) - 1 and _reply(c['response']).startswith('NOT SUBMITTED') for i, c in submits),
+                submit_failed=sum(g['canonical_reply'].startswith('SUBMIT FAILED') for g in gates),
+                bounce_no_followup=sum(g['root_index'] == len(roots) - 1 and
+                                       g['canonical_reply'].startswith('NOT SUBMITTED') for g in gates),
+                gate_llm_limit=int(limit),
+                unacknowledged_inner_submits=sum(len(g['inner_successes']) for g in gates
+                                                if g['canonical_reply'] != 'SUBMITTED'),
                 gate_run_cmds=[_command(c) for c in cmds],
-                gate_internal_visible=any(e.get('author') == 'submit_patch' for e in entries))
+                gate_internal_visible=any(g['children'] for g in gates))
 
 
 def untracked_only(patch_text):
@@ -163,77 +239,74 @@ def _criterion(status, reason):
     return dict(status=status, reason=reason)
 
 
-def _cap_exempt(row):
-    return bool(row.get('agent_timeout_fired') or row.get('timed_out') or row.get('budget_exceeded'))
+def smoke_check(row, entries, gate_yaml_path, scored_patch=None, test_files_loaded=False):
+    """D73.2 i..v. scored_patch must already be stripped with task.test_files.
 
-
-def smoke_check(row, entries, gate_yaml_path):
-    """Return criteria i..v. Reasons are fixed descriptions, never trace/task text."""
+    Missing evidence is UNVERIFIABLE, which is FAIL for the overall smoke.
+    Reasons are fixed descriptions; commands, patches and task text are never emitted.
+    """
     out = {}
-    pairs = _pairs(entries)
-    roots = root_tool_calls(entries)
-    gates = [c for c in roots if c.get('tool') == 'submit_patch']
-    desc = gate_descriptives(entries)
+    gates = gate_invocations(entries)
+    desc = gate_descriptives(entries, row)
     expected = _gate_command(gate_yaml_path)
     failures, missing = [], []
+    captures = []
     if not gates:
-        out['i'] = _criterion('PASS' if _cap_exempt(row) else 'UNVERIFIABLE',
-                              'cap before any gate call; exempt pending cross-task check' if _cap_exempt(row) else 'no gate call observed')
-    else:
-        if not desc['gate_internal_visible']:
+        failures.append('no gate invocation in task')
+    for gate in gates:
+        children = gate['children']
+        if not children:
             missing.append('gate internals absent')
-        for gate in gates:
-            end = gate['response_index']
-            if end is None:
-                missing.append('gate response absent')
-                continue
-            children = [c for c in pairs if c.get('author') == 'submit_patch'
-                        and gate['entry_index'] < c['entry_index'] < end]
-            cmds = [c for c in children if c.get('tool') == 'run_command']
-            subs = [c for c in children if c.get('tool') == 'submit_patch']
-            if not children:
-                missing.append('gate internals absent')
-                continue
-            if len(cmds) != 1 or _command(cmds[0]) != expected:
-                failures.append('gate check command differs or count differs')
-            elif cmds[0]['response_index'] is None:
-                missing.append('gate check response absent')
-            else:
-                text = _response_text(cmds[0]['response'])
-                need_submit = 'VERDICT=SUBMIT' in text or 'VERDICT=EDIT_FIRST' not in text
-                if need_submit and (len(subs) != 1 or subs[0]['entry_index'] <= cmds[0]['response_index']):
-                    failures.append('inner submit absent or out of order')
-                if not need_submit and subs:
-                    failures.append('inner submit after EDIT_FIRST')
-            if _reply(gate['response']).startswith('SUBMITTED'):
-                if any(e.get('author') == ROOT and e.get('type') != 'tool_response' for e in entries[end + 1:]):
-                    failures.append('root model event after successful gate response')
-        if row.get('patch_submitted') is not True:
-            failures.append('run did not end with patch_submitted true')
-        out['i'] = _criterion('FAIL' if failures else 'UNVERIFIABLE' if missing else 'PASS',
-                              '; '.join(failures or missing) or 'gate sequence and termination observed')
+            continue
+        if gate['canonical_index'] is None:
+            missing.append('canonical gate response absent')
+        cmds = [c for c in children if c.get('tool') == 'run_command']
+        subs = [c for c in children if c.get('tool') == 'submit_patch']
+        captures.extend(gate['inner_successes'])
+        if len(cmds) != 1 or _command(cmds[0]) != expected:
+            failures.append('gate check command differs or count differs')
+        elif cmds[0]['response_index'] is None:
+            missing.append('gate check response absent')
+        else:
+            text = _response_text(cmds[0]['response'])
+            need_submit = 'VERDICT=SUBMIT' in text or 'VERDICT=EDIT_FIRST' not in text
+            if need_submit and (len(subs) != 1 or subs[0]['entry_index'] <= cmds[0]['response_index']
+                                or not gate['inner_successes']):
+                failures.append('successful inner submit absent or out of order')
+            if not need_submit and subs:
+                failures.append('inner submit after EDIT_FIRST')
+        if gate['canonical_reply'] == 'SUBMITTED':
+            for e in entries[gate['canonical_index'] + 1:]:
+                if e.get('author') != ROOT or e.get('type') in ('tool_response', 'tool_result'):
+                    continue
+                if e.get('type') == 'final' and e.get('content') == gate['canonical_reply']:
+                    continue  # legacy recorder's mirrored function-response display
+                failures.append('root model event after successful gate response')
+                break
+    if gates and not captures:
+        missing.append('no successful inner submit evidence')
+    flag, _ = _terminal_flag(row, entries)
+    if flag is False:
+        failures.append('run did not end with patch_submitted true')
+    elif flag is not True:
+        missing.append('terminal patch_submitted flag absent')
+    out['i'] = _criterion('FAIL' if failures else 'UNVERIFIABLE' if missing else 'PASS',
+                          '; '.join(failures or missing) or 'gate sequence and termination observed')
 
-    sizes = [_patch_size(c['response']) for c in pairs
-             if c.get('author') == 'submit_patch' and c.get('tool') == 'submit_patch']
-    sizes = [s for s in sizes if s is not None]
-    if not sizes and row.get('patch_submitted') is False:
-        fallback = row.get('fallback_patch_bytes')
-        if fallback is None:
-            for e in entries:
-                m = re.search(r'Captured unsubmitted working tree modifications as fallback patch \((\d+) bytes\)', e.get('content') or '')
-                if m:
-                    fallback = int(m[1])
-        sizes = [] if fallback is None else [fallback]
     actual = row.get('verified_patch_bytes')
-    out['ii'] = _criterion('UNVERIFIABLE' if not sizes or actual is None else
-                           'PASS' if len(sizes) == 1 and actual == sizes[0] else 'FAIL',
-                           'scored and captured patch sizes agree' if len(sizes) == 1 and actual == sizes[0]
-                           else 'patch size evidence missing' if not sizes or actual is None else 'patch sizes differ or multiple captures')
+    if not test_files_loaded or scored_patch is None or not captures or type(actual) is not int:
+        out['ii'] = _criterion('UNVERIFIABLE', 'task test_files, saved patch or capture evidence missing')
+    else:
+        size = _patch_size(captures[-1]['response'])
+        agrees = len(scored_patch) == size and len(scored_patch.encode('utf-8')) == actual
+        out['ii'] = _criterion('PASS' if agrees else 'FAIL',
+                               'stripped patch characters and UTF-8 bytes agree' if agrees else 'stripped patch sizes differ')
 
     errors = bool(desc['check_error'] or desc['submit_failed'])
-    for key in ('agent_error', 'agent_error_text', 'result_error'):
+    for key in ('agent_error', 'agent_error_text', 'result_error', 'error'):
         err = row.get(key)
-        if err and not re.search(r'budget|timeout|timed out', str(err), re.I):
+        if err and (re.search(r'unknown[ _-]tool|ToolErrorPlugin|compile|validator', str(err), re.I)
+                    or not re.search(r'budget|timeout|timed out', str(err), re.I)):
             errors = True
     for e in entries:
         if e.get('author') not in (ROOT, 'submit_patch'):
@@ -241,9 +314,22 @@ def smoke_check(row, entries, gate_yaml_path):
         if e.get('type') in ('tool_response', 'tool_result'):
             text = _response_text(e.get('result', ''))
             errors |= _has_error(text) or bool(re.search(r'unknown[ _-]tool|ToolErrorPlugin|compile error|validator error', text, re.I))
-    malformed = any(_reply(c['response']) not in ('SUBMITTED', BOUNCE) for c in gates)
+    malformed = False
+    for gate in gates:
+        args = gate.get('args', gate.get('arguments'))
+        malformed |= not (isinstance(args, dict) and set(args) == {'request'}
+                          and isinstance(args['request'], str) and bool(args['request']))
+        malformed |= gate['canonical_reply'] not in ('SUBMITTED', BOUNCE)
+        for c in gate['children']:
+            args = c.get('args', c.get('arguments'))
+            if c.get('tool') == 'run_command':
+                malformed |= args != {'command': expected}
+            elif c.get('tool') == 'submit_patch':
+                malformed |= args != {}
+            else:
+                malformed = True
     out['iii'] = _criterion('FAIL' if errors or malformed else 'PASS',
-                            'error or malformed gate reply observed' if errors or malformed else 'no errors or malformed gate replies observed')
+                            'error or malformed gate call/reply observed' if errors or malformed else 'no errors or malformed gate calls/replies observed')
     clock = row.get('agent_clock_seconds')
     valid = type(clock) in (int, float) and math.isfinite(clock) and clock >= 0
     out['iv'] = _criterion('UNVERIFIABLE' if not valid else 'PASS' if clock <= 210 else 'FAIL',
@@ -279,7 +365,7 @@ def base_metrics():
             rep = identical_runs_root(entries)
             rows.append(dict(instance_id=iid, part=part, **rep, mechanism2=rep['max_run'] >= 5,
                              mechanism1_empty=t.get('verified_patch_bytes') == 0,
-                             submitted_without_test=submitted_without_test(entries)))
+                             submitted_without_test=submitted_without_test(entries, gate_mode=False)))
     assert [r['instance_id'] for r in rows] == base.ids_file(base.ARM_IDS)
     totals = dict(mechanism2=sum(r['mechanism2'] for r in rows),
                   mechanism1_empty=sum(r['mechanism1_empty'] for r in rows),
@@ -290,33 +376,153 @@ def base_metrics():
                   repeated_calls=sum(r['repeated_calls'] for r in rows))
     assert totals['mechanism2'] == 17, 'arm-1 mechanism2 baseline changed'
     assert totals['mechanism1_empty'] == 12, 'arm-1 empty baseline changed'
+    assert totals['submitted_without_test'] == 23, 'arm-1 safety baseline changed'
+    assert totals['count_no_successful_submit'] == 7, 'arm-1 no-submit baseline changed'
     return dict(_schema=_schema('base', paths), n_rows=len(rows), totals=totals, rows=rows)
 
 
-def smoke_metrics(run_dir):
+def load_task_test_files(tasks_path):
+    # Match agent_timing.evaluate / run_agent_eval.run: the Task property derives
+    # these paths from test_patch. Never use gold patch or test text as agent input.
+    from swegemma.models import load_tasks
+    tasks = load_tasks(Path(tasks_path))
+    inventory = {t.instance_id: list(t.test_files) for t in tasks}
+    if len(inventory) != len(tasks):
+        raise ValueError('duplicate task IDs')
+    return inventory
+
+
+def _tasks_path():
+    if os.environ.get('PLAN008_TASKS_PATH'):
+        return Path(os.environ['PLAN008_TASKS_PATH'])
+    kaggle = Path('/kaggle/input/competitions/gemma-4-developer-agent/tasks.jsonl')
+    return kaggle if kaggle.is_file() else Path('data/raw/tasks.jsonl')
+
+
+def _artifacts(run_dir, iid):
+    # Kaggle: runs/<iid>; local eval runner: <iid>.
+    nested = Path(run_dir) / 'runs' / iid
+    return nested if nested.is_dir() else Path(run_dir) / iid
+
+
+def smoke_metrics(run_dir, tasks_path=None):
     timing = Path(run_dir) / 'timing.jsonl'
     paths, rows = [timing, GATE_YAML], []
+    tasks_path = Path(tasks_path) if tasks_path is not None else _tasks_path()
+    if tasks_path.is_file():
+        paths.append(tasks_path)
+    try:
+        test_files = load_task_test_files(tasks_path)
+    except Exception:
+        test_files = {}  # criterion ii is UNVERIFIABLE for every missing task
     for row in base.load_rows(timing):
-        trace = Path(run_dir) / 'runs' / row['instance_id'] / 'trace.json'
-        paths.append(trace)
-        entries = json.loads(trace.read_text())['entries']
-        desc = gate_descriptives(entries)
-        # Commands are used only for comparison, never serialized (counts-only output).
+        artifacts = _artifacts(run_dir, row['instance_id'])
+        trace, patch = artifacts / 'trace.json', artifacts / 'agent.patch'
+        if trace.is_file():
+            paths.append(trace)
+        entries = json.loads(trace.read_text()).get('entries', []) if trace.is_file() else []
+        scored = None
+        loaded = row['instance_id'] in test_files
+        if patch.is_file():
+            paths.append(patch)
+            if loaded:
+                from swegemma.harness.verification import strip_protected_files_from_patch
+                try:
+                    scored = strip_protected_files_from_patch(patch.read_bytes().decode('utf-8'),
+                                extra_protected_paths=test_files[row['instance_id']])
+                except (OSError, UnicodeError, ValueError):
+                    scored = None
+        desc = gate_descriptives(entries, row)
         desc.pop('gate_run_cmds')
-        rows.append(dict(instance_id=row['instance_id'], criteria=smoke_check(row, entries, GATE_YAML), **desc))
-    if rows and all(r['gate_calls'] == 0 for r in rows):
-        for row in rows:
-            row['criteria']['i'] = _criterion('UNVERIFIABLE', 'no task exercised the gate')
+        rows.append(dict(instance_id=row['instance_id'],
+                         criteria=smoke_check(row, entries, GATE_YAML, scored, loaded), **desc))
     passed = bool(rows) and all(c['status'] == 'PASS' for r in rows for c in r['criteria'].values())
     return dict(_schema=_schema('smoke', paths), n_rows=len(rows), overall='PASS' if passed else 'FAIL', rows=rows)
+
+
+GATE_COUNTS = ('gate_calls', 'bounces', 'forced', 'check_error', 'submit_failed',
+               'bounce_no_followup', 'gate_llm_limit', 'unacknowledged_inner_submits', 'untracked_only_submits')
+
+
+def arm2_metrics(run_dir):
+    timing = Path(run_dir) / 'timing.jsonl'
+    paths, rows, inputs = [timing], [], []
+    for row in base.load_rows(timing):
+        artifacts = _artifacts(run_dir, row['instance_id'])
+        trace = artifacts / 'trace.json'
+        if trace.is_file():
+            paths.append(trace)
+        entries = json.loads(trace.read_text()).get('entries', []) if trace.is_file() else []
+        inputs.append((row, entries, artifacts))
+    # Builtin responses carry patch_size; gate requests carry request, children
+    # have author submit_patch. Header/directory labels cover runs with no calls.
+    headers = [json.loads(line) for line in timing.read_text().splitlines() if line.strip()
+               and 'instance_id' not in json.loads(line)]
+    header_text = json.dumps(headers)
+    has_gate = ('v010' in header_text or 'v010' in Path(run_dir).name or any(
+        e.get('author') == 'submit_patch' or
+        (e.get('author') == ROOT and e.get('tool') == 'submit_patch' and
+         (isinstance(e.get('args'), dict) and 'request' in e['args'] or
+          _reply(e.get('result')) in ('SUBMITTED', BOUNCE)))
+        for _, entries, _ in inputs for e in entries))
+    for row, entries, artifacts in inputs:
+        rep = identical_runs_root(entries)
+        desc = gate_descriptives(entries, row) if has_gate else {}
+        desc.pop('gate_run_cmds', None)
+        if has_gate:
+            # D72's untracked-only descriptive requires a canonical acknowledgement;
+            # the D73 SAFETY boundary below needs only an inner harness capture.
+            acknowledged = any(g['canonical_reply'] == 'SUBMITTED' for g in gate_invocations(entries))
+            desc['untracked_only_submits'] = None if acknowledged else False
+            if acknowledged:
+                result = artifacts / 'result.json'
+                if not result.is_file():
+                    result = artifacts / 'output.json'
+                scored = None
+                if result.is_file():
+                    paths.append(result)
+                    scored = json.loads(result.read_text()).get('agent_patch')
+                patch = artifacts / 'agent.patch'
+                if scored is None and patch.is_file():
+                    paths.append(patch)
+                    try:
+                        from swegemma.harness.verification import strip_protected_files_from_patch
+                        tasks_path = _tasks_path()
+                        if tasks_path.is_file():
+                            paths.append(tasks_path)
+                        tests = load_task_test_files(tasks_path)[row['instance_id']]
+                        scored = strip_protected_files_from_patch(patch.read_bytes().decode('utf-8'), extra_protected_paths=tests)
+                    except Exception:
+                        scored = None
+                if isinstance(scored, str):
+                    desc['untracked_only_submits'] = untracked_only(scored)
+        else:
+            desc = dict.fromkeys((*GATE_COUNTS, 'gate_internal_visible'), 'n/a (no gate)')
+        rows.append(dict(instance_id=row['instance_id'], **rep, mechanism2=rep['max_run'] >= 5,
+                         mechanism1_empty=row.get('verified_patch_bytes') == 0,
+                         submitted_without_test=submitted_without_test(entries, has_gate),
+                         **submit_evidence(row, entries, has_gate, (artifacts / 'trace.json').is_file()), **desc))
+    totals = dict(mechanism2=sum(r['mechanism2'] for r in rows),
+                  mechanism1_empty=sum(r['mechanism1_empty'] for r in rows),
+                  submitted_without_test=sum(r['submitted_without_test'] is True for r in rows),
+                  count_no_successful_submit=sum(r['submitted_without_test'] is None for r in rows),
+                  max_run=max((r['max_run'] for r in rows), default=0),
+                  runs_ge3=sum(r['runs_ge3'] for r in rows), runs_ge5=sum(r['runs_ge5'] for r in rows),
+                  repeated_calls=sum(r['repeated_calls'] for r in rows),
+                  submit_unverifiable=sum(r['submit_unverifiable'] for r in rows))
+    for key in GATE_COUNTS:
+        totals[key] = (sum(r[key] for r in rows if r[key] is not None) if has_gate else 'n/a (no gate)')
+    totals['untracked_only_unverifiable'] = sum(r.get('untracked_only_submits') is None for r in rows) if has_gate else 'n/a (no gate)'
+    return dict(_schema=_schema('arm2', paths), n_rows=len(rows), totals=totals,
+                submit_unverifiable_rows=[r['instance_id'] for r in rows if r['submit_unverifiable']], rows=rows)
 
 
 def main(argv=None):
     argv = sys.argv if argv is None else argv
     if len(argv) == 3 and argv[1] == 'base':
         out = base_metrics()
-    elif len(argv) == 4 and argv[1] == 'smoke':
-        out = smoke_metrics(argv[2])
+    elif len(argv) == 4 and argv[1] in ('smoke', 'arm2'):
+        out = (smoke_metrics if argv[1] == 'smoke' else arm2_metrics)(argv[2])
     else:
         print(__doc__)
         return 2
