@@ -35,9 +35,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   NOT yet sent: send `Decision needed` after review CLEAN (fix any BLOCKING first). Recommends A (wait v002 LB) + B (anti-loop arm F next week).
 - DEC 059 (on report 013): B approved. ARM E = 31b-v007-p5e (bundles/31b/v007, dist/31b-v007.zip 3a62f41fa5417ee5b129e845296c5a8e44d496f1d22501d5b3a4b29667be3c6f,
   v006 + cap 1.23 only; light review-20261106T043550 no BLOCKING). Addendum E rule: not V -> INVALID; V & E empty<=4/8 & E-empty-only(vs D)<=2
-  -> USABLE; else CAP-BOUND (+1 line: dec 056 item 6 = binding blocker for 31B final at cap<=1.23). Descriptive: timeouts, tasks w/ first ok
-  edit_file/write_file < 73.8 s (trace_tool_errors only counts edit_file: compute write_file too), per-id patch bytes D->E, sign test.
-  Analysis = same as arm D: timing_summary --gate-mode stock-path, trace_tool_errors, thinking_bound, shell_error_causes; log quota AFTER in budget row.
+  -> USABLE; else CAP-BOUND. Analysis DONE c113 (report 014).
 - 31b-v004 CPU DRAFT (dec 059 item 1): dist/31b-v004.zip sha256=50537e1ddcf13f160fcaa9b2bfa145ac13ef91d99a2ce0b27d69f54ee125f7b3 (5f9b4ae) =
   v007 + 1 quoting/no-repeat line (v002 + thinking 0 + plan-005 prompt + cap 1.23). DEVIATION from literal item 1 (full arm-B prompt kept)
   -> argue in arm-E report, offer minimal alt. No slot until v002 LB exists; v004 vs repeat-v002 needs paired evidence. Correction sent:
