@@ -316,3 +316,4 @@
 2026-11-06T08:12Z | codex-review-p7report-light launched on 242859a (sub-case fn); waiting on main | ops/codex/
 2026-11-06T08:13Z | codex review of 242859a DONE: 2 BLOCKING (B1 instance_id check in predicate; B2 absent error keys accepted as null) | ops/codex/review-20261106T081225.md
 2026-11-06T08:15Z | plan 007 Addendum B.1 committed ea9c064 BEFORE main download: predicate fixed to literal dec-068 definition (assert_paired separate; keys must be present), sha a5c58a1d, 50 tests, smoke hits unchanged (rich_3063); re-review codex-review-p7fix-light launched | eval/plans/007.md
+2026-11-06T08:20Z | codex re-review 081435 of ea9c064 CLEAN (0 BLOCKING); NB1 fixed: smoke test asserts equal id sets before pairing (50 pass); waiting on main | ops/codex/review-20261106T081435.md

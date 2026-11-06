@@ -99,10 +99,11 @@ def test_smoke_rich_3063_if_present():
         r = json.loads(line)
         if 'instance_id' in r:
             trows[r['instance_id']] = r
+    # Addendum B.1: every row must pair; no silent skips (codex review 081435 NB1).
+    assert set(rows) == set(trows)
     hits = []
     for i in sorted(rows):
-        if i in trows:
-            assert_paired(rows[i], trows[i])
-            if is_h_verify_empty_patch(rows[i], trows[i]):
-                hits.append(i)
+        assert_paired(rows[i], trows[i])
+        if is_h_verify_empty_patch(rows[i], trows[i]):
+            hits.append(i)
     assert hits == ['rich_3063']
