@@ -2254,3 +2254,528 @@ zip sha256: fc24fcc3eeb98f1bdcd5914d61d597ed2b309d74eb64bed717a2ba5b47bd7c42
   (results/bundle_load_check_31b_v010.json); tests eval/tests/test_submit_gate.py 58 pass.
 - Correction: the anti-pattern line is the Option A text with its first sentence bolded, so it is not byte-verbatim (codex NB3).
 
+codex
+The two reviews match the failures D73 addresses: rename eligibility can disagree with the stripped patch, and a successful inner submit can precede an interrupted acknowledgement. I’ll fix both and make smoke checks require per-task evidence, including separate character and UTF-8 byte comparisons.
+exec
+/bin/bash -lc "sed -n '690,716p' eval/kaggle/agent_timing.py && sed -n '1000,1060p' eval/kaggle/agent_timing.py && sed -n '1290,1335p' eval/kaggle/agent_timing.py && sed -n '387,420p' eval/run_agent_eval.py && sed -n '510,554p' eval/run_agent_eval.py && cat eval/plan007_arm1_summary.py" in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 0ms:
+    """Per tool name: wall seconds from each tool_call to its tool_response (FIFO per name)."""
+    pending, out = {}, {}
+    for e in entries:
+        if e.event_type == 'tool_call':
+            pending.setdefault(e.tool_name, []).append(e.timestamp)
+        elif e.event_type == 'tool_response' and pending.get(e.tool_name):
+            stat = out.setdefault(e.tool_name, dict(n=0, total=0.0, max=0.0))
+            dt = max(0.0, e.timestamp - pending[e.tool_name].pop(0))
+            stat['n'] += 1
+            stat['total'] = round(stat['total'] + dt, 3)
+            stat['max'] = round(max(stat['max'], dt), 3)
+    return out
+
+def observe_patch_strip(original, state):
+    """Retain the agent's diff before the harness removes protected edits."""
+    def strip(patch, *pos, **kw):
+        current = state.get(None)
+        filtered = original(patch, *pos, **kw)
+        if current is not None and current.get('agent_active'):
+            if patch != current.get('filtered_patch'):
+                current['raw_patch'] = patch
+            current['filtered_patch'] = filtered
+        return filtered
+    return strip
+
+def test_run_stats(trace, agent_seconds):
+    pending, n, total = {}, 0, 0.0
+    with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as tf:
+        tf.extractall(destination, filter='data')
+    return hashlib.sha256(payload).hexdigest(), hashlib.sha256((destination / 'agent.yaml').read_bytes()).hexdigest()
+
+def append(stream, row):
+    stream.write(json.dumps(row, allow_nan=False) + '\n')
+    stream.flush(); os.fsync(stream.fileno())
+
+async def evaluate(config, journal, started, caps, totals):
+    from contextvars import ContextVar
+    from swegemma.evaluate import Evaluator
+    from swegemma.models import load_tasks
+    from swegemma.harness.verification import _is_protected_test_or_config_path
+    import swegemma.evaluate as ev
+    import swegemma.harness.verification as vf
+    import swegemma.harness.agent_runner as ar
+    state = ContextVar('timing')
+    original_asyncio = ar.asyncio
+    original_sandbox = {name: getattr(ar, name) for name in ('sandbox_start', 'sandbox_stop', 'sandbox_exec')}
+    ar.asyncio = AsyncioTimingProxy(original_asyncio, state)
+    for name, original in original_sandbox.items():
+        setattr(ar, name, observe_sandbox(original, state, name))
+    original_verify, original_strip = ev.verify_task, vf.strip_protected_files_from_patch
+    vf.strip_protected_files_from_patch = observe_patch_strip(original_strip, state)
+    async def verify(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return await (skip_verification if SKIP_VERIFICATION else original_verify)(*args, **kwargs)
+        finally:
+            state.get()['verification'] = time.perf_counter() - start
+    ev.verify_task = verify
+    class TimingEvaluator(Evaluator):
+        agent_seconds, patch, trace, agent_error = 0.0, '', None, ''
+        def _hydrate_task_from_secret(self, task):
+            return task
+        def _get_secret_bundle_data(self):
+            return {}, {}, None
+        async def _run_agent_sandbox(self, task, *args, **kwargs):
+            safe = dataclasses.replace(task, patch='', test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=())
+            self.context = kwargs['context']
+            self.context.task = safe
+            start = time.perf_counter()
+            state.get()['agent_active'] = True
+            try:
+                self.patch, self.agent_error, self.trace = await super()._run_agent_sandbox(safe, *args, **kwargs)
+                return self.patch, self.agent_error, self.trace
+            finally:
+                self.agent_seconds = time.perf_counter() - start
+                state.get()['agent_active'] = False
+    try:
+        inventory = {t.instance_id: t for t in load_tasks(config.tasks_path)}
+        if len(set(TASK_IDS)) != len(TASK_IDS) or set(TASK_IDS) - inventory.keys():
+            raise ValueError('Duplicate or missing task IDs')
+        patch_subprocess_deps(DATA, state)
+        for iid in TASK_IDS:
+            if should_stop(time.monotonic()-started + (P1_DEADLINE_SECONDS + 30 if STOCK_PROBE else 0), caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+                break
+            task = dataclasses.replace(inventory[iid], patch='')
+            stock = stock_setup_probe(config, iid, task.repo) if STOCK_PROBE else None
+            if STOCK_PROBE and should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+    with (WORK / 'timing.jsonl').open('w') as journal:
+        header = dict(_schema='kaggle_timing_v1', git_sha=GIT_SHA, task_ids=TASK_IDS, concurrency=1,
+                      created_utc=datetime.now(timezone.utc).isoformat(), caps=None,
+                      bundle_sha256=None, agent_yaml_sha256=None, gpu_names=[], gpu_count=0,
+                      mcp_import_ok=None, vllm_startup_seconds=None, platform_probe=None,
+                      fields=dict(instance_id='Task ID', repo='Repository', wall_seconds='Agent (including setup), verification, total wall seconds',
+                          vllm_startup_seconds='Header: perf_counter seconds spent starting vLLM; null on startup failure',
+                          verification_skipped='Container B and verification tests skipped',
+                          agent_outcome='timeout/turns/tool_calls/no_submit from agent_error, or null',
+                          image_emulation_seconds='Setup steps emulating image layers the scorer image already has (inside Phase-1)',
+                          agent_timeout_seconds='Delay passed to agent_runner asyncio.timeout, or null',
+                          agent_clock_seconds='Timeout context exit minus enter (perf_counter), or null',
+                          agent_timeout_fired='Real timeout expired or exit TimeoutError; null if not entered',
+                          finalization_seconds='Sandbox stop end minus timeout exit, or null',
+                          finalization_exec='Post-timeout sandbox_exec calls: cmd (first 40 chars), duration_s, rc or exception type',
+                          teardown_seconds='sandbox_stop duration including failed stop, or null',
+                          phase1_wall_seconds='sandbox_start begin to sandbox_stop end, otherwise _run_agent_sandbox duration',
+                          phase1_source='sandbox_wrappers or run_agent_sandbox fallback',
+                          pre_agent_seconds='Timeout enter minus sandbox_start begin, or null',
+                          post_phase1_seconds='Total wall seconds minus phase1_wall_seconds',
+                          patch_submitted='Context patch_submitted; null if no context',
+                          fallback_patch_used='No submitted patch and non-empty returned harness patch; null if no context',
+                          sandbox_setup_seconds='Sum of measured setup steps', setup_calls='Bounded setup command timings/output', setup_failed='Any setup failure', resolved='Harness verdict', exit_code='Verification exit code or null',
+                          error='Sanitized failure category or null', llm_turns='LLM calls or null', tool_calls='Total and per_tool requests',
+                          tool_seconds='Per-tool n,total,max call->response seconds, FIFO per name', test_run='Test requests n, matched total_seconds, share_of_agent_seconds',
+                          prompt_tokens='Trace usage or null', completion_tokens='Trace usage or null', completion_tokens_per_second='Completion usage / agent seconds or null',
+                          patch_bytes='UTF-8 diff bytes before stripping', patch_files='Diff paths', test_files_edited='Protected/test target paths',
+                          stray_files='New files outside package Python source', empty_patch='Blank diff', timed_out='Timeout error or exit 124',
+                          platform_probe='Header (P2): docker binary/socket, DNS + one 10 s TCP connect to pypi.org:443, no payload',
+                          stock_setup='P1: stock subprocess setup sequence on the same snapshot, run before the task (outside its Phase-1): total_s, steps_s, error',
+                          llm_calls='P3: per usage-bearing trace entry: t since first entry, gap_s since previous entry, tokens'))
+        # Write the header even if installation or extraction fails; enrich before startup.
+        try:
+            header['bundle_sha256'], header['agent_yaml_sha256'] = extract_bundle(BUNDLE_B64, BUNDLE)
+            print('bundle_sha256=', header['bundle_sha256'], 'agent_yaml_sha256=', header['agent_yaml_sha256'], flush=True)
+            header['platform_probe'] = platform_probe()  # P2: <= ~20 s, no payload
+            print('platform_probe=', header['platform_probe'], flush=True)
+            gpu_preflight()  # cheap fail-fast before the multi-minute install (torch check below stays authoritative)
+            install()
+            check_hook_targets()  # fail before vLLM startup if the wheelhouse swegemma lacks the hook targets
+            if os.environ.get('SETUP_FIX') == '1':  # only the fixed path installs the line-9 tools
+                check_tool_sources(DATA / 'wheels' if (DATA / 'wheels').is_dir() else WHEELHOUSE)  # same choice as patch_subprocess_deps
+            try:
+                import mcp  # noqa: F401
+                header['mcp_import_ok'] = True
+            except Exception:
+    from swegemma.cli import _build_cli_model_registry
+    from swegemma.config import EvalConfig
+    from swegemma.evaluate import Evaluator
+    from swegemma.context import SwegemmaContext
+    from swegemma.models import load_tasks
+    from swegemma.harness.verification import _is_protected_test_or_config_path
+    import yaml
+
+    split_ids = read_ids(args.split)
+    if not split_ids <= read_ids(ROOT / 'eval/splits/dev.txt'):
+        raise ValueError('Only frozen dev IDs are authorized; split contains non-dev IDs')
+    selected = split_ids & set(args.ids.split(',')) if args.ids else split_ids
+    if not selected:
+        raise ValueError('No selected tasks')
+    validate_inventory_ids(args.data_dir / 'tasks.jsonl')
+    inventory = load_tasks(args.data_dir / 'tasks.jsonl')
+    tasks = {t.instance_id: t for t in inventory}
+    if not split_ids <= tasks.keys():
+        raise ValueError('Split IDs missing from inventory')
+    if any(not re.fullmatch(r'[A-Za-z0-9_.-]+', i) for i in split_ids):
+        raise ValueError('Unsafe task ID')
+    settings = args.bundle / 'eval_config.yaml'
+    defaults = (yaml.safe_load(settings.read_text()) or {}).get('evaluation', {}) if settings.exists() else {}
+    caps = resolve_caps(defaults, args)
+    validate_caps(caps.values())
+    if args.models_yaml and not args.models_yaml.is_file():
+        raise ValueError('models.yaml missing')
+    models = _build_cli_model_registry(args.bundle, args.models_yaml)
+    # Force every alias to the one recorded endpoint (including models.yaml aliases).
+    for name in models.list_available():
+        model = models.get(name)
+        model._additional_args['api_base'] = args.endpoint
+    raw_dir = args.out / args.run_name
+    raw_dir.mkdir(parents=True, exist_ok=True)
+            result = await evaluator.evaluate_task(task, context=context)
+            resolved, code = result.resolved, result.test_exit_code
+            error = 'Harness task failure (see raw artifacts)' if result.error else None
+        except Exception as exc:
+            logging.exception('Task failed: %s', iid)
+            error = f'Evaluation exception ({type(exc).__name__})'
+        finally:
+            evaluator.docker.cleanup_all()
+        total = time.perf_counter() - start
+        patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch)
+        task_dir = raw_dir / iid
+        trace = evaluator.trace
+        trace_path = task_dir / 'trace.json'
+        artifact_error = None
+        try:
+            task_dir.mkdir(exist_ok=True)
+            (task_dir / 'agent.patch').write_text(patch)
+            (task_dir / 'output.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result
+                                                           else dict(error=error), default=str))
+            trace_path.write_text(json.dumps(trace.to_dict(format='legacy') if trace else {}, default=str))
+        except Exception as exc:
+            logging.exception('Artifact diagnostics failed: %s', iid)
+            artifact_error = type(exc).__name__
+        diagnostics = task_diagnostics(trace, patch, task.repo,
+                                       _is_protected_test_or_config_path, task.test_files,
+                                       args.data_dir)
+        if artifact_error:
+            diagnostics['diag_error'] = ','.join(filter(None, [diagnostics['diag_error'], artifact_error]))
+        per_tool = diagnostics.pop('per_tool')
+        raw_error = result.error or '' if result else error or ''
+        row = dict(instance_id=iid, repo=task.repo, resolved=resolved, exit_code=code, error=error,
+                   wall_seconds=dict(agent=evaluator.agent_seconds,
+                                     verification=times['verification'],
+                                     total=total), llm_turns=context.llm_calls_used,
+                   tool_calls=dict(total=sum(per_tool.values()) if trace else context.tool_calls_used,
+                                   per_tool=per_tool), **timing.metrics(), **diagnostics,
+                   sandbox=environment['sandbox'], cmd_timeouts=times.get('cmd_timeouts', 0),
+                   timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' +
+                                           getattr(evaluator, 'agent_error', ''), re.I)) or code == 124,
+                   trace_path=os.path.relpath(trace_path, ROOT))
+        journal.append(row)
+        print(f'{iid}: resolved={resolved}', flush=True)
+
+    try:
+        if not args.skip_selfcheck:
+#!/usr/bin/env python3
+"""Plan 007 arm-1 summary (Addendum B layout a-e + empty-patch headline).
+
+Inputs: smoke + main kernel timing.jsonl (sealed) and their d4cdf0f0 / a208a023 class files.
+Output: one schema-headed JSON. Counts only; no task text. Calls assert_paired on every row
+before is_h_verify_empty_patch (Addendum B.1).
+
+usage: plan007_arm1_summary.py OUT_JSON
+"""
+import hashlib
+import json
+import math
+import sys
+from collections import Counter
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from plan007_report import assert_paired, is_h_verify_empty_patch  # noqa: E402
+from thinking_bound import task as thinking_task  # noqa: E402
+
+PARTS = [
+    ('smoke', 'runs/31b-v009-p7a1-smoke/timing.jsonl',
+     'results/plan007_arm1_smoke_d4cdf0f0.json', 'results/plan007_arm1_smoke_a208a023.json'),
+    ('main', 'runs/31b-v009-p7a1-main/timing.jsonl',
+     'results/plan007_arm1_main_d4cdf0f0.json', 'results/plan007_arm1_main_a208a023.json'),
+]
+ARM_IDS = 'eval/plans/007-arm1-ids.txt'
+SCREENED_IDS = 'eval/plans/004-gpu-retime-ids.txt'  # the 8 plan-005/006 screen ids (tuned-on), plan 006 l.3
+META_KEYS = ({'_schema'}, {'_vllm'}, {'_done'})  # recognized non-row records (first key set must contain these)
+D4_SHA = 'd4cdf0f012659c685789add3b8e5687362ba01673344bdc1f1bad97f81d8ae5e'
+A2_SHA = 'a208a02343b43556e990271b8757044fdf51515f27ff9a067cd3af14c1fd4e6b'
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def wilson(k, n, z=1.959963984540054):
+    if n == 0:
+        return None
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return [round(max(0.0, c - h), 4), round(min(1.0, c + h), 4)]
+
+
+def rate(k, n):
+    return dict(k=k, n=n, rate=round(k / n, 4) if n else None, wilson95=wilson(k, n))
+
+
+def pct(vals, q):
+    vals = sorted(v for v in vals if v is not None)
+    if not vals:
+        return None
+    i = (len(vals) - 1) * q
+    lo, hi = math.floor(i), math.ceil(i)
+    return round(vals[lo] + (vals[hi] - vals[lo]) * (i - lo), 1)
+
+
+def load_rows(path):
+    out = []
+    for line in Path(path).read_text().splitlines():
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        if 'instance_id' in r:
+            out.append(r)
+        elif not any(m <= set(r) for m in META_KEYS):
+            raise AssertionError(f'unrecognized non-row record in {path}: keys {sorted(r)[:8]}')
+    ids = [r['instance_id'] for r in out]
+    assert len(ids) == len(set(ids)), f'duplicate instance_id rows in {path}'
+    return out
+
+
+def unique_map(rows, what):
+    ids = [r['instance_id'] for r in rows]
+    assert len(ids) == len(set(ids)), f'duplicate classifier rows in {what}'
+    return {r['instance_id']: r for r in rows}
+
+
+def ids_file(path):
+    return [ln.strip() for ln in Path(path).read_text().splitlines()
+            if ln.strip() and not ln.lstrip().startswith('#')]
+
+
+def keys_of_max(d):
+    """(tool, args) key of the first longest identical run (same key as identical_runs)."""
+    best, cur, prev = (0, None), 0, object()
+    for e in d.get('entries') or []:
+        if e.get('type') != 'tool_call':
+            continue
+        key = (e.get('tool'), json.dumps(e.get('args', e.get('arguments')), sort_keys=True))
+        cur = cur + 1 if key == prev else 1
+        prev = key
+        if cur > best[0]:
+            best = (cur, key)
+    return [best[1]] if best[1] else []
+
+
+def identical_runs(trace_path):
+    """Dec 060 metric: runs of consecutive tool_call entries with the same tool + byte-identical args
+    (plan005_armE_compare.max_identical_run key). Returns max run, number of runs >= 3 / >= 5, and
+    total repeated calls = sum over runs of (length - 1)."""
+    d = json.loads(Path(trace_path).read_text())
+    lens, cur, prev = [], 0, object()
+    for e in d.get('entries') or []:
+        if e.get('type') != 'tool_call':
+            continue
+        key = (e.get('tool'), json.dumps(e.get('args', e.get('arguments')), sort_keys=True))
+        if key == prev:
+            cur += 1
+        else:
+            if cur:
+                lens.append(cur)
+            cur = 1
+        prev = key
+    if cur:
+        lens.append(cur)
+    tools = [k[0] for k in keys_of_max(d)]
+    return dict(max_run=max(lens, default=0), max_run_tool=tools[0] if tools else None, runs_ge3=sum(x >= 3 for x in lens),
+                runs_ge5=sum(x >= 5 for x in lens), repeated_calls=sum(x - 1 for x in lens))
+
+
+def main(argv):
+    if len(argv) != 2:
+        print(__doc__)
+        return 2
+    rows, inputs = [], []
+    for part, tpath, d4path, a2path in PARTS:
+        d4 = json.loads(Path(d4path).read_text())
+        a2 = json.loads(Path(a2path).read_text())
+        assert d4['classifier_sha256'] == D4_SHA and a2['classifier_sha256'] == A2_SHA
+        assert d4['input_sha256'] == sha(tpath) == a2['input_sha256']
+        trows = load_rows(tpath)
+        d4rows = unique_map(d4['rows'], d4path)
+        a2rows = unique_map(a2['rows'], a2path)
+        assert len(d4['rows']) == len(a2['rows']) == len(trows)
+        assert set(d4rows) == set(a2rows) == {r['instance_id'] for r in trows}
+        assert len(d4rows) == len(trows)
+        for t in trows:
+            c = d4rows[t['instance_id']]
+            assert_paired(c, t)
+            assert_paired(a2rows[t['instance_id']], t)
+            rows.append((part, t, c, a2rows[t['instance_id']]))
+        inputs.append(dict(part=part, timing=tpath, timing_sha256=sha(tpath),
+                           d4cdf0f0=d4path, a208a023=a2path, n=len(trows)))
+
+    order = ids_file(ARM_IDS)
+    got = [t['instance_id'] for _, t, _, _ in rows]
+    assert got == order, 'row order/ids differ from the fixed arm-1 order'
+    n = len(rows)
+
+    def res(t):
+        return t.get('resolved') is True
+
+    def is_h(c):
+        return c['h'] is not None
+
+    ep = {t['instance_id'] for _, t, c, _ in rows if is_h(c) and is_h_verify_empty_patch(c, t)}
+
+    def strip_known_diag(c):
+        # dec 069 item 1 line (d'): the literal predicate applied to a COPY whose reasons omit 'known_diag:*' flags
+        # (plan l.51: a flag, never gating). is_h_verify_empty_patch itself is unchanged.
+        return dict(c, reasons=[x for x in c['reasons'] if not str(x).startswith('known_diag:')])
+
+    ep_prime = {t['instance_id'] for _, t, c, _ in rows if is_h(c) and is_h_verify_empty_patch(strip_known_diag(c), t)}
+    assert ep <= ep_prime
+    non_h_but_ep_prime = [t for _, t, c, _ in rows if not is_h(c) or t['instance_id'] in ep_prime]
+    per_repo = {}
+    for repo in sorted({t['repo'] for _, t, _, _ in rows}):
+        sub = [t for _, t, _, _ in rows if t['repo'] == repo]
+        per_repo[repo] = rate(sum(res(t) for t in sub), len(sub))
+
+    non_h = [t for _, t, c, _ in rows if not is_h(c)]
+    non_h_but_ep = [t for _, t, c, _ in rows if not is_h(c) or t['instance_id'] in ep]
+    h_rows = [dict(instance_id=t['instance_id'], part=p, h=c['h'], reasons=c['reasons'],
+                   h_verify_empty_patch=t['instance_id'] in ep,
+                   verified_patch_bytes=t.get('verified_patch_bytes'), exit_code=t.get('exit_code'),
+                   patch_submitted=t.get('patch_submitted'))
+              for p, t, c, _ in rows if is_h(c)]
+
+    def timeout(t):
+        return bool(t.get('timed_out')) or bool(t.get('agent_timeout_fired'))
+
+    empty = [(p, t) for p, t, _, _ in rows if t.get('verified_patch_bytes') == 0]
+    empty_rows = [dict(instance_id=t['instance_id'], timeout=timeout(t), llm_turns=t.get('llm_turns'),
+                       per_tool=(t.get('tool_calls') or {}).get('per_tool'))
+                  for _, t in empty]
+    walls = [t.get('wall_seconds') or {} for _, t, _, _ in rows]
+
+    screened = ids_file(SCREENED_IDS)
+    assert len(screened) == len(set(screened)) == 8 and set(screened) <= set(order)
+    unscreened = [t for _, t, _, _ in rows if t['instance_id'] not in set(screened)]
+    assert len(unscreened) == n - 8
+
+    run_dir = {part: str(Path(tp).parent) for part, tp, _, _ in PARTS}
+    rep_rows, th_rows = [], []
+    for p, t, _, _ in rows:
+        tr = Path(run_dir[p]) / 'runs' / t['instance_id'] / 'trace.json'
+        assert tr.is_file(), f'missing trace for {t["instance_id"]}'
+        rep_rows.append(dict(instance_id=t['instance_id'], **identical_runs(tr)))
+        th = thinking_task(str(tr))
+        th_rows.append(dict(instance_id=t['instance_id'], thinking_blocks=th['thinking_blocks'],
+                            max_thinking_chars=th['max_thinking_chars'],
+                            total_thinking_chars=sum(len(e.get('content') or '') for e in
+                                                     json.loads(tr.read_text()).get('entries') or []
+                                                     if e.get('author') == 'swe_baseline_agent'
+                                                     and e.get('type') == 'thinking')))
+
+    out = {
+        '_schema': 'plan007_arm1_summary/v2',
+        'header': {
+            'arm': '31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7...)',
+            'kernel_code_sha': '078f4ea (pre-fold; dec 065 deviation: smoke+main ran before the rev-5 re-freeze)',
+            'governing_classifier_sha256': D4_SHA, 'also_counted_classifier_sha256': A2_SHA,
+            'agent_timing_py_sha256': sha('eval/kaggle/agent_timing.py'),
+            'report_predicate_sha256': sha('eval/plan007_report.py'),
+            'summary_script_sha256': sha(__file__),
+            'k': 1, 'env_caveat': 'env agreement with the local gold calibration unmeasured in the kernel path',
+            'fastapi_hint_caveat': 'v000-v002 carry the FastAPI hint; this arm (v009 from v006) per dec 057/060 notes',
+            'footnote_l239': ('classifier l.239 clause patch_bytes == 0 and code not in (None, -1) flags an empty '
+                              'patch with a failing verification exit as contradictory; a false-positive assumption, '
+                              'not a kernel defect (dec 068).'),
+            'inputs': inputs,
+        },
+        'n_rows': n,
+        'a_primary': dict(resolved=rate(sum(res(t) for _, t, _, _ in rows), n), per_repo=per_repo),
+        'b_d4cdf0f0_counts': dict(
+            h=dict(Counter(c['h'] for _, _, c, _ in rows if is_h(c))),
+            agent=dict(Counter(c['agent'] for _, _, c, _ in rows if c['agent'])),
+            known_diag=sum(bool(c['known_diag']) for _, _, c, _ in rows),
+            h_total=sum(is_h(c) for _, _, c, _ in rows)),
+        'h_rows': h_rows,
+        'c_sens_excl_all_h': rate(sum(res(t) for t in non_h), len(non_h)),
+        'd_sens_excl_h_except_empty_patch': rate(sum(res(t) for t in non_h_but_ep), len(non_h_but_ep)),
+        'd_prime_sens_excl_h_except_empty_patch_ignoring_known_diag': dict(
+            source='dec 069 item 1 (POST-HOC, plan 007 Addendum C); line (d) above stays literal',
+            h_verify_empty_patch_ids_ignoring_known_diag=sorted(ep_prime),
+            resolved=rate(sum(res(t) for t in non_h_but_ep_prime), len(non_h_but_ep_prime))),
+        'e_a208a023_counts': dict(
+            h=dict(Counter(a['h'] for _, _, _, a in rows if a['h'])),
+            agent=dict(Counter(a['agent'] for _, _, _, a in rows if a['agent'])),
+            known_diag=sum(bool(a['known_diag']) for _, _, _, a in rows)),
+        'headline_empty_patch': dict(
+            all=rate(len(empty), n),
+            timeout=sum(r['timeout'] for r in empty_rows),
+            non_timeout=sum(not r['timeout'] for r in empty_rows),
+            empty_with_submit_patch_called=sum(bool(t.get('patch_submitted')) for _, t in empty),
+            rows=empty_rows),
+        'secondary': dict(
+            timeouts=sum(timeout(t) for _, t, _, _ in rows),
+            submit_patch_called=sum(bool(t.get('patch_submitted')) for _, t, _, _ in rows),
+            test_files_edited_rows=sum(bool(t.get('test_files_edited')) for _, t, _, _ in rows),
+            stray_files_rows=sum(bool(t.get('stray_files')) for _, t, _, _ in rows),
+            agent_wall_p50_p90=[pct([w.get('agent') for w in walls], .5), pct([w.get('agent') for w in walls], .9)],
+            verification_wall_p50_p90=[pct([w.get('verification') for w in walls], .5),
+                                       pct([w.get('verification') for w in walls], .9)],
+            total_wall_p50_p90_max=[pct([w.get('total') for w in walls], .5), pct([w.get('total') for w in walls], .9),
+                                    pct([w.get('total') for w in walls], 1.0)],
+            agent_clock_max=pct([t.get('agent_clock_seconds') for _, t, _, _ in rows], 1.0),
+            llm_turns_p50_p90=[pct([t.get('llm_turns') for _, t, _, _ in rows], .5),
+                               pct([t.get('llm_turns') for _, t, _, _ in rows], .9)],
+            tool_calls_p50=pct([(t.get('tool_calls') or {}).get('total') for _, t, _, _ in rows], .5)),
+        'invalidity_rule': dict(text='Arm 1 INVALID iff H rows >= 5 of 33 (eval/plans/007.md Decision rules)',
+                                h_total=sum(is_h(c) for _, _, c, _ in rows),
+                                literal_verdict='INVALID' if sum(is_h(c) for _, _, c, _ in rows) >= 5 else 'VALID',
+                                ruling='VALID by Director ruling dec 069 (POST-HOC; plan 007 Addendum C): all H rows are '
+                                       'empty-patch (FAIL in any env), so not env-induced false negatives of the primary'),
+        'unscreened_25': dict(ids_file=SCREENED_IDS, note='dev minus the 8 plan-005/006 screen ids (tuned-on); descriptive',
+                              resolved=rate(sum(res(t) for t in unscreened), len(unscreened)),
+                              screened_8_resolved=rate(sum(res(t) for _, t, _, _ in rows
+                                                           if t['instance_id'] in set(screened)), 8)),
+        'dec060_identical_runs': dict(
+            definition='consecutive tool_call entries, same tool + byte-identical args (sort_keys JSON); '
+                       'repeated_calls = sum over runs of (len - 1)',
+            tasks_run_ge3=sum(r['max_run'] >= 3 for r in rep_rows),
+            tasks_run_ge5=sum(r['max_run'] >= 5 for r in rep_rows),
+            max_run_max=max(r['max_run'] for r in rep_rows),
+            total_repeated_calls=sum(r['repeated_calls'] for r in rep_rows),
+            max_run_tool_tasks_ge5=dict(Counter(r['max_run_tool'] for r in rep_rows if r['max_run'] >= 5)),
+            empty_patch_and_run_ge5=sum(r['max_run'] >= 5 for r in rep_rows
+                                        if r['instance_id'] in {t['instance_id'] for _, t in empty}),
+            rows=rep_rows),
+        'dec062_thinking_blocks': dict(
+            definition='root (swe_baseline_agent) thinking entries with non-empty content (eval/thinking_bound.py)',
+            tasks_with_blocks=sum(r['thinking_blocks'] > 0 for r in th_rows),
+            total_blocks=sum(r['thinking_blocks'] for r in th_rows),
+            total_chars=sum(r['total_thinking_chars'] for r in th_rows), rows=th_rows),
+    }
+    Path(argv[1]).write_text(json.dumps(out, indent=1) + '\n')
+    print(json.dumps({k: out[k] for k in ('a_primary', 'b_d4cdf0f0_counts', 'c_sens_excl_all_h',
+                                          'd_sens_excl_h_except_empty_patch',
+                                          'd_prime_sens_excl_h_except_empty_patch_ignoring_known_diag', 'invalidity_rule')}, indent=1))
+    hp = out['headline_empty_patch']
+    print('empty_patch', hp['all'], 'timeout', hp['timeout'], 'non_timeout', hp['non_timeout'],
+          'submit_called', hp['empty_with_submit_patch_called'])
+    print('secondary', json.dumps(out['secondary']))
+    print('unscreened_25', json.dumps(out['unscreened_25']))
+    print('dec060', json.dumps({k: v for k, v in out['dec060_identical_runs'].items() if k not in ('rows', 'definition')}))
+    print('dec062', json.dumps({k: v for k, v in out['dec062_thinking_blocks'].items() if k not in ('rows', 'definition')}))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))
+

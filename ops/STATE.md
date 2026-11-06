@@ -32,11 +32,7 @@
   On d73 build: review diff, merge, re-run base (totals must be identical), bin/pack v010 -> NEW sha, load check, MANIFEST + D73.4 sha line,
   then ONE codex-review (gate + metrics + D73 text + v011 unchanged). Smoke only if CLEAN by ~22:00Z, else post-reset AFTER dec 055 submit.
 - DEC 073 APPROVE (D72 accepted as governing pre-data defs; metrics asserts mech2 17/empty 12 fail -> STOP+report, never adjust; arm-1 safety base committed BEFORE arm-2 rows; new gate-changing BLOCKING -> new sha + D72.x line + 1-line FYI; re-verify /tmp if reuse_containers ever set).
-- DEC 072 (both deviations ACCEPTED): codex 133941 on v010 = 4 BLOCKING -> fixed 1a3b831: gate = harness-equal eligibility (py one-liner of
-  _is_protected_test_or_config_path), outputs GATE call/kept_files + reason=changes|forced|check_error, failure-safe counter, SUBMIT FAILED.
-  31b-v010 REPACKED dist/31b-v010.zip sha256=fc24fcc3eeb98f1bdcd5914d61d597ed2b309d74eb64bed717a2ba5b47bd7c42 (c7a86295 VOID); load PASS; 58 gate tests.
-  Plan 008 Addendum D72 (root author filter; test-run boundary = successful submit; gate descriptives per row; untracked-only; /tmp per-task VERIFIED).
-  Metric script eval/plan008_metrics.py = codex-build plan008-metrics (base asserts mech2 17, empty 12). Review + merge, then run base, commit.
+- DEC 072: gate = harness-equal eligibility + observable reasons + failure-safe counter + SUBMIT FAILED (1a3b831); fc24fcc3 VOID (D73). Plan 008 D72 = pinned metric defs.
 - DEC 071 (gate approved w/ conditions): items 1-3 DONE 787b465. Plan 008 Addendum D71: wiring (a) YES same Context (gate alive),
   (b) scored = patch at submit call, else end-of-session workspace diff, (c) no name keying (keep name submit_patch), (d) gate counts:
   worst +3 calls/+7 turns. Smoke ids eval/plans/008-smoke-ids.txt (rule: first 2 non-timeout empty arm-1 rows) sha dcae5058...;
@@ -50,10 +46,8 @@
 - PLAN 008 / 31b-v010-p8 (dec 069 item 3 + DEC 070): pre-reg eval/plans/008.md (1169579). Feasibility: bundle callbacks silently dropped
   (no registry passed), so repeat guard = PROMPT-LEVEL (Option A text verbatim + edit 2-fail -> shorter anchor or /tmp script, NOT write_file);
   empty guard = dec 070 1(b) prompt rule + IN-BUNDLE agent_tool gate named submit_patch (shares Context; <=2 bounces). Both deviations
-  flagged to Director 133950 (awaiting objection). Ship rule: pass delta>=0 AND empty<=4/33 AND run>=5 tasks<=6/33 AND safety (incl.
-  submitted-without-test-run <= arm1+3; arm-1 base to compute with same script BEFORE arm 2). dist/31b-v010.zip sha256=
-  [VOID, superseded by fc24fcc3 above].
-  Smoke <=2 tasks (007-smoke-ids) only if review CLEAN by ~22:00Z (2.34 h quota). Dec 070 item 5: arm-3 addendum must require smoke thinking blocks > 0.
+  accepted (dec 072). Ship rule: pass delta>=0 AND empty<=4/33 AND run>=5 tasks<=6/33 AND safety (submitted-without-test <= 23+3=26).
+  Dec 070 item 5: arm-3 addendum must require smoke thinking blocks > 0.
 - DEC 065-067: d4cdf0f0 = GOVERNING plan-007 classifier (a208a023 alongside); main kernel 078f4ea; results header names 078f4ea, classifier sha, agent_timing.py 0dc1c972 + dec-065 note. Chunk 2 after reset+dec055 submit, same bundle/code.
 - PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
   33 dev fixed order eval/plans/007-arm1-ids.txt, --with-verification --no-stock-probe, slug aniket0202/gemma-31b-passrate.
