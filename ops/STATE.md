@@ -33,7 +33,6 @@
 - DEC 063 (approve): freeze 18afdbbd approved. Classifier code SHA = b6e120f (cite in results header + smoke/main kernel manifest; line
   added plan 007). Smoke ONLY if review r3 has 0 BLOCKING; new BLOCKING -> no patch+launch same cycle; miss 15:30Z -> after reset.
   Log Kaggle quota before/after smoke + main. Dec 055 submit at 11-07T00:00Z has priority; plan-007 must not hold the Kaggle session then.
-- Plan 007 r1/r2 history (reviews 064331, 065651; classifier fe8df91 freeze 69ab78f2 superseded): journal + plan 007 l.75-84.
 - DEC 062 (report 015 approved, A): T stays 0.2 everywhere; no T 0.6 arm in plan 007; repeat guard = design note only (DONE draft
   eval/plans/007-repeat-guard.md); item 4: plan-007 arm 1 may use expiring quota IF pre-reg reviewed + pushed by 11-06T15:30Z, else after reset.
 - PLAN 007 PRE-REG written 06:29Z (eval/plans/007.md, commit e547980): arm 1 = 31b-v009-p7a1 (bundles/31b/v009 = v006 + cap 3.5;
@@ -45,7 +44,6 @@
   if SCORED -> bring v004 cap choice w/ data (FINALS RULE allows cap<=3.5); if ERROR/timeout -> CAP-BOUND binds, anti-loop only 31B path.
   (ii) v004 stays CPU draft, no slot; fold codex NB2 pipefail fix at system.md:33 next time source touched, label UNSCREENED; no repack.
   (iii) next 31B GPU arm = exact-repeat loops.
-  ARM F (31b-v008-p5f, v006 + root T 0.6, sha e1513aac..) DONE NO-EFFECT (report 015). Raw rows: runs/31b-v008-p5f-timing/timing.jsonl.
   Item 4: plan 007 pre-reg (33-dev pass rate; H1 env; thinking off vs on paired arm) DUE 2026-11-07T18:00Z (may use leftover quota pre-reset).
   Item 5: Nov 8 slot candidate + 1-para justification DUE 2026-11-07T12:00Z (e4b-v002 repeat / e4b-v003 if packed+reviewed+smoke / 31b-v002 repeat).
   Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
