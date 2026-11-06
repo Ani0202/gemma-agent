@@ -2684,3 +2684,1309 @@ zip sha256: 4f5b078a367e964ffb7d7426f4d42e13451d0c9dde79322c7fee5bd3a88f4938
     25	    thinking_budget: 0
     26	    include_thoughts: true
 
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/__init__.py; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py | sed -n '1,150p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	"""Execution and status inspection tools for SWE-gemma."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import json
+     6	import logging
+     7	from collections.abc import Callable
+     8	from typing import Any
+     9	
+    10	from swegemma.tools.base import (
+    11	    budget_gated,
+    12	    error_response,
+    13	    ok_response,
+    14	    parse_tool_response,
+    15	)
+    16	
+    17	logger = logging.getLogger(__name__)
+    18	
+    19	
+    20	@budget_gated
+    21	def run_command(ctx: Any, command: str) -> str:
+    22	    """Execute a shell command inside the repository sandbox.
+    23	
+    24	    You can run any shell command (Python scripts, tests, git commands, etc.).
+    25	    The command runs in the repository workspace. No network access.
+    26	
+    27	    Args:
+    28	        ctx: Context instance.
+    29	        command: Shell command to execute (e.g., "pytest tests/", "python3 script.py").
+    30	    """
+    31	    # Determine effective command timeout
+    32	    cmd_timeout = ctx.harness.command_timeout_seconds
+    33	    if ctx.budget.time_minutes is not None:
+    34	        remaining = ctx.remaining_time_seconds
+    35	        if remaining is not None:
+    36	            # Provide a minimum floor of 5s on remaining time so near-deadline commands don't fail immediately on 1s
+    37	            effective_remaining = max(5, int(remaining))
+    38	            if cmd_timeout is not None:
+    39	                effective_timeout = min(cmd_timeout, effective_remaining)
+    40	            else:
+    41	                effective_timeout = effective_remaining
+    42	        else:
+    43	            effective_timeout = cmd_timeout
+    44	    else:
+    45	        effective_timeout = cmd_timeout
+    46	
+    47	    result = ctx.docker.exec(ctx.container_id, command, timeout=effective_timeout)
+    48	    if result.timed_out:
+    49	        return error_response(
+    50	            error_type='TimeoutExceeded',
+    51	            error_message=f'Command timed out after {effective_timeout} seconds',
+    52	        )
+    53	
+    54	    max_chars = ctx.harness.max_stdout_chars
+    55	    stdout_str = result.stdout[:max_chars] if max_chars is not None else result.stdout
+    56	    stderr_str = result.stderr[:max_chars] if max_chars is not None else result.stderr
+    57	
+    58	    if result.exit_code != 0:
+    59	        return error_response(
+    60	            error_type='CommandError',
+    61	            error_message=stderr_str if stderr_str else stdout_str,
+    62	            details={
+    63	                'stdout': stdout_str,
+    64	                'stderr': stderr_str,
+    65	                'exit_code': result.exit_code,
+    66	            },
+    67	        )
+    68	
+    69	    return ok_response(
+    70	        stdout=stdout_str,
+    71	        stderr=stderr_str,
+    72	        exit_code=0,
+    73	    )
+    74	
+    75	
+    76	@budget_gated(count_tool_call=False)
+    77	def submit_patch(ctx: Any) -> str:
+    78	    """Capture the current working tree modifications as the agent's submission.
+    79	
+    80	    This generates a unified git diff against the baseline commit. The agent
+    81	    can submit multiple times; only the final submission is evaluated.
+    82	
+    83	    Args:
+    84	        ctx: Context instance.
+    85	    """
+    86	    ctx.docker.exec(ctx.container_id, 'cd /workspace && git add -N .')
+    87	    res = ctx.docker.exec(
+    88	        ctx.container_id,
+    89	        'cd /workspace && (git diff --binary _swegemma_baseline 2>/dev/null || git diff --binary HEAD)',
+    90	    )
+    91	    if res.exit_code != 0:
+    92	        return error_response(
+    93	            error_type='GitDiffError',
+    94	            error_message=f'git diff failed with exit code {res.exit_code}: {res.stderr}',
+    95	        )
+    96	
+    97	    diff = res.stdout
+    98	    repo = (
+    99	        getattr(ctx, 'repo', None)
+   100	        or getattr(getattr(ctx, 'task', None), 'repo', None)
+   101	        or ''
+   102	    )
+   103	    if not str(repo).startswith('test/mock_repo') and diff.strip():
+   104	        from swegemma.harness.verification import strip_protected_files_from_patch
+   105	
+   106	        task_obj = getattr(ctx, 'task', None)
+   107	        extra_protected = list(getattr(task_obj, 'test_files', None) or ())
+   108	        diff = strip_protected_files_from_patch(
+   109	            diff, extra_protected_paths=extra_protected
+   110	        )
+   111	    ctx.submitted_patch = diff
+   112	    ctx.patch_submitted = True
+   113	    return ok_response(
+   114	        patch_size=len(diff),
+   115	        files_changed=diff.count('diff --git'),
+   116	    )
+   117	
+   118	
+   119	@budget_gated(count_tool_call=False)
+   120	def get_status(ctx: Any) -> str:
+   121	    """Check active budget details (time, tool calls) and active patch details.
+   122	
+   123	    Args:
+   124	        ctx: Context instance.
+   125	    """
+   126	    status_data: dict[str, Any] = {
+   127	        'status': 'ok',
+   128	        'tool_calls_used': ctx.tool_calls_used,
+   129	        'patch_submitted': ctx.submitted_patch is not None,
+   130	        'patch_size': len(ctx.submitted_patch) if ctx.submitted_patch else 0,
+   131	    }
+   132	    if ctx.budget.tool_calls is not None:
+   133	        status_data['tool_calls_remaining'] = max(
+   134	            0, ctx.budget.tool_calls - ctx.tool_calls_used
+   135	        )
+   136	        status_data['max_tool_calls'] = ctx.budget.tool_calls
+   137	    if ctx.budget.time_minutes is not None:
+   138	        status_data['time_seconds_remaining'] = ctx.remaining_time_seconds
+   139	        status_data['max_time_minutes'] = ctx.budget.time_minutes
+   140	        status_data['agent_elapsed_seconds'] = ctx.agent_elapsed_seconds
+   141	    if ctx.budget.turns is not None:
+   142	        status_data['max_turns'] = ctx.budget.turns
+   143	    if ctx.harness.command_timeout_seconds is not None:
+   144	        status_data['command_timeout_seconds'] = ctx.harness.command_timeout_seconds
+   145	    return json.dumps(status_data, ensure_ascii=False)
+   146	
+   147	
+   148	def make_run_command(ctx: Any) -> Callable:
+   149	    def run_command_tool(command: str) -> dict[str, Any]:
+   150	        """Execute a shell command inside the repository sandbox.
+   151	
+   152	        You can run any shell command (Python scripts, tests, git commands, etc.).
+   153	        The command runs in the repository workspace. No network access.
+   154	
+   155	        Args:
+   156	            command: Shell command to execute (e.g., "pytest tests/", "python3 script.py").
+   157	        """
+   158	        return parse_tool_response(run_command(ctx, command))
+   159	
+   160	    run_command_tool.__name__ = 'run_command'
+   161	    return run_command_tool
+   162	
+   163	
+   164	def make_submit_patch(ctx: Any) -> Callable:
+   165	    def submit_patch_tool() -> dict[str, Any]:
+   166	        """Capture the current working tree modifications as the agent's submission.
+   167	
+   168	        This generates a unified git diff against the baseline commit. The agent
+   169	        can submit multiple times; only the final submission is evaluated.
+   170	        """
+   171	        return parse_tool_response(submit_patch(ctx))
+   172	
+   173	    submit_patch_tool.__name__ = 'submit_patch'
+   174	    return submit_patch_tool
+   175	
+   176	
+   177	def make_get_status(ctx: Any) -> Callable:
+   178	    def get_status_tool() -> dict[str, Any]:
+   179	        """Check active budget details (time, tool calls) and active patch details."""
+   180	        return parse_tool_response(get_status(ctx))
+   181	
+   182	    get_status_tool.__name__ = 'get_status'
+   183	    return get_status_tool
+   184	
+   185	
+   186	# Backward compatibility aliases
+   187	get_session_status = get_status
+   188	make_get_session_status = make_get_status
+     1	"""Modular tools for SWE-gemma evaluation context."""
+     2	
+     3	from collections.abc import Callable
+     4	from typing import Any
+     5	
+     6	from swegemma.tools.base import budget_gated, error_response, ok_response
+     7	from swegemma.tools.execution import (
+     8	    get_status,
+     9	    make_get_status,
+    10	    make_run_command,
+    11	    make_submit_patch,
+    12	    run_command,
+    13	    submit_patch,
+    14	)
+    15	from swegemma.tools.graph import (
+    16	    get_code_neighbors,
+    17	    get_code_subgraph,
+    18	    make_get_code_neighbors,
+    19	    make_get_code_subgraph,
+    20	    make_search_similar_code,
+    21	    search_similar_code,
+    22	)
+    23	from swegemma.tools.workspace import (
+    24	    _resolve_workspace_path,
+    25	    edit_file,
+    26	    make_edit_file,
+    27	    make_read_file,
+    28	    make_write_file,
+    29	    read_file,
+    30	    write_file,
+    31	)
+    32	
+    33	
+    34	def create_tools(ctx: Any) -> dict[str, Callable]:
+    35	    """Create all standard evaluation tools bound to the provided context."""
+    36	    return {
+    37	        'run_command': make_run_command(ctx),
+    38	        'read_file': make_read_file(ctx),
+    39	        'write_file': make_write_file(ctx),
+    40	        'edit_file': make_edit_file(ctx),
+    41	        'submit_patch': make_submit_patch(ctx),
+    42	        'get_status': make_get_status(ctx),
+    43	        'get_code_neighbors': make_get_code_neighbors(ctx),
+    44	        'search_similar_code': make_search_similar_code(ctx),
+    45	        'get_code_subgraph': make_get_code_subgraph(ctx),
+    46	    }
+    47	
+    48	
+    49	__all__ = [
+    50	    '_resolve_workspace_path',
+    51	    'budget_gated',
+    52	    'create_tools',
+    53	    'edit_file',
+    54	    'error_response',
+    55	    'get_code_neighbors',
+    56	    'get_code_subgraph',
+    57	    'get_status',
+    58	    'ok_response',
+    59	    'read_file',
+    60	    'run_command',
+    61	    'search_similar_code',
+    62	    'submit_patch',
+    63	    'write_file',
+    64	]
+     1	"""Tool and skill resolution for agents."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	from collections.abc import Callable, Sequence
+     6	import functools
+     7	from pathlib import Path
+     8	from typing import Any
+     9	
+    10	from google.adk.agents.base_agent import BaseAgent
+    11	from google.adk.tools.agent_tool import AgentTool
+    12	from google.adk.tools.skill_toolset import SkillToolset
+    13	
+    14	from ..context import CompilationContext, check_instruction_length
+    15	from ..errors import (
+    16	    LimitExceededError,
+    17	    PathTraversalError,
+    18	    SkillNotFoundError,
+    19	    SubmissionValidationError,
+    20	)
+    21	from ..paths import handle_schema_validation_error, validate_sandboxed_path
+    22	from ..schema import AgentToolEntry, SandboxedAgentConfig, SandboxedLlmAgentConfig
+    23	from ..yaml_loader import load_yaml
+    24	
+    25	
+    26	def _get_agent_tool_cls(ctx: CompilationContext | None = None) -> Any:
+    27	    if ctx is not None and ctx.agent_factory and ctx.agent_factory.agent_tool_cls is not None:
+    28	        return ctx.agent_factory.agent_tool_cls
+    29	    return AgentTool
+    30	
+    31	
+    32	def _get_skill_toolset_cls(ctx: CompilationContext | None = None) -> Any:
+    33	    if ctx is not None and ctx.agent_factory and ctx.agent_factory.skill_toolset_cls is not None:
+    34	        return ctx.agent_factory.skill_toolset_cls
+    35	    return SkillToolset
+    36	
+    37	
+    38	def resolve_tool_item(
+    39	    item: str | AgentToolEntry,
+    40	    ctx: CompilationContext,
+    41	    compile_agent_fn: Callable[[Any, CompilationContext], BaseAgent] | None = None,
+    42	) -> Any:
+    43	    """Resolve a single entry in the agent's tools list.
+    44	
+    45	    - Plain ``str`` → look up in the tool registry.
+    46	    - :class:`AgentToolEntry` → compile the referenced agent and wrap it in an ADK ``AgentTool``.
+    47	
+    48	    Args:
+    49	        item: Either a plain string representing a tool name in the registry, or an AgentToolEntry object referencing a sub-agent.
+    50	        ctx: The compilation context tracking mutable state and limits.
+    51	        compile_agent_fn: Optional callable for recursive agent compilation.
+    52	
+    53	    Returns:
+    54	        The resolved tool callable or an ADK AgentTool instance wrapping a compiled sub-agent.
+    55	
+    56	    Raises:
+    57	        ToolNotFoundError: If a plain string tool name is not found in the tool registry.
+    58	        PathTraversalError: If an AgentTool config_path escapes the submission root directory.
+    59	        SubmissionValidationError: If an AgentTool configuration file is not found.
+    60	        LimitExceededError: If sub-agent nesting depth via AgentTool exceeds ``ctx.limits.max_sub_agent_depth``.
+    61	        SubmissionSchemaError: If an AgentTool configuration fails schema validation.
+    62	        yaml.YAMLError: If an AgentTool YAML configuration file is malformed.
+    63	    """
+    64	    if isinstance(item, str):
+    65	        tool = ctx.tool_registry.get(item)
+    66	        if callable(tool):
+    67	            cur_name = getattr(tool, "__name__", "")
+    68	            if cur_name == "<lambda>":
+    69	                try:
+    70	                    tool.__name__ = item
+    71	                    tool._is_named_lambda = True  # type: ignore[attr-defined]
+    72	                except (AttributeError, TypeError):
+    73	                    @functools.wraps(tool)
+    74	                    def _wrapped_ro(*args: Any, **kwargs: Any) -> Any:
+    75	                        return tool(*args, **kwargs)
+    76	
+    77	                    _wrapped_ro.__name__ = item
+    78	                    return _wrapped_ro
+    79	            elif getattr(tool, "_is_named_lambda", False) and cur_name != item:
+    80	                @functools.wraps(tool)
+    81	                def _wrapped_alias(*args: Any, **kwargs: Any) -> Any:
+    82	                    return tool(*args, **kwargs)
+    83	
+    84	                _wrapped_alias.__name__ = item
+    85	                return _wrapped_alias
+    86	        return tool
+    87	
+    88	    # --- AgentToolEntry -------------------------------------------------
+    89	    ref = item.agent_tool
+    90	    current_dir = ctx.current_dir or ctx.root_dir
+    91	    sub_path = ctx.resolve_sub_config_path(ref.config_path, error_prefix="AgentTool")
+    92	
+    93	    ctx.depth += 1
+    94	    prev_dir = current_dir
+    95	    ctx.current_dir = sub_path.parent
+    96	    try:
+    97	        if ctx.depth > ctx.limits.max_sub_agent_depth:
+    98	            raise LimitExceededError(
+    99	                f"Sub-agent nesting too deep (via agent_tool): {ctx.depth} "
+   100	                f"(max {ctx.limits.max_sub_agent_depth})"
+   101	            )
+   102	
+   103	        raw = load_yaml(sub_path, ctx.root_dir, limits=ctx.limits)
+   104	        try:
+   105	            agent_config = SandboxedAgentConfig.model_validate(raw)
+   106	        except Exception as e:  # noqa: BLE001
+   107	            handle_schema_validation_error(
+   108	                e, context_desc=f"AgentTool config ({ref.config_path})"
+   109	            )
+   110	
+   111	        if compile_agent_fn is None:
+   112	            from ..compiler import _compile_agent
+   113	            compile_agent_fn = _compile_agent
+   114	
+   115	        agent = compile_agent_fn(agent_config.root, ctx)
+   116	        tool_cls = _get_agent_tool_cls(ctx)
+   117	        agent_tool = tool_cls(agent=agent, skip_summarization=ref.skip_summarization)
+   118	        cache = getattr(ctx, "_resolved_agent_tools", None)
+   119	        if cache is None:
+   120	            cache = {}
+   121	            ctx._resolved_agent_tools = cache  # type: ignore[attr-defined]
+   122	        cache[id(item)] = agent_tool
+   123	        return agent_tool
+   124	    finally:
+   125	        ctx.current_dir = prev_dir
+   126	        ctx.depth -= 1
+   127	
+   128	
+   129	def resolve_skills(
+   130	    config: SandboxedLlmAgentConfig,
+   131	    ctx: CompilationContext,
+   132	    tools: Sequence[Any] | None = None,
+   133	) -> Any | None:
+   134	    """Resolve skills declared by an LLM agent into a SkillToolset.
+   135	
+   136	    Args:
+   137	        config: The sandboxed LLM agent configuration object.
+   138	        ctx: The compilation context tracking cumulative skill counts and registries.
+   139	        tools: Optional sequence of tools resolved specifically for this agent.
+   140	
+   141	    Returns:
+   142	        A SkillToolset instance if skills were declared, or None.
+   143	
+   144	    Raises:
+   145	        LimitExceededError: If the cumulative skill count, skill byte size, or instruction length exceeds configured limits.
+   146	        PathTraversalError: If a skill reference escapes the sandbox boundary.
+   147	        SkillNotFoundError: If a skill reference is missing from a provided SkillRegistry.
+   148	        SubmissionValidationError: If loading a skill directory fails.
+   149	    """
+   150	    if not config.skills:
+   151	        return None
+   152	
+   153	    ctx.total_skills_count += len(config.skills)
+   154	    if ctx.total_skills_count > ctx.limits.max_skills:
+   155	        raise LimitExceededError(
+   156	            f"Agent '{config.name}': cumulative skills count ({ctx.total_skills_count}) "
+   157	            f"exceeds submission limit of {ctx.limits.max_skills}"
+   158	        )
+   159	
+   160	    loaded_skills = []
+   161	    for skill_ref in config.skills:
+   162	        skill_path: Path | None = None
+   163	        if ctx.skill_registry is not None:
+   164	            cand_keys = [
+   165	                skill_ref,
+   166	                Path(skill_ref).name,
+   167	                Path(skill_ref).name.replace("_", "-"),
+   168	                skill_ref.strip("/").replace("/", "-").replace("_", "-"),
+   169	            ]
+   170	            matched_key = next(
+   171	                (k for k in cand_keys if k in ctx.skill_registry),
+   172	                None,
+   173	            )
+   174	            if matched_key is not None:
+   175	                skill = ctx.skill_registry.get(matched_key)
+   176	            else:
+   177	                avail = (
+   178	                    ctx.skill_registry.list_skills()
+   179	                    if hasattr(ctx.skill_registry, "list_skills")
+   180	                    else ctx.skill_registry.list_available()
+   181	                )
+   182	                raise SkillNotFoundError(skill_ref, available=avail)
+   183	            loaded_skills.append(skill)
+   184	        else:
+   185	            skill_path = validate_sandboxed_path(
+   186	                path=skill_ref,
+   187	                base_dir=ctx.root_dir,
+   188	                allow_relative=True,
+   189	                must_exist=True,
+   190	                allow_symlinks=False,
+   191	                error_prefix="Skill",
+   192	            )
+   193	            skill_size = 0
+   194	            for child in sorted(skill_path.rglob("*")):
+   195	                if child.is_symlink():
+   196	                    raise PathTraversalError(
+   197	                        f"Skill path escapes submission directory: {child}"
+   198	                    )
+   199	                validate_sandboxed_path(
+   200	                    path=child,
+   201	                    base_dir=ctx.root_dir,
+   202	                    must_exist=True,
+   203	                    allow_symlinks=False,
+   204	                    error_prefix="Skill",
+   205	                )
+   206	                if child.is_file():
+   207	                    skill_size += child.stat().st_size
+   208	            if skill_size > ctx.limits.max_skill_size_bytes:
+   209	                raise LimitExceededError(
+   210	                    f"Skill '{skill_ref}' size {skill_size:,} bytes "
+   211	                    f"exceeds limit of {ctx.limits.max_skill_size_bytes:,} bytes"
+   212	                )
+   213	            try:
+   214	                from google.adk.skills import load_skill_from_dir
+   215	
+   216	                skill = load_skill_from_dir(skill_path)
+   217	                loaded_skills.append(skill)
+   218	            except Exception as e:
+   219	                raise SubmissionValidationError(
+   220	                    f"Failed to load skill '{skill_ref}': {e}"
+   221	                ) from e
+   222	
+   223	        skill_instructions = getattr(skill, "instructions", None)
+   224	        if isinstance(skill_instructions, str):
+   225	            inst_len = len(skill_instructions)
+   226	        elif skill_path is not None and (skill_path / "SKILL.md").is_file():
+   227	            inst_len = len(
+   228	                (skill_path / "SKILL.md").read_text(
+   229	                    encoding="utf-8", errors="replace"
+   230	                )
+   231	            )
+   232	        else:
+   233	            inst_len = 0
+   234	
+   235	        if hasattr(ctx, "check_instruction_length"):
+   236	            ctx.check_instruction_length(inst_len, f"skill:{skill_ref}")  # type: ignore[attr-defined]
+   237	        else:
+   238	            check_instruction_length("x" * inst_len, f"skill:{skill_ref}", ctx)
+   239	
+   240	    if tools is not None:
+   241	        resolved_tools = list(tools)
+   242	    else:
+   243	        resolved_tools = []
+   244	        cache = getattr(ctx, "_resolved_agent_tools", {})
+   245	        for item in config.tools or []:
+   246	            if isinstance(item, str):
+   247	                resolved_tools.append(resolve_tool_item(item, ctx))
+   248	            elif id(item) in cache:
+   249	                resolved_tools.append(cache[id(item)])
+   250	            else:
+   251	                resolved_tools.append(resolve_tool_item(item, ctx))
+   252	
+   253	    skill_toolset_cls = _get_skill_toolset_cls(ctx)
+   254	    try:
+   255	        return skill_toolset_cls(
+   256	            skills=loaded_skills,
+   257	            code_executor=ctx.code_executor,
+   258	            script_timeout=ctx.script_timeout,
+   259	            additional_tools=list(resolved_tools),
+   260	        )
+   261	    except ValueError as e:
+   262	        raise SubmissionValidationError(
+   263	            f"Agent '{config.name}': {e}"
+   264	        ) from e
+   265	
+   266	
+   267	__all__ = [
+   268	    "_get_agent_tool_cls",
+   269	    "_get_skill_toolset_cls",
+   270	    "resolve_skills",
+   271	    "resolve_tool_item",
+   272	]
+     1	"""ADK EventDisplayPlugin for real-time live terminal streaming."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import logging
+     6	from collections.abc import Callable
+     7	from typing import TYPE_CHECKING, Any
+     8	
+     9	from google.adk.plugins.base_plugin import BasePlugin
+    10	
+    11	from adk_eval_core.ui.formatters import (
+    12	    ToolFormatterRegistry,
+    13	    get_default_formatter_registry,
+    14	)
+    15	
+    16	if TYPE_CHECKING:
+    17	    from google.adk.agents.invocation_context import InvocationContext
+    18	    from google.adk.events.event import Event
+    19	
+    20	    from adk_eval_core.ui.event_display import EventDisplay
+    21	
+    22	logger = logging.getLogger(__name__)
+    23	
+    24	
+    25	class EventDisplayPlugin(BasePlugin):
+    26	    """ADK plugin intercepting agent events to render terminal UI updates."""
+    27	
+    28	    def __init__(
+    29	        self,
+    30	        display: EventDisplay | Callable[[Any], None] | None = None,
+    31	        formatter_registry: ToolFormatterRegistry | None = None,
+    32	        name: str | None = None,
+    33	        on_event: Callable[[Any], None] | None = None,
+    34	        *,
+    35	        event_display: Any | None = None,
+    36	        display_manager: Any | None = None,
+    37	        trace_callback: Callable[[Any], None] | None = None,
+    38	    ) -> None:
+    39	        eff_name = (
+    40	            name
+    41	            if name is not None
+    42	            else (
+    43	                "swegemma_display"
+    44	                if (
+    45	                    trace_callback is not None
+    46	                    or display_manager is not None
+    47	                    or event_display is not None
+    48	                )
+    49	                else "event_display"
+    50	            )
+    51	        )
+    52	        super().__init__(name=eff_name)
+    53	        eff_display = display if display is not None else (event_display or display_manager)
+    54	        eff_on_event = on_event if on_event is not None else trace_callback
+    55	
+    56	        if callable(eff_on_event):
+    57	            self._on_event: Callable[..., Any] | None = eff_on_event
+    58	            self.display: Any | None = (
+    59	                eff_display
+    60	                if (eff_display is not None and not callable(eff_display))
+    61	                else None
+    62	            )
+    63	        elif (
+    64	            callable(eff_display)
+    65	            and not hasattr(eff_display, "on_event")
+    66	            and not hasattr(eff_display, "log")
+    67	        ):
+    68	            self._on_event = eff_display
+    69	            self.display = None
+    70	        else:
+    71	            self._on_event = None
+    72	            self.display = eff_display
+    73	
+    74	        self.display_manager = self.display
+    75	        self.trace_callback = self._on_event
+    76	
+    77	        if formatter_registry is not None:
+    78	            self.formatter_registry = formatter_registry
+    79	        elif self.display and hasattr(self.display, "formatter_registry"):
+    80	            self.formatter_registry = self.display.formatter_registry
+    81	        else:
+    82	            self.formatter_registry = get_default_formatter_registry()
+    83	
+    84	    async def on_event_callback(
+    85	        self,
+    86	        *,
+    87	        invocation_context: InvocationContext,
+    88	        event: Event,
+    89	    ) -> Event | None:
+    90	        """Called when an ADK event occurs during agent execution."""
+    91	        if self.display is not None and hasattr(self.display, "on_event"):
+    92	            self.display.on_event(event)
+    93	
+    94	        if self._on_event is not None and self._on_event != getattr(self.display, "on_event", None):
+    95	            self._on_event(event)
+    96	
+    97	        if self.display is not None and hasattr(self.display, "log") and not hasattr(self.display, "on_event"):
+    98	            from rich.markup import escape
+    99	
+   100	            event_type = getattr(event, "type", "event")
+   101	            content = getattr(event, "content", "")
+   102	
+   103	            if event_type == "call":
+   104	                tool_name = getattr(event, "tool_name", "tool") or "tool"
+   105	                args = getattr(event, "tool_args", {}) or {}
+   106	                fmt = self.formatter_registry.get(tool_name)
+   107	                call_disp = fmt.format_call(tool_name, args)
+   108	                preview_str = f" [dim]{escape(str(call_disp.preview))}[/dim]" if call_disp.preview else ""
+   109	                self.display.log(
+   110	                    f"{call_disp.icon} [bold cyan]{escape(str(call_disp.title))}[/bold cyan]{preview_str}"
+   111	                )
+   112	            elif event_type == "response":
+   113	                tool_name = getattr(event, "tool_name", "tool") or "tool"
+   114	                raw_res = getattr(event, "tool_result", "")
+   115	                fmt = self.formatter_registry.get(tool_name)
+   116	                res_disp = fmt.format_response(tool_name, raw_res)
+   117	                if res_disp.is_error:
+   118	                    self.display.log(
+   119	                        f"{res_disp.icon} [bold red]{escape(str(res_disp.title))}: {escape(str(res_disp.preview))}[/bold red]"
+   120	                    )
+   121	                else:
+   122	                    self.display.log(
+   123	                        f"{res_disp.icon} [bold yellow]{escape(str(res_disp.title))}: {escape(str(res_disp.preview))}[/bold yellow]"
+   124	                    )
+   125	            elif event_type == "thought" and content:
+   126	                first_line = escape(str(content).split("\n")[0][:100])
+   127	                self.display.log(f"💭 [dim white]{first_line}...[/dim white]")
+   128	            elif event_type == "system_instruction" and content:
+   129	                first_line = escape(str(content).split("\n")[0][:100])
+   130	                self.display.log(f"📋 [bold magenta]System Prompt:[/bold magenta] {first_line}...")
+   131	            elif event_type == "task_prompt" and content:
+   132	                first_line = escape(str(content).split("\n")[0][:100])
+   133	                self.display.log(f"🎯 [bold cyan]Task Prompt:[/bold cyan] {first_line}...")
+   134	            elif event_type == "final":
+   135	                self.display.log("✅ [bold green]Final response received[/bold green]")
+   136	
+   137	        return event
+   138	
+   139	
+   140	__all__ = ["EventDisplayPlugin"]
+
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py | sed -n '585,680p;820,1105p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py | sed -n '180,315p;450,565p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   585	        await asyncio.to_thread(setup_baseline_commit, docker, sandbox_id, 'baseline')
+   586	
+   587	        # Test runners are re-enabled in sandbox container for experiment
+   588	        # Set enable_sandbox_testing to False to mask pytest and unittest
+   589	        cfg_testing = getattr(config, 'enable_sandbox_testing', None)
+   590	        enable_sandbox_testing = (
+   591	            bool(cfg_testing) if isinstance(cfg_testing, bool) else True
+   592	        )
+   593	        if not enable_sandbox_testing:
+   594	            await asyncio.to_thread(disable_test_runners_in_sandbox, docker, sandbox_id)
+   595	
+   596	        # Capture workspace layout for prompt injection
+   597	        tree_cmd = build_workspace_tree_command()
+   598	        tree_res = await sandbox_exec(docker, sandbox_id, tree_cmd)
+   599	        workspace_tree = tree_res.stdout.strip() if tree_res.exit_code == 0 else ''
+   600	
+   601	        tools = context.create_tools()
+   602	
+   603	        # Compile agent submission
+   604	        script_timeout = (
+   605	            config.harness.command_timeout_seconds
+   606	            if config.harness.command_timeout_seconds is not None
+   607	            else 300
+   608	        )
+   609	        code_executor = AdkSandboxCodeExecutor(
+   610	            sandbox=context.sandbox,
+   611	            timeout_seconds=script_timeout,
+   612	            start_time=context.task_start_time,
+   613	            max_time_minutes=config.budget.time_minutes,
+   614	            budget_check_fn=context.check_budget,
+   615	        )
+   616	        agent: BaseAgent = compile_submission(
+   617	            submission_dir=config.submission_dir,
+   618	            tool_registry=tools,
+   619	            model_registry=config.models,
+   620	            code_executor=code_executor,
+   621	            script_timeout=script_timeout,
+   622	            limits=config.limits,
+   623	            generation_constraints=config.generation_constraints,
+   624	            adapter_manifest=config.adapter_manifest,
+   625	            adapter_resolver_fn=lambda base, info: resolve_swegemma_adapter(
+   626	                base, info, config.models
+   627	            ),
+   628	        )
+   629	        _wrap_skill_toolset_tools(agent)
+   630	
+   631	        display_mode = getattr(config, 'display_mode', 'auto')
+   632	        if dashboard is not None or display_mode == 'quiet':
+   633	            display_mgr = EventDisplayManager(
+   634	                ctx=context,
+   635	                instance_id=task.instance_id,
+   636	                repo=task.repo,
+   637	                task_index=task_index,
+   638	                total_tasks=total_tasks,
+   639	                console=file_console,
+   640	                enable_live=False,
+   641	            )
+   642	        else:
+   643	            display_mgr = EventDisplayManager(
+   644	                ctx=context,
+   645	                instance_id=task.instance_id,
+   646	                repo=task.repo,
+   647	                task_index=task_index,
+   648	                total_tasks=total_tasks,
+   649	                enable_live=True,
+   650	            )
+   651	            file_display_mgr = EventDisplayManager(
+   652	                ctx=context,
+   653	                instance_id=task.instance_id,
+   654	                repo=task.repo,
+   655	                task_index=task_index,
+   656	                total_tasks=total_tasks,
+   657	                console=file_console,
+   658	                enable_live=False,
+   659	            )
+   660	
+   661	        def _on_event(event: Any) -> None:
+   662	            trace.record_event(event)
+   663	            if file_display_mgr is not None:
+   664	                file_display_mgr.on_event(event)
+   665	            context.handle_adk_event(event, agent_name=agent.name)
+   666	
+   667	        display_plugin = EventDisplayPlugin(
+   668	            trace_callback=_on_event,
+   669	            display_manager=display_mgr,
+   670	        )
+   671	        retry_plugin = ModelRetryPlugin()
+   672	        tool_error_plugin = ToolErrorPlugin()
+   673	
+   674	        # Setup ADK Runner and App
+   675	        session_service = InMemorySessionService()
+   676	        session_state = {
+   677	            'problem_description': task.problem_statement,
+   678	        }
+   679	        hints = getattr(task, 'hints_text', '') or ''
+   680	        if isinstance(hints, str) and hints.strip():
+   820	
+   821	                            content = getattr(_event, 'content', None)
+   822	                            parts = getattr(content, 'parts', []) if content else []
+   823	                            event_author = getattr(_event, 'author', None)
+   824	
+   825	                            if event_author not in {'user', 'harness', 'system', 'tool'}:
+   826	                                for p in parts:
+   827	                                    if getattr(p, 'text', None) and not getattr(
+   828	                                        p, 'thought', False
+   829	                                    ):
+   830	                                        last_assistant_text += str(p.text)
+   831	
+   832	                            has_function_call = any(
+   833	                                getattr(p, 'function_call', None) for p in parts
+   834	                            )
+   835	                            if has_function_call and (
+   836	                                context.budget.tool_calls is None
+   837	                                or context.tool_calls_used < context.budget.tool_calls
+   838	                            ):
+   839	                                turn_has_tool_call = True
+   840	
+   841	                            if (
+   842	                                hasattr(_event, 'is_final_response')
+   843	                                and _event.is_final_response()
+   844	                            ):
+   845	                                has_text = any(
+   846	                                    getattr(p, 'text', None)
+   847	                                    and not getattr(p, 'thought', False)
+   848	                                    for p in parts
+   849	                                )
+   850	                                has_function_response = any(
+   851	                                    getattr(p, 'function_response', None) for p in parts
+   852	                                )
+   853	
+   854	                                if (
+   855	                                    event_author not in {'user', 'harness', 'system', 'tool'}
+   856	                                    and has_text
+   857	                                    and not has_function_response
+   858	                                    and not has_function_call
+   859	                                    and context.patch_submitted
+   860	                                ):
+   861	                                    logger.debug(
+   862	                                        'Agent submitted patch and returned final completion message; terminating.'
+   863	                                    )
+   864	                                    break
+   865	
+   866	                            if (
+   867	                                timeout_sec is not None
+   868	                                and context.elapsed_seconds > timeout_sec
+   869	                            ):
+   870	                                agent_error = f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+   871	                                logger.warning(
+   872	                                    'Task %s agent timed out.', task.instance_id
+   873	                                )
+   874	                                break
+   875	
+   876	                        # Count at least 1 call if mock runner yielded no events
+   877	                        if context.llm_calls_used == prev_calls:
+   878	                            context.record_llm_call()
+   879	
+   880	                        try:
+   881	                            s = await session_service.get_session(
+   882	                                app_name='swegemma_eval',
+   883	                                user_id='eval_user',
+   884	                                session_id=session.id,
+   885	                            )
+   886	                            if s:
+   887	                                sess_calls = 0
+   888	                                for e in s.events:
+   889	                                    if getattr(e, 'partial', False):
+   890	                                        continue
+   891	                                    if getattr(e, 'author', None) in {
+   892	                                        None,
+   893	                                        'user',
+   894	                                        'harness',
+   895	                                        'system',
+   896	                                        'tool',
+   897	                                    }:
+   898	                                        continue
+   899	                                    e_content = getattr(e, 'content', None)
+   900	                                    if getattr(e_content, 'role', None) in (
+   901	                                        'user',
+   902	                                        'tool',
+   903	                                    ):
+   904	                                        continue
+   905	                                    e_parts = getattr(e_content, 'parts', []) if e_content else []
+   906	                                    if e_parts and all(
+   907	                                        getattr(p, 'function_response', None)
+   908	                                        for p in e_parts
+   909	                                    ):
+   910	                                        continue
+   911	                                    sess_calls += 1
+   912	                                context.llm_calls_used = max(
+   913	                                    context.llm_calls_used, sess_calls
+   914	                                )
+   915	                        except Exception as sess_err:
+   916	                            logger.debug(
+   917	                                'Failed to inspect session events: %s', sess_err
+   918	                            )
+   919	
+   920	                        if context.patch_submitted:
+   921	                            context.set_activity('Patch submitted')
+   922	                            break
+   923	
+   924	                        if (
+   925	                            timeout_sec is not None
+   926	                            and context.elapsed_seconds > timeout_sec
+   927	                        ):
+   928	                            if not agent_error:
+   929	                                agent_error = f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+   930	                            break
+   931	
+   932	                        if (
+   933	                            context.budget.tool_calls is not None
+   934	                            and context.tool_calls_used >= context.budget.tool_calls
+   935	                        ):
+   936	                            if not agent_error:
+   937	                                agent_error = (
+   938	                                    f'Agent exceeded tool call budget ({context.budget.tool_calls} calls)'
+   939	                                )
+   940	                            logger.warning(
+   941	                                'Task %s: Tool call budget (%d) exhausted; terminating agent loop.',
+   942	                                task.instance_id,
+   943	                                context.budget.tool_calls,
+   944	                            )
+   945	                            break
+   946	
+   947	                        if context.llm_calls_used >= max_llm_calls:
+   948	                            if not agent_error:
+   949	                                agent_error = (
+   950	                                    f'Agent exceeded turns budget ({config.budget.turns} turns)'
+   951	                                    if config.budget.turns is not None
+   952	                                    else 'Agent exceeded maximum allowed LLM turns'
+   953	                                )
+   954	                            logger.warning(
+   955	                                'Task %s: LLM turn budget exhausted.', task.instance_id
+   956	                            )
+   957	                            break
+   958	
+   959	                        if agent_error:
+   960	                            break
+   961	
+   962	                        if turn_has_tool_call:
+   963	                            consecutive_nudges = 0
+   964	
+   965	                        if consecutive_nudges >= max_nudges:
+   966	                            logger.warning(
+   967	                                'Task %s: Reached maximum continuation nudges (%d) without patch submission.',
+   968	                                task.instance_id,
+   969	                                max_nudges,
+   970	                            )
+   971	                            break
+   972	
+   973	                        consecutive_nudges += 1
+   974	                        is_length_truncation = False
+   975	                        if last_event_finish_reason is not None:
+   976	                            fr_str = str(last_event_finish_reason).upper()
+   977	                            if 'MAX_TOKENS' in fr_str or 'LENGTH' in fr_str:
+   978	                                is_length_truncation = True
+   979	
+   980	                        has_truncated_tool_call = '<|tool_call>' in last_assistant_text
+   981	
+   982	                        if has_truncated_tool_call:
+   983	                            nudge_prompt = (
+   984	                                'Your previous response reached the token limit before the tool call finished closing '
+   985	                                '(<|tool_call|> was cut off). Do NOT repeat your prior reasoning in thought—emit your '
+   986	                                'next tool call immediately, and if calling edit_file or write_file, split the change '
+   987	                                'into smaller incremental edits.'
+   988	                            )
+   989	                        elif is_length_truncation:
+   990	                            nudge_prompt = (
+   991	                                'Your previous response reached the token limit while thinking before a tool call was '
+   992	                                'completed. Do NOT repeat your analysis in thought—keep reasoning under a few sentences '
+   993	                                'and emit your next tool call immediately, or call submit_patch when you have completed '
+   994	                                'and verified your changes.'
+   995	                            )
+   996	                        else:
+   997	                            nudge_prompt = (
+   998	                                'Please continue your work using the available tools, or call submit_patch when '
+   999	                                'you have completed and verified your changes.'
+  1000	                            )
+  1001	
+  1002	                        logger.info(
+  1003	                            'Task %s: Agent ended turn without calling submit_patch (nudge %d/%d). Prompting continuation.',
+  1004	                            task.instance_id,
+  1005	                            consecutive_nudges,
+  1006	                            max_nudges,
+  1007	                        )
+  1008	                        trace.record_custom(
+  1009	                            'continuation_nudge', nudge_prompt, author='harness'
+  1010	                        )
+  1011	                        context.set_activity(
+  1012	                            f'Nudge ({consecutive_nudges}/{max_nudges})'
+  1013	                        )
+  1014	                        if display_mgr:
+  1015	                            display_mgr.log_task_prompt(nudge_prompt, author='user')
+  1016	                        if file_display_mgr is not None:
+  1017	                            file_display_mgr.log_task_prompt(
+  1018	                                nudge_prompt, author='user'
+  1019	                            )
+  1020	
+  1021	                        current_message = genai_types.Content(
+  1022	                            role='user',
+  1023	                            parts=[genai_types.Part(text=nudge_prompt)],
+  1024	                        )
+  1025	
+  1026	        except (TimeoutError, LlmCallsLimitExceededError) as e:
+  1027	            if isinstance(e, TimeoutError):
+  1028	                agent_error = (
+  1029	                    f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+  1030	                )
+  1031	                logger.warning('Task %s agent timed out.', task.instance_id)
+  1032	            else:
+  1033	                agent_error = (
+  1034	                    f'Agent exceeded turns budget ({config.budget.turns} turns)'
+  1035	                    if config.budget.turns is not None
+  1036	                    else 'Agent exceeded maximum allowed LLM turns'
+  1037	                )
+  1038	                logger.warning('Task %s agent exceeded turns budget.', task.instance_id)
+  1039	        except Exception as e:
+  1040	            logger.exception(
+  1041	                'Error during sandbox execution for task %s', task.instance_id
+  1042	            )
+  1043	            agent_error = f'Sandbox execution error: {e}'
+  1044	
+  1045	        if context is not None and hasattr(context, 'stop_agent_session'):
+  1046	            context.stop_agent_session()
+  1047	
+  1048	        agent_patch = (context.submitted_patch if context is not None else '') or ''
+  1049	        is_synthetic_mock_repo = (
+  1050	            task.repo.startswith('test/mock_repo') and task.base_commit == '123456'
+  1051	        )
+  1052	        extra_protected = list(getattr(task, 'test_files', None) or ())
+  1053	
+  1054	        if not (context is not None and context.patch_submitted):
+  1055	            # Fallback: check if the agent made unsubmitted modifications on disk
+  1056	            try:
+  1057	                await sandbox_exec(docker, sandbox_id, 'cd /workspace && git add -N .')
+  1058	                diff_res = await sandbox_exec(
+  1059	                    docker,
+  1060	                    sandbox_id,
+  1061	                    'cd /workspace && (git diff --binary _swegemma_baseline 2>/dev/null || git diff --binary HEAD)',
+  1062	                )
+  1063	                unsubmitted_diff = diff_res.stdout or ''
+  1064	                if not is_synthetic_mock_repo and unsubmitted_diff.strip():
+  1065	                    from swegemma.harness.verification import (
+  1066	                        strip_protected_files_from_patch,
+  1067	                    )
+  1068	
+  1069	                    unsubmitted_diff = strip_protected_files_from_patch(
+  1070	                        unsubmitted_diff, extra_protected_paths=extra_protected
+  1071	                    )
+  1072	                if unsubmitted_diff.strip():
+  1073	                    logger.info(
+  1074	                        'Task %s: Captured unsubmitted working tree modifications as fallback patch (%d bytes)',
+  1075	                        task.instance_id,
+  1076	                        len(unsubmitted_diff),
+  1077	                    )
+  1078	                    agent_patch = unsubmitted_diff
+  1079	                else:
+  1080	                    if not agent_error:
+  1081	                        agent_error = (
+  1082	                            'Agent completed execution without calling submit_patch.'
+  1083	                        )
+  1084	                    logger.warning(
+  1085	                        'Task %s completed without explicit submit_patch call and no working tree modifications.',
+  1086	                        task.instance_id,
+  1087	                    )
+  1088	            except Exception as fallback_err:
+  1089	                logger.warning(
+  1090	                    'Failed to check fallback working tree diff for task %s: %s',
+  1091	                    task.instance_id,
+  1092	                    fallback_err,
+  1093	                )
+  1094	                if not agent_error:
+  1095	                    agent_error = (
+  1096	                        'Agent completed execution without calling submit_patch.'
+  1097	                    )
+  1098	        elif not is_synthetic_mock_repo and agent_patch.strip():
+  1099	            from swegemma.harness.verification import strip_protected_files_from_patch
+  1100	
+  1101	            agent_patch = strip_protected_files_from_patch(
+  1102	                agent_patch, extra_protected_paths=extra_protected
+  1103	            )
+  1104	
+  1105	    except ContainerSetupError:
+   180	    def sandbox(self, value: Any) -> None:
+   181	        with self._lock:
+   182	            self._sandbox = value
+   183	
+   184	    def start_agent_session(self) -> None:
+   185	        """Mark the start of the active agent problem-solving session."""
+   186	        with self._lock:
+   187	            self.agent_start_time = time.perf_counter()
+   188	            self.agent_end_time = None
+   189	
+   190	    def stop_agent_session(self) -> None:
+   191	        """Mark the end of the active agent session to freeze the agent elapsed timer."""
+   192	        with self._lock:
+   193	            if self.agent_start_time is not None and self.agent_end_time is None:
+   194	                self.agent_end_time = time.perf_counter()
+   195	
+   196	    def record_llm_call(self) -> None:
+   197	        """Record that an LLM call was executed."""
+   198	        with self._lock:
+   199	            self.llm_calls_used += 1
+   200	
+   201	    def set_activity(self, activity: str) -> None:
+   202	        """Set current runtime activity string."""
+   203	        with self._lock:
+   204	            self.current_activity = activity
+   205	
+   206	    def set_phase(self, phase: str) -> None:
+   207	        """Set current evaluation phase."""
+   208	        with self._lock:
+   209	            self.current_phase = phase
+   210	
+   211	    def handle_adk_event(self, event: Any, agent_name: str | None = None) -> None:
+   212	        """Synchronously extract tool/thought activity preview and count model calls."""
+   213	        if event is None:
+   214	            return
+   215	
+   216	        with self._lock:
+   217	            event_id = getattr(event, 'id', None) or id(event)
+   218	            is_partial = getattr(event, 'partial', False)
+   219	            event_key = (event_id, is_partial)
+   220	            if event_key in self._handled_event_ids:
+   221	                return
+   222	            self._handled_event_ids.add(event_key)
+   223	
+   224	        try:
+   225	            content = getattr(event, 'content', None)
+   226	            parts = getattr(content, 'parts', []) if content else []
+   227	
+   228	            # 1. Activity preview extraction
+   229	            activity_found = False
+   230	            for part in parts:
+   231	                if hasattr(part, 'function_call') and part.function_call:
+   232	                    fc = part.function_call
+   233	                    name = getattr(fc, 'name', '') or 'tool'
+   234	                    args = dict(fc.args) if getattr(fc, 'args', None) else {}
+   235	                    preview_arg = ''
+   236	                    for key in (
+   237	                        'command',
+   238	                        'path',
+   239	                        'file_path',
+   240	                        'query',
+   241	                        'pattern',
+   242	                        'filename',
+   243	                        'prompt',
+   244	                    ):
+   245	                        val = args.get(key)
+   246	                        if val:
+   247	                            preview_arg = str(val)
+   248	                            break
+   249	                    if not preview_arg and args:
+   250	                        preview_arg = str(next(iter(args.values())))
+   251	                    if preview_arg and preview_arg.strip():
+   252	                        lines = preview_arg.strip().splitlines()
+   253	                        first_line = lines[0] if lines else ''
+   254	                        if len(first_line) > 30:
+   255	                            first_line = first_line[:27] + '...'
+   256	                        activity = (
+   257	                            f'{name}({first_line})' if first_line else f'{name}()'
+   258	                        )
+   259	                    else:
+   260	                        activity = f'{name}()'
+   261	                    self.set_activity(activity)
+   262	                    activity_found = True
+   263	                    break
+   264	                elif hasattr(part, 'thought') and part.thought:
+   265	                    self.set_activity('Thinking...')
+   266	                    activity_found = True
+   267	                    break
+   268	
+   269	            if not activity_found:
+   270	                event_type = getattr(event, 'type', None)
+   271	                if event_type == 'call':
+   272	                    name = getattr(event, 'tool_name', 'tool')
+   273	                    self.set_activity(f'{name}()')
+   274	                elif event_type == 'thought':
+   275	                    self.set_activity('Thinking...')
+   276	
+   277	            # 2. LLM call counting (all non-partial model events from root or sub-agents)
+   278	            is_partial = getattr(event, 'partial', False)
+   279	            if not is_partial:
+   280	                author = getattr(event, 'author', None)
+   281	                role = getattr(content, 'role', None) if content else None
+   282	                non_model_authors = {'user', 'harness', 'system', 'tool'}
+   283	
+   284	                is_non_model = (author is not None and author in non_model_authors) or (
+   285	                    role is not None and role in ('user', 'tool')
+   286	                )
+   287	                is_agent = not is_non_model and author is not None
+   288	
+   289	                if is_agent:
+   290	                    has_content = content is not None and (
+   291	                        bool(parts)
+   292	                        or bool(getattr(content, 'text', None))
+   293	                        or isinstance(content, str)
+   294	                    )
+   295	                    is_pure_tool_response = bool(parts) and all(
+   296	                        getattr(p, 'function_response', None) for p in parts
+   297	                    )
+   298	                    if has_content and not is_pure_tool_response:
+   299	                        self.record_llm_call()
+   300	                        usage = getattr(event, 'usage_metadata', None)
+   301	                        if usage is not None:
+   302	                            in_toks = int(getattr(usage, 'prompt_token_count', 0) or 0)
+   303	                            out_toks = int(
+   304	                                getattr(usage, 'candidates_token_count', 0) or 0
+   305	                            )
+   306	                            toks = getattr(usage, 'total_token_count', None)
+   307	                            if toks is None:
+   308	                                toks = in_toks + out_toks
+   309	                            if isinstance(toks, (int, float)) and toks > 0:
+   310	                                with self._lock:
+   311	                                    self._total_tokens += int(toks)
+   312	                            if self._token_budget is not None and hasattr(
+   313	                                self._token_budget, 'record_usage'
+   314	                            ):
+   315	                                with contextlib.suppress(Exception):
+   450	        return time.perf_counter() - self.task_start_time
+   451	
+   452	    @property
+   453	    def elapsed_seconds(self) -> float:
+   454	        """Active session elapsed time for budget checks; falls back to task elapsed."""
+   455	        if self.agent_start_time is not None:
+   456	            return self.agent_elapsed_seconds
+   457	        return self.task_elapsed_seconds
+   458	
+   459	    @property
+   460	    def remaining_time_seconds(self) -> float | None:
+   461	        """Remaining agent session time in seconds, or None if session time is unconstrained."""
+   462	        if self.budget.time_minutes is None:
+   463	            return None
+   464	        if self.agent_start_time is None:
+   465	            return self.budget.time_minutes * 60.0
+   466	        return max(0.0, (self.budget.time_minutes * 60.0) - self.agent_elapsed_seconds)
+   467	
+   468	    def check_budget(self, *, count_tool_call: bool = True) -> str | None:
+   469	        """Check consumable budget limits and increment call count. Returns error JSON if exceeded."""
+   470	        with self._lock:
+   471	            if (
+   472	                count_tool_call
+   473	                and self.budget.tool_calls is not None
+   474	                and self.tool_calls_used >= self.budget.tool_calls
+   475	            ):
+   476	                return json.dumps(
+   477	                    {
+   478	                        'status': 'error',
+   479	                        'error_type': 'BudgetExceeded',
+   480	                        'error_message': f'Tool call budget exhausted ({self.budget.tool_calls} calls)',
+   481	                    },
+   482	                    ensure_ascii=False,
+   483	                )
+   484	
+   485	            if (
+   486	                count_tool_call
+   487	                and self.budget.turns is not None
+   488	                and self.llm_calls_used >= self.budget.turns
+   489	            ):
+   490	                return json.dumps(
+   491	                    {
+   492	                        'status': 'error',
+   493	                        'error_type': 'BudgetExceeded',
+   494	                        'error_message': f'Turn budget exhausted ({self.budget.turns} turns)',
+   495	                    },
+   496	                    ensure_ascii=False,
+   497	                )
+   498	
+   499	            if (
+   500	                count_tool_call
+   501	                and self.budget.cost_usd is not None
+   502	                and self.total_cost_usd >= self.budget.cost_usd
+   503	            ):
+   504	                return json.dumps(
+   505	                    {
+   506	                        'status': 'error',
+   507	                        'error_type': 'BudgetExceeded',
+   508	                        'error_message': f'Cost budget exhausted (${self.budget.cost_usd:.4f} USD)',
+   509	                    },
+   510	                    ensure_ascii=False,
+   511	                )
+   512	
+   513	            if (
+   514	                count_tool_call
+   515	                and self.budget.total_tokens is not None
+   516	                and self.total_tokens >= self.budget.total_tokens
+   517	            ):
+   518	                return json.dumps(
+   519	                    {
+   520	                        'status': 'error',
+   521	                        'error_type': 'BudgetExceeded',
+   522	                        'error_message': f'Token budget exhausted ({self.budget.total_tokens} tokens)',
+   523	                    },
+   524	                    ensure_ascii=False,
+   525	                )
+   526	
+   527	            if self.budget.time_minutes is not None:
+   528	                if self.budget.time_minutes <= 0:
+   529	                    return json.dumps(
+   530	                        {
+   531	                            'status': 'error',
+   532	                            'error_type': 'TimeoutExceeded',
+   533	                            'error_message': f'Session time budget exhausted ({self.budget.time_minutes} minutes)',
+   534	                        },
+   535	                        ensure_ascii=False,
+   536	                    )
+   537	                if self.agent_start_time is not None:
+   538	                    elapsed_minutes = self.agent_elapsed_seconds / 60.0
+   539	                    if elapsed_minutes > self.budget.time_minutes:
+   540	                        return json.dumps(
+   541	                            {
+   542	                                'status': 'error',
+   543	                                'error_type': 'TimeoutExceeded',
+   544	                                'error_message': f'Session time budget exhausted ({self.budget.time_minutes} minutes)',
+   545	                            },
+   546	                            ensure_ascii=False,
+   547	                        )
+   548	
+   549	            if count_tool_call:
+   550	                self.tool_calls_used += 1
+   551	            return None
+   552	
+   553	    def get_display_snapshot(self) -> DisplaySnapshot:
+   554	        """Capture an immutable snapshot of context state for thread-safe UI rendering."""
+   555	        with self._lock:
+   556	            eff_tools = getattr(self, 'tool_calls_used', 0) or 0
+   557	            eff_max_tools = (
+   558	                self.budget.tool_calls
+   559	                if (self.budget and self.budget.tool_calls is not None)
+   560	                else getattr(self, 'max_tool_calls', None)
+   561	            )
+   562	            agent_started = self.agent_start_time is not None
+   563	            eff_elapsed = self.agent_elapsed_seconds if agent_started else 0.0
+   564	            return DisplaySnapshot(
+   565	                task_id=self.task_id
+

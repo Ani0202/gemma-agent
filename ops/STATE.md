@@ -45,11 +45,8 @@
 - DEC 065-067 (DONE through main push): d4cdf0f0 = GOVERNING plan-007 classifier (last freeze, no rev 6; a208a023 counts alongside);
   main on kernel 078f4ea; results header must name 078f4ea, classifier sha, agent_timing.py sha 0dc1c972...dc96 + dec-065 deviation note.
   Nothing about main changes from smoke outcomes. Chunk 2 (unrun suffix) after reset AND after dec 055 submit, same bundle/code, seed-max from all rows.
-- DEC 062 (report 015 approved, A): T stays 0.2 everywhere; no T 0.6 arm in plan 007; repeat guard = design note only (DONE draft
-  eval/plans/007-repeat-guard.md); item 4: plan-007 arm 1 may use expiring quota IF pre-reg reviewed + pushed by 11-06T15:30Z, else after reset.
 - PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
   33 dev fixed order eval/plans/007-arm1-ids.txt, --with-verification --no-stock-probe, slug aniket0202/gemma-31b-passrate.
-- Arm E CAP-BOUND (rep 014, v007 3a62f41f.., cap 1.23); arm D v006 b7b2eb3d.. PASS (rep 013). ARM F DONE NO-EFFECT (report 015, dec 062 accepted). results/plan005_armF_vs_D.json + *_31b_v008.json (schema-header check pending, dec 062 item 6).
 - DEC 061 (on report 014): approve-with-changes. CAP-BOUND accepted; A + B approved. (i) dec 055 v002 submit at 11-07T00:00Z stays FIRST;
   if SCORED -> bring v004 cap choice w/ data (FINALS RULE allows cap<=3.5); if ERROR/timeout -> CAP-BOUND binds, anti-loop only 31B path.
   (ii) v004 stays CPU draft, no slot; fold codex NB2 pipefail fix at system.md:33 next time source touched, label UNSCREENED; no repack.
