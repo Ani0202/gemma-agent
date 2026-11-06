@@ -359,3 +359,6 @@
 2026-11-06T14:45Z | dec 078 read (approve; no FYIs for routine clean reviews). (a) arm-3 thinking addendum pre-registered eval/plans/009.md 1b0054a (pre-data); codex-review-plan009-light started | ops/decisions/078-20261106T143654-4893-from-builder.md
 2026-11-06T14:45Z | (b) Nov 8 slot inputs drafted (decision matrix; e4b-v003 not packed); (c) B3 fix launched as codex-build b3-unpaired-inner | ops/drafts/nov8-slot-inputs.md
 2026-11-06T14:44:15Z | B3 codex-build done; diff reviewed, suite 1493 pass/6 skip in worktree; merged ab4dd1a; targeted review codex-review-b3-light started | eval/plan008_metrics.py
+2026-11-06T14:47Z | codex review B3 merge ab4dd1a CLEAN (no FYI, dec 078) | ops/codex/review-20261106T144406.md
+2026-11-06T14:47Z | codex review plan 009 BLOCKING x2 (identity hashes; validity/H-row inheritance) -> rev 1 157b525, re-review launched | ops/codex/review-20261106T143954.md eval/plans/009.md
+2026-11-06T14:49Z | arm-3 candidates packed: 31b-v012-p9a 78a8fd30..., 31b-v013-p9b 06eff226...; load checks PASS; light review launched | bundles/31b/v012/MANIFEST.md bundles/31b/v013/MANIFEST.md
