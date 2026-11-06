@@ -1,18 +1,20 @@
-# STATE: snapshot 2026-11-06 01:05Z (cycle 101, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-06 01:01Z (cycle 102, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
-- e4b-v001 (cap 1.4): dist/e4b-v001.zip f2ced9c9...62d277e9, review clean; superseded by v002.
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
   SUBMITTED 2026-11-06T00:11:23Z ref 58039259 (kernel aniket0202/gemma-submit-e4b v1, auth dec 040); PENDING. Waiter lb-e4b-v002-wait-light
   -> results/lb_e4b_v002.polls.csv; on score fill results/lb_e4b_v002.json (score, completed_utc, runtime fields) + ops/budget/kaggle.md.
   Next e4b submit: earliest after this scores AND next UTC day (one pending at a time). Guard v6 applied b9caae4 (dry checks rc=3 x2).
 - 31b-v002 (dec 052 item 3; v001-t4 + cap 3.5 only): dist/31b-v002.zip sha256=e56a05e5701fa16a8dbbabb304d98f63a465511cefbb28d65850ea5ce086ec88,
-  pack PASS, load check 8192 x2 / 210 s. Submit kernel aniket0202/gemma-submit-31b v1 (CPU) COMPLETE, output sha = e56a05e5 verified. NOT authorized: report 010 carries
-  SUBMIT line (exact: SUBMIT dist/31b-v002.zip sha256=e56a05e5...ec88 track=31b) iff G1 holds AND review-31b-v002-light clean (dec 053);
-  submit only after e4b ref 58039259 is final (check server list first); no change to v002/kernel after review. Review CLEAN ops/codex/review-20261106T001642.md.
-  DEC 054: before EACH submit, commit "config: SUBMIT_KERNEL=<slug> for <bundle> (dec 054)" (31b -> gemma-submit-31b v1), grep it into the
-  journal; if the edit is denied: bin/send aniket the one-line change, wait. Else propose alternative (repeat e4b-v002 after its score / 31B cap <= 1.23) with trade-offs (dec 052 item 4).
+  pack PASS, load check 8192 x2 / 210 s. Submit kernel aniket0202/gemma-submit-31b v1 (CPU) COMPLETE, output sha e56a05e5 verified. Review CLEAN.
+  DEC 055 = SUBMIT AUTHORIZED, CONDITIONAL. ALL must hold or it is void: (1) now >= 2026-11-07T00:00Z (waiter submit-window-31b-light);
+  (2) `kaggle competitions submissions` shows e4b 58039259 FINAL; (3) T = (first poll showing e4b final, results/lb_e4b_v002.polls.csv) - 00:11:23Z;
+  submit only if e4b SCORED and T <= 6.0 h. If 6<T<=8 h or e4b ERRORED (any cause): do NOT submit, mail Director T + exact status text +
+  options B (31B cap<=1.23) / C (repeat e4b-v002). e4b still pending at 2026-11-07T18:00Z: mail Director, don't submit.
+  (4) commit "config: SUBMIT_KERNEL=aniket0202/gemma-submit-31b for 31b-v002 (dec 054)", grep into journal, kernel v1.
+  (5) journal T + veto (number, threshold, verdict) BEFORE bin/kaggle-submit; then results/lb_31b_v002.json (same schema as
+  lb_e4b_v002.json) + waiter -light. Expect a weak LB score (validation submit); don't act on it alone.
 - CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 E4B/12B/E2B validator
   acceptance (first e4b submit settles E4B); l.55 submit_patch/get_status vs call limits; l.63 private-LB multiple runs; l.72 wheels arch
   (x86 assumed, unrecorded); 12h overrun ruling. VERIFIED: l.42 submit method = kernel output (dec 041); l.76 superseded by l.112.
@@ -24,13 +26,14 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 ## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
-## Running jobs (01:05Z): lb-e4b-v002-wait-light, memguard-light. Plan 006 DONE: results/kaggle_timing_31b_v001.json, all gates PASS, G1 HOLDS -> report 010 (NEEDS_DECISION).
-- Report 010 veto (pre-registered 01:05Z): T = e4b complete_utc - 00:11:23Z; T > 8 h or e4b time-fail -> do NOT submit 31b-v002.
-- 31B cap 4.0 quality: 6/8 timeout, 4/8 empty diff (all no-edit timeouts) -> plan 005 is the lever.
+## Running jobs (01:01Z): lb-e4b-v002-wait-light, memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), review-plan005-light.
+- PLAN 005 ADDENDUM A (pre-reg 00:59Z, eval/plans/005.md): arm A = runs/31b-v001-t4-timing (results/trace_tool_errors_31b_v001.json);
+  arm B = 31b-v003-p5t4 dist/31b-v003.zip sha 3fa08f768ab7052b9c225c8ec92dcd62743d760cdf32c5dd14e8ab139b18081a (v001-t4 + prompt only).
+  Report 011 asks for Kaggle L4x4 ~2.1 h (NEEDS_DECISION); run only after the review is clean AND approved. Same kernel/ids/flags as plan 006.
+  Metric script: eval/trace_tool_errors.py <run_dir> <label> <out.json>. Root causes: write_file rejects /tmp (prompt said /tmp!),
+  edit_file args mangled by backticks/quotes, shell quoting, 40-call budget on reads.
 - KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
   dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
-- Kernel stack (fix5/probes/gate/finfix/fix7) MERGED to main 2db5f51 (all reviews clean).
-- memguard-fix6 MERGED e8a2b04 + deployed. Tests: ops/tools/runtests.py (pyimg path). bin/job owner patch: HOLD (dec 026).
 - DEC 027 FIDELITY: kernel = Dockerfile.public only (offline); NO PIP_* prefixes; setup_calls logging mandatory.
 - Dec 022 item 4 = plan 005 (ops/codex/ask-20261105T181222.md; draft bundles/drafts/item4-system.md; empty submit loses all; needs GPU).
 ## Quota / spend
@@ -72,7 +75,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - OPEN eval-design question (dec 034 item 6): under H1, test deps come from the scorer's own site-packages, not setup.py. Before local
   pass-rate evals start, pre-register which environment the local sandbox models and why. Don't act on it before then.
 ## Next 3
-1. Await Director ruling on report 010 (SUBMIT 31b-v002 w/ veto). On e4b score: fill results/lb_e4b_v002.json + budget log, compute T.
-   Before any 31B submit: dec 054 SUBMIT_KERNEL commit; server list check; guard v6 (b9caae4).
-2. Dec 050 heavy-job hold lifted (plan 006 done): plan 005 (dec 022 item 4: truncation-safe diff / no-edit timeouts) + plan 007 (dec 039).
-3. ops/patches cleanup (dec 045 item 4); dec 038 paper evidence (results files schema-headed) by Nov 9 23:59Z.
+1. review-plan005-light result -> fix BLOCKING items (re-pack, new sha) -> on Director approval push arm B (same push as plan 006, log quota).
+2. e4b waiter final -> fill results/lb_e4b_v002.json + budget log, compute T. At 2026-11-07T00:00Z: run the dec 055 checklist above.
+3. Plan 007 (after 005); dec 038 paper evidence by Nov 9 23:59Z (trace_tool_errors files are schema-headed); ops/patches cleanup (dec 045 item 4).

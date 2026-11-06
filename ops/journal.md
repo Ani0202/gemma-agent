@@ -220,3 +220,9 @@
 2026-11-06T00:19:10Z | dec 054: SUBMIT_KERNEL per-submission config commit (option A modified); option B -> backlog | ops/decisions/054-20261106T001818-11529-from-builder.md
 2026-11-06T01:05Z | plan 006 31B timing COMPLETE: gates a/b/d/e PASS (b 243.4<=277, vLLM 364 s), P2 no docker, P1 max 5.3 s -> G1 HOLDS; 6/8 timeout, 4/8 empty diff; quota 7.28/30 h | results/kaggle_timing_31b_v001.json
 2026-11-06T01:05Z | report 010: SUBMIT 31b-v002 requested, conditional on e4b final + pre-registered veto T>8h | ops/reports/010-31b-timing-g1.md
+2026-11-06T01:01Z | note: the two "01:05Z" lines above were written at about 00:54Z (the clock was misread); the content stands | ops/journal.md
+2026-11-06T01:01Z | dec 055: SUBMIT 31b-v002 AUTHORIZED, CONDITIONAL (>=2026-11-07T00:00Z; e4b 58039259 final+SCORED; veto T<=6.0 h; dec 054 commit; journal T first) | ops/decisions/055-010-31b-timing-g1.md
+2026-11-06T01:01Z | waiter submit-window-31b-light started (fires 2026-11-07T00:00:30Z) | ops/jobs
+2026-11-06T01:01Z | plan 005 re-scoped (dec 055 item 6): trace analysis of arm A, 4/8 empty from write_file-/tmp rejection (6/8 tasks), edit_file mangled args (19 calls), quoting, budget | results/trace_tool_errors_31b_v001.json
+2026-11-06T01:01Z | plan 005 Addendum A pre-registered (00:59Z); screen bundle 31b-v003-p5t4 built, pack PASS sha 3fa08f76...081a; review-plan005-light launched | eval/plans/005.md bundles/31b/v003/MANIFEST.md
+2026-11-06T01:01Z | report 011: request Kaggle L4x4 ~2.1 h for plan 005 arm B after a clean review | ops/reports/011-plan005-screen.md
