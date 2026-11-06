@@ -4,11 +4,13 @@ set -euo pipefail
 dry_run=false
 skip_verification=1
 stock_probe=1
-while [[ ${1:-} == --dry-run || ${1:-} == --with-verification || ${1:-} == --no-stock-probe ]]; do
+seed_max=0
+while [[ ${1:-} == --dry-run || ${1:-} == --with-verification || ${1:-} == --no-stock-probe || ${1:-} == --seed-max ]]; do
   case $1 in
     --dry-run) dry_run=true ;;
     --with-verification) skip_verification=0 ;;
     --no-stock-probe) stock_probe=0 ;;
+    --seed-max) seed_max=${2:?--seed-max SECONDS}; [[ $seed_max =~ ^[0-9]+$ ]] || { echo '--seed-max takes whole seconds' >&2; exit 2; }; shift ;;
   esac
   shift
 done
@@ -23,7 +25,7 @@ if [[ ${1:-} == --setup-only ]]; then
   set -- "$1" - "$2" "${3:-1800}"
 fi
 if [[ $# -lt 3 || $# -gt 4 || ! $1 =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]]; then
-  echo "Usage: $0 [--dry-run] [--with-verification] [--no-stock-probe] KAGGLE_USER/SLUG BUNDLE_DIR IDS_FILE [BUDGET_SECONDS]" >&2
+  echo "Usage: $0 [--dry-run] [--with-verification] [--no-stock-probe] [--seed-max SECONDS] KAGGLE_USER/SLUG BUNDLE_DIR IDS_FILE [BUDGET_SECONDS]" >&2
   exit 2
 fi
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -31,7 +33,7 @@ stage_dir=$(mktemp -d /tmp/timing-kernel-push.XXXXXX)
 # Dry runs retain the generated artifact for inspection.
 if ! $dry_run; then trap 'rm -rf -- "$stage_dir"' EXIT; fi
 budget=${4:-10800}
-python3 - "$script_dir" "$stage_dir" "$1" "$2" "$3" "$budget" "$setup_only" "$setup_fix" "$skip_verification" "$stock_probe" <<'PY'
+python3 - "$script_dir" "$stage_dir" "$1" "$2" "$3" "$budget" "$setup_only" "$setup_fix" "$skip_verification" "$stock_probe" "$seed_max" <<'PY'
 import ast
 import base64
 import gzip
@@ -45,7 +47,7 @@ import sys
 import tarfile
 
 source, stage = map(Path, sys.argv[1:3])
-kernel_id, bundle_arg, ids_arg, budget_arg, setup_only_arg, setup_fix_arg, skip_verification_arg, stock_probe_arg = sys.argv[3:]
+kernel_id, bundle_arg, ids_arg, budget_arg, setup_only_arg, setup_fix_arg, skip_verification_arg, stock_probe_arg, seed_max_arg = sys.argv[3:]
 setup_only = setup_only_arg == "1"
 bundle, ids_file = Path(bundle_arg).resolve(), Path(ids_arg)
 budget = int(budget_arg)
@@ -89,7 +91,8 @@ constants = dict(BUNDLE_B64=base64.b64encode(buf.getvalue()).decode(), TASK_IDS=
                  GIT_SHA=subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip(),
                  KERNEL_BUDGET_SECONDS=budget, SETUP_ONLY=setup_only, SETUP_FIX=int(setup_fix_arg),
                  SKIP_VERIFICATION=skip_verification_arg == "1",
-                 STOCK_PROBE=stock_probe_arg == "1")
+                 STOCK_PROBE=stock_probe_arg == "1",
+                 OBSERVED_MAX_SEED_SECONDS=float(seed_max_arg))
 text = (source / 'agent_timing.py').read_text()
 lines = text.splitlines(keepends=True)
 for node in reversed(ast.parse(text).body):

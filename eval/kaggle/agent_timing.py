@@ -38,6 +38,10 @@ GIT_SHA = ""
 KERNEL_BUDGET_SECONDS = 3 * 3600
 P1_DEADLINE_SECONDS = 180
 STOCK_PROBE = True  # P1 (plan 006 addendum): time the stock subprocess setup per task
+# Plan 007 (codex review 063014 item 4): should_stop reserves sandbox setup passes explicitly, and a
+# prior chunk's (smoke) max per-task total seeds observed_max because each kernel restarts `totals`.
+SETUP_PASS_SECONDS = 240  # per sandbox dependency-setup pass; 1 pass (agent) + 2 (Container B) with verification
+OBSERVED_MAX_SEED_SECONDS = 0.0
 DATA = Path('/kaggle/input/competitions/gemma-4-developer-agent')
 WORK = Path('/kaggle/working')
 BUNDLE = WORK / 'bundle'
@@ -722,8 +726,12 @@ def test_run_stats(trace, agent_seconds):
                 total += max(0.0, e.timestamp - start)
     return dict(n=n, total_seconds=total, share_of_agent_seconds=total / agent_seconds if agent_seconds else None)
 
-def should_stop(elapsed, cap_minutes, verification_timeout, observed_max, budget):
-    return elapsed + 1.5 * max(cap_minutes * 60 + verification_timeout, observed_max) > budget
+def should_stop(elapsed, cap_minutes, verification_timeout, observed_max, budget, setup_reserve=0):
+    return elapsed + 1.5 * max(cap_minutes * 60 + verification_timeout + setup_reserve, observed_max) > budget
+
+
+def setup_reserve_seconds(skip_verification):
+    return SETUP_PASS_SECONDS * (1 if skip_verification else 3)
 
 
 class AsyncioTimingProxy:
@@ -1044,12 +1052,12 @@ async def evaluate(config, journal, started, caps, totals):
             raise ValueError('Duplicate or missing task IDs')
         patch_subprocess_deps(DATA, state)
         for iid in TASK_IDS:
-            if should_stop(time.monotonic()-started + (P1_DEADLINE_SECONDS + 30 if STOCK_PROBE else 0), caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
+            if should_stop(time.monotonic()-started + (P1_DEADLINE_SECONDS + 30 if STOCK_PROBE else 0), caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
                 append(journal, {'_stopped': 'insufficient remaining budget for next task'})
                 break
             task = dataclasses.replace(inventory[iid], patch='')
             stock = stock_setup_probe(config, iid, task.repo) if STOCK_PROBE else None
-            if STOCK_PROBE and should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
+            if STOCK_PROBE and should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
                 append(journal, {'_stopped': 'insufficient remaining budget for next task'})
                 break
             times = dict(instance_id=task.instance_id, verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)

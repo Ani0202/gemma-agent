@@ -89,6 +89,12 @@ def test_timebox_boundary():
     assert not timing.should_stop(100, 5, 300, 0, 1000)
     assert timing.should_stop(100.01, 5, 300, 0, 1000)
     assert timing.should_stop(100, 5, 300, 601, 1000)
+    # plan 007: explicit setup reserve (3 passes with verification) and smoke-seeded observed max
+    assert timing.setup_reserve_seconds(True) == timing.SETUP_PASS_SECONDS
+    assert timing.setup_reserve_seconds(False) == 3 * timing.SETUP_PASS_SECONDS
+    assert not timing.should_stop(0, 3.5, 300, 0, 1.5 * (210 + 300 + 720))
+    assert timing.should_stop(0.01, 3.5, 300, 0, 1.5 * (210 + 300 + 720), 720)
+    assert not timing.should_stop(0.01, 3.5, 300, 0, 1.5 * (210 + 300 + 720))
 
 
 @pytest.fixture(autouse=True)
