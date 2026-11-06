@@ -645,6 +645,10 @@ def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, s
         assert ev.verify_task is original_verify
         return
     assert row['verification_skipped'] is skip
+    assert {'result_error', 'agent_error_text', 'verified_patch_bytes'} <= row.keys()
+    assert row['result_error'] is None
+    expected_bytes = None if failure in ('runner', 'setup') else len('diff --git a/repo/a.py b/repo/a.py\n'.encode('utf-8'))
+    assert row['verified_patch_bytes'] == expected_bytes
     assert (row['error'] is not None) is bool(failure)
     verified = not skip and failure not in ('runner', 'setup')
     assert row['resolved'] is verified
@@ -655,6 +659,21 @@ def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, s
     assert seen[0][2] == (0 if skip else 300)
     assert ev.verify_task is original_verify
     assert all(getattr(ar, key) is originals[key] for key in ('asyncio', 'sandbox_start', 'sandbox_stop', 'sandbox_exec'))
+
+
+def test_row_build_fallback_retains_evidence_fields():
+    tree = ast.parse(Path(timing.__file__).read_text())
+    evaluate = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'evaluate')
+    row_try = next(n for n in ast.walk(evaluate) if isinstance(n, ast.Try) and isinstance(n.body[0], ast.Expr)
+                   and any(isinstance(c, ast.keyword) and c.arg == 'verified_patch_bytes'
+                           for c in ast.walk(ast.Module(body=n.body, type_ignores=[]))))
+    handler = row_try.handlers[0]
+    evidence = next(n for n in handler.body if isinstance(n, ast.For))
+    assert {ast.literal_eval(item.elts[0]) for item in evidence.iter.elts} == {
+        'result_error', 'agent_error_text', 'verified_patch_bytes'}
+    assert any(isinstance(n, ast.keyword) and n.arg is None
+               and isinstance(n.value, ast.Name) and n.value.id == 'evidence'
+               for n in ast.walk(handler))
 
 
 @pytest.mark.parametrize('key,value,check', [
