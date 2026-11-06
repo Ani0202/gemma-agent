@@ -41,11 +41,8 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   bundles/drafts/item4-system.md line REMOVED (c104). FINALS: no final with a repo-specific line -> e4b-v003 = e4b-v002 + generic
   prompt fixes minus the line, CPU draft folded into dec 056 item 5; slot request later. Next report MUST state: v000-v002 (both tracks)
   carry an inherited FastAPI/docs_src hint; their LB scores may be tilted toward FastAPI-like tasks (paper + finals evidence say so).
-- Addendum B pre-registered 01:03Z (eval/plans/005.md): structural early-edit/submit-guard mechanism M1/M2/M3, choose one by dated
-  line after CPU ADK feasibility codex-ask; needs a separate quota request.
 - Dec 055 checklist at 2026-11-07T00:00Z has PRIORITY over arm-B analysis.
-- KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
-  dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
+- KERNEL v5 (e4b, 87001e4): GATE FAIL (ctx overflow 7/8, max 305.6>296), two-strike STOP; legacy 'decision' field in results/kaggle_timing_e4b_v001.json is not the gate.
 - DEC 027 FIDELITY: kernel = Dockerfile.public only (offline); NO PIP_* prefixes; setup_calls logging mandatory.
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
