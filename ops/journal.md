@@ -278,3 +278,6 @@
 2026-11-06T05:35Z | codex review of eval/plan005_armF_compare.py started (dec 061: review before relying) | ops/jobs/codex-review-armF-compare-light.status
 2026-11-06T05:39Z | codex review armF compare 053515: 2 BLOCKING (null patch_bytes, dup ids); fixed 0c3c777, E-as-F smoke HARM 3/5 reproduced; re-review job codex-review-armF-compare2-light | ops/codex/review-20261106T053515.md
 2026-11-06T05:43Z | codex re-review armF compare (0c3c777) CLEAN: 0 BLOCKING, 1 NB (malformed schema fails closed via exception); script cleared for arm F post-process | ops/codex/review-20261106T053934.md
+2026-11-06T06:22Z | kernel gemma-31b-timing v6 (arm F) COMPLETE; outputs -> runs/31b-v008-p5f-timing; kernel bundle == dist/31b-v008.zip (only MANIFEST extra); quota 14.49 -> 16.02 h (+1.53) | ops/budget/kaggle.md
+2026-11-06T06:30Z | PLAN 005 ARM F: V (gates PASS), empty 2/8 (D 3/8), F-empty-only 0, tasks w/ identical run>=5 F 3 (22,10,8) vs D 2 -> verdict NO-EFFECT; descriptive: timeouts 2->0, cmd_error_shell 22->0 (not gated) | results/plan005_armF_vs_D.json results/kaggle_timing_31b_v008.json results/trace_tool_errors_31b_v008.json results/thinking_bound_31b_v008.json
+2026-11-06T06:31Z | c119 report 015 (arm F NO-EFFECT, rec A: T stays 0.2, repeat guard design-only); NEEDS_DECISION sent | ops/reports/015-plan005-armF-result.md
