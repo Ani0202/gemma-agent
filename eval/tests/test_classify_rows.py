@@ -169,7 +169,31 @@ def test_schema_guard(key):
 
 def test_pass_and_other_fail():
     assert classifier.classify(row(resolved=True))['agent'] == 'PASS'
-    assert classifier.classify(row(verified_patch_bytes=None, exit_code=None))['agent'] == 'OTHER_FAIL'
+    assert classifier.classify(row(verified_patch_bytes=10, exit_code=None, result_error='Agent exceeded tool call budget'))['h'] == 'H-VERIFY'
+
+
+@pytest.mark.parametrize('patch_bytes,code', [(None, None), (-1, -1), (True, 0), (1.5, 0), ('10', 0)])
+def test_invalid_patch_evidence_is_h(patch_bytes, code):
+    result = classifier.classify(row(verified_patch_bytes=patch_bytes, exit_code=code))
+    assert result['h'] == 'H-ROW' and result['agent'] is None
+    assert 'r7:invalid_patch_evidence' in result['reasons']
+
+
+@pytest.mark.parametrize('texts', [(None, None), ('', '  '), (None, '')])
+def test_unexplained_harness_failure_is_h(texts):
+    result = classifier.classify(row(error='Harness task failure', result_error=texts[0], agent_error_text=texts[1]))
+    assert result['h'] == 'H-ROW' and 'r6:unexplained_harness_failure' in result['reasons']
+
+
+@pytest.mark.parametrize('message', ['Agent exceeded tool call budget', 'Required test node did not pass: t::x'])
+def test_explained_harness_failure_not_h(message):
+    result = classifier.classify(row(error='Harness task failure', result_error=message, exit_code=1))
+    assert result['h'] is None and result['agent'] == 'PYTEST_1'
+
+
+def test_zero_patch_without_exit_code_is_no_patch():
+    result = classifier.classify(row(verified_patch_bytes=0, exit_code=None))
+    assert result['h'] is None and result['agent'] == 'NO_PATCH'
 
 
 def test_precedence_and_orthogonal_diagnostic():

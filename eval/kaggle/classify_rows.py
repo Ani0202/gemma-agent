@@ -46,10 +46,16 @@ def classify(row: dict) -> dict:
     elif error is not None and error != 'Harness task failure':
         row_reasons.append('r3:unexpected_error')
     elif error is None or error == 'Harness task failure':
-        for message in (row.get('result_error'), row.get('agent_error_text')):
+        messages = (row.get('result_error'), row.get('agent_error_text'))
+        for message in messages:
             if message and agent_end(message) is None and not message.startswith(VERIFY_AGENT_PREFIXES):
                 row_reasons.append('r4:unrecognized_message' if error else 'r5:unrecognized_message')
                 break
+        if error and not any(isinstance(m, str) and m.strip() for m in messages):
+            row_reasons.append('r6:unexplained_harness_failure')
+    patch_evidence = row.get('verified_patch_bytes')
+    if 'verified_patch_bytes' in row and not (type(patch_evidence) is int and patch_evidence >= 0):
+        row_reasons.append('r7:invalid_patch_evidence')
 
     setup_reasons = []
     diagnostic = False

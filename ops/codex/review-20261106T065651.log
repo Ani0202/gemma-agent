@@ -1176,3 +1176,2907 @@ Kaggle L4x4 gives about 15 h/week, reserved for exact-environment smoke tests an
  results/plan007_classifier_armF_check.json         |  129 +
  18 files changed, 3955 insertions(+), 28 deletions(-)
 
+exec
+/bin/bash -lc 'nl -ba eval/kaggle/classify_rows.py' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	"""Frozen Plan 007 rev 2 classifier for timing journal rows (stdlib only)."""
+     2	import argparse
+     3	from collections import Counter
+     4	import hashlib
+     5	import json
+     6	from pathlib import Path
+     7	
+     8	if __package__:
+     9	    from .agent_timing import AGENT_OUTCOMES as AGENT_END
+    10	else:
+    11	    from agent_timing import AGENT_OUTCOMES as AGENT_END
+    12	
+    13	RECORD = 'uninstall-no-record-file'
+    14	WRAPPER_H = ('Evaluation exception (', 'Cleanup exception (', 'trace parse (', 'Row build exception (')
+    15	VERIFY_AGENT_PREFIXES = (
+    16	    'Failed to apply agent patch:',
+    17	    'Missing or empty JUnit XML report', 'Malformed JUnit XML report:',
+    18	    'No <testsuite> elements found in JUnit XML',
+    19	    'No passing tests recorded in JUnit XML', 'Test failures/errors recorded in JUnit XML',
+    20	    'Required test node did not pass:',
+    21	    'Pytest stdout summary indicates zero or no passing tests',
+    22	    'Missing JUnit XML report (possible premature os._exit(0))',
+    23	)
+    24	REQUIRED = ('result_error', 'agent_error_text', 'verified_patch_bytes', 'setup_calls', 'exit_code', 'resolved')
+    25	
+    26	
+    27	def agent_end(message):
+    28	    text = (message or '').strip()
+    29	    return next((name for name, pattern in AGENT_END if pattern.match(text)), None)
+    30	
+    31	
+    32	def output_text(entry):
+    33	    return (entry.get('stdout') or '') + (entry.get('stderr') or '')
+    34	
+    35	
+    36	def classify(row: dict) -> dict:
+    37	    """Classify one task row, preserving the stock verdict even for H rows."""
+    38	    if 'instance_id' not in row:
+    39	        raise ValueError('Meta row has no instance_id')
+    40	    row_reasons = []
+    41	    error = row.get('error')
+    42	    if any(key not in row for key in REQUIRED):
+    43	        row_reasons.append('r1:missing_schema')
+    44	    if isinstance(error, str) and any(marker in error for marker in WRAPPER_H):
+    45	        row_reasons.append('r2:wrapper_exception')
+    46	    elif error is not None and error != 'Harness task failure':
+    47	        row_reasons.append('r3:unexpected_error')
+    48	    elif error is None or error == 'Harness task failure':
+    49	        for message in (row.get('result_error'), row.get('agent_error_text')):
+    50	            if message and agent_end(message) is None and not message.startswith(VERIFY_AGENT_PREFIXES):
+    51	                row_reasons.append('r4:unrecognized_message' if error else 'r5:unrecognized_message')
+    52	                break
+    53	
+    54	    setup_reasons = []
+    55	    diagnostic = False
+    56	    if row.get('missing_tool_deps'):
+    57	        setup_reasons.append('s1:missing_tool_deps')
+    58	    for entry in row.get('setup_calls', []):
+    59	        step, rc = entry.get('step'), entry.get('rc')
+    60	        if step not in ('pip_check', 'workspace_editable', 'setup.py'):
+    61	            if rc != 0 and (rc is not None or (entry.get('duration_s') or 0) > 0 or entry.get('stderr')):
+    62	                setup_reasons.append('s2:setup_step_failed')
+    63	        elif step == 'workspace_editable' and rc != 0:
+    64	            if RECORD in output_text(entry):
+    65	                diagnostic = True
+    66	            else:
+    67	                setup_reasons.append('s4:workspace_editable_failed')
+    68	        elif step == 'setup.py':
+    69	            if rc != 0:
+    70	                setup_reasons.append('s3:setup_py_failed')
+    71	            earlier_offline_record = False
+    72	            for sub in entry.get('subprocesses', []):
+    73	                argv = sub.get('argv')
+    74	                if not isinstance(argv, list) or '-e' not in argv or sub.get('rc') == 0:
+    75	                    continue
+    76	                if '--no-index' in argv and RECORD in output_text(sub):
+    77	                    earlier_offline_record = diagnostic = True
+    78	                elif '--no-index' not in argv and earlier_offline_record:
+    79	                    pass
+    80	                else:
+    81	                    setup_reasons.append('s5:unexpected_editable_failure')
+    82	    if row.get('setup_failed') is True and not setup_reasons and not diagnostic:
+    83	        setup_reasons.append('s6:setup_failed_unexplained')
+    84	    known_diag = diagnostic and not setup_reasons
+    85	    reasons = row_reasons + setup_reasons
+    86	    if known_diag:
+    87	        reasons.append('known_diag:record_chain')
+    88	    h = 'H-ROW' if row_reasons else ('H-SETUP' if setup_reasons else None)
+    89	    patch_bytes = row.get('verified_patch_bytes')
+    90	    patch_apply = (row.get('result_error') or '').startswith('Failed to apply agent patch:')
+    91	    code = row.get('exit_code')
+    92	    if h is None and patch_bytes is not None and patch_bytes > 0 and not patch_apply and not (
+    93	        type(code) is int and code in (0, 1, 2, 3, 4, 5, 124)
+    94	    ):
+    95	        h = 'H-VERIFY'
+    96	        reasons.append('verify:unexpected_exit_code')
+    97	    resolved = bool(row.get('resolved'))
+    98	    agent = None
+    99	    if h is None:
+   100	        if resolved:
+   101	            agent = 'PASS'
+   102	        elif patch_bytes == 0:
+   103	            agent = 'NO_PATCH'
+   104	        elif patch_apply:
+   105	            agent = 'PATCH_APPLY'
+   106	        elif code == 124:
+   107	            agent = 'VERIFY_TIMEOUT_124'
+   108	        elif code == 1:
+   109	            agent = 'PYTEST_1'
+   110	        elif code in (2, 3, 4, 5):
+   111	            agent = 'PYTEST_2_5'
+   112	        elif code == 0:
+   113	            agent = 'EXIT0_UNRESOLVED'
+   114	        else:
+   115	            agent = 'OTHER_FAIL'
+   116	    return dict(h=h, known_diag=known_diag, agent=agent,
+   117	                agent_end=agent_end(row.get('agent_error_text')), resolved=resolved,
+   118	                reasons=list(dict.fromkeys(reasons)))
+   119	
+   120	
+   121	def main():
+   122	    parser = argparse.ArgumentParser(description=__doc__)
+   123	    parser.add_argument('timing', type=Path)
+   124	    parser.add_argument('--out', type=Path)
+   125	    args = parser.parse_args()
+   126	    payload = args.timing.read_bytes()
+   127	    rows = []
+   128	    for line in payload.decode('utf-8').splitlines():
+   129	        if not line.strip():
+   130	            continue
+   131	        row = json.loads(line)
+   132	        if 'instance_id' in row:
+   133	            rows.append(dict(instance_id=row['instance_id'], repo=row.get('repo'), **classify(row)))
+   134	    result = dict(_schema='plan007_row_classes/v1',
+   135	                  classifier_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+   136	                  input=str(args.timing), input_sha256=hashlib.sha256(payload).hexdigest(),
+   137	                  n_rows=len(rows),
+   138	                  counts=dict(h=dict(Counter(r['h'] for r in rows if r['h'] is not None)),
+   139	                              agent=dict(Counter(r['agent'] for r in rows if r['agent'] is not None)),
+   140	                              known_diag=sum(r['known_diag'] for r in rows)),
+   141	                  h_rows=[r['instance_id'] for r in rows if r['h'] is not None], rows=rows)
+   142	    output = json.dumps(result, indent=2) + '\n'
+   143	    if args.out:
+   144	        args.out.write_text(output, encoding='utf-8')
+   145	    print(output, end='')
+   146	
+   147	
+   148	if __name__ == '__main__':
+   149	    main()
+
+exec
+/bin/bash -lc "nl -ba eval/tests/test_classify_rows.py; git show fe8df91:eval/plans/007.md | nl -ba | sed -n '79,155p'; git diff -- eval/plans/007.md" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	"""Offline synthetic tests for the frozen Plan 007 row classifier."""
+     2	import hashlib
+     3	from importlib import import_module
+     4	import json
+     5	from pathlib import Path
+     6	import subprocess
+     7	import sys
+     8	
+     9	import pytest
+    10	
+    11	classifier = import_module('eval.kaggle.classify_rows')
+    12	timing = import_module('eval.kaggle.agent_timing')
+    13	
+    14	
+    15	def row(**updates):
+    16	    return dict(dict(instance_id='task-1', repo='example/repo', result_error=None,
+    17	                     agent_error_text=None, verified_patch_bytes=10, setup_calls=[],
+    18	                     exit_code=0, resolved=False, error=None, setup_failed=False), **updates)
+    19	
+    20	
+    21	def editable(offline=True, record=True, rc=1):
+    22	    return dict(argv=['pip', 'install', '-e', '/workspace'] + (['--no-index'] if offline else []),
+    23	                rc=rc, stdout='' if offline else 'subprocess-exited-with-error',
+    24	                stderr=classifier.RECORD if record else 'other failure')
+    25	
+    26	
+    27	def chain():
+    28	    return dict(step='setup.py', rc=0,
+    29	                subprocesses=[editable(), editable(offline=False, record=False)])
+    30	
+    31	
+    32	def test_agent_patterns_are_stock():
+    33	    assert [(n, p.pattern, p.flags) for n, p in classifier.AGENT_END] == [
+    34	        (n, p.pattern, p.flags) for n, p in timing.AGENT_OUTCOMES]
+    35	
+    36	
+    37	@pytest.mark.parametrize('passes', [1, 3])
+    38	def test_record_chain_all_passes(passes):
+    39	    result = classifier.classify(row(setup_calls=[chain() for _ in range(passes)],
+    40	                                     setup_failed=True, editable_failed=True))
+    41	    assert result['h'] is None
+    42	    assert result['known_diag'] is True
+    43	
+    44	
+    45	@pytest.mark.parametrize('subprocesses', [
+    46	    [editable(record=False)], [editable(offline=False, record=False)],
+    47	    [editable(offline=False, record=False), editable()],
+    48	])
+    49	def test_unexpected_editable_failure(subprocesses):
+    50	    result = classifier.classify(row(setup_calls=[dict(step='setup.py', rc=0, subprocesses=subprocesses)]))
+    51	    assert result['h'] == 'H-SETUP'
+    52	    assert result['known_diag'] is False
+    53	    assert 's5:unexpected_editable_failure' in result['reasons']
+    54	
+    55	
+    56	def test_later_pass_failure_is_retained():
+    57	    calls = [chain(), dict(step='setup.py', rc=0, subprocesses=[editable(record=False)])]
+    58	    result = classifier.classify(row(setup_calls=calls))
+    59	    assert result['h'] == 'H-SETUP'
+    60	    assert result['known_diag'] is False
+    61	
+    62	
+    63	@pytest.mark.parametrize('updates,reason', [
+    64	    (dict(setup_calls=[dict(step='tool_deps', rc=-1)]), 's2:setup_step_failed'),
+    65	    (dict(missing_tool_deps=['x']), 's1:missing_tool_deps'),
+    66	    (dict(setup_failed=True), 's6:setup_failed_unexplained'),
+    67	    (dict(setup_calls=[dict(step='setup.py', rc=1)]), 's3:setup_py_failed'),
+    68	    (dict(setup_calls=[dict(step='workspace_editable', rc=1)]), 's4:workspace_editable_failed'),
+    69	])
+    70	def test_setup_failures(updates, reason):
+    71	    result = classifier.classify(row(**updates))
+    72	    assert result['h'] == 'H-SETUP'
+    73	    assert result['known_diag'] is False
+    74	    assert reason in result['reasons']
+    75	
+    76	
+    77	@pytest.mark.parametrize('duration,stderr,expected', [(0, '', None), (1, '', 'H-SETUP'), (0, 'failure', 'H-SETUP')])
+    78	def test_not_run_step(duration, stderr, expected):
+    79	    result = classifier.classify(row(setup_calls=[dict(step='tool_deps', rc=None, duration_s=duration, stderr=stderr)]))
+    80	    assert result['h'] == expected
+    81	
+    82	
+    83	def test_workspace_record_and_pip_check():
+    84	    result = classifier.classify(row(setup_failed=True, setup_calls=[
+    85	        dict(step='workspace_editable', rc=1, stdout=classifier.RECORD),
+    86	        dict(step='pip_check', rc=1), dict(step='setup.py', rc=0)]))
+    87	    assert result['h'] is None and result['known_diag'] is True
+    88	
+    89	
+    90	@pytest.mark.parametrize('message,code,expected', [
+    91	    ('Failed to apply agent patch: xyz', 1, 'PATCH_APPLY'),
+    92	    ('Failed to apply agent patch: xyz', None, 'PATCH_APPLY'),
+    93	    ('Required test node did not pass: a::b', 0, 'EXIT0_UNRESOLVED'),
+    94	    ('Test failures/errors recorded in JUnit XML (failures=1, errors=0)', 1, 'PYTEST_1'),
+    95	])
+    96	def test_verification_agent_errors(message, code, expected):
+    97	    result = classifier.classify(row(error='Harness task failure', result_error=message,
+    98	                                     exit_code=code, verified_patch_bytes=50))
+    99	    assert result['h'] is None and result['agent'] == expected
+   100	
+   101	
+   102	@pytest.mark.parametrize('prefix', classifier.VERIFY_AGENT_PREFIXES)
+   103	def test_all_verification_agent_prefixes(prefix):
+   104	    result = classifier.classify(row(error='Harness task failure', result_error=prefix + ' synthetic'))
+   105	    assert result['h'] is None
+   106	
+   107	
+   108	@pytest.mark.parametrize('code,expected', [(124, 'VERIFY_TIMEOUT_124'), (1, 'PYTEST_1'),
+   109	                                         (2, 'PYTEST_2_5'), (3, 'PYTEST_2_5'), (4, 'PYTEST_2_5'),
+   110	                                         (5, 'PYTEST_2_5'), (0, 'EXIT0_UNRESOLVED')])
+   111	def test_verification_outcomes(code, expected):
+   112	    result = classifier.classify(row(exit_code=code))
+   113	    assert result['h'] is None and result['agent'] == expected
+   114	
+   115	
+   116	@pytest.mark.parametrize('field,message', [
+   117	    ('result_error', 'Evaluation error: boom'),
+   118	    ('result_error', 'Failed to apply test_patch: x'),
+   119	    ('result_error', 'Missing test specification'),
+   120	    ('agent_error_text', 'Agent crashed'),
+   121	])
+   122	@pytest.mark.parametrize('error,reason', [('Harness task failure', 'r4:unrecognized_message'),
+   123	                                         (None, 'r5:unrecognized_message')])
+   124	def test_unrecognized_messages(field, message, error, reason):
+   125	    result = classifier.classify(row(error=error, **{field: message}))
+   126	    assert result['h'] == 'H-ROW' and result['agent'] is None
+   127	    assert reason in result['reasons']
+   128	
+   129	
+   130	@pytest.mark.parametrize('error', ['Cleanup exception (OSError)', 'Harness task failure trace parse (KeyError)',
+   131	                                 'Evaluation exception (ValueError)', 'Row build exception (TypeError)'])
+   132	def test_wrapper_errors_preserve_stock_verdict(error):
+   133	    result = classifier.classify(row(error=error, resolved=True))
+   134	    assert result['h'] == 'H-ROW' and result['resolved'] is True and result['agent'] is None
+   135	
+   136	
+   137	def test_other_row_error():
+   138	    assert classifier.classify(row(error='unexpected'))['reasons'] == ['r3:unexpected_error']
+   139	
+   140	
+   141	@pytest.mark.parametrize('code', [None, -1, 6, '0', False, 0.0])
+   142	def test_invalid_verification_codes(code):
+   143	    assert classifier.classify(row(verified_patch_bytes=30, exit_code=code))['h'] == 'H-VERIFY'
+   144	
+   145	
+   146	def test_no_patch_with_agent_end():
+   147	    result = classifier.classify(row(verified_patch_bytes=0, exit_code=-1,
+   148	                                     agent_error_text='Agent exceeded turns budget'))
+   149	    assert result['h'] is None and result['agent'] == 'NO_PATCH' and result['agent_end'] == 'turns'
+   150	
+   151	
+   152	@pytest.mark.parametrize('name,message', [
+   153	    ('timeout', ' Agent exceeded session timeout (300s) '),
+   154	    ('turns', 'Agent exceeded maximum allowed LLM turns'),
+   155	    ('tool_calls', 'Agent exceeded tool call budget'),
+   156	    ('no_submit', 'Agent completed execution without calling submit_patch'),
+   157	])
+   158	def test_agent_end_is_descriptive(name, message):
+   159	    result = classifier.classify(row(exit_code=1, agent_error_text=message))
+   160	    assert result['agent'] == 'PYTEST_1' and result['agent_end'] == name
+   161	
+   162	
+   163	@pytest.mark.parametrize('key', classifier.REQUIRED)
+   164	def test_schema_guard(key):
+   165	    source = row()
+   166	    del source[key]
+   167	    assert classifier.classify(source)['h'] == 'H-ROW'
+   168	
+   169	
+   170	def test_pass_and_other_fail():
+   171	    assert classifier.classify(row(resolved=True))['agent'] == 'PASS'
+   172	    assert classifier.classify(row(verified_patch_bytes=None, exit_code=None))['agent'] == 'OTHER_FAIL'
+   173	
+   174	
+   175	def test_precedence_and_orthogonal_diagnostic():
+   176	    result = classifier.classify(row(error='unexpected', setup_calls=[chain()]))
+   177	    assert result['h'] == 'H-ROW' and result['known_diag'] is True
+   178	    result = classifier.classify(row(error='unexpected', setup_failed=True, exit_code=-1))
+   179	    assert result['h'] == 'H-ROW' and result['known_diag'] is False
+   180	    assert classifier.classify(row(setup_failed=True, exit_code=-1))['h'] == 'H-SETUP'
+   181	
+   182	
+   183	def test_meta_rejected():
+   184	    with pytest.raises(ValueError):
+   185	        classifier.classify({'_schema': 'example'})
+   186	
+   187	
+   188	def test_cli(tmp_path):
+   189	    source, output = tmp_path / 'timing.jsonl', tmp_path / 'classes.json'
+   190	    source.write_text('\n'.join(json.dumps(r) for r in [
+   191	        {'_schema': 'example'}, {'_vllm': {}}, row(resolved=True),
+   192	        row(instance_id='bad', error='Harness task failure', result_error='Evaluation error: boom'),
+   193	        row(instance_id='diag', setup_calls=[chain()], setup_failed=True),
+   194	        {'_stopped': 'example'}, {'_done': {'n': 3}},
+   195	    ]) + '\n')
+   196	    proc = subprocess.run([sys.executable, classifier.__file__, str(source), '--out', str(output)],
+   197	                          check=True, capture_output=True, text=True)
+   198	    result = json.loads(proc.stdout)
+   199	    assert result == json.loads(output.read_text())
+   200	    assert result['_schema'] == 'plan007_row_classes/v1'
+   201	    assert result['n_rows'] == 3 and result['h_rows'] == ['bad']
+   202	    assert result['counts'] == dict(h={'H-ROW': 1}, agent={'PASS': 1, 'EXIT0_UNRESOLVED': 1}, known_diag=1)
+   203	    assert result['input_sha256'] == hashlib.sha256(source.read_bytes()).hexdigest()
+   204	    assert result['classifier_sha256'] == hashlib.sha256(Path(classifier.__file__).read_bytes()).hexdigest()
+   205	    assert 'boom' not in proc.stdout and 'Evaluation error' not in proc.stdout
+   206	    assert classifier.RECORD not in proc.stdout
+   207	    assert proc.stderr == ''
+    79	### Smoke, chunks, reruns
+    80	- SMOKE first: the first 3 ids (eval/plans/007-smoke-ids.txt: 2 rich + 1 fastapi), budget 5400 s (rev 1: was 4800; fits the larger stop-guard reserve). The gate checks mechanics
+    81	  only; agent quality (0/3 included) never fails it. Gate holds iff: vLLM up, 3 rows present, 0 H rows. On hold the smoke rows
+    82	  COUNT as the first 3 arm-1 rows, and the main kernel runs ids 4..33 with --seed-max = ceil(max smoke per-task total).
+    83	  Gate FAIL: no main run today; diagnose; the run moves after the reset (dec 062 item 4: no rushing).
+    84	- Budget: KERNEL_BUDGET for main sized from the smoke per-task wall and the quota left before the reset (target: week
+    85	  usage <= 29.5/30 h). Unrun ids (a suffix of the fixed order) run as chunk 2 after the reset, identical bundle and code SHA,
+    86	  with --seed-max from all earlier rows.
+    87	- First attempts are always retained and reported. A code change during arm 1 is allowed ONLY to fix a defect behind an H row,
+    88	  documented first (journal line naming the row + the H category + the cause, then a commit, then a codex review). If the fix
+    89	  touches no file on the agent or verification path, only the H rows rerun (appended at the end of the order). If it does
+    90	  touch either path, every row already run reruns under the fixed code so all primary rows share one code SHA, and the
+    91	  first-attempt rows are reported as a sensitivity line. Any bundle byte change = a different arm: arm 1 restarts with a new addendum.
+    92	  No rerun for any AGENT outcome, ever.
+    93	- Quota logged before/after every kernel in ops/budget/kaggle.md. No GCP spend. Never delays the dec 055 checklist at 2026-11-07T00:00Z.
+    94	
+    95	## Metrics
+    96	- PRIMARY: count of stock resolved=True / 33, Wilson 95% CI. No override of the stock verdict by any class: the primary numerator is
+    97	  stock resolved=True for every row, H rows included (an H row with resolved=True counts as PASS; review 064331 Q1). H status
+    98	  affects only validity (smoke gate, reruns of H rows) and the sensitivity line. Sensitivity line: pass rate over the non-H rows (n stated).
+    99	  KNOWN-DIAG count listed.
+   100	- Per repo (rich 27, fastapi 6), descriptive. Note: dev includes the 8 plan-005/006 screen ids (tuned-on); report pass rate on the 25
+   101	  never-screened ids separately as a descriptive line.
+   102	- Secondary (descriptive): AGENT FAIL sub-label counts, empty-patch count, timeouts, submit_patch called, test files edited, stray
+   103	  files, agent wall p50/p90, verification wall p50/p90, LLM calls/tool calls per task.
+   104	- Dec 060 Addendum metric (all arms): identical consecutive tool-call runs (same tool + byte-identical args): per-task max run,
+   105	  tasks with run >= 3 and >= 5, total repeated calls (code: eval/plan005_armF_compare.py logic).
+   106	- Dec 062 item 5: thinking blocks per task (count + total chars; eval/thinking_bound.py logic), descriptive; with thinking_budget 0
+   107	  one 17-char block was seen in arm F.
+   108	
+   109	## Decision rules
+   110	- ARM 1 alone is a measurement: no ship decision follows from it. It sets the baseline for arm 2 and is cited in the dec 061 (i)
+   111	  v004 cap discussion. Arm 1 is INVALID (env problem, not a quality result) iff H rows >= 5 of 33, whatever the pass count.
+   112	- ENV CONTROL (pre-registered follow-up, not gating the runs): a gold+null pass of the 33 dev ids through this exact kernel
+   113	  verification path (CPU kernel, no GPU quota; needs a small gold-patch mode, codex-reviewed first). Until it exists, arm 1 is
+   114	  reported with the caveat "env agreement with the local gold calibration unmeasured in the kernel path". When it exists:
+   115	  ids whose kernel-path gold fails or null passes are listed and a sensitivity pass rate excludes them; the primary is unchanged.
+   116	- ARM 2 vs ARM 1 (paired, same 33 ids, k=1 FIXED: no second sample under this plan, whatever arm 2 shows): per-task discordant
+   117	  counts on-only / off-only, exact two-sided sign test. Any later k>1 needs a new pre-registration with a fixed n and seeds, fixed
+   118	  before results, and a task-level analysis (per-task mean over samples, sign test on per-task differences).
+   119	  - ON-ADOPT: on-only > off-only, p < 0.2, AND ON timeouts <= OFF timeouts + 2, AND the cap-3.5 timing check passes.
+   120	  - ON-BETTER-VETOED: on-only > off-only with p < 0.2 but the timeout or timing condition fails: keep OFF for shipping; report
+   121	    to the Director with the timing data as a candidate for a cap/budget follow-up (no automatic further arm).
+   122	  - KEEP-OFF: off-only >= on-only.
+   123	  - NO-DIFFERENCE: on ahead with p >= 0.2: keep OFF (cheaper, faster). +-3 tasks on 33 is noise.
+   124	  - Cap-3.5 timing check (cap unchanged, so this checks that thinking does not break cap enforcement): every ON row has a non-null
+   125	    agent_clock_seconds <= 3.5 x 60 + 10 = 220 s and finalization_seconds <= 30 s; any violation or null fails the check.
+   126	- Cost note: verification adds a fresh sandbox setup per task (Container B, two dependency installs), so per-task wall is higher than
+   127	  the plan-005 screens (~5.5 min/task); the smoke measures it. If arm 2 at k=1 does not fit next week's quota with other approved work,
+   128	  the arm-2 schedule comes back to the Director with the measured numbers.
+   129	
+   130	## Repeat guard (dec 062 item 3)
+   131	CPU-only design note delivered as eval/plans/007-repeat-guard.md (by 2026-11-07T18:00Z). Not built, not packed.
+   132	
+   133	---
+   134	## Appendix Z: superseded draft (2026-11-05T22:58Z, budget lever; not scheduled)
+   135	> # Plan 007: time-aware budget lever (pre-registered 2026-11-05T22:58Z; CANDIDATE, not runnable; first quality lever after report 010, dec 039 item 2)
+   136	> Evidence: results/failure_taxonomy_e4b_v001_v5.json (n=8, e4b-v001, cap 1.4 min, ungraded): 4/8 hit the session timeout
+   137	> without calling submit_patch (1 of these made zero edits, so its patch was empty); the finalization diff rescued a non-empty patch in 3 of the 4.
+   138	> The short cap inflates the timeout rate. Re-measure the base rate at the candidate cap before trusting the size of the effect.
+   139	> Lever: the bundle prompt (and a skill if needed) sets a step budget: first source edit by ~50% of the budget, run the targeted
+   140	> test, then submit_patch before the cap. The agent probably can't see wall-clock time from inside a declarative ADK bundle, so the
+   141	> budget is stated in LLM-call/tool-call counts derived from the measured calls-per-minute at the target cap (v5: ~9-16 LLM calls
+   142	> at 1.4 min). Check what the agent can observe before building. No repo-specific content.
+   143	> Hypothesis: B reduces timeout-without-submit and zero-edit outcomes and does not lower the pass rate (it may raise it slightly).
+   144	> Expected effect: primary = pass rate, +0 to +3 tasks on 33 dev (small; most timeouts are already rescued by the finalization diff);
+   145	> secondary = timeout-without-submit rate (expect at least halved), zero-edit/empty-patch rate, submitted-but-unverified rate (risk: an early submit
+   146	> skips the test run).
+   147	> Design: paired, same 33 dev ids, k=2 seeds each, same model and cap (the cap of the then-current best bundle), A = current best,
+   148	> B = A + budget prompt only (byte diff limited to prompts/). Interaction with plan 005 (dec 022 item 4 empty-patch protection):
+   149	> run as a 2x2 sharing arm A if compute allows (A, A+005, A+007, A+005+007); otherwise 005 first, then 007 on top of the winner.
+   150	> Decision rule: adopt B if B-only > A-only with exact sign test p < 0.2 and no rise in timeouts; if p >= 0.2 but the timeout-without-
+   151	> submit rate falls by >= 50% with no pass-rate loss (B-only >= A-only), adopt B as a safety change; else keep A.
+   152	> Compute: local paired quality eval (GPU), not authorized; request it in the report that follows report 010. Timing re-check is only needed if
+   153	> call counts change materially (not expected, since the cap is unchanged).
+   154	>
+   155	> ## Addendum (dec 060 item 3, 2026-11-06T04:45Z; added before any plan-007 run)
+
+codex
+Rev 2 adds the requested evidence fields, and the timing diff is confined to row serialization. I’m checking whether the classifier handles that evidence correctly, especially null patch evidence and failures from earlier setup passes.
+exec
+/bin/bash -lc "rg -n 'pytest|site-packages|pyimg' ops/codex/build-plan007-classifier.sh eval/tests/conftest.py; head -70 eval/kaggle/agent_timing.py; git show fe8df91:eval/plans/007.md | sha256sum; sha256sum eval/kaggle/classify_rows.py runs/31b-v008-p5f-timing/timing.jsonl; rg --files eval/tests | head -15" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+rg: eval/tests/conftest.py: No such file or directory (os error 2)
+"""Self-contained Kaggle timing script; starter notebook cells 2/8/10, swegemma 0.2.11.
+Trace/patch classification copied from codex/eval-runner; no repository imports.
+Build using timing_push.sh. Raw task artifacts stay in /kaggle/working/runs.
+"""
+import asyncio
+import base64
+from collections import Counter
+import dataclasses
+from datetime import datetime, timezone
+import glob
+import hashlib
+import importlib
+import io
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import shutil
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import tarfile
+import threading
+import time
+
+BUNDLE_B64 = ""  # embedded by timing_push.sh
+TASK_IDS = []
+# {wheel filename: [sha256, base64]}: public wheels the scorer image pip-installs online but the offline
+# Kaggle wheelhouse lacks (pytest-timeout==2.1.0, Dockerfile.public line 9). Embedded by timing_push.sh.
+EXTRA_WHEELS = {}
+SETUP_ONLY = False
+SKIP_VERIFICATION = True
+SETUP_FIX = 1
+GIT_SHA = ""
+KERNEL_BUDGET_SECONDS = 3 * 3600
+P1_DEADLINE_SECONDS = 180
+STOCK_PROBE = True  # P1 (plan 006 addendum): time the stock subprocess setup per task
+# Plan 007 (codex review 063014 item 4): should_stop reserves sandbox setup passes explicitly, and a
+# prior chunk's (smoke) max per-task total seeds observed_max because each kernel restarts `totals`.
+SETUP_PASS_SECONDS = 240  # per sandbox dependency-setup pass; 1 pass (agent) + 2 (Container B) with verification
+OBSERVED_MAX_SEED_SECONDS = 0.0
+DATA = Path('/kaggle/input/competitions/gemma-4-developer-agent')
+WORK = Path('/kaggle/working')
+BUNDLE = WORK / 'bundle'
+WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+
+def install():
+    print('python', sys.version.split()[0], 'executable', sys.executable, flush=True)
+    env = dict(TRANSFORMERS_NO_TF='1', TRANSFORMERS_NO_FLAX='1', TRANSFORMERS_OFFLINE='1',
+               VLLM_NO_USAGE_STATS='1', VLLM_WORKER_MULTIPROC_METHOD='spawn',
+               VLLM_ENGINE_READY_TIMEOUT_S='1200', VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS='1',
+               NCCL_DEBUG='WARN', LITELLM_LOCAL_MODEL_COST_MAP='True', LITELLM_TELEMETRY='False',
+               LITELLM_LOG='WARNING', PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True',
+               OTEL_SDK_DISABLED='true', OTEL_PYTHON_DISABLED='true')
+    os.environ.update(env)
+    for key in ('OPENAI_API_KEY', 'LOCAL_API_KEY'):
+        os.environ.setdefault(key, 'EMPTY')
+    for pattern in ('/usr/local/lib/python*/dist-packages/*cutlass*.pth',
+                    '/usr/local/lib/python*/site-packages/*cutlass*.pth'):
+        for pth in glob.glob(pattern):
+            try:
+                os.unlink(pth)
+            except OSError:
+                pass
+    staged = Path('/tmp/wheelhouse')
+    staged.mkdir(exist_ok=True)
+    for w in WHEELHOUSE.glob('*.whl'):
+5c52a534c47055f425f82562d0b51534a1ccf3144bb49a7b27b4ea51df0835a1  -
+69ab78f27c393373ce235be9868a80e3e47190a4d81b1d42e0849fd956994fc3  eval/kaggle/classify_rows.py
+37fad310aacf8e70860228cfbf25ba99f873f8283d8928a6e321f24097f16359  runs/31b-v008-p5f-timing/timing.jsonl
+eval/tests/test_classify_rows.py
+eval/tests/test_memguard.py
+eval/tests/test_agent_timing.py
+eval/tests/guard_mock_test.sh
+eval/tests/test_sandbox_limits.py
+eval/tests/test_eval_fixes.py
+eval/tests/test_run_agent_eval.py
+eval/tests/test_gold_calibration.py
+eval/tests/test_sandbox_deps.py
+eval/tests/test_pack.py
+eval/tests/test_setup_check.py
+eval/tests/test_kernel_probes.py
+
+exec
+/bin/bash -lc "rg -n 'error=|agent_patch=|return TaskResult|exit_code|JUnit|required_test|Required test|Missing test' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py | sed -n '420,715p'; git diff 8a5b958..fe8df91 -- eval/tests/test_agent_timing.py; cat ops/codex/build-plan007-classifier.spec" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+253:    """Check if a JUnit testcase identifier matches a required test specification."""
+272:    """Validate JUnit XML report to prevent os._exit(0), conftest, or skip-all exploits."""
+276:        return False, 'Missing or empty JUnit XML report (possible premature exit)'
+280:        return False, f'Malformed JUnit XML report: {e}'
+284:        return False, 'No <testsuite> elements found in JUnit XML'
+295:            f'No passing tests recorded in JUnit XML (total={total_tests}, passed={passed_tests}, skipped={total_skipped})',
+300:            f'Test failures/errors recorded in JUnit XML (failures={total_failures}, errors={total_errors})',
+340:                return False, f'Required test node did not pass: {req}'
+371:        return TaskResult(
+375:            agent_patch=agent_patch,
+377:            test_exit_code=-1,
+379:            error='Missing test specification (empty test_patch and FAIL_TO_PASS; secret hydration failed or unavailable)',
+457:                exit_code, stdout, stderr = await asyncio.to_thread(
+463:                if exit_code != 0:
+478:                    return TaskResult(
+482:                        agent_patch=agent_patch,
+484:                        test_exit_code=exit_code,
+486:                        error=agent_error,
+567:                exit_code, stdout, stderr = await asyncio.to_thread(
+573:                if exit_code != 0:
+587:                    return TaskResult(
+591:                        agent_patch=agent_patch,
+593:                        test_exit_code=-1,
+595:                        error=f'Failed to apply test_patch: {err_detail}',
+646:        resolved = test_res.exit_code == 0
+683:                junit_error = 'Missing JUnit XML report (possible premature os._exit(0))'
+689:        return TaskResult(
+693:            agent_patch=agent_patch,
+695:            test_exit_code=test_res.exit_code,
+697:            error=(junit_error or agent_error) if not resolved else None,
+707:        return TaskResult(
+711:            agent_patch=agent_patch,
+713:            test_exit_code=-1,
+715:            error=f'Evaluation error: {e}',
+   420	            setup_workspace_test_config,
+   421	            docker,
+   422	            eval_id,
+   423	            repo=task.repo,
+   424	        )
+   425	
+   426	        # Create clean baseline commit so git checkout has a reliable HEAD
+   427	        await asyncio.to_thread(setup_baseline_commit, docker, eval_id, 'eval_baseline')
+   428	
+   429	        target_test_files = (
+   430	            list(task.test_files)
+   431	            if task.test_files
+   432	            else extract_test_files_from_patch(task.test_patch)
+   433	        )
+   434	
+   435	        effective_agent_patch = (
+   436	            strip_protected_files_from_patch(
+   437	                agent_patch, extra_protected_paths=target_test_files
+   438	            )
+   439	            if not is_synthetic_mock_repo
+   440	            else agent_patch
+   441	        )
+   442	
+   443	        # Apply agent patch if present
+   444	        if effective_agent_patch.strip():
+   445	            with tempfile.NamedTemporaryFile('w', suffix='.patch', delete=False) as f:
+   446	                f.write(
+   447	                    effective_agent_patch
+   448	                    if effective_agent_patch.endswith('\n')
+   449	                    else effective_agent_patch + '\n'
+   450	                )
+   451	                patch_host_path = Path(f.name)
+   452	
+   453	            try:
+   454	                await asyncio.to_thread(
+   455	                    docker.copy_to, eval_id, patch_host_path, '/tmp/'
+   456	                )
+   457	                exit_code, stdout, stderr = await asyncio.to_thread(
+   458	                    apply_patch_in_container,
+   459	                    docker,
+   460	                    eval_id,
+   461	                    f'/tmp/{patch_host_path.name}',
+   462	                )
+   463	                if exit_code != 0:
+   464	                    err_detail = stderr or stdout
+   465	                    if 'Patch file not found:' in err_detail:
+   466	                        raise ContainerSetupError(
+   467	                            f'Agent patch file missing in container on task {task.instance_id}: {err_detail}'
+   468	                        )
+   469	                    logger.error(
+   470	                        'Failed to apply agent patch on task %s: %s',
+   471	                        task.instance_id,
+   472	                        err_detail,
+   473	                    )
+   474	                    agent_error = f'Failed to apply agent patch: {err_detail}'
+   475	                    json_path = save_trace_artifact(
+   476	                        trace, config.results_dir, task.instance_id
+   477	                    )
+   478	                    return TaskResult(
+   479	                        instance_id=task.instance_id,
+   480	                        repo=task.repo,
+   481	                        resolved=False,
+   482	                        agent_patch=agent_patch,
+   483	                        test_output=err_detail,
+   484	                        test_exit_code=exit_code,
+   485	                        duration_seconds=time.perf_counter() - start_time,
+   486	                        error=agent_error,
+   487	                        trace=trace,
+   488	                        trace_json_path=json_path,
+   489	                    )
+   490	            finally:
+   491	                patch_host_path.unlink(missing_ok=True)
+   492	
+   493	        # Collect any test files, conftest.py, or runner config files touched by agent_patch (including deleted/renamed sources)
+   494	        agent_touched_files = extract_test_files_from_patch(agent_patch)
+   495	        if agent_patch.strip():
+   496	            for raw_line in agent_patch.splitlines():
+   497	                if raw_line.startswith('diff --git '):
+   498	                    m_git = re.match(r'^diff --git "?a/(.*?)"? "?b/(.*?)"?$', raw_line)
+   499	                    if m_git:
+   500	                        for grp in (m_git.group(1), m_git.group(2)):
+   501	                            if grp and grp not in agent_touched_files:
+   502	                                agent_touched_files.append(grp)
+   503	                elif raw_line.startswith(('--- a/', '+++ b/')):
+   504	                    rel_p = raw_line[6:].strip().strip('"')
+   505	                    if rel_p and rel_p != '/dev/null' and rel_p not in agent_touched_files:
+   506	                        agent_touched_files.append(rel_p)
+   507	                elif raw_line.startswith('rename from '):
+   508	                    rel_p = raw_line[len('rename from ') :].strip().strip('"')
+   509	                    if rel_p and rel_p not in agent_touched_files:
+   510	                        agent_touched_files.append(rel_p)
+   511	            git_status_res = await sandbox_exec(
+   512	                docker,
+   513	                eval_id,
+   514	                'cd /workspace && (git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null) || true',
+   515	            )
+   516	            for line in (git_status_res.stdout or '').splitlines():
+   517	                rel_line = line.strip()
+   518	                if rel_line and rel_line not in agent_touched_files:
+   519	                    agent_touched_files.append(rel_line)
+   520	
+   521	        protected_agent_files = [
+   522	            p for p in agent_touched_files if _is_protected_test_or_config_path(p)
+   523	        ]
+   524	        files_to_reset = list(
+   525	            dict.fromkeys(
+   526	                target_test_files
+   527	                + protected_agent_files
+   528	                + [
+   529	                    'conftest.py',
+   530	                    'pytest.ini',
+   531	                    'sitecustomize.py',
+   532	                    'usercustomize.py',
+   533	                    '_swegemma_stubs.py',
+   534	                ]
+   535	            )
+   536	        )
+   537	
+   538	        # Reset test and config files to baseline to prevent test tampering or conflicts with test_patch
+   539	        if files_to_reset:
+   540	            test_files_quoted = [shlex.quote(p) for p in files_to_reset]
+   541	            test_files_str = ' '.join(test_files_quoted)
+   542	            checkout_cmd = (
+   543	                f'cd /workspace && tracked=$(git ls-tree -r --name-only HEAD -- {test_files_str} 2>/dev/null) '
+   544	                f'&& [ -n "$tracked" ] && git ls-tree -r -z --name-only HEAD -- {test_files_str} '
+   545	                f'| xargs -0 git checkout HEAD -- 2>/dev/null || true'
+   546	            )
+   547	            clean_cmd = (
+   548	                f'cd /workspace && git clean -f -- {test_files_str} 2>/dev/null || true'
+   549	            )
+   550	            await sandbox_exec(docker, eval_id, checkout_cmd)
+   551	            await sandbox_exec(docker, eval_id, clean_cmd)
+   552	
+   553	        # Apply test patch (verification tests)
+   554	        if task.test_patch.strip():
+   555	            with tempfile.NamedTemporaryFile('w', suffix='.patch', delete=False) as f:
+   556	                f.write(
+   557	                    task.test_patch
+   558	                    if task.test_patch.endswith('\n')
+   559	                    else task.test_patch + '\n'
+   560	                )
+   561	                test_patch_host_path = Path(f.name)
+   562	
+   563	            try:
+   564	                await asyncio.to_thread(
+   565	                    docker.copy_to, eval_id, test_patch_host_path, '/tmp/'
+   566	                )
+   567	                exit_code, stdout, stderr = await asyncio.to_thread(
+   568	                    apply_patch_in_container,
+   569	                    docker,
+   570	                    eval_id,
+   571	                    f'/tmp/{test_patch_host_path.name}',
+   572	                )
+   573	                if exit_code != 0:
+   574	                    err_detail = stderr or stdout
+   575	                    if 'Patch file not found:' in err_detail:
+   576	                        raise ContainerSetupError(
+   577	                            f'Test patch file missing in container on task {task.instance_id}: {err_detail}'
+   578	                        )
+   579	                    logger.error(
+   580	                        'Failed to apply test patch on task %s: %s',
+   581	                        task.instance_id,
+   582	                        err_detail,
+   583	                    )
+   584	                    json_path = save_trace_artifact(
+   585	                        trace, config.results_dir, task.instance_id
+   586	                    )
+   587	                    return TaskResult(
+   588	                        instance_id=task.instance_id,
+   589	                        repo=task.repo,
+   590	                        resolved=False,
+   591	                        agent_patch=agent_patch,
+   592	                        test_output='',
+   593	                        test_exit_code=-1,
+   594	                        duration_seconds=time.perf_counter() - start_time,
+   595	                        error=f'Failed to apply test_patch: {err_detail}',
+   596	                        trace_json_path=json_path,
+   597	                    )
+   598	            finally:
+   599	                test_patch_host_path.unlink(missing_ok=True)
+   600	
+   601	        # Refresh workspace paths, stubs, and pytest config after patches add new files/imports
+   602	        await asyncio.to_thread(
+   603	            install_test_dependencies,
+   604	            docker,
+   605	            eval_id,
+   606	            task.repo,
+   607	            fast_path=fast_path,
+   608	            config=config,
+   609	        )
+   610	        await asyncio.to_thread(
+   611	            setup_workspace_test_config,
+   612	            docker,
+   613	            eval_id,
+   614	            repo=task.repo,
+   615	            overwrite=True,
+   616	        )
+   617	
+   618	        # Run pytest on verification test files (excluding conftest.py from positional test args)
+   619	        pytest_targets = [
+   620	            p
+   621	            for p in target_test_files
+   622	            if Path(p).name != 'conftest.py' and p.endswith('.py')
+   623	        ] or target_test_files
+   624	        test_files_quoted = [shlex.quote(p) for p in pytest_targets]
+   625	        test_files_str = ' '.join(test_files_quoted) if test_files_quoted else '.'
+   626	        junit_xml_path = f'/tmp/_swegemma_junit_{uuid.uuid4().hex[:12]}.xml'
+   627	        await sandbox_exec(docker, eval_id, f'rm -f {junit_xml_path}')
+   628	        pytest_cmd = (
+   629	            f'cd /workspace && PYTHONSAFEPATH=1 PYTHONNOUSERSITE=1 python3 -s -m pytest {test_files_str} '
+   630	            f'--junitxml={junit_xml_path} '
+   631	            '-p no:anyio -o timeout=0 '
+   632	            '-o python_classes="Test* *Test" -q'
+   633	        )
+   634	        verification_timeout = getattr(
+   635	            config.harness, 'verification_timeout_seconds', None
+   636	        )
+   637	        if verification_timeout is None:
+   638	            verification_timeout = config.harness.command_timeout_seconds
+   639	        test_res = await sandbox_exec(
+   640	            docker,
+   641	            eval_id,
+   642	            pytest_cmd,
+   643	            timeout=verification_timeout,
+   644	        )
+   645	
+   646	        resolved = test_res.exit_code == 0
+   647	        junit_error: str | None = None
+   648	        if resolved:
+   649	            xml_res = await sandbox_exec(
+   650	                docker,
+   651	                eval_id,
+   652	                f'cat {junit_xml_path} 2>/dev/null || true',
+   653	            )
+   654	            xml_content = xml_res.stdout or ''
+   655	            is_real_sandbox = type(docker).__name__ in {
+   656	                'ContainerManager',
+   657	                'SubprocessManager',
+   658	                'DockerSandbox',
+   659	                'SubprocessSandbox',
+   660	            }
+   661	            stdout_text = (test_res.stdout or '').lower()
+   662	            stdout_invalid = (
+   663	                bool(re.search(r'\b0 passed\b', stdout_text))
+   664	                or 'no tests ran' in stdout_text
+   665	                or 'collected 0 items' in stdout_text
+   666	                or (stdout_text.strip() != '' and 'passed' not in stdout_text)
+   667	            )
+   668	            if xml_content.strip():
+   669	                junit_ok, junit_reason = _validate_junit_xml(
+   670	                    xml_content,
+   671	                    fail_to_pass=getattr(task, 'FAIL_TO_PASS', ()),
+   672	                    pass_to_pass=getattr(task, 'PASS_TO_PASS', ()),
+   673	                    test_patch=getattr(task, 'test_patch', ''),
+   674	                )
+   675	                if not junit_ok:
+   676	                    resolved = False
+   677	                    junit_error = junit_reason
+   678	                elif stdout_invalid:
+   679	                    resolved = False
+   680	                    junit_error = 'Pytest stdout summary indicates zero or no passing tests'
+   681	            elif is_real_sandbox or stdout_invalid or not stdout_text.strip():
+   682	                resolved = False
+   683	                junit_error = 'Missing JUnit XML report (possible premature os._exit(0))'
+   684	
+   685	        duration = time.perf_counter() - start_time
+   686	
+   687	        json_path = save_trace_artifact(trace, config.results_dir, task.instance_id)
+   688	
+   689	        return TaskResult(
+   690	            instance_id=task.instance_id,
+   691	            repo=task.repo,
+   692	            resolved=resolved,
+   693	            agent_patch=agent_patch,
+   694	            test_output=f'STDOUT:\n{test_res.stdout}\nSTDERR:\n{test_res.stderr}',
+   695	            test_exit_code=test_res.exit_code,
+   696	            duration_seconds=duration,
+   697	            error=(junit_error or agent_error) if not resolved else None,
+   698	            trace=trace,
+   699	            trace_json_path=json_path,
+   700	        )
+   701	    except ContainerSetupError:
+   702	        raise
+   703	    except Exception as e:
+   704	        logger.exception(
+   705	            'Error during evaluation container run for task %s', task.instance_id
+   706	        )
+   707	        return TaskResult(
+   708	            instance_id=task.instance_id,
+   709	            repo=task.repo,
+   710	            resolved=False,
+   711	            agent_patch=agent_patch,
+   712	            test_output='',
+   713	            test_exit_code=-1,
+   714	            duration_seconds=time.perf_counter() - start_time,
+   715	            error=f'Evaluation error: {e}',
+diff --git a/eval/tests/test_agent_timing.py b/eval/tests/test_agent_timing.py
+index ff83725..89a3948 100644
+--- a/eval/tests/test_agent_timing.py
++++ b/eval/tests/test_agent_timing.py
+@@ -645,6 +645,10 @@ def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, s
+         assert ev.verify_task is original_verify
+         return
+     assert row['verification_skipped'] is skip
++    assert {'result_error', 'agent_error_text', 'verified_patch_bytes'} <= row.keys()
++    assert row['result_error'] is None
++    expected_bytes = None if failure in ('runner', 'setup') else len('diff --git a/repo/a.py b/repo/a.py\n'.encode('utf-8'))
++    assert row['verified_patch_bytes'] == expected_bytes
+     assert (row['error'] is not None) is bool(failure)
+     verified = not skip and failure not in ('runner', 'setup')
+     assert row['resolved'] is verified
+@@ -657,6 +661,21 @@ def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, s
+     assert all(getattr(ar, key) is originals[key] for key in ('asyncio', 'sandbox_start', 'sandbox_stop', 'sandbox_exec'))
+ 
+ 
++def test_row_build_fallback_retains_evidence_fields():
++    tree = ast.parse(Path(timing.__file__).read_text())
++    evaluate = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'evaluate')
++    row_try = next(n for n in ast.walk(evaluate) if isinstance(n, ast.Try) and isinstance(n.body[0], ast.Expr)
++                   and any(isinstance(c, ast.keyword) and c.arg == 'verified_patch_bytes'
++                           for c in ast.walk(ast.Module(body=n.body, type_ignores=[]))))
++    handler = row_try.handlers[0]
++    evidence = next(n for n in handler.body if isinstance(n, ast.For))
++    assert {ast.literal_eval(item.elts[0]) for item in evidence.iter.elts} == {
++        'result_error', 'agent_error_text', 'verified_patch_bytes'}
++    assert any(isinstance(n, ast.keyword) and n.arg is None
++               and isinstance(n.value, ast.Name) and n.value.id == 'evidence'
++               for n in ast.walk(handler))
++
++
+ @pytest.mark.parametrize('key,value,check', [
+     ('phase1_wall_seconds', 296.00001, 'b_max_phase1'),
+     ('phase1_wall_seconds', 270.00001, 'c_mean_phase1'),
+Plan 007 rev 2: a frozen, mechanical row classifier for Kaggle pass-rate kernel rows (fixes codex review ops/codex/review-20261106T064331.md BLOCKING 1-3). Two parts. Keep the change minimal; touch NOTHING on the agent path or the stock verification path.
+
+PART A: eval/kaggle/agent_timing.py, the per-task row (the main `append(journal, dict(instance_id=iid, ...))` near line 1090). Add exactly three fields:
+  result_error = (result.error[:4096] if result is not None and result.error else None)   # stock TaskResult.error, verbatim, truncated to 4096 chars
+  agent_error_text = (evaluator.agent_error[:4096] if evaluator.agent_error else None)
+  verified_patch_bytes = (len((result.agent_patch or '').encode('utf-8')) if result is not None else None)  # the patch stock Container B verified (post protected-file strip)
+Also add the same three fields to the `except Exception` fallback row (computed defensively; use None if anything raises). Do not change harness_error(), the `error` field, or anything else. Bump nothing else. Add a unit test in eval/tests/test_agent_timing.py that the generated row contains these fields (follow the existing test style there for building rows; if the row is only built inside main(), a source-level test that asserts the three keys appear in both row dicts is acceptable).
+
+PART B: new file eval/kaggle/classify_rows.py (stdlib only, python 3.10+), plus tests eval/tests/test_classify_rows.py.
+API: classify(row: dict) -> dict with keys:
+  h: None | 'H-ROW' | 'H-SETUP' | 'H-VERIFY'   (first match in this precedence order: H-ROW, H-SETUP, H-VERIFY)
+  known_diag: bool   (a flag, orthogonal to h and agent label)
+  agent: None | 'PASS' | 'NO_PATCH' | 'TIMEOUT' | 'PATCH_APPLY' | 'VERIFY_TIMEOUT_124' | 'PYTEST_1' | 'PYTEST_2_5' | 'EXIT0_UNRESOLVED' | 'OTHER_FAIL'  (None iff h is not None)
+  resolved: bool(row.get('resolved'))   # ALWAYS the stock verdict, even for H rows
+  reasons: list[str]  (short machine strings explaining h / known_diag; ids only, never file contents)
+Meta rows (no 'instance_id' key, e.g. '_schema', '_vllm', '_stopped', '_done') are skipped by the CLI and classify() raises ValueError on them.
+
+Marker constants (module level, frozen):
+  RECORD = 'uninstall-no-record-file'
+  WRAPPER_H = ('Evaluation exception (', 'Cleanup exception (', 'trace parse (', 'Row build exception (')
+  AGENT_END = regexes copied from agent_timing.AGENT_OUTCOMES (timeout, turns, tool_calls, no_submit) -- import them from agent_timing if importing is side-effect free, else copy the patterns verbatim and add a test asserting equality with agent_timing.AGENT_OUTCOMES patterns.
+  VERIFY_AGENT_PREFIXES (stock swegemma/harness/verification.py messages caused by the agent patch):
+    'Failed to apply agent patch:'  -> PATCH_APPLY
+    'Missing or empty JUnit XML report', 'Malformed JUnit XML report:', 'No <testsuite> elements found in JUnit XML',
+    'No passing tests recorded in JUnit XML', 'Test failures/errors recorded in JUnit XML', 'Required test node did not pass:',
+    'Pytest stdout summary indicates zero or no passing tests', 'Missing JUnit XML report (possible premature os._exit(0))'  -> verification-agent (JUnit family)
+  Anything else (including 'Evaluation error:', 'Failed to apply test_patch:', 'Missing test specification') is NOT agent-caused.
+
+Rules (frozen):
+H-ROW if any of:
+  (r1) row lacks any of the keys result_error, agent_error_text, verified_patch_bytes, setup_calls, exit_code, resolved (schema guard: rows from before PART A are H-ROW);
+  (r2) row['error'] (string) contains any WRAPPER_H substring;
+  (r3) row['error'] is non-null and is not exactly 'Harness task failure' (after the r2 check);
+  (r4) row['error'] == 'Harness task failure' and some non-empty message in [result_error, agent_error_text] matches neither AGENT_END (re.match on stripped text) nor startswith any VERIFY_AGENT_PREFIXES;
+  (r5) row['error'] is None but some non-empty message in [result_error, agent_error_text] matches neither AGENT_END nor VERIFY_AGENT_PREFIXES (fail closed; should not happen).
+H-SETUP, evaluated over ALL entries of row['setup_calls'] (there is one entry per setup step per installation pass; a row with verification has several passes and several 'setup.py' entries):
+  (s1) row.get('missing_tool_deps') non-empty;
+  (s2) any entry with step not in ('pip_check', 'workspace_editable', 'setup.py') and rc != 0 (rc None counts as != 0 only if duration_s > 0 or stderr non-empty; otherwise treat None as not-run and ignore);
+  (s3) any 'setup.py' entry with rc != 0;
+  (s4) any 'workspace_editable' entry with rc != 0 whose stdout+stderr does not contain RECORD;
+  (s5) for each 'setup.py' entry: let E = its 'subprocesses' (missing -> []) filtered to argv being a list containing '-e', in order. Every element with rc != 0 must be either
+        OFFLINE_RECORD: '--no-index' in argv and RECORD in (stdout+stderr), or
+        FALLBACK: '--no-index' not in argv and an OFFLINE_RECORD failure occurs EARLIER in the same entry's E.
+       Any other failing editable subprocess -> H-SETUP;
+  (s6) consistency: row['setup_failed'] is True but none of s1-s5 fired and known_diag is False -> H-SETUP ('setup_failed_unexplained').
+known_diag = at least one OFFLINE_RECORD failure (s5) or a workspace_editable rc != 0 containing RECORD, AND no s1-s6 fired. (If any s-rule fired, known_diag False and h='H-SETUP' unless H-ROW took precedence.)
+H-VERIFY: verified_patch_bytes > 0 AND not PATCH_APPLY (result_error does not start with 'Failed to apply agent patch:') AND exit_code is not an int in {0,1,2,3,4,5,124}.
+AGENT label when h is None (first match):
+  resolved True -> 'PASS';
+  verified_patch_bytes == 0 -> 'NO_PATCH';
+  result_error startswith 'Failed to apply agent patch:' -> 'PATCH_APPLY';
+  exit_code == 124 -> 'VERIFY_TIMEOUT_124';
+  exit_code == 1 -> 'PYTEST_1';  exit_code in 2..5 -> 'PYTEST_2_5';  exit_code == 0 -> 'EXIT0_UNRESOLVED';
+  else 'OTHER_FAIL'.
+  Separately expose agent_end = name of matched AGENT_END pattern on agent_error_text (None if none) in the output dict (descriptive; e.g. a timed-out agent that still produced a patch is labelled by its verification outcome, with agent_end='timeout').
+
+CLI: python3 eval/kaggle/classify_rows.py <timing.jsonl> [--out <json>] : prints and/or writes JSON
+  {_schema: 'plan007_row_classes/v1', classifier_sha256: <sha256 of this source file>, input: <path>, input_sha256, n_rows, counts: {h: {...}, agent: {...}, known_diag: n}, h_rows: [ids], rows: [{instance_id, repo, h, known_diag, agent, agent_end, resolved, reasons}]}.
+  Exit 0 always on a parseable file. Must not print patches, test output or any message text (reasons are fixed short codes like 's5:unexpected_editable_failure', 'r4:unrecognized_message').
+
+TESTS (eval/tests/test_classify_rows.py, offline, synthetic rows only, no files from runs/ or data/):
+  1. RECORD chain: setup.py entry with two editable subprocesses [offline --no-index rc1 stderr containing RECORD, online fallback rc1 stdout 'subprocess-exited-with-error'], setup_failed True, editable_failed True -> h None, known_diag True.
+  2. Same chain repeated in 3 setup.py entries (3 passes) -> known_diag True, h None.
+  3. Offline failure WITHOUT RECORD -> H-SETUP. Fallback failure with no earlier offline-RECORD failure -> H-SETUP.
+  4. Chain in pass 1 but pass 2 has a non-RECORD offline failure -> H-SETUP (later pass not overwritten).
+  5. tool_deps rc -1 -> H-SETUP; missing_tool_deps ['x'] -> H-SETUP; setup_failed True with clean calls -> H-SETUP.
+  6. error 'Harness task failure' + result_error 'Failed to apply agent patch: xyz' + exit_code 1, verified_patch_bytes 50 -> h None, agent PATCH_APPLY.
+  7. error 'Harness task failure' + result_error 'Required test node did not pass: a::b', exit 0 -> h None, agent EXIT0_UNRESOLVED; same with 'Test failures/errors recorded in JUnit XML (failures=1, errors=0)' exit 1 -> PYTEST_1.
+  8. exit_code 124, patch bytes 10 -> h None, VERIFY_TIMEOUT_124.
+  9. error 'Harness task failure' + result_error 'Evaluation error: boom' -> H-ROW; 'Failed to apply test_patch: x' -> H-ROW; unknown agent_error_text 'Agent crashed' -> H-ROW.
+  10. error 'Cleanup exception (OSError)' -> H-ROW even with resolved True; output resolved stays True.
+  11. error None, 'Harness task failure trace parse (KeyError)' -> H-ROW.
+  12. verified_patch_bytes 30, exit_code None, result_error None -> H-VERIFY; exit -1 -> H-VERIFY; verified_patch_bytes 0 exit -1 agent_error_text 'Agent exceeded turns budget' -> h None, NO_PATCH, agent_end 'turns'.
+  13. row missing result_error key -> H-ROW (schema).
+  14. resolved True clean -> PASS.
+  15. CLI on a temp jsonl with meta rows + 3 rows: counts correct, output contains no message text (assert 'boom' not in stdout).
+Run: the repo's test command is /home/ubuntu/gemma-local/venv/bin/python3 -m pytest eval/tests -q (if that interpreter is unavailable in your sandbox, use python3 -m pytest eval/tests/test_classify_rows.py eval/tests/test_agent_timing.py -q). All existing tests must still pass.
+
+exec
+/bin/bash -lc "nl -ba eval/kaggle/agent_timing.py | sed -n '430,720p'; nl -ba eval/kaggle/agent_timing.py | sed -n '830,880p'; nl -ba eval/kaggle/agent_timing.py | sed -n '1020,1160p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   430	log = Path(__file__).with_name('setup_subprocesses.json')
+   431	log.write_text('[]')
+   432	full_log = log.with_name('setup_subprocesses_full.jsonl')
+   433	full_log.write_text('')
+   434	def run(*args, **kwargs):
+   435	    start = time.perf_counter()
+   436	    argv = args[0] if args else kwargs.get('args')
+   437	    result = None
+   438	    try:
+   439	        result = original(*args, **kwargs)
+   440	        return result
+   441	    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+   442	        result = exc
+   443	        raise
+   444	    finally:
+   445	        def decode(value):
+   446	            return value.decode(errors='replace') if isinstance(value, bytes) else (value or '')
+   447	        out, err = decode(getattr(result, 'stdout', '')), decode(getattr(result, 'stderr', ''))
+   448	        with full_log.open('a') as stream:
+   449	            stream.write(json.dumps(dict(argv=argv, stdout=out, stderr=err)) + '\n')
+   450	        calls.append(dict(argv=argv, duration_s=time.perf_counter()-start,
+   451	            start_offset_s=start-origin, rc=getattr(result, 'returncode', None),
+   452	            stdout=out.encode()[-2048:].decode(errors='ignore'),
+   453	            stderr=err.encode()[-2048:].decode(errors='ignore'),
+   454	            retrying_lines=sum('Retrying' in line for line in (out+'\n'+err).splitlines()),
+   455	            interpreter_version=sys.version))
+   456	        log.write_text(json.dumps(calls))
+   457	origin = time.perf_counter()
+   458	subprocess.run = run
+   459	sys.argv = sys.argv[1:]
+   460	runpy.run_path(sys.argv[0], run_name='__main__')
+   461	'''
+   462	
+   463	
+   464	def patch_subprocess_deps(data_dir, state=None):
+   465	    """Install scorer tools in each venv, using that interpreter's ABI, entirely offline."""
+   466	    import swegemma.harness.container_setup as cs
+   467	    from packaging.utils import parse_wheel_filename
+   468	    orig = getattr(cs.install_test_dependencies, '_timing_original', cs.install_test_dependencies)
+   469	    wheels = data_dir / 'wheels'
+   470	    if not wheels.is_dir():
+   471	        wheels = WHEELHOUSE
+   472	    setup = data_dir / 'sandbox' / 'setup.py'
+   473	    if not setup.exists():
+   474	        setup = next(iter(data_dir.rglob('setup.py')), setup)
+   475	
+   476	    def install(docker, container_id, repo='', *, fast_path=True, config=None):
+   477	        if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
+   478	            return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+   479	        current = state.get() if state is not None else dict(
+   480	            started=time.perf_counter(), setup_calls=[], setup_failed=False)
+   481	        fixed = os.environ.get('SETUP_FIX', '1') == '1'
+   482	        current['setup_fix'] = int(fixed)
+   483	        venv = docker.sandboxes[container_id]['venv']
+   484	        sp = next(iter(sorted(venv.glob('lib/python3*/site-packages'))))
+   485	        if not fixed:
+   486	            # Preserve the original injector's wheel selection and base tar exactly.
+   487	            def original_base():
+   488	                base, large, _modules, _requirements = cs._inspect_wheels_dir(wheels)
+   489	                if large:
+   490	                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+   491	                current['wheel_tags_chosen'] = [p.name for p in base]
+   492	                inject_base(cs, base, sp, current)
+   493	            setup_step(current, 'base_tar_extraction', original_base)
+   494	            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+   495	        else:
+   496	            # A subprocess venv otherwise exposes every kernel package via _host_env.pth.
+   497	            # Only the scorer's image tools and public base wheels belong here.
+   498	            def isolate_venv():
+   499	                for pth in sp.glob('_host_env.pth'):
+   500	                    pth.unlink()
+   501	                cfg = venv / 'pyvenv.cfg'
+   502	                if cfg.exists():
+   503	                    cfg.write_text(cfg.read_text().replace(
+   504	                        'include-system-site-packages = true', 'include-system-site-packages = false'))
+   505	            setup_step(current, 'venv_fidelity', isolate_venv)
+   506	            pip_wheel = fallback_wheel(wheels, 'pip')
+   507	            def bootstrap_pip():
+   508	                if pip_wheel:
+   509	                    current['setup_calls'][-1]['source'] = str(pip_wheel)
+   510	                    import zipfile
+   511	                    with zipfile.ZipFile(pip_wheel) as zf:
+   512	                        zf.extractall(sp)
+   513	                else:
+   514	                    current['setup_calls'][-1]['source'] = copy_runtime_package('pip', sp)
+   515	                    if current['setup_calls'][-1]['source'] == 'missing':
+   516	                        raise RuntimeError('No offline pip source available')
+   517	                return docker.exec(container_id, 'python3 -m pip --version', timeout=30)
+   518	            result = setup_step(current, 'pip_bootstrap', bootstrap_pip)
+   519	            if result.exit_code != 0:
+   520	                raise RuntimeError('Sandbox pip bootstrap failed')
+   521	            probe = ("import sys,json;from pip._vendor.packaging.tags import sys_tags;"
+   522	                     "from pip._vendor.packaging.markers import default_environment;"
+   523	                     "print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()],"
+   524	                     "'environment':default_environment()}))")
+   525	            result = setup_step(current, 'interpreter_probe', lambda: docker.exec(
+   526	                container_id, 'python3 -c ' + shlex.quote(probe), timeout=30))
+   527	            if result.exit_code != 0:
+   528	                raise RuntimeError('Sandbox interpreter probe failed')
+   529	            identity = json.loads(result.stdout)
+   530	            current['interpreter_version'] = identity['version']
+   531	            selected = compatible_wheels(wheels, identity['tags'])
+   532	            # The image pins pytest-timeout, even if a newer wheel is present.
+   533	            selected.pop('pytest-timeout', None)
+   534	            for path in pytest_timeout_wheels(wheels):
+   535	                if {str(t) for t in parse_wheel_filename(path.name)[3]} & set(identity['tags']):
+   536	                    selected['pytest-timeout'] = path
+   537	                    break
+   538	            current['wheel_tags_chosen'] = [p.name for p in selected.values()]
+   539	            def validate_tools():
+   540	                missing = [n for n in SCORER_TOOLS if n not in selected and n not in ('pip', 'pytest-timeout')]
+   541	                if missing:
+   542	                    raise RuntimeError('Required compatible tools missing: ' + ', '.join(missing))
+   543	            setup_step(current, 'tool_sources', validate_tools)
+   544	            def timeout_source():
+   545	                source = selected.get('pytest-timeout')
+   546	                current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
+   547	                if current['setup_calls'][-1]['source'] == 'missing':
+   548	                    raise RuntimeError('No offline pytest-timeout 2.1.0 source available')
+   549	            setup_step(current, 'pytest_timeout_source', timeout_source)
+   550	            def install_tools():
+   551	                for path in selected.values():
+   552	                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+   553	                tools = ['/wheels/' + selected[n].name for n in SCORER_TOOLS
+   554	                         if n in selected and n != 'pip']
+   555	                return docker.exec(container_id,
+   556	                    'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
+   557	                    ' '.join(shlex.quote(n) for n in tools), timeout=60)
+   558	            result = setup_step(current, 'tool_install', install_tools)
+   559	            if result.exit_code != 0:
+   560	                raise RuntimeError('Offline scorer tool installation failed')
+   561	            def tool_deps():
+   562	                from importlib.metadata import distributions
+   563	                roots = [wheel_metadata(selected[n]) for n in SCORER_TOOLS if n in selected]
+   564	                roots.extend(d.metadata for d in distributions(path=[str(sp)])
+   565	                             if d.metadata['Name'].lower() in ('pip', 'pytest-timeout')
+   566	                             and d.metadata['Name'].lower() not in selected)
+   567	                def install_dependency(path):
+   568	                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+   569	                    result = docker.exec(container_id,
+   570	                        'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
+   571	                        shlex.quote('/wheels/' + path.name), timeout=60)
+   572	                    setup_artifact(current, dict(step='tool_deps', wheel=path.name,
+   573	                        stdout=result.stdout, stderr=result.stderr))
+   574	                    current['setup_calls'][-1]['retrying_lines'] += sum(
+   575	                        'Retrying' in line for line in (result.stdout + '\n' + result.stderr).splitlines())
+   576	                    return result
+   577	                entries, missing = close_tool_dependencies(
+   578	                    roots, wheels, identity['tags'], identity['environment'], sp, install_dependency)
+   579	                current['setup_calls'][-1]['dependencies'] = entries
+   580	                current['missing_tool_deps'] = missing
+   581	                if missing:
+   582	                    current.update(status='failed', reason='missing_tool_deps')
+   583	                    raise RuntimeError('missing_tool_deps: ' + ', '.join(missing))
+   584	            setup_step(current, 'tool_deps', tool_deps)
+   585	            setup_step(current, 'pip_check', lambda: docker.exec(
+   586	                container_id, 'python3 -m pip check', timeout=30), fatal=False)
+   587	            # Docker's hook ignores failure, but observe the real pip rc and both streams.
+   588	            setup_step(current, 'workspace_editable', lambda: docker.exec(container_id,
+   589	                'python3 -m pip install --no-index --find-links=/wheels --no-build-isolation --no-deps -e /workspace',
+   590	                timeout=280), fatal=False)
+   591	            current['workspace_editable_rc'] = current['setup_calls'][-1]['rc']
+   592	            current['editable_failed'] = current['workspace_editable_rc'] != 0
+   593	            current['setup_failed'] |= current['editable_failed']
+   594	            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+   595	            def extract_base():
+   596	                base = [p for name, p in selected.items() if name not in BASE_SKIP]
+   597	                if any(p.stat().st_size >= cs._LARGE_WHEEL_THRESHOLD_BYTES for p in base):
+   598	                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+   599	                inject_base(cs, base, sp, current)
+   600	            setup_step(current, 'base_tar_extraction', extract_base)
+   601	            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+   602	        def run_setup():
+   603	            docker.copy_to(container_id, setup, '/tmp/setup.py')
+   604	            # All observer files are scratch files, never workspace patch inputs.
+   605	            observer = docker.sandboxes[container_id]['tmp'] / 'setup_observer.py'
+   606	            observer.write_text(SETUP_OBSERVER)
+   607	            return docker.exec(container_id, setup_command(repo, fast_path), timeout=280)
+   608	        try:
+   609	            setup_step(current, 'setup.py', run_setup)
+   610	        finally:
+   611	            log = docker.sandboxes[container_id]['tmp'] / 'setup_subprocesses.json'
+   612	            calls = json.loads(log.read_text()) if log.exists() else []
+   613	            full_log = log.with_name('setup_subprocesses_full.jsonl')
+   614	            if full_log.exists():
+   615	                for line in full_log.read_text().splitlines():
+   616	                    setup_artifact(current, dict(step='setup.py', **json.loads(line)))
+   617	            current['setup_subprocesses'] = calls
+   618	            setup_row = next(c for c in reversed(current['setup_calls']) if c['step'] == 'setup.py')
+   619	            setup_row['subprocesses'] = calls
+   620	            setup_row['retrying_lines'] += sum(c['retrying_lines'] for c in calls)
+   621	            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+   622	            editable = [c for c in calls if isinstance(c['argv'], list) and '-e' in c['argv']]
+   623	            current['editable_rc'] = editable[0]['rc'] if editable else None
+   624	            current['editable_final_rc'] = editable[-1]['rc'] if editable else None
+   625	            current['editable_failed'] = any(c['rc'] != 0 for c in editable) or current.get('workspace_editable_rc', 0) != 0
+   626	            current['setup_failed'] |= current['editable_failed']
+   627	            record_distributions(docker, container_id, repo, setup_row)
+   628	            if calls:
+   629	                current['interpreter_version'] = calls[0]['interpreter_version']
+   630	            else:
+   631	                current.setdefault('interpreter_version', None)
+   632	        current['status'] = 'failed' if current['setup_failed'] else 'passed'
+   633	        return current
+   634	    install._timing_original = orig
+   635	    for name, module in list(sys.modules.items()):
+   636	        if name.startswith('swegemma.') and hasattr(module, 'install_test_dependencies'):
+   637	            module.install_test_dependencies = install
+   638	    return install
+   639	
+   640	def classify_patch(patch, repo, protected=None, test_targets=()):
+   641	    """Parse file headers outside hunks, including quoted paths and renames."""
+   642	    files, new = set(), set()
+   643	    current, added, in_hunk = set(), False, False
+   644	    def path_value(raw):
+   645	        raw = raw.split('\t', 1)[0]
+   646	        value = json.loads(raw) if raw.startswith('"') else raw
+   647	        return value[2:] if value.startswith(('a/', 'b/')) else value
+   648	    for line in patch.splitlines() + ['diff --git ']:
+   649	        if line.startswith('diff --git '):
+   650	            files.update(current)
+   651	            if added:
+   652	                new.update(current)
+   653	            current, added, in_hunk = set(), False, False
+   654	            match = re.match(r'^diff --git ("a/.*?"|a/.*?) ("b/.*?"|b/.*)$', line)
+   655	            if match:
+   656	                current.update(path_value(p) for p in match.groups())
+   657	        elif line.startswith('@@'):
+   658	            in_hunk = True
+   659	        elif not in_hunk:
+   660	            if line.startswith(('--- ', '+++ ')):
+   661	                p = path_value(line[4:])
+   662	                if p != '/dev/null':
+   663	                    current.add(p)
+   664	                elif line.startswith('--- '):
+   665	                    added = True
+   666	            elif line.startswith('new file mode '):
+   667	                added = True
+   668	            elif line.startswith(('rename from ', 'rename to ')):
+   669	                current.add(path_value(line.split(' ', 2)[2]))
+   670	    if protected is None:
+   671	        protected = lambda p: bool(re.search(r'(^|/)(tests?/|test_[^/]*\.py$|conftest\.py$)|_test\.py$', p))
+   672	    tests = sorted(p for p in files if protected(p) or p in test_targets)
+   673	    package = repo.split('/')[-1].replace('-', '_').lower()
+   674	    source_roots = (package + '/', 'src/' + package + '/')
+   675	    stray = sorted(p for p in new if not (p.endswith('.py') and p.lower().startswith(source_roots)
+   676	                                         and p not in tests))
+   677	    return dict(patch_bytes=len(patch.encode()), patch_files=sorted(files),
+   678	                test_files_edited=tests, stray_files=stray, empty_patch=not patch.strip())
+   679	
+   680	def trace_counts(trace):
+   681	    entries = trace.entries if trace else []
+   682	    counts = Counter(e.tool_name for e in entries if e.event_type == 'tool_call')
+   683	    tokens = {}
+   684	    for key in ('prompt_tokens', 'completion_tokens'):
+   685	        values = [e.usage[key] for e in entries if e.usage and isinstance(e.usage.get(key), (int, float))]
+   686	        tokens[key] = sum(values) if values else None
+   687	    return dict(counts), tokens, tool_seconds(entries)
+   688	
+   689	def tool_seconds(entries):
+   690	    """Per tool name: wall seconds from each tool_call to its tool_response (FIFO per name)."""
+   691	    pending, out = {}, {}
+   692	    for e in entries:
+   693	        if e.event_type == 'tool_call':
+   694	            pending.setdefault(e.tool_name, []).append(e.timestamp)
+   695	        elif e.event_type == 'tool_response' and pending.get(e.tool_name):
+   696	            stat = out.setdefault(e.tool_name, dict(n=0, total=0.0, max=0.0))
+   697	            dt = max(0.0, e.timestamp - pending[e.tool_name].pop(0))
+   698	            stat['n'] += 1
+   699	            stat['total'] = round(stat['total'] + dt, 3)
+   700	            stat['max'] = round(max(stat['max'], dt), 3)
+   701	    return out
+   702	
+   703	def observe_patch_strip(original, state):
+   704	    """Retain the agent's diff before the harness removes protected edits."""
+   705	    def strip(patch, *pos, **kw):
+   706	        current = state.get(None)
+   707	        filtered = original(patch, *pos, **kw)
+   708	        if current is not None and current.get('agent_active'):
+   709	            if patch != current.get('filtered_patch'):
+   710	                current['raw_patch'] = patch
+   711	            current['filtered_patch'] = filtered
+   712	        return filtered
+   713	    return strip
+   714	
+   715	def test_run_stats(trace, agent_seconds):
+   716	    pending, n, total = {}, 0, 0.0
+   717	    for e in trace.entries if trace else []:
+   718	        if e.event_type == 'tool_call':
+   719	            command = (e.tool_args or {}).get('command', '')
+   720	            is_test = e.tool_name == 'run_command' and any(s in command for s in ('pytest', 'unittest', 'tox', 'nox', 'run_tests'))
+   830	        teardown_seconds=current.get('sandbox_stop_duration'),
+   831	        phase1_wall_seconds=phase1, phase1_source=source,
+   832	        pre_agent_seconds=difference('timeout_enter', 'sandbox_start_begin'),
+   833	        post_phase1_seconds=total - phase1, patch_submitted=submitted,
+   834	        fallback_patch_used=(not submitted and bool(patch.strip())) if submitted is not None else None,
+   835	        verification_skipped=SKIP_VERIFICATION)
+   836	
+   837	
+   838	# Normal agent end states that swegemma reports through agent_error (agent_runner.py 0.2.11).
+   839	AGENT_OUTCOMES = (('timeout', re.compile(r'Agent exceeded session timeout\b')),
+   840	                  ('turns', re.compile(r'Agent exceeded (turns budget|maximum allowed LLM turns)\b')),
+   841	                  ('tool_calls', re.compile(r'Agent exceeded tool call budget\b')),
+   842	                  ('no_submit', re.compile(r'Agent completed execution without calling submit_patch\b')))
+   843	IMAGE_EMULATION_STEPS = ('venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'tool_sources',
+   844	                         'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check')
+   845	
+   846	
+   847	def agent_outcome(message):
+   848	    """Name of a known normal agent end state, else None (including for empty messages)."""
+   849	    text = (message or '').strip()
+   850	    return next((name for name, pattern in AGENT_OUTCOMES if pattern.match(text)), None)
+   851	
+   852	
+   853	def harness_error(result, agent_error):
+   854	    """Fail closed: any error that is not a known normal agent end state is a harness failure."""
+   855	    messages = [m for m in ((result.error if result is not None else None), agent_error) if m]
+   856	    return 'Harness task failure' if any(agent_outcome(m) is None for m in messages) else None
+   857	
+   858	
+   859	def platform_probe(host='pypi.org', port=443, timeout=10.0):
+   860	    """P2 (plan 006 addendum): docker presence, DNS, and one TCP connect. Sends no payload."""
+   861	    out = dict(docker_which=shutil.which('docker'), docker_sock=os.path.exists('/var/run/docker.sock'),
+   862	               host=host, port=port, dns=None, dns_seconds=None, tcp=None, tcp_seconds=None, tcp_errno=None)
+   863	    box = {}
+   864	    def resolve():
+   865	        try:
+   866	            box['addrs'] = sorted({ai[4][0] for ai in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)})
+   867	        except Exception as exc:
+   868	            box['error'] = type(exc).__name__
+   869	    start = time.perf_counter()
+   870	    worker = threading.Thread(target=resolve, daemon=True)
+   871	    worker.start(); worker.join(timeout)
+   872	    out['dns_seconds'] = round(time.perf_counter() - start, 3)
+   873	    if worker.is_alive():
+   874	        out['dns'], out['tcp'] = 'timeout', 'skipped'
+   875	        return out
+   876	    if 'error' in box or not box.get('addrs'):
+   877	        out['dns'], out['tcp'] = 'failed:' + box.get('error', 'empty'), 'skipped'
+   878	        return out
+   879	    out['dns'] = 'resolved'
+   880	    out['dns_addr_count'] = len(box['addrs'])
+  1020	    for name, original in original_sandbox.items():
+  1021	        setattr(ar, name, observe_sandbox(original, state, name))
+  1022	    original_verify, original_strip = ev.verify_task, vf.strip_protected_files_from_patch
+  1023	    vf.strip_protected_files_from_patch = observe_patch_strip(original_strip, state)
+  1024	    async def verify(*args, **kwargs):
+  1025	        start = time.perf_counter()
+  1026	        try:
+  1027	            return await (skip_verification if SKIP_VERIFICATION else original_verify)(*args, **kwargs)
+  1028	        finally:
+  1029	            state.get()['verification'] = time.perf_counter() - start
+  1030	    ev.verify_task = verify
+  1031	    class TimingEvaluator(Evaluator):
+  1032	        agent_seconds, patch, trace, agent_error = 0.0, '', None, ''
+  1033	        def _hydrate_task_from_secret(self, task):
+  1034	            return task
+  1035	        def _get_secret_bundle_data(self):
+  1036	            return {}, {}, None
+  1037	        async def _run_agent_sandbox(self, task, *args, **kwargs):
+  1038	            safe = dataclasses.replace(task, patch='', test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=())
+  1039	            self.context = kwargs['context']
+  1040	            self.context.task = safe
+  1041	            start = time.perf_counter()
+  1042	            state.get()['agent_active'] = True
+  1043	            try:
+  1044	                self.patch, self.agent_error, self.trace = await super()._run_agent_sandbox(safe, *args, **kwargs)
+  1045	                return self.patch, self.agent_error, self.trace
+  1046	            finally:
+  1047	                self.agent_seconds = time.perf_counter() - start
+  1048	                state.get()['agent_active'] = False
+  1049	    try:
+  1050	        inventory = {t.instance_id: t for t in load_tasks(config.tasks_path)}
+  1051	        if len(set(TASK_IDS)) != len(TASK_IDS) or set(TASK_IDS) - inventory.keys():
+  1052	            raise ValueError('Duplicate or missing task IDs')
+  1053	        patch_subprocess_deps(DATA, state)
+  1054	        for iid in TASK_IDS:
+  1055	            if should_stop(time.monotonic()-started + (P1_DEADLINE_SECONDS + 30 if STOCK_PROBE else 0), caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+  1056	                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+  1057	                break
+  1058	            task = dataclasses.replace(inventory[iid], patch='')
+  1059	            stock = stock_setup_probe(config, iid, task.repo) if STOCK_PROBE else None
+  1060	            if STOCK_PROBE and should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+  1061	                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+  1062	                break
+  1063	            times = dict(instance_id=task.instance_id, verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+  1064	            state.set(times)
+  1065	            evaluator, result, error = TimingEvaluator(config), None, None
+  1066	            original_start = evaluator.docker.start
+  1067	            evaluator.docker.start = lambda: setup_step(times, 'venv', original_start)
+  1068	            start = time.perf_counter()
+  1069	            try:
+  1070	                result = await evaluator.evaluate_task(task)
+  1071	                error = harness_error(result, evaluator.agent_error)
+  1072	            except Exception as exc:
+  1073	                error = 'Evaluation exception (' + type(exc).__name__ + ')'
+  1074	            finally:
+  1075	                try:
+  1076	                    evaluator.docker.cleanup_all()
+  1077	                except Exception as exc:
+  1078	                    error = 'Cleanup exception (' + type(exc).__name__ + ')'
+  1079	            total = time.perf_counter() - start
+  1080	            totals.append(total)
+  1081	            patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch) or ''
+  1082	            try:
+  1083	                counts, tokens, seconds = trace_counts(evaluator.trace)
+  1084	            except Exception as exc:  # never lose the run over trace parsing
+  1085	                counts, tokens, seconds = {}, dict(prompt_tokens=None, completion_tokens=None), {}
+  1086	                error = (error or '') + ' trace parse (' + type(exc).__name__ + ')'
+  1087	            code = result.test_exit_code if result else None
+  1088	            raw_error = (result.error or '') if result else error or ''
+  1089	            phase = phase1_fields(times, evaluator.agent_seconds, total,
+  1090	                                  getattr(evaluator, 'context', None),
+  1091	                                  result.agent_patch if result else evaluator.patch)
+  1092	            phase.update(agent_outcome=agent_outcome(evaluator.agent_error or raw_error),
+  1093	                         image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
+  1094	            try:
+  1095	              append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+  1096	                result_error=(result.error[:4096] if result is not None and result.error else None),
+  1097	                agent_error_text=(evaluator.agent_error[:4096] if evaluator.agent_error else None),
+  1098	                verified_patch_bytes=(len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+  1099	                **phase,
+  1100	                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+  1101	                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+  1102	                editable_failed=times.get('editable_failed', False),
+  1103	                setup_output_artifact=times.get('setup_output_artifact'),
+  1104	                missing_tool_deps=times.get('missing_tool_deps', []),
+  1105	                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+  1106	                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
+  1107	                llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
+  1108	                tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
+  1109	                completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
+  1110	                stock_setup=stock, llm_calls=llm_calls(evaluator.trace),
+  1111	                **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+  1112	                timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+  1113	            except Exception as exc:
+  1114	                evidence = {}
+  1115	                for key, value in (
+  1116	                    ('result_error', lambda: result.error[:4096] if result is not None and result.error else None),
+  1117	                    ('agent_error_text', lambda: evaluator.agent_error[:4096] if evaluator.agent_error else None),
+  1118	                    ('verified_patch_bytes', lambda: len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+  1119	                ):
+  1120	                    try:
+  1121	                        evidence[key] = value()
+  1122	                    except Exception:
+  1123	                        evidence[key] = None
+  1124	                append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+  1125	                                     **evidence,
+  1126	                                     **phase,
+  1127	                                     wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+  1128	                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+  1129	                editable_failed=times.get('editable_failed', False),
+  1130	                setup_output_artifact=times.get('setup_output_artifact'),
+  1131	                missing_tool_deps=times.get('missing_tool_deps', []),
+  1132	                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+  1133	                stock_setup=stock,
+  1134	                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
+  1135	            # Raw artifacts are diagnostics written after the row; never lose the remaining tasks over them.
+  1136	            try:
+  1137	                raw = WORK / 'runs' / iid
+  1138	                raw.mkdir(parents=True, exist_ok=True)
+  1139	                (raw / 'agent.patch').write_text(patch)
+  1140	                (raw / 'trace.json').write_text(json.dumps(evaluator.trace.to_dict(format='legacy') if evaluator.trace else {}, default=str))
+  1141	                (raw / 'result.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result else {'error': error}, default=str))
+  1142	            except Exception as exc:
+  1143	                append(journal, {'_artifact_error': dict(instance_id=iid, type=type(exc).__name__)})
+  1144	    finally:
+  1145	        ev.verify_task, vf.strip_protected_files_from_patch = original_verify, original_strip
+  1146	        ar.asyncio = original_asyncio
+  1147	        for name, original in original_sandbox.items():
+  1148	            setattr(ar, name, original)
+  1149	
+  1150	def start_server(holder):
+  1151	    import torch
+  1152	    from adk_submission import VllmConfig, VllmServer, discover_adapters
+  1153	    from adk_submission.discovery import discover_declared_models
+  1154	    from swegemma.config import ALLOWED_ADAPTER_EXTENSIONS
+  1155	    MODEL_VLLM_EXTRA_ARGS = {'gemma-4-12b-it-qat-w4a16-ct': (
+  1156	        '--hf-overrides', '{"architectures": ["Gemma4ForCausalLM"], "model_type": "gemma4"}')}
+  1157	    _SAFE_PATH_COMPONENT = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
+  1158	    declared_models = discover_declared_models(BUNDLE)
+  1159	    assert len(declared_models) == 1, f'Expected exactly 1 declared model, got: {sorted(declared_models)}'
+  1160	    declared_model = next(iter(declared_models))
+
+exec
+/bin/bash -lc "nl -ba eval/kaggle/agent_timing.py | sed -n '838,870p'; nl -ba eval/kaggle/agent_timing.py | sed -n '1015,1145p'; nl -ba eval/kaggle/agent_timing.py | sed -n '325,373p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   838	# Normal agent end states that swegemma reports through agent_error (agent_runner.py 0.2.11).
+   839	AGENT_OUTCOMES = (('timeout', re.compile(r'Agent exceeded session timeout\b')),
+   840	                  ('turns', re.compile(r'Agent exceeded (turns budget|maximum allowed LLM turns)\b')),
+   841	                  ('tool_calls', re.compile(r'Agent exceeded tool call budget\b')),
+   842	                  ('no_submit', re.compile(r'Agent completed execution without calling submit_patch\b')))
+   843	IMAGE_EMULATION_STEPS = ('venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'tool_sources',
+   844	                         'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check')
+   845	
+   846	
+   847	def agent_outcome(message):
+   848	    """Name of a known normal agent end state, else None (including for empty messages)."""
+   849	    text = (message or '').strip()
+   850	    return next((name for name, pattern in AGENT_OUTCOMES if pattern.match(text)), None)
+   851	
+   852	
+   853	def harness_error(result, agent_error):
+   854	    """Fail closed: any error that is not a known normal agent end state is a harness failure."""
+   855	    messages = [m for m in ((result.error if result is not None else None), agent_error) if m]
+   856	    return 'Harness task failure' if any(agent_outcome(m) is None for m in messages) else None
+   857	
+   858	
+   859	def platform_probe(host='pypi.org', port=443, timeout=10.0):
+   860	    """P2 (plan 006 addendum): docker presence, DNS, and one TCP connect. Sends no payload."""
+   861	    out = dict(docker_which=shutil.which('docker'), docker_sock=os.path.exists('/var/run/docker.sock'),
+   862	               host=host, port=port, dns=None, dns_seconds=None, tcp=None, tcp_seconds=None, tcp_errno=None)
+   863	    box = {}
+   864	    def resolve():
+   865	        try:
+   866	            box['addrs'] = sorted({ai[4][0] for ai in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)})
+   867	        except Exception as exc:
+   868	            box['error'] = type(exc).__name__
+   869	    start = time.perf_counter()
+   870	    worker = threading.Thread(target=resolve, daemon=True)
+  1015	    import swegemma.harness.agent_runner as ar
+  1016	    state = ContextVar('timing')
+  1017	    original_asyncio = ar.asyncio
+  1018	    original_sandbox = {name: getattr(ar, name) for name in ('sandbox_start', 'sandbox_stop', 'sandbox_exec')}
+  1019	    ar.asyncio = AsyncioTimingProxy(original_asyncio, state)
+  1020	    for name, original in original_sandbox.items():
+  1021	        setattr(ar, name, observe_sandbox(original, state, name))
+  1022	    original_verify, original_strip = ev.verify_task, vf.strip_protected_files_from_patch
+  1023	    vf.strip_protected_files_from_patch = observe_patch_strip(original_strip, state)
+  1024	    async def verify(*args, **kwargs):
+  1025	        start = time.perf_counter()
+  1026	        try:
+  1027	            return await (skip_verification if SKIP_VERIFICATION else original_verify)(*args, **kwargs)
+  1028	        finally:
+  1029	            state.get()['verification'] = time.perf_counter() - start
+  1030	    ev.verify_task = verify
+  1031	    class TimingEvaluator(Evaluator):
+  1032	        agent_seconds, patch, trace, agent_error = 0.0, '', None, ''
+  1033	        def _hydrate_task_from_secret(self, task):
+  1034	            return task
+  1035	        def _get_secret_bundle_data(self):
+  1036	            return {}, {}, None
+  1037	        async def _run_agent_sandbox(self, task, *args, **kwargs):
+  1038	            safe = dataclasses.replace(task, patch='', test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=())
+  1039	            self.context = kwargs['context']
+  1040	            self.context.task = safe
+  1041	            start = time.perf_counter()
+  1042	            state.get()['agent_active'] = True
+  1043	            try:
+  1044	                self.patch, self.agent_error, self.trace = await super()._run_agent_sandbox(safe, *args, **kwargs)
+  1045	                return self.patch, self.agent_error, self.trace
+  1046	            finally:
+  1047	                self.agent_seconds = time.perf_counter() - start
+  1048	                state.get()['agent_active'] = False
+  1049	    try:
+  1050	        inventory = {t.instance_id: t for t in load_tasks(config.tasks_path)}
+  1051	        if len(set(TASK_IDS)) != len(TASK_IDS) or set(TASK_IDS) - inventory.keys():
+  1052	            raise ValueError('Duplicate or missing task IDs')
+  1053	        patch_subprocess_deps(DATA, state)
+  1054	        for iid in TASK_IDS:
+  1055	            if should_stop(time.monotonic()-started + (P1_DEADLINE_SECONDS + 30 if STOCK_PROBE else 0), caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+  1056	                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+  1057	                break
+  1058	            task = dataclasses.replace(inventory[iid], patch='')
+  1059	            stock = stock_setup_probe(config, iid, task.repo) if STOCK_PROBE else None
+  1060	            if STOCK_PROBE and should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+  1061	                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+  1062	                break
+  1063	            times = dict(instance_id=task.instance_id, verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+  1064	            state.set(times)
+  1065	            evaluator, result, error = TimingEvaluator(config), None, None
+  1066	            original_start = evaluator.docker.start
+  1067	            evaluator.docker.start = lambda: setup_step(times, 'venv', original_start)
+  1068	            start = time.perf_counter()
+  1069	            try:
+  1070	                result = await evaluator.evaluate_task(task)
+  1071	                error = harness_error(result, evaluator.agent_error)
+  1072	            except Exception as exc:
+  1073	                error = 'Evaluation exception (' + type(exc).__name__ + ')'
+  1074	            finally:
+  1075	                try:
+  1076	                    evaluator.docker.cleanup_all()
+  1077	                except Exception as exc:
+  1078	                    error = 'Cleanup exception (' + type(exc).__name__ + ')'
+  1079	            total = time.perf_counter() - start
+  1080	            totals.append(total)
+  1081	            patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch) or ''
+  1082	            try:
+  1083	                counts, tokens, seconds = trace_counts(evaluator.trace)
+  1084	            except Exception as exc:  # never lose the run over trace parsing
+  1085	                counts, tokens, seconds = {}, dict(prompt_tokens=None, completion_tokens=None), {}
+  1086	                error = (error or '') + ' trace parse (' + type(exc).__name__ + ')'
+  1087	            code = result.test_exit_code if result else None
+  1088	            raw_error = (result.error or '') if result else error or ''
+  1089	            phase = phase1_fields(times, evaluator.agent_seconds, total,
+  1090	                                  getattr(evaluator, 'context', None),
+  1091	                                  result.agent_patch if result else evaluator.patch)
+  1092	            phase.update(agent_outcome=agent_outcome(evaluator.agent_error or raw_error),
+  1093	                         image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
+  1094	            try:
+  1095	              append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+  1096	                result_error=(result.error[:4096] if result is not None and result.error else None),
+  1097	                agent_error_text=(evaluator.agent_error[:4096] if evaluator.agent_error else None),
+  1098	                verified_patch_bytes=(len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+  1099	                **phase,
+  1100	                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+  1101	                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+  1102	                editable_failed=times.get('editable_failed', False),
+  1103	                setup_output_artifact=times.get('setup_output_artifact'),
+  1104	                missing_tool_deps=times.get('missing_tool_deps', []),
+  1105	                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+  1106	                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
+  1107	                llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
+  1108	                tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
+  1109	                completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
+  1110	                stock_setup=stock, llm_calls=llm_calls(evaluator.trace),
+  1111	                **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+  1112	                timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+  1113	            except Exception as exc:
+  1114	                evidence = {}
+  1115	                for key, value in (
+  1116	                    ('result_error', lambda: result.error[:4096] if result is not None and result.error else None),
+  1117	                    ('agent_error_text', lambda: evaluator.agent_error[:4096] if evaluator.agent_error else None),
+  1118	                    ('verified_patch_bytes', lambda: len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+  1119	                ):
+  1120	                    try:
+  1121	                        evidence[key] = value()
+  1122	                    except Exception:
+  1123	                        evidence[key] = None
+  1124	                append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+  1125	                                     **evidence,
+  1126	                                     **phase,
+  1127	                                     wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+  1128	                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+  1129	                editable_failed=times.get('editable_failed', False),
+  1130	                setup_output_artifact=times.get('setup_output_artifact'),
+  1131	                missing_tool_deps=times.get('missing_tool_deps', []),
+  1132	                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+  1133	                stock_setup=stock,
+  1134	                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
+  1135	            # Raw artifacts are diagnostics written after the row; never lose the remaining tasks over them.
+  1136	            try:
+  1137	                raw = WORK / 'runs' / iid
+  1138	                raw.mkdir(parents=True, exist_ok=True)
+  1139	                (raw / 'agent.patch').write_text(patch)
+  1140	                (raw / 'trace.json').write_text(json.dumps(evaluator.trace.to_dict(format='legacy') if evaluator.trace else {}, default=str))
+  1141	                (raw / 'result.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result else {'error': error}, default=str))
+  1142	            except Exception as exc:
+  1143	                append(journal, {'_artifact_error': dict(instance_id=iid, type=type(exc).__name__)})
+  1144	    finally:
+  1145	        ev.verify_task, vf.strip_protected_files_from_patch = original_verify, original_strip
+   325	    files = [p for p in files if '..' not in p.parts and not p.is_absolute()
+   326	             and not p.parts[0].endswith('.data')]
+   327	    if not any(str(p).endswith('.py') and not p.parts[0].endswith('.dist-info') for p in files):
+   328	        return None
+   329	    return dist, files
+   330	
+   331	
+   332	def copy_runtime_package(name, destination):
+   333	    """Copy only the pure Python image package and metadata; no host path injection."""
+   334	    found = runtime_copyable(name)
+   335	    if found is None:
+   336	        return 'missing'
+   337	    dist, files = found
+   338	    for entry in files:
+   339	        target = destination / entry
+   340	        target.parent.mkdir(parents=True, exist_ok=True)
+   341	        shutil.copyfile(dist.locate_file(entry), target)
+   342	    return 'runtime-site-packages:' + str(dist.locate_file(''))
+   343	
+   344	
+   345	def wheel_metadata(path):
+   346	    from email.parser import BytesParser
+   347	    import zipfile
+   348	    with zipfile.ZipFile(path) as archive:
+   349	        name = next(n for n in archive.namelist() if n.endswith('.dist-info/METADATA'))
+   350	        return BytesParser().parsebytes(archive.read(name))
+   351	
+   352	
+   353	def close_tool_dependencies(roots, wheels, tags, environment, destination, install_wheel):
+   354	    """Walk runtime requirements only, using sandbox markers and no pip resolver.
+   355	
+   356	    Existing sandbox metadata describes base wheels and copied tools. Each requirement
+   357	    edge is checked, while each installed distribution/version is expanded only once.
+   358	    Missing edges are returned to the caller, which must fail setup.
+   359	    """
+   360	    from importlib.metadata import distributions, distribution, PackageNotFoundError
+   361	    from packaging.requirements import Requirement
+   362	    from packaging.utils import canonicalize_name, parse_wheel_filename
+   363	    installed = {canonicalize_name(d.metadata['Name']): d.metadata
+   364	                 for d in distributions(path=[str(destination)])}
+   365	    queue = list(roots)
+   366	    installed.update({canonicalize_name(m['Name']): m for m in queue})
+   367	    sources = {name: 'runtime-site-packages:' + str(destination) for name in installed}
+   368	    for path in compatible_wheels(wheels, tags).values():
+   369	        name, version, _, _ = parse_wheel_filename(path.name)
+   370	        if name in installed and installed[name]['Version'] == str(version):
+   371	            sources[name] = str(path)
+   372	    visited, entries, missing = set(), [], []
+   373	    while queue:
+
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py | sed -n '430,530p'; rg -n 'return False|return \\(' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py | head -35; cat ops/codex/build-plan007-classifier.sh; rg -n 'pyimg|pytest.main|pytest eval' ops/codex/build-plan007-classifier.log | tail -10" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   430	            list(task.test_files)
+   431	            if task.test_files
+   432	            else extract_test_files_from_patch(task.test_patch)
+   433	        )
+   434	
+   435	        effective_agent_patch = (
+   436	            strip_protected_files_from_patch(
+   437	                agent_patch, extra_protected_paths=target_test_files
+   438	            )
+   439	            if not is_synthetic_mock_repo
+   440	            else agent_patch
+   441	        )
+   442	
+   443	        # Apply agent patch if present
+   444	        if effective_agent_patch.strip():
+   445	            with tempfile.NamedTemporaryFile('w', suffix='.patch', delete=False) as f:
+   446	                f.write(
+   447	                    effective_agent_patch
+   448	                    if effective_agent_patch.endswith('\n')
+   449	                    else effective_agent_patch + '\n'
+   450	                )
+   451	                patch_host_path = Path(f.name)
+   452	
+   453	            try:
+   454	                await asyncio.to_thread(
+   455	                    docker.copy_to, eval_id, patch_host_path, '/tmp/'
+   456	                )
+   457	                exit_code, stdout, stderr = await asyncio.to_thread(
+   458	                    apply_patch_in_container,
+   459	                    docker,
+   460	                    eval_id,
+   461	                    f'/tmp/{patch_host_path.name}',
+   462	                )
+   463	                if exit_code != 0:
+   464	                    err_detail = stderr or stdout
+   465	                    if 'Patch file not found:' in err_detail:
+   466	                        raise ContainerSetupError(
+   467	                            f'Agent patch file missing in container on task {task.instance_id}: {err_detail}'
+   468	                        )
+   469	                    logger.error(
+   470	                        'Failed to apply agent patch on task %s: %s',
+   471	                        task.instance_id,
+   472	                        err_detail,
+   473	                    )
+   474	                    agent_error = f'Failed to apply agent patch: {err_detail}'
+   475	                    json_path = save_trace_artifact(
+   476	                        trace, config.results_dir, task.instance_id
+   477	                    )
+   478	                    return TaskResult(
+   479	                        instance_id=task.instance_id,
+   480	                        repo=task.repo,
+   481	                        resolved=False,
+   482	                        agent_patch=agent_patch,
+   483	                        test_output=err_detail,
+   484	                        test_exit_code=exit_code,
+   485	                        duration_seconds=time.perf_counter() - start_time,
+   486	                        error=agent_error,
+   487	                        trace=trace,
+   488	                        trace_json_path=json_path,
+   489	                    )
+   490	            finally:
+   491	                patch_host_path.unlink(missing_ok=True)
+   492	
+   493	        # Collect any test files, conftest.py, or runner config files touched by agent_patch (including deleted/renamed sources)
+   494	        agent_touched_files = extract_test_files_from_patch(agent_patch)
+   495	        if agent_patch.strip():
+   496	            for raw_line in agent_patch.splitlines():
+   497	                if raw_line.startswith('diff --git '):
+   498	                    m_git = re.match(r'^diff --git "?a/(.*?)"? "?b/(.*?)"?$', raw_line)
+   499	                    if m_git:
+   500	                        for grp in (m_git.group(1), m_git.group(2)):
+   501	                            if grp and grp not in agent_touched_files:
+   502	                                agent_touched_files.append(grp)
+   503	                elif raw_line.startswith(('--- a/', '+++ b/')):
+   504	                    rel_p = raw_line[6:].strip().strip('"')
+   505	                    if rel_p and rel_p != '/dev/null' and rel_p not in agent_touched_files:
+   506	                        agent_touched_files.append(rel_p)
+   507	                elif raw_line.startswith('rename from '):
+   508	                    rel_p = raw_line[len('rename from ') :].strip().strip('"')
+   509	                    if rel_p and rel_p not in agent_touched_files:
+   510	                        agent_touched_files.append(rel_p)
+   511	            git_status_res = await sandbox_exec(
+   512	                docker,
+   513	                eval_id,
+   514	                'cd /workspace && (git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null) || true',
+   515	            )
+   516	            for line in (git_status_res.stdout or '').splitlines():
+   517	                rel_line = line.strip()
+   518	                if rel_line and rel_line not in agent_touched_files:
+   519	                    agent_touched_files.append(rel_line)
+   520	
+   521	        protected_agent_files = [
+   522	            p for p in agent_touched_files if _is_protected_test_or_config_path(p)
+   523	        ]
+   524	        files_to_reset = list(
+   525	            dict.fromkeys(
+   526	                target_test_files
+   527	                + protected_agent_files
+   528	                + [
+   529	                    'conftest.py',
+   530	                    'pytest.ini',
+100:            return False
+276:        return False, 'Missing or empty JUnit XML report (possible premature exit)'
+280:        return False, f'Malformed JUnit XML report: {e}'
+284:        return False, 'No <testsuite> elements found in JUnit XML'
+293:        return (
+298:        return (
+340:                return False, f'Required test node did not pass: {req}'
+#!/usr/bin/env bash
+cd "/home/ubuntu/work/gemma/../gemma-wt/codex-plan007-classifier" || exit 1
+codex exec --sandbox workspace-write  -c model_reasoning_effort="medium" \
+"Read AGENTS.md (your role: implementer) and CLAUDE.md. Implement: $(cat "/home/ubuntu/work/gemma/ops/codex/build-plan007-classifier.spec")
+Do NOT run git commit (the wrapper commits). Tests must run offline. End with: what changed, test output,
+open issues, anything the sandbox prevented." </dev/null > "/home/ubuntu/work/gemma/ops/codex/build-plan007-classifier.md" 2> "/home/ubuntu/work/gemma/ops/codex/build-plan007-classifier.log"
+rc=$?
+git add -A && git commit -q -m "codex-build: plan007-classifier" || echo "(nothing to commit)" >> "/home/ubuntu/work/gemma/ops/codex/build-plan007-classifier.md"
+exit $rc
+2515:/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/__pycache__/pytest_timeout.cpython-313-pytest-9.2.0.pyc
+2516:/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/__pycache__/pytest_timeout.cpython-313.pyc
+2517:/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pytest_timeout.py
+2518:/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/__pycache__/pytester.cpython-312.pyc
+2519:/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/__pycache__/pytester.cpython-313.pyc
+2520:/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/__pycache__/pytester_assertions.cpython-313.pyc
+2521:/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pytester.py
+2522:/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/pytester_assertions.py
+2527:/bin/bash -lc "/home/ubuntu/gemma-local/venv/bin/python3 -c 'import sys; sys.path.append(\"/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages\"); import pytest; sys.exit(pytest.main([\"eval/tests\", \"-q\"]))'" in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+3105:/bin/bash -lc "/home/ubuntu/gemma-local/venv/bin/python3 -c 'import sys; sys.path.append(\"/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages\"); import pytest; sys.exit(pytest.main([\"eval/tests\", \"-q\"]))'" in /home/ubuntu/work/gemma-wt/codex-plan007-classifier
+
+exec
+/bin/bash -lc "rg -n 'strip_protected|agent_patch|verify_task|test_files' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/evaluator.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py; nl -ba eval/kaggle/agent_timing.py | sed -n '222,270p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py | sed -n '348,430p'; nl -ba eval/tests/test_agent_timing.py | sed -n '540,665p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/evaluator.py: No such file or directory (os error 2)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:494:    agent_patch = ''
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1048:        agent_patch = (context.submitted_patch if context is not None else '') or ''
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1052:        extra_protected = list(getattr(task, 'test_files', None) or ())
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1066:                        strip_protected_files_from_patch,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1069:                    unsubmitted_diff = strip_protected_files_from_patch(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1078:                    agent_patch = unsubmitted_diff
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1098:        elif not is_synthetic_mock_repo and agent_patch.strip():
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1099:            from swegemma.harness.verification import strip_protected_files_from_patch
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1101:            agent_patch = strip_protected_files_from_patch(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1102:                agent_patch, extra_protected_paths=extra_protected
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1120:    return agent_patch, agent_error, trace
+   222	    identity = (str(harness_version), sorted((p.name, p.stat().st_size) for p in wheels))
+   223	    return 'timing_' + hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:24]
+   224	
+   225	
+   226	def inject_base(cs, wheels, destination, current):
+   227	    from importlib.metadata import version
+   228	    harness_version = version('swegemma')
+   229	    row = current['setup_calls'][-1]
+   230	    row.update(selected_wheels=sorted(p.name for p in wheels), harness_version=harness_version,
+   231	               cache_key=base_cache_key(wheels, harness_version))
+   232	    archive = cs._build_unpacked_wheels_tar(wheels, row['cache_key'], '.swegemma_base_injected')
+   233	    with tarfile.open(archive) as tf:
+   234	        members = tf.getmembers()
+   235	        row['tar_member_count'] = len(members)
+   236	        payload = [m for m in members if m.isfile() and
+   237	                   Path(m.name).name not in ('', '.swegemma_base_injected')]
+   238	        if wheels and not payload:
+   239	            raise RuntimeError('Selected wheels but base tar contains only marker/empty entries')
+   240	        tf.extractall(destination, filter='data')
+   241	
+   242	
+   243	def record_distributions(docker, container_id, repo, row):
+   244	    # Query the same interpreter and metadata selection pip uses, never host metadata.
+   245	    package = repo.rsplit('/', 1)[-1].lower()
+   246	    probe = """import json
+   247	from importlib.metadata import distribution, PackageNotFoundError
+   248	names = NAMES
+   249	result = {}
+   250	for name in names:
+   251	    try:
+   252	        d = distribution(name)
+   253	        result[name] = dict(location=str(d.locate_file('')), version=d.version,
+   254	                            metadata_location=str(d._path), record_exists=d.read_text('RECORD') is not None)
+   255	    except PackageNotFoundError:
+   256	        result[name] = dict(location=None, version=None, metadata_location=None, record_exists=False)
+   257	print(json.dumps(result))
+   258	""".replace('NAMES', repr([package]))
+   259	    # Diagnostic only: a probe problem must never change the harness path.
+   260	    try:
+   261	        result = docker.exec(container_id, 'python3 -c ' + shlex.quote(probe), timeout=30)
+   262	        row['dist_probe_rc'] = result.exit_code
+   263	        if result.exit_code != 0:
+   264	            row['dist_probe_error'] = 'rc'
+   265	            return
+   266	        row['distributions'] = json.loads(result.stdout)
+   267	    except Exception as exc:
+   268	        row['dist_probe_error'] = type(exc).__name__
+   269	
+   270	
+   348	    task: Task,
+   349	    snapshot_path: Path,
+   350	    *,
+   351	    base_snapshot_path: Path | None = None,
+   352	    patch_path: Path | None = None,
+   353	    fast_path: bool = True,
+   354	    agent_patch: str = '',
+   355	    agent_error: str | None = None,
+   356	    trace: SessionTrace | None = None,
+   357	    start_time: float = 0.0,
+   358	) -> TaskResult:
+   359	    """Verifies a generated patch inside the clean evaluation container (Container B)."""
+   360	    is_synthetic_mock_repo = (
+   361	        task.repo.startswith('test/mock_repo') and task.base_commit == '123456'
+   362	    )
+   363	    if (
+   364	        not task.test_patch.strip()
+   365	        and not getattr(task, 'FAIL_TO_PASS', ())
+   366	        and not getattr(task, 'PASS_TO_PASS', ())
+   367	        and not getattr(task, 'test_files', None)
+   368	        and not is_synthetic_mock_repo
+   369	    ):
+   370	        json_path = save_trace_artifact(trace, config.results_dir, task.instance_id)
+   371	        return TaskResult(
+   372	            instance_id=task.instance_id,
+   373	            repo=task.repo,
+   374	            resolved=False,
+   375	            agent_patch=agent_patch,
+   376	            test_output='',
+   377	            test_exit_code=-1,
+   378	            duration_seconds=time.perf_counter() - start_time,
+   379	            error='Missing test specification (empty test_patch and FAIL_TO_PASS; secret hydration failed or unavailable)',
+   380	            trace=trace,
+   381	            trace_json_path=json_path,
+   382	        )
+   383	
+   384	    eval_id = await sandbox_start(docker)
+   385	    try:
+   386	        # Setup wheels in container
+   387	        await asyncio.to_thread(setup_container_wheels, docker, eval_id, config)
+   388	
+   389	        # Copy snapshot into eval container and extract (supports base + patch)
+   390	        await asyncio.to_thread(
+   391	            extract_snapshot,
+   392	            docker,
+   393	            eval_id,
+   394	            snapshot_path,
+   395	            patch_path=patch_path,
+   396	            base_snapshot_path=base_snapshot_path,
+   397	        )
+   398	
+   399	        # Setup synthetic environment stubs if provided by sandbox setup
+   400	        await asyncio.to_thread(setup_synthetic_hardware, docker, eval_id)
+   401	
+   402	        # Configure git exclude to ignore bytecode and test cache artifacts
+   403	        await asyncio.to_thread(setup_git_exclude, docker, eval_id)
+   404	
+   405	        # Install editable package
+   406	        await asyncio.to_thread(install_editable_package, docker, eval_id)
+   407	
+   408	        # Install test dependencies (fast-path by default)
+   409	        await asyncio.to_thread(
+   410	            install_test_dependencies,
+   411	            docker,
+   412	            eval_id,
+   413	            task.repo,
+   414	            fast_path=fast_path,
+   415	            config=config,
+   416	        )
+   417	
+   418	        # Configure pytest.ini and conftest.py for hermetic test discovery
+   419	        await asyncio.to_thread(
+   420	            setup_workspace_test_config,
+   421	            docker,
+   422	            eval_id,
+   423	            repo=task.repo,
+   424	        )
+   425	
+   426	        # Create clean baseline commit so git checkout has a reliable HEAD
+   427	        await asyncio.to_thread(setup_baseline_commit, docker, eval_id, 'eval_baseline')
+   428	
+   429	        target_test_files = (
+   430	            list(task.test_files)
+   540	    assert fields['patch_submitted'] is fields['fallback_patch_used'] is None
+   541	
+   542	
+   543	@pytest.mark.parametrize('failure', [None, 'runner', 'setup', 'cleanup'])
+   544	@pytest.mark.parametrize('skip', [True, False])
+   545	def test_skip_verification_result_and_task_row(tmp_path, monkeypatch, failure, skip, budget_scenario=None):
+   546	    import asyncio
+   547	    from contextvars import ContextVar
+   548	    import dataclasses
+   549	    import sys
+   550	    from types import ModuleType
+   551	    modules = {}
+   552	    for name in ('swegemma', 'swegemma.evaluate', 'swegemma.models', 'swegemma.harness',
+   553	                 'swegemma.harness.verification', 'swegemma.harness.agent_runner'):
+   554	        modules[name] = ModuleType(name)
+   555	        monkeypatch.setitem(sys.modules, name, modules[name])
+   556	    ev, vf, ar, models = [modules['swegemma.' + n] for n in (
+   557	        'evaluate', 'harness.verification', 'harness.agent_runner', 'models')]
+   558	    class TaskResult(Entry):
+   559	        tool_calls = 0
+   560	        def model_dump(self, **kwargs):
+   561	            return vars(self)
+   562	    models.TaskResult = TaskResult
+   563	    task = dataclasses.make_dataclass('Task', [('instance_id', str), ('repo', str),
+   564	        ('patch', str), ('test_patch', str), ('FAIL_TO_PASS', tuple), ('PASS_TO_PASS', tuple),
+   565	        ('test_files', tuple)])('task', 'org/repo', '', '', (), (), ())
+   566	    result = asyncio.run(timing.skip_verification(None, None, task, None, agent_patch='diff'))
+   567	    assert isinstance(result, TaskResult)
+   568	    assert result.resolved is False and result.test_exit_code is None
+   569	    assert result.agent_patch == 'diff' and result.error is None and result.trace is None
+   570	    assert timing.harness_error(result, '') is None
+   571	    assert timing.harness_error(result, 'Sandbox execution error: failed') == 'Harness task failure'
+   572	    models.load_tasks = lambda path: [task]
+   573	    verification_calls = []
+   574	    async def original_verify(*a, **kw):
+   575	        assert not skip, 'real verification must not run when skipped'
+   576	        verification_calls.append((a, kw))
+   577	        result = await timing.skip_verification(*a, **kw)
+   578	        result.resolved, result.test_exit_code = True, 0
+   579	        return result
+   580	    ev.verify_task = original_verify
+   581	    vf.strip_protected_files_from_patch = lambda patch, **kw: patch
+   582	    vf._is_protected_test_or_config_path = lambda path: False
+   583	    ar.asyncio = asyncio
+   584	    async def sandbox(*a, **kw):
+   585	        if failure == 'setup':
+   586	            raise RuntimeError('container setup failed')
+   587	        return 'sid'
+   588	    ar.sandbox_start = ar.sandbox_stop = ar.sandbox_exec = sandbox
+   589	    originals = dict(vars(ar))
+   590	    class Evaluator:
+   591	        def __init__(self, config):
+   592	            assert budget_scenario is None, "measured task must not start"
+   593	            def cleanup():
+   594	                if failure == 'cleanup':
+   595	                    raise RuntimeError('cleanup failed')
+   596	            self.docker = Entry(start=lambda: None, cleanup_all=cleanup)
+   597	        async def _run_agent_sandbox(self, task, *args, **kw):
+   598	            assert not task.patch and not task.test_patch
+   599	            if failure == 'runner':
+   600	                raise RuntimeError('runner failed')
+   601	            sid = await ar.sandbox_start(self.docker)
+   602	            async with ar.asyncio.timeout(10):
+   603	                pass
+   604	            await ar.sandbox_stop(self.docker, sid)
+   605	            return 'diff --git a/repo/a.py b/repo/a.py\n', '', None
+   606	        async def evaluate_task(self, task):
+   607	            context = Entry(task=task, patch_submitted=False, llm_calls_used=0)
+   608	            patch, error, trace = await self._run_agent_sandbox(task, context=context)
+   609	            return await ev.verify_task(self.docker, None, task, None,
+   610	                                        agent_patch=patch, agent_error=error, trace=trace)
+   611	    ev.Evaluator = Evaluator
+   612	    monkeypatch.setattr(timing, 'TASK_IDS', ['task'])
+   613	    monkeypatch.setattr(timing, 'WORK', tmp_path)
+   614	    monkeypatch.setattr(timing, 'SKIP_VERIFICATION', skip)
+   615	    monkeypatch.setattr(timing, 'patch_subprocess_deps', lambda *a: None)
+   616	    seen = []
+   617	    monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or False)
+   618	    totals = []
+   619	    if budget_scenario:
+   620	        # Review example: 5200 + 1.5*463 fits 6000, but P1's reservation does not.
+   621	        # The second case admits P1, then catches an unexpectedly long fake probe.
+   622	        clock = [5200.0 if budget_scenario == 'reserve' else 5000.0]
+   623	        real_should_stop = load('agent_timing').should_stop
+   624	        monkeypatch.setattr(timing.time, 'monotonic', lambda: clock[0])
+   625	        monkeypatch.setenv('KERNEL_BUDGET_SECONDS', '6000')
+   626	        monkeypatch.setattr(timing, 'STOCK_PROBE', True)
+   627	        monkeypatch.setattr(timing, 'should_stop', lambda *a: seen.append(a) or real_should_stop(*a))
+   628	        probes = []
+   629	        def fake_probe(*args):
+   630	            probes.append(True)
+   631	            clock[0] += 360
+   632	            return dict(total_s=360, error='deadline', steps_s={})
+   633	        monkeypatch.setattr(timing, 'stock_setup_probe', fake_probe)
+   634	        totals = [463.0]
+   635	    with (tmp_path / 'journal').open('w+') as stream:
+   636	        asyncio.run(timing.evaluate(Entry(tasks_path=None), stream, 0 if budget_scenario else timing.time.monotonic(),
+   637	                    dict(max_time_minutes=1.4, verification_timeout_seconds=300), totals))
+   638	        stream.seek(0)
+   639	        row = json.loads(stream.read())
+   640	    if budget_scenario:
+   641	        assert row == {'_stopped': 'insufficient remaining budget for next task'}
+   642	        assert len(probes) == (0 if budget_scenario == 'reserve' else 1)
+   643	        assert len(seen) == (1 if budget_scenario == 'reserve' else 2)
+   644	        assert totals == [463.0]
+   645	        assert ev.verify_task is original_verify
+   646	        return
+   647	    assert row['verification_skipped'] is skip
+   648	    assert {'result_error', 'agent_error_text', 'verified_patch_bytes'} <= row.keys()
+   649	    assert row['result_error'] is None
+   650	    expected_bytes = None if failure in ('runner', 'setup') else len('diff --git a/repo/a.py b/repo/a.py\n'.encode('utf-8'))
+   651	    assert row['verified_patch_bytes'] == expected_bytes
+   652	    assert (row['error'] is not None) is bool(failure)
+   653	    verified = not skip and failure not in ('runner', 'setup')
+   654	    assert row['resolved'] is verified
+   655	    assert row['exit_code'] == (0 if verified else None)
+   656	    assert len(verification_calls) == int(verified)
+   657	    assert row['fallback_patch_used'] is (failure not in ('runner', 'setup'))
+   658	    assert row['phase1_source'] == ('run_agent_sandbox' if failure in ('runner', 'setup') else 'sandbox_wrappers')
+   659	    assert seen[0][2] == (0 if skip else 300)
+   660	    assert ev.verify_task is original_verify
+   661	    assert all(getattr(ar, key) is originals[key] for key in ('asyncio', 'sandbox_start', 'sandbox_stop', 'sandbox_exec'))
+   662	
+   663	
+   664	def test_row_build_fallback_retains_evidence_fields():
+   665	    tree = ast.parse(Path(timing.__file__).read_text())
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import hashlib, json
+from pathlib import Path
+from eval.kaggle.classify_rows import classify
+p=Path('runs/31b-v008-p5f-timing/timing.jsonl')
+rows=[json.loads(x) for x in p.read_text().splitlines() if 'instance_id' in json.loads(x)]
+stored=json.loads(Path('results/plan007_classifier_armF_check.json').read_text())
+actual=[dict(instance_id=r['instance_id'],repo=r.get('repo'),**classify(r)) for r in rows]
+print('armF_reproduced',actual==stored['rows'], 'n',len(actual), 'known_diag',sum(r['known_diag'] for r in actual))
+def base(**kw):
+ r=dict(instance_id='synthetic',result_error=None,agent_error_text=None,verified_patch_bytes=10,setup_calls=[],exit_code=0,resolved=False,error=None,setup_failed=False)
+ r.update(kw);return r
+cases={
+ 'null_patch_null_exit':base(verified_patch_bytes=None,exit_code=None),
+ 'harness_error_without_messages':base(error='Harness task failure'),
+ 'null_patch_resolved_true':base(verified_patch_bytes=None,resolved=True),
+ 'negative_patch_invalid_exit':base(verified_patch_bytes=-1,exit_code=-1),
+}
+for n,r in cases.items():print(n, classify(r))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+armF_reproduced True n 8 known_diag 7
+null_patch_null_exit {'h': None, 'known_diag': False, 'agent': 'OTHER_FAIL', 'agent_end': None, 'resolved': False, 'reasons': []}
+harness_error_without_messages {'h': None, 'known_diag': False, 'agent': 'EXIT0_UNRESOLVED', 'agent_end': None, 'resolved': False, 'reasons': []}
+null_patch_resolved_true {'h': None, 'known_diag': False, 'agent': 'PASS', 'agent_end': None, 'resolved': True, 'reasons': []}
+negative_patch_invalid_exit {'h': None, 'known_diag': False, 'agent': 'OTHER_FAIL', 'agent_end': None, 'resolved': False, 'reasons': []}
+
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py | sed -n '1040,1110p'; rg -n 'agent_patch|verify_task|return TaskResult|_run_agent_sandbox' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py; rg -n 'def setup_step' eval/kaggle/agent_timing.py; nl -ba eval/kaggle/agent_timing.py | sed -n '150,200p'; rg -n 'def strip_protected|def _is_protected' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+  1040	            logger.exception(
+  1041	                'Error during sandbox execution for task %s', task.instance_id
+  1042	            )
+  1043	            agent_error = f'Sandbox execution error: {e}'
+  1044	
+  1045	        if context is not None and hasattr(context, 'stop_agent_session'):
+  1046	            context.stop_agent_session()
+  1047	
+  1048	        agent_patch = (context.submitted_patch if context is not None else '') or ''
+  1049	        is_synthetic_mock_repo = (
+  1050	            task.repo.startswith('test/mock_repo') and task.base_commit == '123456'
+  1051	        )
+  1052	        extra_protected = list(getattr(task, 'test_files', None) or ())
+  1053	
+  1054	        if not (context is not None and context.patch_submitted):
+  1055	            # Fallback: check if the agent made unsubmitted modifications on disk
+  1056	            try:
+  1057	                await sandbox_exec(docker, sandbox_id, 'cd /workspace && git add -N .')
+  1058	                diff_res = await sandbox_exec(
+  1059	                    docker,
+  1060	                    sandbox_id,
+  1061	                    'cd /workspace && (git diff --binary _swegemma_baseline 2>/dev/null || git diff --binary HEAD)',
+  1062	                )
+  1063	                unsubmitted_diff = diff_res.stdout or ''
+  1064	                if not is_synthetic_mock_repo and unsubmitted_diff.strip():
+  1065	                    from swegemma.harness.verification import (
+  1066	                        strip_protected_files_from_patch,
+  1067	                    )
+  1068	
+  1069	                    unsubmitted_diff = strip_protected_files_from_patch(
+  1070	                        unsubmitted_diff, extra_protected_paths=extra_protected
+  1071	                    )
+  1072	                if unsubmitted_diff.strip():
+  1073	                    logger.info(
+  1074	                        'Task %s: Captured unsubmitted working tree modifications as fallback patch (%d bytes)',
+  1075	                        task.instance_id,
+  1076	                        len(unsubmitted_diff),
+  1077	                    )
+  1078	                    agent_patch = unsubmitted_diff
+  1079	                else:
+  1080	                    if not agent_error:
+  1081	                        agent_error = (
+  1082	                            'Agent completed execution without calling submit_patch.'
+  1083	                        )
+  1084	                    logger.warning(
+  1085	                        'Task %s completed without explicit submit_patch call and no working tree modifications.',
+  1086	                        task.instance_id,
+  1087	                    )
+  1088	            except Exception as fallback_err:
+  1089	                logger.warning(
+  1090	                    'Failed to check fallback working tree diff for task %s: %s',
+  1091	                    task.instance_id,
+  1092	                    fallback_err,
+  1093	                )
+  1094	                if not agent_error:
+  1095	                    agent_error = (
+  1096	                        'Agent completed execution without calling submit_patch.'
+  1097	                    )
+  1098	        elif not is_synthetic_mock_repo and agent_patch.strip():
+  1099	            from swegemma.harness.verification import strip_protected_files_from_patch
+  1100	
+  1101	            agent_patch = strip_protected_files_from_patch(
+  1102	                agent_patch, extra_protected_paths=extra_protected
+  1103	            )
+  1104	
+  1105	    except ContainerSetupError:
+  1106	        raise
+  1107	    except Exception as e:
+  1108	        logger.exception('Error during sandbox execution for task %s', task.instance_id)
+  1109	        agent_error = f'Sandbox execution error: {e}'
+  1110	    finally:
+27:from swegemma.harness.verification import save_trace_artifact, verify_task
+194:    async def _run_agent_sandbox(
+285:            return TaskResult(
+289:                agent_patch='',
+300:        if self.config.skip_agent_patch:
+301:            agent_patch = ''
+310:            sig = inspect.signature(self._run_agent_sandbox)
+316:            agent_patch, agent_error, trace = await self._run_agent_sandbox(
+324:        if agent_error and not agent_patch:
+338:            return TaskResult(
+342:                agent_patch='',
+360:            'agent_patch': agent_patch,
+365:        verify_sig = inspect.signature(verify_task)
+372:        res = await verify_task(
+535:                    agent_patch='',
+271:def setup_step(current, name, action, *, fatal=True):
+   150	                queue.append(found[0].metadata)
+   151	            elif name not in missing:
+   152	                missing.append(name)
+   153	    return missing
+   154	
+   155	
+   156	def check_tool_sources(wheels):
+   157	    """Before vLLM starts: every Dockerfile.public line-9 tool needs an offline wheel (or pip fallback)."""
+   158	    from packaging.utils import canonicalize_name, parse_wheel_filename
+   159	    names = set()
+   160	    for w in Path(wheels).glob('*.whl'):
+   161	        try:
+   162	            names.add(canonicalize_name(parse_wheel_filename(w.name)[0]))
+   163	        except Exception:
+   164	            continue
+   165	    missing = [n for n in SCORER_TOOLS if n not in ('pip', 'pytest-timeout') and canonicalize_name(n) not in names]
+   166	    if not pytest_timeout_wheels(wheels):
+   167	        missing.append('pytest-timeout==2.1.0')
+   168	    if fallback_wheel(wheels, 'pip') is None and runtime_copyable('pip') is None:  # same sources as bootstrap_pip
+   169	        missing.append('pip')
+   170	    missing.extend(missing_tool_closure(wheels))
+   171	    if missing:
+   172	        raise RuntimeError('Offline scorer tool sources missing: ' + ', '.join(missing))
+   173	    return sorted(names)
+   174	
+   175	
+   176	SCORER_TOOLS = ('pip', 'pdm-backend', 'setuptools', 'wheel', 'poetry-core',
+   177	                'hatchling', 'flit-core', 'editables', 'pytest', 'pytest-timeout', 'typer')
+   178	BASE_SKIP = {'pytest', 'pytest-timeout', 'pytest-asyncio', 'pytest-httpbin',
+   179	             'pytest-xdist', 'pluggy', 'pip', 'setuptools', 'wheel'}
+   180	
+   181	
+   182	def setup_command(repo, fast_path=True):
+   183	    return ('python3 /tmp/setup_observer.py /tmp/setup.py ' +
+   184	            ('--fast-path ' if fast_path else '') + shlex.quote(repo))
+   185	
+   186	
+   187	def compatible_wheels(wheels, tags, requirement=None):
+   188	    """Highest version per distribution, with sandbox PEP 425 tags (never host tags)."""
+   189	    from packaging.utils import canonicalize_name, parse_wheel_filename
+   190	    rank = {tag: i for i, tag in enumerate(tags)}
+   191	    selected = {}
+   192	    for path in sorted(Path(wheels).glob('*.whl')):
+   193	        name, version, build, wheel_tags = parse_wheel_filename(path.name)
+   194	        if requirement is not None and (name != canonicalize_name(requirement.name) or version not in requirement.specifier):
+   195	            continue
+   196	        matches = [rank[str(tag)] for tag in wheel_tags if str(tag) in rank]
+   197	        if not matches:
+   198	            continue
+   199	        score = (version, -min(matches), build)
+   200	        if name not in selected or score > selected[name][0]:
+62:def _is_protected_test_or_config_path(rel_path: str) -> bool:
+88:def strip_protected_files_from_patch(
+98:    def _is_protected(path_str: str) -> bool:
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 /home/ubuntu/gemma-local/venv/bin/python3 -c 'import sys; sys.path.append(\"/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages\"); import pytest; sys.exit(pytest.main([\"eval/tests/test_classify_rows.py\", \"eval/tests/test_agent_timing.py\", \"-q\", \"-p\", \"no:cacheprovider\", \"--basetemp=/tmp/plan007-review-pytest\"]))'" in /home/ubuntu/work/gemma
+ exited 1 in 46ms:
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import sys; sys.path.append("/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages"); import pytest; sys.exit(pytest.main(["eval/tests/test_classify_rows.py", "eval/tests/test_agent_timing.py", "-q", "-p", "no:cacheprovider", "--basetemp=/tmp/plan007-review-pytest"]))
+                                                                                                                                                         ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 231, in main
+    return _main(args=args, plugins=plugins, prog="pytest.main()")
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 253, in _main
+    config = _prepareconfig(new_args, plugins, prog=prog)
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 443, in _prepareconfig
+    config: Config = pluginmanager.hook.pytest_cmdline_parse(
+                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        pluginmanager=pluginmanager, args=args
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_caller.py", line 197, in __call__
+    return self._hookexec(
+           ~~~~~~~~~~~~~~^
+        self.name, self._hookimpls.copy(), call_kwargs, firstresult
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_manager.py", line 183, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 195, in _multicall
+    raise exception
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 167, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/helpconfig.py", line 126, in pytest_cmdline_parse
+    config = yield
+             ^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 147, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 1397, in pytest_cmdline_parse
+    self.parse(args)
+    ~~~~~~~~~~^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 1791, in parse
+    self.hook.pytest_load_initial_conftests(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        early_config=self, args=args, parser=self._parser
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_caller.py", line 197, in __call__
+    return self._hookexec(
+           ~~~~~~~~~~~~~~^
+        self.name, self._hookimpls.copy(), call_kwargs, firstresult
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_manager.py", line 183, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 195, in _multicall
+    raise exception
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 167, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/warnings.py", line 114, in pytest_load_initial_conftests
+    return (yield)
+            ^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 141, in _multicall
+    next(function_gen)  # first yield
+    ~~~~^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 170, in pytest_load_initial_conftests
+    capman.start_global_capturing()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 779, in start_global_capturing
+    self._global_capturing = _get_multicapture(self._method)
+                             ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 720, in _get_multicapture
+    return MultiCapture(in_=FDCapture(0), out=FDCapture(1), err=FDCapture(2))
+                                              ~~~~~~~~~^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 493, in __init__
+    TemporaryFile(buffering=0),
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 686, in TemporaryFile
+    prefix, suffix, dir, output_type = _sanitize_params(prefix, suffix, dir)
+                                       ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 128, in _sanitize_params
+    dir = gettempdir()
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 366, in gettempdir
+    return _os.fsdecode(_gettempdir())
+                        ~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 359, in _gettempdir
+    tempdir = _get_default_tempdir()
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 223, in _get_default_tempdir
+    raise FileNotFoundError(_errno.ENOENT,
+                            "No usable temporary directory found in %s" %
+                            dirlist)
+FileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma']
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/ubuntu/gemma-local/venv/bin/python3 -c 'import sys; sys.path.append(\"/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages\"); import pytest; sys.exit(pytest.main([\"eval/tests/test_classify_rows.py\", \"-q\", \"-s\", \"-p\", \"no:cacheprovider\", \"-k\", \"not cli\"]))'" in /home/ubuntu/work/gemma
+ succeeded in 78ms:
+.....................................................................
+69 passed, 1 deselected in 0.07s
+
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py | sed -n '274,386p'; nl -ba eval/kaggle/agent_timing.py | sed -n '271,299p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py | sed -n '60,125p'; nl -ba eval/plans/007-smoke-ids.txt; git status --short" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   274	        if not snapshot_path.exists():
+   275	            _, _, secret_dir = self._get_secret_bundle_data()
+   276	            if secret_dir is not None and (secret_dir / 'sandbox' / 'snapshots').is_dir():
+   277	                snapshot_path, base_snapshot_path, patch_path = resolve_task_snapshot_paths(
+   278	                    secret_dir / 'sandbox' / 'snapshots', task.instance_id, task.repo
+   279	                )
+   280	        if not snapshot_path.exists():
+   281	            err_msg = f'Snapshot file not found: {self.config.snapshots_dir / f"{task.instance_id}.tar.gz"} or .tgz'
+   282	            duration = time.perf_counter() - start_time
+   283	            if dashboard is not None and slot_id is not None:
+   284	                dashboard.task_completed(slot_id, False, duration, err_msg)
+   285	            return TaskResult(
+   286	                instance_id=task.instance_id,
+   287	                repo=task.repo,
+   288	                resolved=False,
+   289	                agent_patch='',
+   290	                test_output='',
+   291	                test_exit_code=-1,
+   292	                duration_seconds=duration,
+   293	                error=err_msg,
+   294	                task_index=task_index,
+   295	            )
+   296	
+   297	        # -------------------------------------------------------------------
+   298	        # Phase 1: Sandbox Execution (Container A)
+   299	        # -------------------------------------------------------------------
+   300	        if self.config.skip_agent_patch:
+   301	            agent_patch = ''
+   302	            agent_error = None
+   303	            trace: SessionTrace | None = SessionTrace()
+   304	        else:
+   305	            run_kwargs: dict[str, Any] = {
+   306	                'slot_id': slot_id,
+   307	                'dashboard': dashboard,
+   308	                'context': context,
+   309	            }
+   310	            sig = inspect.signature(self._run_agent_sandbox)
+   311	            if 'base_snapshot_path' in sig.parameters or any(
+   312	                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+   313	            ):
+   314	                run_kwargs['base_snapshot_path'] = base_snapshot_path
+   315	                run_kwargs['patch_path'] = patch_path
+   316	            agent_patch, agent_error, trace = await self._run_agent_sandbox(
+   317	                task,
+   318	                snapshot_path,
+   319	                task_index,
+   320	                total_tasks,
+   321	                **run_kwargs,
+   322	            )
+   323	
+   324	        if agent_error and not agent_patch:
+   325	            json_path = save_trace_artifact(
+   326	                trace, self.config.results_dir, task.instance_id
+   327	            )
+   328	            duration = time.perf_counter() - start_time
+   329	            llm_calls = context.llm_calls_used
+   330	            if dashboard is not None and slot_id is not None:
+   331	                dashboard.task_completed(
+   332	                    slot_id,
+   333	                    False,
+   334	                    duration,
+   335	                    agent_error,
+   336	                    agent_duration=context.agent_elapsed_seconds if context else None,
+   337	                )
+   338	            return TaskResult(
+   339	                instance_id=task.instance_id,
+   340	                repo=task.repo,
+   341	                resolved=False,
+   342	                agent_patch='',
+   343	                test_output='',
+   344	                test_exit_code=-1,
+   345	                duration_seconds=duration,
+   346	                error=agent_error,
+   347	                trace_json_path=json_path,
+   348	                total_llm_calls=llm_calls,
+   349	                tool_calls=context.tool_calls_used,
+   350	                task_index=task_index,
+   351	            )
+   352	
+   353	        # -------------------------------------------------------------------
+   354	        # Phase 2: Evaluation Container (Container B)
+   355	        # -------------------------------------------------------------------
+   356	        context.set_phase('Verifying')
+   357	        context.set_activity('Running test suite...')
+   358	
+   359	        verify_kwargs: dict[str, Any] = {
+   360	            'agent_patch': agent_patch,
+   361	            'agent_error': agent_error,
+   362	            'trace': trace,
+   363	            'start_time': start_time,
+   364	        }
+   365	        verify_sig = inspect.signature(verify_task)
+   366	        if 'base_snapshot_path' in verify_sig.parameters or any(
+   367	            p.kind == inspect.Parameter.VAR_KEYWORD for p in verify_sig.parameters.values()
+   368	        ):
+   369	            verify_kwargs['base_snapshot_path'] = base_snapshot_path
+   370	            verify_kwargs['patch_path'] = patch_path
+   371	
+   372	        res = await verify_task(
+   373	            self.docker,
+   374	            self.config,
+   375	            task,
+   376	            snapshot_path,
+   377	            **verify_kwargs,
+   378	        )
+   379	        llm_calls = context.llm_calls_used
+   380	        res.total_llm_calls = llm_calls
+   381	        res.tool_calls = context.tool_calls_used
+   382	        res.task_index = task_index
+   383	        if dashboard is not None and slot_id is not None:
+   384	            dashboard.task_completed(
+   385	                slot_id,
+   386	                res.resolved,
+   271	def setup_step(current, name, action, *, fatal=True):
+   272	    """Time setup steps and retain bounded output plus retry counts."""
+   273	    start = time.perf_counter()
+   274	    row = dict(step=name, start_offset_s=round(start-current['started'], 6),
+   275	               duration_s=0.0, rc=None, stdout='', stderr='', retrying_lines=0)
+   276	    current['setup_calls'].append(row)
+   277	    try:
+   278	        result = action()
+   279	        row['rc'] = getattr(result, 'exit_code', getattr(result, 'returncode', 0))
+   280	        setup_artifact(current, dict(step=name, stdout=getattr(result, 'stdout', '') or '',
+   281	                                     stderr=getattr(result, 'stderr', '') or ''))
+   282	        for field in ('stdout', 'stderr'):
+   283	            value = getattr(result, field, '') or ''
+   284	            row['retrying_lines'] += sum('Retrying' in line for line in value.splitlines())
+   285	            row[field] = value.encode('utf-8', errors='replace')[-2048:].decode('utf-8', errors='ignore')
+   286	        return result
+   287	    except Exception as exc:
+   288	        row.update(rc=-1, stderr=type(exc).__name__)
+   289	        if fatal:
+   290	            current['setup_failed'] = True
+   291	            raise
+   292	    finally:
+   293	        row['duration_s'] = round(time.perf_counter()-start, 6)
+   294	        current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+   295	        if fatal and row['rc'] != 0:
+   296	            current['setup_failed'] = True
+   297	
+   298	
+   299	def fallback_wheel(wheels, package):
+    60	
+    61	
+    62	def _is_protected_test_or_config_path(rel_path: str) -> bool:
+    63	    """Returns True if rel_path is a test file, conftest, or runner config that agent_patch must not tamper with."""
+    64	    p = Path(rel_path)
+    65	    name = p.name
+    66	    if name in {
+    67	        'conftest.py',
+    68	        'pytest.ini',
+    69	        'pyproject.toml',
+    70	        'tox.ini',
+    71	        'setup.cfg',
+    72	        '.pytest.ini',
+    73	        'sitecustomize.py',
+    74	        'usercustomize.py',
+    75	        '_swegemma_stubs.py',
+    76	    }:
+    77	        return True
+    78	    if name.endswith('.pth'):
+    79	        return True
+    80	    if name.startswith('test_') and name.endswith('.py'):
+    81	        return True
+    82	    if name.endswith('_test.py'):
+    83	        return True
+    84	    parts = {part.lower() for part in p.parts[:-1]}
+    85	    return bool({'tests', 'test', 'testing'} & parts and name.endswith('.py'))
+    86	
+    87	
+    88	def strip_protected_files_from_patch(
+    89	    patch_text: str,
+    90	    extra_protected_paths: Sequence[str] = (),
+    91	) -> str:
+    92	    """Removes unified diff sections that touch protected test or runner config files."""
+    93	    if not patch_text or not patch_text.strip():
+    94	        return ''
+    95	
+    96	    extra_set = {p.strip() for p in extra_protected_paths if p and p.strip()}
+    97	
+    98	    def _is_protected(path_str: str) -> bool:
+    99	        if not path_str or path_str == '/dev/null':
+   100	            return False
+   101	        return path_str in extra_set or _is_protected_test_or_config_path(path_str)
+   102	
+   103	    sections: list[tuple[list[str], list[str]]] = []
+   104	    current_lines: list[str] = []
+   105	    current_paths: list[str] = []
+   106	    in_hunk = False
+   107	    rem_old = 0
+   108	    rem_new = 0
+   109	    saw_hunk = False
+   110	    has_diff_git_header = False
+   111	
+   112	    def _flush_section() -> None:
+   113	        nonlocal current_lines, current_paths, in_hunk, rem_old, rem_new, saw_hunk, has_diff_git_header
+   114	        if current_lines:
+   115	            sections.append((current_lines, current_paths))
+   116	        current_lines = []
+   117	        current_paths = []
+   118	        in_hunk = False
+   119	        rem_old = 0
+   120	        rem_new = 0
+   121	        saw_hunk = False
+   122	        has_diff_git_header = False
+   123	
+   124	    for raw_line in patch_text.splitlines(keepends=True):
+   125	        line = raw_line.rstrip('\r\n')
+     1	# plan 007 arm-1 smoke: first 3 ids of eval/plans/007-arm1-ids.txt
+     2	rich_3063
+     3	rich_3953
+     4	fastapi_14372
+ M ops/codex/review-20261106T065651.log
+ M ops/logs/memguard.log
+
+codex
+The arm F result reproduces exactly: 7 KNOWN-DIAG flags, with all 8 H-ROW labels caused only by missing rev 2 fields. The 69 classifier tests that need no temporary files pass.
+
+I also reproduced a fail-open case: when `verified_patch_bytes` and `exit_code` are present but null, `classify()` returns `OTHER_FAIL` with no H label. A generic `Harness task failure` with no explanatory messages is also accepted. I’m checking the implications for the smoke gate.
+exec
+/bin/bash -lc "git show fe8df91:eval/plans/007.md | nl -ba | sed -n '45,100p'; nl -ba results/plan007_classifier_armF_check.json | head -45; cat eval/splits/dev.txt; cat eval/plans/007-arm1-ids.txt" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+    45	### Row classification (rev 2, frozen before any run; mechanical, from the raw timing.jsonl row)
+    46	- Rev 2 (codex review 064331 BLOCKING 1-3): the classifier is CODE, not prose: eval/kaggle/classify_rows.py
+    47	  (`classify(row)`; sha256 recorded below at freeze, and every summary prints `classifier_sha256`). Its rules, summarised:
+    48	- Row evidence (rev 2, wrapper-only change, not on the agent or verification path): each row now carries `result_error`
+    49	  (stock TaskResult.error verbatim, <=4096 chars), `agent_error_text`, and `verified_patch_bytes` (length of the stock
+    50	  result.agent_patch = the post-strip patch Container B verified). A row missing any of these is H-ROW (schema guard).
+    51	- KNOWN-DIAG (a flag, not an error, never gating): over EVERY `setup.py` entry in `setup_calls` (one per installation pass;
+    52	  passes are no longer judged from the overwritten `editable_failed` / `setup_subprocesses` fields), each failing editable
+    53	  subprocess is either the offline attempt (`--no-index`) whose output contains `uninstall-no-record-file`, or an online
+    54	  fallback (no `--no-index`) that follows such a failure in the same pass. The fallback's own output need not contain the
+    55	  diagnostic (rev 1's predicate rejected this documented chain: 0/7 matches on arm F; rev 2 matches 7/7). Same marker
+    56	  accepted for a failing `workspace_editable` step. Docs: docs/GOLD_CALIBRATION.md v2; the 48-clean gold/null calibration ran
+    57	  in the same docker-path.
+    58	- HARNESS (H), precedence H-ROW > H-SETUP > H-VERIFY:
+    59	  H-ROW = row missing; schema guard; wrapper `error` naming an evaluation/cleanup/trace-parse/row-build exception; or any
+    60	  non-empty `result_error`/`agent_error_text` that is neither a known agent end state (timeout/turns/tool_calls/no_submit)
+    61	  nor a stock verification message caused by the agent patch (`Failed to apply agent patch:`, the JUnit/required-node
+    62	  family in swegemma verification.py). So `Evaluation error:`, `Failed to apply test_patch:`, `Missing test specification`
+    63	  and unrecognised text stay H (fail closed); the wrapper's generic `Harness task failure` is re-derived from the two texts.
+    64	  H-SETUP = missing_tool_deps; a fatal step rc != 0; a `setup.py` rc != 0; any failing editable subprocess outside the
+    65	  KNOWN-DIAG chain in ANY pass; or setup_failed=True with none of these and no KNOWN-DIAG (unexplained).
+    66	  H-VERIFY = verified_patch_bytes > 0, not a patch-apply failure, and exit_code not an int in {0..5, 124}.
+    67	  vLLM not up = the whole kernel is void.
+    68	- AGENT outcomes (quality, never validity, never rerun): PASS = stock resolved=True; NO_PATCH (verified_patch_bytes 0);
+    69	  PATCH_APPLY; VERIFY_TIMEOUT_124 (the patch hangs pytest, review item 2); PYTEST_1; PYTEST_2_5; EXIT0_UNRESOLVED
+    70	  (JUnit/required nodes); OTHER_FAIL. `agent_end` (timeout/turns/...) is recorded alongside, descriptive.
+    71	- Reporting guard (not a validity rule, triggers nothing automatic): PATCH_APPLY + VERIFY_TIMEOUT_124 counts are in the
+    72	  headline line with ids; if their sum is >= 3 the report flags a possible harness defect for a Director ruling.
+    73	- Validation before freeze: unit tests (synthetic rows, eval/tests/test_classify_rows.py) + the arm F raw rows (expected:
+    74	  7 KNOWN-DIAG, 0 H-SETUP; H-ROW by schema guard only, since arm F predates the new fields) + codex review.
+    75	- FROZEN 2026-11-06T07:10Z: eval/kaggle/classify_rows.py sha256=69ab78f27c393373ce235be9868a80e3e47190a4d81b1d42e0849fd956994fc3
+    76	  (merge of codex/plan007-classifier 63f6866). Validation: eval/tests 783 passed / 4 skipped; arm F rows -> 8 H-ROW (r1 schema only),
+    77	  known_diag 7, 0 H-SETUP (results/plan007_classifier_armF_check.json). Any later edit = new sha + Director note before use.
+    78	
+    79	### Smoke, chunks, reruns
+    80	- SMOKE first: the first 3 ids (eval/plans/007-smoke-ids.txt: 2 rich + 1 fastapi), budget 5400 s (rev 1: was 4800; fits the larger stop-guard reserve). The gate checks mechanics
+    81	  only; agent quality (0/3 included) never fails it. Gate holds iff: vLLM up, 3 rows present, 0 H rows. On hold the smoke rows
+    82	  COUNT as the first 3 arm-1 rows, and the main kernel runs ids 4..33 with --seed-max = ceil(max smoke per-task total).
+    83	  Gate FAIL: no main run today; diagnose; the run moves after the reset (dec 062 item 4: no rushing).
+    84	- Budget: KERNEL_BUDGET for main sized from the smoke per-task wall and the quota left before the reset (target: week
+    85	  usage <= 29.5/30 h). Unrun ids (a suffix of the fixed order) run as chunk 2 after the reset, identical bundle and code SHA,
+    86	  with --seed-max from all earlier rows.
+    87	- First attempts are always retained and reported. A code change during arm 1 is allowed ONLY to fix a defect behind an H row,
+    88	  documented first (journal line naming the row + the H category + the cause, then a commit, then a codex review). If the fix
+    89	  touches no file on the agent or verification path, only the H rows rerun (appended at the end of the order). If it does
+    90	  touch either path, every row already run reruns under the fixed code so all primary rows share one code SHA, and the
+    91	  first-attempt rows are reported as a sensitivity line. Any bundle byte change = a different arm: arm 1 restarts with a new addendum.
+    92	  No rerun for any AGENT outcome, ever.
+    93	- Quota logged before/after every kernel in ops/budget/kaggle.md. No GCP spend. Never delays the dec 055 checklist at 2026-11-07T00:00Z.
+    94	
+    95	## Metrics
+    96	- PRIMARY: count of stock resolved=True / 33, Wilson 95% CI. No override of the stock verdict by any class: the primary numerator is
+    97	  stock resolved=True for every row, H rows included (an H row with resolved=True counts as PASS; review 064331 Q1). H status
+    98	  affects only validity (smoke gate, reruns of H rows) and the sensitivity line. Sensitivity line: pass rate over the non-H rows (n stated).
+    99	  KNOWN-DIAG count listed.
+   100	- Per repo (rich 27, fastapi 6), descriptive. Note: dev includes the 8 plan-005/006 screen ids (tuned-on); report pass rate on the 25
+     1	{
+     2	  "_schema": "plan007_row_classes/v1",
+     3	  "classifier_sha256": "69ab78f27c393373ce235be9868a80e3e47190a4d81b1d42e0849fd956994fc3",
+     4	  "input": "runs/31b-v008-p5f-timing/timing.jsonl",
+     5	  "input_sha256": "37fad310aacf8e70860228cfbf25ba99f873f8283d8928a6e321f24097f16359",
+     6	  "n_rows": 8,
+     7	  "counts": {
+     8	    "h": {
+     9	      "H-ROW": 8
+    10	    },
+    11	    "agent": {},
+    12	    "known_diag": 7
+    13	  },
+    14	  "h_rows": [
+    15	    "rich_3063",
+    16	    "rich_3067",
+    17	    "rich_3454",
+    18	    "rich_3535",
+    19	    "rich_3930",
+    20	    "rich_3953",
+    21	    "fastapi_14258",
+    22	    "fastapi_14851"
+    23	  ],
+    24	  "rows": [
+    25	    {
+    26	      "instance_id": "rich_3063",
+    27	      "repo": "Textualize/rich",
+    28	      "h": "H-ROW",
+    29	      "known_diag": false,
+    30	      "agent": null,
+    31	      "agent_end": null,
+    32	      "resolved": false,
+    33	      "reasons": [
+    34	        "r1:missing_schema"
+    35	      ]
+    36	    },
+    37	    {
+    38	      "instance_id": "rich_3067",
+    39	      "repo": "Textualize/rich",
+    40	      "h": "H-ROW",
+    41	      "known_diag": true,
+    42	      "agent": null,
+    43	      "agent_end": null,
+    44	      "resolved": false,
+    45	      "reasons": [
+fastapi_14258
+fastapi_14372
+fastapi_14851
+fastapi_14986
+fastapi_15661
+fastapi_15800
+rich_2725
+rich_2943
+rich_3006
+rich_3043
+rich_3052
+rich_3061
+rich_3063
+rich_3067
+rich_3180
+rich_3454
+rich_3468
+rich_3470
+rich_3471
+rich_3480
+rich_3506
+rich_3518
+rich_3521
+rich_3535
+rich_3675
+rich_3718
+rich_3894
+rich_3905
+rich_3930
+rich_3935
+rich_3938
+rich_3944
+rich_3953
+# plan 007 arm-1 order: 33 dev ids (eval/splits/dev.txt) sorted by sha256("plan007:"+id); pre-registered; smoke = first 3 (2 rich + 1 fastapi)
+rich_3063
+rich_3953
+fastapi_14372
+fastapi_14258
+rich_3180
+rich_3454
+rich_3521
+rich_3480
+rich_2943
+rich_3468
+rich_3938
+rich_3471
+rich_3067
+fastapi_14851
+rich_3470
+rich_3930
+rich_3061
+rich_3043
+fastapi_14986
+rich_3894
+rich_3675
+rich_2725
+rich_3006
+rich_3944
+rich_3535
+rich_3518
+rich_3935
+fastapi_15800
+rich_3905
+rich_3052
+rich_3718
+fastapi_15661
+rich_3506
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import ast, hashlib, json, subprocess
+from pathlib import Path
+for name in ['eval/kaggle/classify_rows.py','eval/tests/test_classify_rows.py','eval/kaggle/agent_timing.py','eval/tests/test_agent_timing.py','eval/plans/007.md','results/plan007_classifier_armF_check.json']:
+ committed=subprocess.check_output(['git','show',f'fe8df91:{name}'])
+ print(name,'matches_target_commit',Path(name).read_bytes()==committed)
+t=ast.parse(Path('eval/tests/test_agent_timing.py').read_text())
+print('no_fixture_tests', [n.name for n in t.body if isinstance(n,ast.FunctionDef) and n.name.startswith('test_') and not n.args.args])
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+eval/kaggle/classify_rows.py matches_target_commit True
+eval/tests/test_classify_rows.py matches_target_commit True
+eval/kaggle/agent_timing.py matches_target_commit True
+eval/tests/test_agent_timing.py matches_target_commit True
+eval/plans/007.md matches_target_commit False
+results/plan007_classifier_armF_check.json matches_target_commit True
+no_fixture_tests ['test_unmatched_test_call_and_fifo', 'test_timebox_boundary', 'test_diagnostic_step_exception_is_nonfatal', 'test_real_timeout_proxy_expiration', 'test_finalization_only_after_timeout_and_phase_fields', 'test_row_build_fallback_retains_evidence_fields', 'test_installed_agent_runner_observation_attributes', 'test_image_emulation_seconds', 'test_vendored_wheel_is_official', 'test_vendored_closure_complete_against_local_wheelhouse']
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/ubuntu/gemma-local/venv/bin/python3 -c 'import sys; sys.path.append(\"/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages\"); import pytest; sys.exit(pytest.main([\"eval/tests/test_agent_timing.py::test_row_build_fallback_retains_evidence_fields\", \"-q\", \"-s\", \"-p\", \"no:cacheprovider\"]))'" in /home/ubuntu/work/gemma
+ exited 1 in 150ms:
+E
+==================================== ERRORS ====================================
+______ ERROR at setup of test_row_build_fallback_retains_evidence_fields _______
+
+    def gettempdir():
+        """Returns tempfile.tempdir as str."""
+>       return _os.fsdecode(_gettempdir())
+                            ^^^^^^^^^^^^^
+
+../../gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py:366: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../../gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py:359: in _gettempdir
+    tempdir = _get_default_tempdir()
+              ^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+dirlist = ['/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma']
+
+    def _get_default_tempdir(dirlist=None):
+        """Calculate the default directory to use for temporary files.
+        This routine should be called exactly once.
+    
+        We determine whether or not a candidate temp dir is usable by
+        trying to create and write to a file in that directory.  If this
+        is successful, the test file is deleted.  To prevent denial of
+        service, the name of the test file must be randomized."""
+    
+        namer = _RandomNameSequence()
+        if dirlist is None:
+            dirlist = _candidate_tempdir_list()
+    
+        for dir in dirlist:
+            if dir != _os.curdir:
+                dir = _os.path.abspath(dir)
+            for seq in range(TMP_MAX):
+                name = next(namer)
+                filename = _os.path.join(dir, name)
+                try:
+                    fd = _os.open(filename, _bin_openflags, 0o600)
+                    try:
+                        try:
+                            _os.write(fd, b'blat')
+                        finally:
+                            _os.close(fd)
+                    finally:
+                        _os.unlink(filename)
+                    return dir
+                except FileExistsError:
+                    pass
+                except PermissionError:
+                    # See the comment in mkdtemp().
+                    if _os.name == 'nt' and _os.path.isdir(dir):
+                        continue
+                    break   # no point trying more names in this directory
+                except OSError:
+                    break   # no point trying more names in this directory
+>       raise FileNotFoundError(_errno.ENOENT,
+                                "No usable temporary directory found in %s" %
+                                dirlist)
+E       FileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma']
+
+../../gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py:223: FileNotFoundError
+=========================== short test summary info ============================
+ERROR eval/tests/test_agent_timing.py::test_row_build_fallback_retains_evidence_fields
+1 error in 0.14s
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import hashlib,json,subprocess,sys
+from pathlib import Path
+p='runs/31b-v008-p5f-timing/timing.jsonl'
+out=json.loads(subprocess.check_output([sys.executable,'-B','eval/kaggle/classify_rows.py',p]))
+print('CLI_matches_committed_result',out==json.loads(Path('results/plan007_classifier_armF_check.json').read_text()))
+def ids(p):return [s for s in Path(p).read_text().splitlines() if s and not s.startswith('#')]
+dev=ids('eval/splits/dev.txt'); order=ids('eval/plans/007-arm1-ids.txt'); smoke=ids('eval/plans/007-smoke-ids.txt')
+print('order_check',len(order)==33 and len(set(order))==33 and set(order)==set(dev) and order==sorted(dev,key=lambda i:hashlib.sha256(('plan007:'+i).encode()).hexdigest()))
+print('smoke_check',smoke==order[:3])
+from eval.kaggle.classify_rows import classify
+base=dict(instance_id='synthetic',result_error=None,agent_error_text=None,verified_patch_bytes=10,setup_calls=[],exit_code=0,resolved=False,error=None,setup_failed=False)
+for kw in [dict(verified_patch_bytes=None,exit_code=None),dict(error='Harness task failure'),dict(verified_patch_bytes=-1,exit_code=-1)]:
+ print('counterexample',kw,'=>',classify(dict(base,**kw)))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 3ms:
+CLI_matches_committed_result True
+order_check True
+smoke_check True
+counterexample {'verified_patch_bytes': None, 'exit_code': None} => {'h': None, 'known_diag': False, 'agent': 'OTHER_FAIL', 'agent_end': None, 'resolved': False, 'reasons': []}
+counterexample {'error': 'Harness task failure'} => {'h': None, 'known_diag': False, 'agent': 'EXIT0_UNRESOLVED', 'agent_end': None, 'resolved': False, 'reasons': []}
+counterexample {'verified_patch_bytes': -1, 'exit_code': -1} => {'h': None, 'known_diag': False, 'agent': 'OTHER_FAIL', 'agent_end': None, 'resolved': False, 'reasons': []}
+
+codex
+Reviewed **`fe8df91`**. The three prior blockers are addressed, but one fail-open issue remains before smoke.
+
+**BLOCKING**
+
+1. **Missing or inconsistent evidence can pass classification without H.** The schema guard checks only key presence ([classify_rows.py:42](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:42)); null patch evidence bypasses H-VERIFY ([classify_rows.py:92](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:92)). Reproduced on otherwise clean synthetic rows:
+
+   | Evidence | Actual classification |
+   |---|---|
+   | `verified_patch_bytes=None`, `exit_code=None` | No H; `OTHER_FAIL` |
+   | `verified_patch_bytes=-1`, `exit_code=-1` | No H; `OTHER_FAIL` |
+   | `error="Harness task failure"`, both error texts null | No H; `EXIT0_UNRESOLVED` |
+
+   The last case passes because there is no nonempty message to inspect ([classify_rows.py:49](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:49)). The null-evidence behavior is explicitly asserted by [test_classify_rows.py:172](/home/ubuntu/work/gemma/eval/tests/test_classify_rows.py:172).
+
+   These are synthetic consistency failures, not observed arm F failures. Nevertheless, they can satisfy the smoke’s “0 H rows” condition ([007.md:81](/home/ubuntu/work/gemma/eval/plans/007.md:81)). Classify unavailable/invalid patch evidence and an unexplained generic harness error as H-ROW; add regression tests and re-freeze the SHA before smoke.
+
+**NON-BLOCKING**
+
+- **Prior BLOCKING 1 resolved.** The RECORD failure followed by an online fallback is accepted within each installation pass ([classify_rows.py:71](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:71)). The CLI reproduces the committed arm F result exactly: **7 KNOWN-DIAG, 8 H-ROW solely for missing schema**, with no setup failure reasons ([result:7](/home/ubuntu/work/gemma/results/plan007_classifier_armF_check.json:7)).
+
+- **Prior BLOCKING 2 resolved.** Agent patch-apply and JUnit/required-node messages are recognized; exit 124 receives `VERIFY_TIMEOUT_124` instead of H ([classify_rows.py:15](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:15), [classify_rows.py:106](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:106)).
+
+- **Prior BLOCKING 3 resolved.** Classification traverses every retained setup pass and uses `verified_patch_bytes` ([classify_rows.py:58](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:58), [classify_rows.py:89](/home/ubuntu/work/gemma/eval/kaggle/classify_rows.py:89)). The `8a5b958..fe8df91` timing diff only adds the three evidence fields and defensive fallback serialization; it leaves agent execution and stock verification unchanged ([agent_timing.py:1095](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:1095)).
+
+- **Pre-registration otherwise supports smoke.** Fixed IDs/order, budget, gate, rerun restrictions, and preservation of stock `resolved` are specified. The classifier hash matches the FROZEN line ([007.md:75](/home/ubuntu/work/gemma/eval/plans/007.md:75)).
+
+**Questions:** None.
+
+Validation: **69 classifier tests passed**, arm F CLI output reproduced exactly, and ID/order checks passed. Tests requiring temporary files were prevented by the read-only sandbox. No files changed or Kaggle actions performed.
+tokens used
+70,709
