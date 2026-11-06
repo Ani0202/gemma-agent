@@ -1093,6 +1093,9 @@ async def evaluate(config, journal, started, caps, totals):
                          image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
             try:
               append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+                result_error=(result.error[:4096] if result is not None and result.error else None),
+                agent_error_text=(evaluator.agent_error[:4096] if evaluator.agent_error else None),
+                verified_patch_bytes=(len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
                 **phase,
                 wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
                 setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
@@ -1108,7 +1111,18 @@ async def evaluate(config, journal, started, caps, totals):
                 **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
                 timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
             except Exception as exc:
+                evidence = {}
+                for key, value in (
+                    ('result_error', lambda: result.error[:4096] if result is not None and result.error else None),
+                    ('agent_error_text', lambda: evaluator.agent_error[:4096] if evaluator.agent_error else None),
+                    ('verified_patch_bytes', lambda: len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+                ):
+                    try:
+                        evidence[key] = value()
+                    except Exception:
+                        evidence[key] = None
                 append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+                                     **evidence,
                                      **phase,
                                      wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
                                      setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
