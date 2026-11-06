@@ -18,8 +18,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 E4B/12B/E2B validator
   acceptance (first e4b submit settles E4B); l.55 submit_patch/get_status vs call limits; l.63 private-LB multiple runs; l.72 wheels arch
   (x86 assumed, unrecorded); 12h overrun ruling. VERIFIED: l.42 submit method = kernel output (dec 041); l.76 superseded by l.112.
-- No local pass-rate scores yet. eval-runner-fix MERGED to main 70c0d9f (codex review clean + N1 count-cap fix d13ceac; 421 pass, 3 skip).
-  Test cmd: /home/ubuntu/gemma-local/venv/bin/python3 with pyimg cp3.13 site-packages appended to sys.path, pytest eval/tests.
+- No local pass-rate scores yet. eval-runner-fix MERGED 70c0d9f (421 pass, 3 skip). Test cmd: /home/ubuntu/gemma-local/venv/bin/python3 with pyimg cp3.13 site-packages appended to sys.path, pytest eval/tests.
 ## Eval data
 - Splits v2 FROZEN: clean 48 (rich 39, fastapi 9), dev 33, holdout 15; holdout uses = 0. Hashes: eval/splits/MANIFEST.json.
 - requests/httpx dropped (wheel shadowing = scorer property, dec 014). Gold v2 files in results/ (gold_calibration_*, gold_failure_causes).
@@ -44,8 +43,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - codex-review v004 DONE (ops/codex/review-20261106T043840.md): BLOCKING none (not submission clearance). NB1 = dec 060 deviation (in report 014);
   NB2 system.md:33 `python3 ... | tail` lacks pipefail (inherited from arm B/E prompt) -> list in report 014 as unscreened candidate, v004 NOT repacked;
   NB3 timeout empty patch unguaranteed (dec 056 item 6). Cap 1.23 = zero margin under S assumptions. Full compiler validation blocked by sandbox.
-- PLAN 005 ARM D DONE (c108): V, Md 8/8, empty 3/8 (=C), disc 1/1 -> PASS. results/plan005_armD_vs_C.json + *_31b_v006.json. Report 013.
-- DEC 058 (arm C/D push cmd: eval/kaggle/timing_push.sh aniket0202/gemma-31b-timing <bundle> eval/plans/004-gpu-retime-ids.txt 6000; M2 declined).
+- Arm D DONE (report 013, PASS). Push cmd (dec 058): eval/kaggle/timing_push.sh aniket0202/gemma-31b-timing <bundle> eval/plans/004-gpu-retime-ids.txt 6000.
 - DEC 057 (FastAPI/docs_src hint): dec 055 UNCHANGED (don't touch 31b-v002/zip/kernel). Standing rule: no new bundle/draft carries any
   repo-named hint (31b-v004+, e4b-v003+, drafts). v004 diff vs v002 = prompts/system.md + MANIFEST only, and MUST remove the line.
   bundles/drafts/item4-system.md line REMOVED (c104). FINALS: no final with a repo-specific line -> e4b-v003 = e4b-v002 + generic
