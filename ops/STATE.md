@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 13:53Z (cycle 143, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 13:54Z (cycle 144, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -25,6 +25,7 @@
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
 - DEC 068: Addendum B/B.1 (242859a/ea9c064, pre-download) H-VERIFY(empty-patch) = eval/plan007_report.py (50 tests); report layout a-e + empty headline (implemented, see dec 069 line).
 ## Running jobs (13:53Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-v011-d71-light, codex-review-v010b-light, codex-plan008-metrics (build).
+- DEC 073 APPROVE (D72 accepted as governing pre-data defs; metrics asserts mech2 17/empty 12 fail -> STOP+report, never adjust; arm-1 safety base committed BEFORE arm-2 rows; new gate-changing BLOCKING -> new sha + D72.x line + 1-line FYI; re-verify /tmp if reuse_containers ever set).
 - DEC 072 (both deviations ACCEPTED): codex 133941 on v010 = 4 BLOCKING -> fixed 1a3b831: gate = harness-equal eligibility (py one-liner of
   _is_protected_test_or_config_path), outputs GATE call/kept_files + reason=changes|forced|check_error, failure-safe counter, SUBMIT FAILED.
   31b-v010 REPACKED dist/31b-v010.zip sha256=fc24fcc3eeb98f1bdcd5914d61d597ed2b309d74eb64bed717a2ba5b47bd7c42 (c7a86295 VOID); load PASS; 58 gate tests.

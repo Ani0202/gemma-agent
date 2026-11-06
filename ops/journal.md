@@ -336,3 +336,4 @@
 2026-11-06T13:53Z | v010 gate fixed (harness-equal eligibility, observable reason, failure-safe counter, SUBMIT FAILED), REPACKED dist/31b-v010.zip fc24fcc3... (c7a86295 VOID, never run); 1286 eval tests pass; /tmp per-task VERIFIED (reuse_containers never set) | 1a3b831 bundles/31b/v010/MANIFEST.md
 2026-11-06T13:53Z | plan 008 pre-data revision Addendum D72 (root author filter, successful-submit boundary, gate descriptives, untracked-only metric); prompt-only line dropped; plan sha b02ac88c... | eval/plans/008.md 1a3b831
 2026-11-06T13:53Z | codex-build plan008-metrics started (eval/plan008_metrics.py base+smoke); codex-review-v010b-light started | ops/jobs/codex-plan008-metrics.log
+2026-11-06T13:54Z | dec 073 APPROVE: D72 accepted (budget-cap gate submit, /tmp per-task, metric defs governing, smoke addendum); sequencing unchanged; waiting on 3 codex jobs | ops/decisions/073-20261106T135234-11251-from-builder.md
