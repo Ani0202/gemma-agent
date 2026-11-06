@@ -5,7 +5,9 @@ Usage: plan008_metrics.py base OUT_JSON | smoke RUN_DIR OUT_JSON | arm2 RUN_DIR 
        plan008_metrics.py arm3smoke RUN_DIR CLASSIFIER_D4_JSON OUT_JSON
        plan008_metrics.py arm3 {arm1,arm2} OUT_JSON --arm3 DIR [DIR ...]
            [--base-dirs DIR ...] --classifiers DIR=D4_JSON,A2_JSON [--classifiers ...]
-           [--smoke-json PATH]
+           --smoke-json PATH [--base-verdict-json PATH]
+       Dirs are supplied in push order: smoke, main, chunk1, chunk2, ...
+       Both arm3 modes require --identity-json PATH --bundle v01N --transport DIR=SHA256 (each arm3 dir).
 
 Exit: 0 ok, 2 usage, 3 incomplete arm2/arm3 inventory, 4 builtin arm2 run holds a non-root
 submit_patch response (dec 077 failure-safe; STOP and report). 3/4 write no results.
@@ -656,13 +658,13 @@ ARM3_DEFINITIONS = {
     'timeouts': 'bool(timed_out) or bool(agent_timeout_fired), plan007 definition',
     'safety': 'arm3 test_files_edited and stray_files zero rows; total wall p90 <=1.10*base; empty and submitted_without_test <=base+3; missing evidence fails',
     'thinking': 'thinking_bound.task: root author swe_baseline_agent, type thinking, nonempty content; blocks/chars per task and tasks>0',
-    'arm3smoke': 'first two registered ids exactly; i each >=1 thinking block and sum>=5; ii timing; iii verification verdict, zero H, agreeing identity headers; missing -> UNVERIFIABLE',
-    'aggregation': 'exact registered 33-id union; earliest supplied dir wins; all cross-dir duplicates listed; within-dir duplicates fail inventory',
+    'arm3smoke': 'first two registered ids exactly; i each >=1 thinking block and sum>=5; ii timing; iii vLLM startup, verification verdict, zero H, ZIP/CONTENT event proof and per-push TRANSPORT/header identity',
+    'aggregation': 'exact registered 33-id union; earliest supplied dir wins; duplicate attempts listed; within-dir duplicates fail inventory; identity-rejected runs only in uncounted_sensitivity',
     'calls': 'timing llm_turns/tool_calls.total if present; otherwise trace root usage-bearing turns/root tool calls; linear percentiles from plan007.pct',
     'descriptive': 'per repo uses timing repo, fallback id prefix before __; unscreened excludes 004-gpu-retime ids; context overflow unavailable in plan007',
     'env_drift': 'header environment values, null if absent; setup/verification wall p50/p90 from timing; differences reported only',
-    'kernel_code': 'header kernel_code and agent/verification path hashes when present; differing values flag pairing_void_candidate, report only',
-    'decision': 'INVALID smoke overall!=PASS or H>=5; on ahead p<0.2 adopts only with timeout/timing/all safety; otherwise veto; off>=on KEEP-OFF; else NO-DIFFERENCE',
+    'kernel_code': 'header kernel_code and agent/verification path hashes when present; differing values void pairing',
+    'decision': 'INVALID for voided pairing, identity mismatch, invalid/unruled base, unbound/failed smoke or H>=5; on ahead p<0.2 adopts only with timeout/timing/all safety; otherwise veto; off>=on KEEP-OFF; else NO-DIFFERENCE',
 }
 
 
@@ -709,7 +711,65 @@ def _classifier(timing, path, sha, rows):
     return by_id
 
 
-def arm3smoke_metrics(run_dir, classifier):
+def _read_json(path):
+    try:
+        value = json.loads(Path(path).read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _readable_file(path):
+    try:
+        base.sha(path)
+        return True
+    except (OSError, TypeError):
+        return False
+
+
+def identity_check(dirs, identity_json, bundle, transports, smoke_dirs):
+    """Check each push against its event proof and its separate transport hash."""
+    data = _read_json(identity_json)
+    records = data.get('records', [])
+    events = defaultdict(set)
+    for record in records if isinstance(records, list) else []:
+        if not isinstance(record, dict) or not isinstance(record.get('bundles'), dict):
+            continue
+        proof = record['bundles'].get(bundle, {})
+        if not isinstance(proof, dict):
+            continue
+        if all(proof.get(k) is True for k in ('pass', 'zip_ok', 'content_ok')):
+            agent = proof.get('agent_yaml_sha256')
+            if isinstance(agent, str) and re.fullmatch('[0-9a-f]{64}', agent):
+                events[record.get('event')].add(agent)
+    # All pushes must prove the same registered agent bytes.
+    agents = set().union(*events.values()) if events else set()
+    results = []
+    main_index = 0
+    for directory in dirs:
+        directory = str(Path(directory))
+        timing = Path(directory) / 'timing.jsonl'
+        rows = base.load_rows(timing) if timing.is_file() else []
+        needed = ['smoke'] if directory in smoke_dirs else []
+        if directory not in smoke_dirs or any(r['instance_id'] not in base.ids_file(base.ARM_IDS)[:2] for r in rows):
+            needed.append('main' if main_index == 0 else 'chunkN')
+            main_index += 1
+        headers = _headers(timing) if timing.is_file() else []
+        event_ok = all(any(re.fullmatch(r'chunk[0-9]+', str(event)) and values == agents
+                           for event, values in events.items()) if e == 'chunkN'
+                       else events.get(e) == agents for e in needed)
+        transport = transports.get(directory)
+        ok = (bool(needed) and event_ok and len(agents) == 1 and bool(headers)
+              and isinstance(transport, str) and re.fullmatch('[0-9a-f]{64}', transport) is not None
+              and all(h.get('bundle_sha256') == transport and h.get('agent_yaml_sha256') in agents
+                      for h in headers))
+        results.append(dict(dir=directory, events=needed, checked=bool(ok),
+                            transport_sha256=transport, agent_yaml_sha256=sorted(agents)))
+    return dict(checked=all(r['checked'] for r in results), runs=results,
+                mismatching_dirs=[r['dir'] for r in results if not r['checked']])
+
+
+def arm3smoke_metrics(run_dir, classifier, identity_json=None, bundle=None, transports=None):
     timing = Path(run_dir) / 'timing.jsonl'
     paths = [base.ARM_IDS, base.__file__, 'eval/plan007_report.py', 'eval/thinking_bound.py']
     expected = base.ids_file(base.ARM_IDS)[:2]
@@ -726,6 +786,12 @@ def arm3smoke_metrics(run_dir, classifier):
     cii = dict(status='UNVERIFIABLE' if missing_time else 'PASS' if ti['timing_pass'] else 'FAIL', **ti)
     headers = _headers(timing) if timing.is_file() else []
     identity = {k: [h.get(k) for h in headers] for k in ('agent_yaml_sha256', 'bundle_sha256')}
+    checked_identity = identity_check([run_dir], identity_json, bundle, transports or {}, {str(Path(run_dir))})
+    if identity_json and _readable_file(identity_json):
+        paths.append(identity_json)
+    startup = [r.get('_vllm') for r in map(json.loads, filter(str.strip, timing.read_text().splitlines())) if '_vllm' in r] if timing.is_file() else []
+    vllm_up = any(isinstance(v, dict) and _finite_number(v.get('startup_seconds'))
+                  and v['startup_seconds'] > 0 for v in startup)
     identity_missing = not headers or any(not v for vals in identity.values() for v in vals)
     identity_conflict = any(len(set(vals)) > 1 for vals in identity.values())
     hs = None
@@ -735,10 +801,10 @@ def arm3smoke_metrics(run_dir, classifier):
         hs = ([r['instance_id'] for r in rows if cs[r['instance_id']]['h'] is not None]
               if all('h' in cs[r['instance_id']] for r in rows) else None)
     verdict_missing = any(type(r.get('resolved')) is not bool or r.get('verification_skipped') is True for r in rows)
-    missing = bool(inv['missing']) or not rows or hs is None or identity_missing or verdict_missing
-    ciii = dict(status='FAIL' if inv['extra'] or inv['duplicates'] or identity_conflict or hs else
+    missing = bool(inv['missing']) or not rows or hs is None or identity_missing or verdict_missing or not vllm_up
+    ciii = dict(status='FAIL' if inv['extra'] or inv['duplicates'] or identity_conflict or not checked_identity['checked'] or hs else
                 'UNVERIFIABLE' if missing else 'PASS', h_rows=hs, identity_headers=identity,
-                identity_checked_externally=True)
+                identity=checked_identity, vllm_up=vllm_up)
     criteria = dict(i=ci, ii=cii, iii=ciii)
     overall = 'PASS' if all(c['status'] == 'PASS' for c in criteria.values()) else 'FAIL'
     return dict(_schema=_schema('arm3smoke', paths), n_rows=len(rows), inventory=inv,
@@ -764,10 +830,12 @@ def aggregate_arm(dirs, classifiers):
         headers.extend(_headers(timing))
         for row in rows:
             iid = row['instance_id']
-            occurrences[iid].append(str(directory))
+            occurrences[iid].append(dict(dir=str(directory), resolved=row.get('resolved'),
+                                         timeout=bool(row.get('timed_out') or row.get('agent_timeout_fired')),
+                                         empty_patch=row.get('verified_patch_bytes') == 0))
             selected.setdefault(iid, (row, str(directory)))
     inv = inventory(list(selected), base.ids_file(base.ARM_IDS))
-    inv['duplicates'] = [dict(instance_id=i, dirs=ds) for i, ds in occurrences.items() if len(ds) > 1]
+    inv['duplicates'] = [dict(instance_id=i, dirs=[a['dir'] for a in ds], attempts=ds) for i, ds in occurrences.items() if len(ds) > 1]
     if not inv['complete']:
         raise IncompleteRun(inv)
     classified = {}
@@ -878,7 +946,18 @@ def environment_metrics(headers, records):
     return out
 
 
-def arm3_decision(on, off, p, h_count, smoke_invalid, vetoes):
+def arm3_decision(on, off, p, h_count, smoke_invalid, vetoes, *, pairing_void_reason=None,
+                  base_valid=True, identity_valid=True, smoke_bound=True, thinking_pass=True):
+    if pairing_void_reason:
+        return 'INVALID (pairing voided: ' + pairing_void_reason + ')'
+    if not base_valid:
+        return 'INVALID (base invalid/unruled)'
+    if not identity_valid:
+        return 'INVALID (identity mismatch)'
+    if not thinking_pass:
+        return 'INVALID (smoke i)'
+    if not smoke_bound:
+        return 'INVALID (smoke evidence not bound)'
     if smoke_invalid or h_count >= 5:
         return 'INVALID'
     if off >= on:
@@ -888,7 +967,8 @@ def arm3_decision(on, off, p, h_count, smoke_invalid, vetoes):
     return 'ON-BETTER-VETOED' if vetoes else 'ON-ADOPT'
 
 
-def arm3_metrics(base_name, arm3_dirs, base_dirs, classifiers, smoke_json=None):
+def arm3_metrics(base_name, arm3_dirs, base_dirs, classifiers, smoke_json=None, *, base_verdict_json=None,
+                 identity_json=None, bundle=None, transports=None):
     paths = [base.ARM_IDS, base.SCREENED_IDS, base.__file__, 'eval/plan007_report.py', 'eval/thinking_bound.py']
     if base_name == 'arm1':
         base_dirs = [str(Path(t).parent) for _, t, _, _ in base.PARTS]
@@ -922,43 +1002,96 @@ def arm3_metrics(base_name, arm3_dirs, base_dirs, classifiers, smoke_json=None):
         vetoes.append('timeouts')
     if not a['timing']['timing_pass']:
         vetoes.append('timing')
-    smoke_invalid = False
-    if smoke_json:
-        paths.append(smoke_json)
-        smoke_invalid = json.loads(Path(smoke_json).read_text()).get('overall') != 'PASS'
+    smoke = _read_json(smoke_json)
+    smoke_invalid = smoke.get('overall') != 'PASS'
+    for path in (smoke_json, base_verdict_json, identity_json):
+        if path and _readable_file(path):
+            paths.append(path)
+    smoke_records = all_records['arm3'][:2]
+    traces = [r[2] for r in smoke_records]
+    smoke_dirs = {str(t.parent.parent.parent) for t in traces}
+    schema = smoke.get('_schema')
+    evidence = schema.get('input_shas', {}) if isinstance(schema, dict) else {}
+    if not isinstance(evidence, dict):
+        evidence = {}
+    required_evidence = [*traces, *(Path(d) / 'timing.jsonl' for d in smoke_dirs)]
+    smoke_bound = all(evidence.get(str(p)) == base.sha(p) for p in required_evidence)
+    # A smoke report must name exactly the timing files that supplied the counted rows.
+    smoke_bound = smoke_bound and {str(Path(p)) for p in evidence if Path(p).name == 'timing.jsonl'} == {
+        str(Path(d) / 'timing.jsonl') for d in smoke_dirs}
+    ci = thinking_criterion(traces)
+    identity = identity_check(arm3_dirs, identity_json, bundle, transports or {}, smoke_dirs)
+    base_verdict = _read_json(base_verdict_json)
+    verdicts = [base_verdict[k] for k in ('decision', 'verdict') if k in base_verdict]
+    base_valid = base_name == 'arm1' or bool(verdicts) and all(
+        v in ('SHIP-ELIGIBLE', 'GUARD FAILED', 'HARM', 'NO-DECISION') for v in verdicts)
     differences = [k for k in envs['arm3'] if envs['arm3'][k] != envs['base'][k]]
     envs.update(differences=differences, pairing_void_candidate='kernel_code' in differences)
     inputs = dict(arm3_timeouts=a['timeouts']['count'], base_timeouts=b['timeouts']['count'],
                   on_only=len(on), off_only=len(off), p=p, arm3_h=a['h_rows']['count'],
-                  smoke_invalid=smoke_invalid, timeouts_pass='timeouts' not in vetoes,
+                  smoke_invalid=smoke_invalid, smoke_bound=smoke_bound, smoke_thinking=ci,
+                  base_valid=base_valid, identity=identity, timeouts_pass='timeouts' not in vetoes,
                   timing_pass=a['timing']['timing_pass'], safety_checks=checks, vetoes=vetoes)
-    return dict(_schema=_schema('arm3', paths), n_rows=a['n_rows'], base_arm=base_name, inventory=inventories,
+    result = dict(_schema=_schema('arm3', paths), n_rows=a['n_rows'], base_arm=base_name, inventory=inventories,
                 base_validity=('VALID by dec069; ENV CONTROL: environment agreement with local gold calibration unmeasured'
-                               if base_name == 'arm1' else 'plan008 verdict taken as on file'),
+                               if base_name == 'arm1' else verdicts if base_valid else 'INVALID (base invalid/unruled)'),
                 primary=dict(on_only=_id_count(on), off_only=_id_count(off), p=p,
                              arm3_resolved=a['resolved'], base_resolved=b['resolved']), arms=arms,
                 validity_literal='INVALID (H>=5)' if a['h_rows']['count'] >= 5 else 'VALID-pending-director',
-                env_drift=envs, decision=arm3_decision(len(on), len(off), p, a['h_rows']['count'], smoke_invalid, vetoes),
+                env_drift=envs, decision=arm3_decision(len(on), len(off), p, a['h_rows']['count'], smoke_invalid, vetoes,
+                    pairing_void_reason='kernel agent/verification path differs' if envs['pairing_void_candidate'] else None,
+                    base_valid=base_valid, identity_valid=identity['checked'], smoke_bound=smoke_bound,
+                    thinking_pass=ci['status'] == 'PASS'),
                 decision_inputs=inputs, label='thinking ACTIVE != budget enforced')
+    if not identity['checked']:
+        # Rejected pushes are visible as first-attempt sensitivity, never counted.
+        excluded = set(identity['mismatching_dirs'])
+        counted = [r['instance_id'] for r, _, trace, _ in all_records['arm3']
+                   if str(trace.parent.parent.parent) not in excluded]
+        result['uncounted_sensitivity'] = dict(primary=result.pop('primary'), arms=result.pop('arms'))
+        result['n_rows'] = len(counted)
+        inventories['arm3'].update(complete=False, counted_instance_ids=counted,
+                                  identity_excluded_dirs=identity['mismatching_dirs'],
+                                  counted_missing=[i for i in base.ids_file(base.ARM_IDS) if i not in counted])
+    return result
 
 
 def arm3_cli(argv):
     import argparse
     parser = argparse.ArgumentParser(description='Plan 009 CPU/offline metrics')
     parser.add_argument('mode', choices=['arm3', 'arm3smoke'])
+    parser.add_argument('--identity-json', required=True)
+    parser.add_argument('--bundle', required=True)
+    parser.add_argument('--transport', action='append', required=True)
+    def transports_for(args, dirs):
+        transports = {}
+        for value in args.transport:
+            if '=' not in value:
+                parser.error('--transport requires DIR=SHA256')
+            directory, sha = value.rsplit('=', 1)
+            if not re.fullmatch('[0-9a-f]{64}', sha):
+                parser.error('--transport requires a SHA256')
+            transports[str(Path(directory))] = sha
+        if any(str(Path(d)) not in transports for d in dirs):
+            parser.error('--transport required for every arm3 dir')
+        if not re.fullmatch(r'v01[0-9]+', args.bundle):
+            parser.error('--bundle requires v01N')
+        return transports
     if argv[1] == 'arm3smoke':
         parser.add_argument('run_dir')
         parser.add_argument('classifier')
         parser.add_argument('out_json')
         args = parser.parse_args(argv[1:])
-        out = arm3smoke_metrics(args.run_dir, args.classifier)
+        out = arm3smoke_metrics(args.run_dir, args.classifier, args.identity_json, args.bundle,
+                                 transports_for(args, [args.run_dir]))
     else:
         parser.add_argument('base', choices=['arm1', 'arm2'])
         parser.add_argument('out_json')
         parser.add_argument('--arm3', nargs='+', required=True)
         parser.add_argument('--base-dirs', nargs='+', default=[])
         parser.add_argument('--classifiers', action='append', default=[])
-        parser.add_argument('--smoke-json')
+        parser.add_argument('--smoke-json', required=True)
+        parser.add_argument('--base-verdict-json')
         args = parser.parse_args(argv[1:])
         classifiers = {}
         for value in args.classifiers:
@@ -975,7 +1108,9 @@ def arm3_cli(argv):
         if args.base == 'arm2' and not args.base_dirs:
             parser.error('--base-dirs required for arm2')
         try:
-            out = arm3_metrics(args.base, args.arm3, args.base_dirs, classifiers, args.smoke_json)
+            out = arm3_metrics(args.base, args.arm3, args.base_dirs, classifiers, args.smoke_json,
+                               base_verdict_json=args.base_verdict_json, identity_json=args.identity_json,
+                               bundle=args.bundle, transports=transports_for(args, args.arm3))
         except IncompleteRun as exc:
             print('INCOMPLETE arm3 inventory; no results written:', json.dumps(exc.args[0]))
             return 3
