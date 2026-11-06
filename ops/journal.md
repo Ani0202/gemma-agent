@@ -318,3 +318,8 @@
 2026-11-06T08:15Z | plan 007 Addendum B.1 committed ea9c064 BEFORE main download: predicate fixed to literal dec-068 definition (assert_paired separate; keys must be present), sha a5c58a1d, 50 tests, smoke hits unchanged (rich_3063); re-review codex-review-p7fix-light launched | eval/plans/007.md
 2026-11-06T08:20Z | codex re-review 081435 of ea9c064 CLEAN (0 BLOCKING); NB1 fixed: smoke test asserts equal id sets before pairing (50 pass); waiting on main | ops/codex/review-20261106T081435.md
 2026-11-06T11:18Z | periodic check: main kernel RUNNING (11:13Z poll), submit-window armed, memguard ok 0 KILL, disk 87G free; no action | ops/jobs/passrate-31b-v009-main-wait-light.log
+2026-11-06T13:24:34Z | plan-007 MAIN COMPLETE + downloaded + SEALED: SEAL.sha256 sha256=cd3ed9180b4bdc8932c6aadc312f45335748a9464cff71352353473fe9442a5e (194 entries, sha256sum -c OK); timing.jsonl 63d8688d...8909; all 30 ids ran (no chunk 2) | runs/31b-v009-p7a1-main/SEAL.sha256
+2026-11-06T13:26Z | quota after main: 27.66 h used / 2.34 h left (+10.41 h), refresh 11-07T00:00Z | ops/budget/kaggle.md
+2026-11-06T13:26Z | blind gate main under d4cdf0f0 = FAIL (h_count 6; vllm up, 30/30 rows, max total 855.5 s) | eval/plan007_blind_gate.py
+2026-11-06T13:27Z | arm 1 (33) classified: PRIMARY 4/33 resolved (12.1%, Wilson 4.8-27.3); H-VERIFY 7 (all empty-patch+submit_patch shape; 6 main miss Addendum-B predicate only via known_diag reason) -> literal rule H>=5 INVALID; empty-patch 12/33; summary script 29e140e under codex review | results/plan007_arm1_summary.json ops/jobs/codex-review-arm1summary-light.status
+2026-11-06T13:30Z | report 018 NEEDS_DECISION (arm-1 validity: rec A VALID-by-ruling, next arm = empty-diff guard + edit-loop fix) | ops/reports/018-plan007-arm1-result.md
