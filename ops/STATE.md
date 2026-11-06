@@ -33,8 +33,6 @@
   eval/plans/007-arm1-ids.txt, docker-path env (reasons in plan), --with-verification --no-stock-probe (new flag), slug aniket0202/gemma-31b-passrate.
   NEXT: review clean -> SMOKE (eval/plans/007-smoke-ids.txt, 3 ids, budget 4800) -> gate -> main ids 4..33 budget sized to quota (week <= 29.5 h).
 - ARM F DONE NO-EFFECT (report 015, dec 062 accepted). results/plan005_armF_vs_D.json + *_31b_v008.json (schema-header check pending, dec 062 item 6).
-- armF compare script REVIEW CLEAN (review-20261106T053934 on 0c3c777: 0 BLOCKING; NB1 malformed schema raises, fails closed). E-as-F smoke 3/5, F-only 2, HARM. Cleared for use.
-- ARM F kernel v6 COMPLETE 06:21Z (repo b4d9f59); kernel bundle == dist zip; quota 14.49 -> 16.02 h.
 - DEC 061 (on report 014): approve-with-changes. CAP-BOUND accepted; A + B approved. (i) dec 055 v002 submit at 11-07T00:00Z stays FIRST;
   if SCORED -> bring v004 cap choice w/ data (FINALS RULE allows cap<=3.5); if ERROR/timeout -> CAP-BOUND binds, anti-loop only 31B path.
   (ii) v004 stays CPU draft, no slot; fold codex NB2 pipefail fix at system.md:33 next time source touched, label UNSCREENED; no repack.
@@ -48,7 +46,6 @@
   Item 5: Nov 8 slot candidate + 1-para justification DUE 2026-11-07T12:00Z (e4b-v002 repeat / e4b-v003 if packed+reviewed+smoke / 31b-v002 repeat).
   Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
 - Arm E DONE CAP-BOUND (report 014) = 31b-v007-p5e (dist/31b-v007.zip 3a62f41f..., v006 + cap 1.23). Arm D = 31b-v006-p5d (b7b2eb3d..., report 013 PASS).
-  Push cmd: eval/kaggle/timing_push.sh aniket0202/gemma-31b-timing <bundle> eval/plans/004-gpu-retime-ids.txt 6000.
 - 31b-v004 CPU DRAFT: dist/31b-v004.zip sha256=50537e1ddcf13f160fcaa9b2bfa145ac13ef91d99a2ce0b27d69f54ee125f7b3 (5f9b4ae) = v007 +
   1 quoting/no-repeat line. No slot (dec 061 ii). Review 043840: no BLOCKING; NB2 pipefail system.md:33 -> fold in next touch, UNSCREENED;
   NB3 timeout empty patch unguaranteed (dec 056 item 6).
