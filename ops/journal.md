@@ -376,3 +376,4 @@
 2026-11-06T15:20Z | merged codex/plan009-arm3-fix -> main 7e47b5c (arm3 modes NOT cleared); launched codex-review-arm3fix-light | ops/jobs/codex-review-arm3fix-light.status
 2026-11-06T15:25Z | codex re-review 151940 of arm3 fix: BLOCKING (F1 chunk record reuse, F2 partial identity/zip unchecked, F3 smoke classifier unbound); codex-build plan009-arm3-fix2 launched | ops/codex/review-20261106T151940.md, ops/codex/build-plan009-arm3-fix2.spec
 2026-11-06T15:33Z | codex-build plan009-arm3-fix2 done (6ec3227); Builder reviewed diff; eval files merged main 7876239; suite 1614 pass/4 skip; codex-review-arm3fix2-light launched (arm3 modes NOT cleared) | ops/codex/build-plan009-arm3-fix2.md
+2026-11-06T15:40Z | codex re-review 153229 of arm3 fix2: CLEAN (F1-F3 resolved) -> plan008_metrics arm3 modes CLEARED (main 7876239) | ops/codex/review-20261106T153229.md
