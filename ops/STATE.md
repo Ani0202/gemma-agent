@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 14:45Z (cycle 154, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 14:50Z (cycle 155, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -23,8 +23,8 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (14:45Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-plan009-light (plan 009 pre-reg),
-  codex-b3-unpaired-inner (dec 077 item 3 B3 fix, branch codex/b3-unpaired-inner; review diff + run suite before merge).
+## Running jobs (14:50Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-plan009-light (plan 009 pre-reg),
+  codex-review-b3-light (targeted review of B3 merge ab4dd1a). B3 build DONE: diff read, suite 1493 pass/6 skip, MERGED ab4dd1a.
 - DEC 078: approve; nothing changes. No FYIs for routine clean reviews (fold into next report/STATE). Idle order: (a) arm-3 addendum
   DONE eval/plans/009.md (1b0054a; base = v011 iff plan-008 SHIP-ELIGIBLE else v009; arm-3 = base + thinking 0->4096 only;
   smoke = first 2 registered ids, needs >=1 root thinking block/row and >=5 total, else INVALID) - review running; (b) Nov 8 inputs
@@ -74,7 +74,7 @@
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. Review codex-review-plan009 (fix BLOCKING, then CLEAN -> plan 009 final) and codex-b3 build (diff + suite, merge, targeted review).
+1. Review codex-review-plan009 (fix BLOCKING, then CLEAN -> plan 009 final) and codex-review-b3 (BLOCKING -> fix/revert ab4dd1a; CLEAN -> fold into next report).
 2. Dec 055 31b-v002 submit 11-07T00:00Z FIRST (checklist in Best bundles); kaggle quota log after reset; then arm-2 v011 ONE session
    (verify kernel/runner names v011 sha 4f5b078a, journal, quota before/after, 1-line FYI).
 3. Pack arm-3 candidates v012 (v009+think) / v013 (v011+think) on CPU + light review; Nov 8 proposal from drafts by 11-07T12:00Z.

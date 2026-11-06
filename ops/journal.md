@@ -358,3 +358,4 @@
 2026-11-06T14:40Z | dec 077 item 2 targeted review of 9486a3b CLEAN (83 pass sandbox, 60 adversarial guard cases) -> arm-2 metrics unblocked; v011 zip sha re-verified 4f5b078a == MANIFEST | ops/codex/review-20261106T143319.md
 2026-11-06T14:45Z | dec 078 read (approve; no FYIs for routine clean reviews). (a) arm-3 thinking addendum pre-registered eval/plans/009.md 1b0054a (pre-data); codex-review-plan009-light started | ops/decisions/078-20261106T143654-4893-from-builder.md
 2026-11-06T14:45Z | (b) Nov 8 slot inputs drafted (decision matrix; e4b-v003 not packed); (c) B3 fix launched as codex-build b3-unpaired-inner | ops/drafts/nov8-slot-inputs.md
+2026-11-06T14:44:15Z | B3 codex-build done; diff reviewed, suite 1493 pass/6 skip in worktree; merged ab4dd1a; targeted review codex-review-b3-light started | eval/plan008_metrics.py
