@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 07:32Z (cycle 131, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 07:38Z (cycle 132, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -24,9 +24,9 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (07:31Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-plan007-rev5-fold,
+## Running jobs (07:31Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z),
   passrate-31b-v009-smoke-wait-light (smoke kernel gemma-31b-passrate v1, pushed 07:28:20Z, PRE-FOLD 078f4ea; downloads to
-  runs/31b-v009-p7a1-smoke + SEAL.sha256), codex-review-blindgate-light (eval/plan007_blind_gate.py).
+  runs/31b-v009-p7a1-smoke + SEAL.sha256). Blind gate ready (expected rows arg REQUIRED: 3).
 - DEC 065: smoke decoupled from the fold. On download: journal + kaggle.md the SEAL hashes FIRST; then ONLY blind gate output
   (python3 -I eval/plan007_blind_gate.py <timing.jsonl> eval/plan007_pinned/classify_rows_a208a023.py a208a023...4e6b 3).
   NO pass/fail/resolved/patch viewing until re-frozen classifier has a Director note. HOLD (vLLM up, 3 rows, 0 H) -> main ids 4..33
@@ -36,9 +36,9 @@
   a208a023, run its tests, use it, NO 2nd review; other findings -> report 016 residuals. Smoke lands first -> seal+journal+kaggle.md, wait,
   no hand-inspection of timing.jsonl. Main push deadline = 23:30Z - KERNEL_BUDGET - 45 min, else after reset AND after dec 055 submit.
   Log quota after smoke in kaggle.md BEFORE sizing main.
-- R5 REVIEW 071306 = NOT CLEAN: 19 BLOCKING fail-open + 2 false-H. Folding via codex-build plan007-rev5-fold (branch
-  codex/plan007-rev5-fold). On finish: review diff, tests, merge, ONE re-freeze, REPORT 016 (residuals, arm-F exposure, run commits).
-  Build fails/tests regress: don't iterate; report what landed.
+- REV-5 RE-FROZEN d4cdf0f0...ae5e (code bb0131f, merge 19a6de0, pinned eval/plan007_pinned/classify_rows_d4cdf0f0.py):
+  all review-071306 reproducers OK (results/plan007_rev5_repro.txt 32/0, in pytest); suite 1178 pass; arm F unchanged. REPORT 016
+  NEEDS_DECISION = Director note on freeze + main on 078f4ea. Blind gate review folded (4 BLOCKING), 21 tests; exit 0 HOLD / 3 FAIL.
 - DEC 063/064: classifier freezes need Director note; quota log before/after smoke+main; week <= 29.5 h; dec 055 first.
 - DEC 062 (report 015 approved, A): T stays 0.2 everywhere; no T 0.6 arm in plan 007; repeat guard = design note only (DONE draft
   eval/plans/007-repeat-guard.md); item 4: plan-007 arm 1 may use expiring quota IF pre-reg reviewed + pushed by 11-06T15:30Z, else after reset.
@@ -71,10 +71,10 @@
 - 31b-v001-t4 (dec 036 item 2 name; dir bundles/31b/v001) = TIMING bundle (cap 4.0, max_output_tokens 8192 x2): dist/31b-v001.zip sha256=3c3a264652ab1d72ff6b9c5609c482c34a2ab7af37eb600689e5cfa0bf810f6a,
   pack PASS, load check results/bundle_load_check_31b_v001.json (8192/8192, 240 s). NOT a submission candidate.
 - Timing kernel (plan 006 DONE, G1 held -> dec 055): stack main 2db5f51 per Addendum A (gate fix from 92a74c7, worktree
-  gemma-wt/codex-kernel-probes-gate). Last FROZEN+noted classifier: a208a023 (0d49b1c); r5 candidate 9d0a8b4 superseded by fold.
+  gemma-wt/codex-kernel-probes-gate). Last FROZEN+noted classifier: a208a023 (0d49b1c); rev-5 d4cdf0f0 frozen pending Director note (report 016).
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
 1. Smoke done -> seal hashes -> blind gate -> (HOLD) push main ids 4..33 sized to quota/23:30Z; seal + journal; quota before/after.
-2. Fold done -> review + tests + merge + ONE re-freeze -> report 016 NEEDS_DECISION. Dec 055 31b-v002 submit at 11-07T00:00Z FIRST.
+2. Await Director note on report 016; then offline-classify smoke/main under d4cdf0f0 too. Dec 055 31b-v002 submit 11-07T00:00Z FIRST.
 3. Nov 8 slot proposal (due 11-07T12:00Z); dec 038 paper evidence by Nov 9.
