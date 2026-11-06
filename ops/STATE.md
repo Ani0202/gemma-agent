@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 01:01Z (cycle 102, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-06 01:06Z (cycle 103, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
@@ -26,12 +26,20 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 ## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
-## Running jobs (01:01Z): lb-e4b-v002-wait-light, memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), review-plan005-light.
-- PLAN 005 ADDENDUM A (pre-reg 00:59Z, eval/plans/005.md): arm A = runs/31b-v001-t4-timing (results/trace_tool_errors_31b_v001.json);
-  arm B = 31b-v003-p5t4 dist/31b-v003.zip sha 3fa08f768ab7052b9c225c8ec92dcd62743d760cdf32c5dd14e8ab139b18081a (v001-t4 + prompt only).
-  Report 011 asks for Kaggle L4x4 ~2.1 h (NEEDS_DECISION); run only after the review is clean AND approved. Same kernel/ids/flags as plan 006.
-  Metric script: eval/trace_tool_errors.py <run_dir> <label> <out.json>. Root causes: write_file rejects /tmp (prompt said /tmp!),
-  edit_file args mangled by backticks/quotes, shell quoting, 40-call budget on reads.
+## Running jobs (01:06Z): lb-e4b-v002-wait-light, memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), review-plan005-fix-light.
+- DEC 056 (approve-with-changes): ONE Kaggle L4x4 run of plan 005 arm B (~2.1 h quota, $0 GCP) once review has no unresolved BLOCKING.
+  review-20261106T005952: BLOCKING 1 (decision rule not total) + 2 (FastAPI/docs_src line in prompt) FIXED in 7879aef: Addendum A
+  dated correction (V/E/M predicates, INVALID branch, sign test 1- and 2-sided), prompt-text-only edits (+pipefail, env-only failure,
+  config-only exception), RE-PACKED dist/31b-v003.zip sha256=e9e603ab7decd589f5ea040579a5facf9c88858986039690ae8053df3e1f4d2f
+  (old 3fa08f76 superseded, never run). trace_tool_errors.py: per-response tool, FIFO pairing, 4th arg ids file (exit 2 if incomplete);
+  arm A output unchanged. review-plan005-fix-light = narrow confirm of those fixes.
+- ON CLEAN: push arm B exactly as plan 006 (same kernel, --gate-mode stock-path, ids eval/plans/004-gpu-retime-ids.txt, conc 1, cap 4.0,
+  40 calls/50 turns, KERNEL_BUDGET 6000), log quota before/after in ops/budget/kaggle.md. Then trace_tool_errors.py <run> 31b-v003-p5t4
+  results/trace_tool_errors_31b_v003.json eval/plans/004-gpu-retime-ids.txt + timing summary -> results/kaggle_timing_31b_v003.json;
+  report per dec 056 item 4; PASS -> v004 = v002 + prompt only (dec 056 item 5); else pre-registered branch.
+- Addendum B pre-registered 01:03Z (eval/plans/005.md): structural early-edit/submit-guard mechanism M1/M2/M3, choose one by dated
+  line after CPU ADK feasibility codex-ask; needs a separate quota request.
+- Dec 055 checklist at 2026-11-07T00:00Z has PRIORITY over arm-B analysis.
 - KERNEL v5 (87001e4, 4xL4): GATE FAIL (a) 7/8 rich_3930 ctx overflow, (b) max TOTAL 305.6>296; two-strike STOP (no v6);
   dec 032 -> v002 (above). results/kaggle_timing_e4b_v001.json top-level "decision" = legacy projection, not the gate.
 - DEC 027 FIDELITY: kernel = Dockerfile.public only (offline); NO PIP_* prefixes; setup_calls logging mandatory.
@@ -75,6 +83,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - OPEN eval-design question (dec 034 item 6): under H1, test deps come from the scorer's own site-packages, not setup.py. Before local
   pass-rate evals start, pre-register which environment the local sandbox models and why. Don't act on it before then.
 ## Next 3
-1. review-plan005-light result -> fix BLOCKING items (re-pack, new sha) -> on Director approval push arm B (same push as plan 006, log quota).
-2. e4b waiter final -> fill results/lb_e4b_v002.json + budget log, compute T. At 2026-11-07T00:00Z: run the dec 055 checklist above.
-3. Plan 007 (after 005); dec 038 paper evidence by Nov 9 23:59Z (trace_tool_errors files are schema-headed); ops/patches cleanup (dec 045 item 4).
+1. review-plan005-fix-light clean -> push arm B (Kaggle, plan-006 stack), log quota; analyze per dec 056 item 4 when done.
+2. e4b waiter final -> fill results/lb_e4b_v002.json + budget log, compute T. At 2026-11-07T00:00Z: run the dec 055 checklist above (priority).
+3. Addendum B ADK feasibility codex-ask (CPU); dec 038 paper evidence by Nov 9 23:59Z; plan 007; ops/patches cleanup (dec 045 item 4).

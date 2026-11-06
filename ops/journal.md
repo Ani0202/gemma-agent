@@ -226,3 +226,8 @@
 2026-11-06T01:01Z | plan 005 re-scoped (dec 055 item 6): trace analysis of arm A, 4/8 empty from write_file-/tmp rejection (6/8 tasks), edit_file mangled args (19 calls), quoting, budget | results/trace_tool_errors_31b_v001.json
 2026-11-06T01:01Z | plan 005 Addendum A pre-registered (00:59Z); screen bundle 31b-v003-p5t4 built, pack PASS sha 3fa08f76...081a; review-plan005-light launched | eval/plans/005.md bundles/31b/v003/MANIFEST.md
 2026-11-06T01:01Z | report 011: request Kaggle L4x4 ~2.1 h for plan 005 arm B after a clean review | ops/reports/011-plan005-screen.md
+2026-11-06T01:06Z | dec 056 recorded: one Kaggle L4x4 arm-B screen approved, gated on review w/o unresolved BLOCKING | ops/decisions/056-011-plan005-screen.md
+2026-11-06T01:06Z | review-20261106T005952: 2 BLOCKING (decision rule not total; FastAPI-specific prompt line, inherited from v001) + 5 NB | ops/codex/review-20261106T005952.md
+2026-11-06T01:06Z | fixed: Addendum A dated correction (total V/E/M rule); prompt-text-only edits; 31b-v003 re-packed sha e9e603ab...4d2f (3fa08f76 superseded, never run); trace_tool_errors.py pairing/ids check (arm A unchanged) | eval/plans/005.md bundles/31b/v003/MANIFEST.md 7879aef
+2026-11-06T01:06Z | plan 005 Addendum B pre-registered 01:03Z (truncation-safe/early-edit mechanism, dec 056 item 6) | eval/plans/005.md
+2026-11-06T01:06Z | review-plan005-fix-light launched (narrow confirm before arm-B push) | ops/jobs
