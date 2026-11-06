@@ -337,3 +337,7 @@
 2026-11-06T13:53Z | plan 008 pre-data revision Addendum D72 (root author filter, successful-submit boundary, gate descriptives, untracked-only metric); prompt-only line dropped; plan sha b02ac88c... | eval/plans/008.md 1a3b831
 2026-11-06T13:53Z | codex-build plan008-metrics started (eval/plan008_metrics.py base+smoke); codex-review-v010b-light started | ops/jobs/codex-plan008-metrics.log
 2026-11-06T13:54Z | dec 073 APPROVE: D72 accepted (budget-cap gate submit, /tmp per-task, metric defs governing, smoke addendum); sequencing unchanged; waiting on 3 codex jobs | ops/decisions/073-20261106T135234-11251-from-builder.md
+2026-11-06T13:58Z | codex re-reviews: v010b 3 BLOCKING, v011-d71 6 BLOCKING; metrics build done (asserts 17/12) | ops/codex/review-20261106T135202.md, review-20261106T134518.md, build-plan008-metrics.md
+2026-11-06T13:59Z | ARM-1 SAFETY BASE committed before any arm-2 row (dec 073 item 3): submitted_without_test 23/33, no_successful_submit 7, mech2 17, empty 12 | results/plan008_arm1_base.json (c689e76)
+2026-11-06T14:00Z | plan 008 Addendum D73 pre-data (smoke stricter, arm-2 boundary = inner harness response, gate rename/counter fix); fc24fcc3 VOID | eval/plans/008.md (f582942)
+2026-11-06T14:00Z | codex-build plan008-d73 started; Director FYI | ops/codex/build-plan008-d73.spec, ops/mail/director/20261106T140056-4962-from-builder.md

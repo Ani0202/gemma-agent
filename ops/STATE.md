@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 13:54Z (cycle 144, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 14:01Z (cycle 145, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -24,7 +24,13 @@
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
 - DEC 068: Addendum B/B.1 (242859a/ea9c064, pre-download) H-VERIFY(empty-patch) = eval/plan007_report.py (50 tests); report layout a-e + empty headline (implemented, see dec 069 line).
-## Running jobs (13:53Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-v011-d71-light, codex-review-v010b-light, codex-plan008-metrics (build).
+## Running jobs (14:01Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-plan008-d73 (build, effort high).
+- CYCLE 145: re-reviews NOT clean: v010b 3 BLOCKING (rename eligibility, unacked inner submit, (ii) units) + v011-d71 6 BLOCKING (+8 turns,
+  child turn cap, (i) exemption, event selectors, (ii) units, arg checks). Pre-data Addendum D73 (f582942) fixes all; Director FYI'd 140056.
+  Metrics merged (c689e76, script sha f09eb26e...); ARM-1 BASE results/plan008_arm1_base.json COMMITTED: mech2 17, empty 12 (asserts PASS),
+  submitted_without_test 23/33 -> arm-2 limit 26; no successful submit 7. Script not yet codex-reviewed (review after d73 build, same pass).
+  On d73 build: review diff, merge, re-run base (totals must be identical), bin/pack v010 -> NEW sha, load check, MANIFEST + D73.4 sha line,
+  then ONE codex-review (gate + metrics + D73 text + v011 unchanged). Smoke only if CLEAN by ~22:00Z, else post-reset AFTER dec 055 submit.
 - DEC 073 APPROVE (D72 accepted as governing pre-data defs; metrics asserts mech2 17/empty 12 fail -> STOP+report, never adjust; arm-1 safety base committed BEFORE arm-2 rows; new gate-changing BLOCKING -> new sha + D72.x line + 1-line FYI; re-verify /tmp if reuse_containers ever set).
 - DEC 072 (both deviations ACCEPTED): codex 133941 on v010 = 4 BLOCKING -> fixed 1a3b831: gate = harness-equal eligibility (py one-liner of
   _is_protected_test_or_config_path), outputs GATE call/kept_files + reason=changes|forced|check_error, failure-safe counter, SUBMIT FAILED.
@@ -75,6 +81,6 @@
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. On codex-review-v010b + v011-d71 + plan008-metrics build: fix BLOCKING, merge metrics, run base (arm-1) + commit; smoke (008-smoke-ids) on v010 fc24fcc3 if ALL CLEAN by ~22:00Z, else after reset AFTER dec 055 submit.
+1. On codex-plan008-d73: merge, base re-run identical, repack v010 (new sha), combined codex-review; smoke (008-smoke-ids) if CLEAN by ~22:00Z, else post-reset AFTER dec 055 submit.
 2. Dec 055 31b-v002 submit 11-07T00:00Z FIRST (checklist in Best bundles).
 3. Nov 8 slot proposal (due 11-07T12:00Z); arm-3 thinking addendum (dec 070 item 5) due 11-07T18:00Z; dec 038 paper evidence by Nov 9.
