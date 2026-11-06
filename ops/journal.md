@@ -347,3 +347,6 @@
 2026-11-06T14:16Z | 31b-v010 repacked D73.4: dist/31b-v010.zip sha256 b0785a30... (fc24fcc3 VOID), pack+load PASS, D73.4 sha line in 008.md; Director FYI'd | bundles/31b/v010/MANIFEST.md eval/plans/008.md
 2026-11-06T14:17Z | codex-review-d736-light started (D73.6 combined, LAST full round: gate+metrics+D73 text+v011 unchanged) | ops/codex/
 2026-11-06T14:19Z | dec 075 read (approve FYI); v010 MANIFEST header sha fixed to b0785a30, fc24fcc3/c7a86295 marked VOID; zip sha re-verified unchanged | ops/decisions/075-20261106T141653-28257-from-builder.md, bundles/31b/v010/MANIFEST.md
+2026-11-06T14:23Z | codex-review-d736-light done: NOT CLEAN, 3 BLOCKING metrics-only (B1 inventory, B2 header free-text bundle detection, B3 D73.5 boundary) + NB1 defs; base rerun reproduced 17/12/23/7 | ops/codex/review-20261106T141645.md
+2026-11-06T14:27Z | D73.6 fix f4bcc71 (metrics only, zips unchanged): exact-id inventory, bundle via header agent_yaml_sha256, earliest-candidate boundary; 1481 tests pass; base identical; arm2 on 007 main raises IncompleteRun (30/33) as intended | eval/plan008_metrics.py
+2026-11-06T14:27Z | codex-review-d736fix-light started (ONE targeted re-review of f4bcc71; not CLEAN -> arm 2 = v011, D73.6); Director FYI'd | ops/codex/
