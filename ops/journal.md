@@ -247,3 +247,4 @@
 2026-11-06T02:22Z | DEC 058: arm C approved (~2.1 h quota, after review-p5c-light clean); M2 declined (Addendum B on file, not built); arm D conditional (push by 21:00Z only if C valid + Mc); plan 007 next week | ops/decisions/058-012-plan005-armB-result.md
 2026-11-06T02:23Z | Addendum D pre-registered (thinking_budget 0 = enable_thinking false, schema ge=0, generation.py:407); 31b-v006-p5d packed sha b7b2eb3d...60a0 | eval/plans/005.md bundles/31b/v006/MANIFEST.md
 2026-11-06T02:27Z | arm C kernel staged (dry-run OK, same timing_push.sh stack as arm B); waiting on review-p5c-light before push | eval/kaggle/timing_push.sh
+2026-11-06T02:28Z | reviews p5c/p5d: bundles byte-clean; BLOCKING on Mc/Md measurement -> dated correction (root-only, thinking-text length T=6144 chars, validity add-on); confirm review review-p5cd-fix-light running | eval/plans/005.md b9ddca1 ops/codex/review-20261106T022022.md ops/codex/review-20261106T022324.md
