@@ -42,11 +42,7 @@
   if SCORED -> bring v004 cap choice w/ data (FINALS RULE allows cap<=3.5); if ERROR/timeout -> CAP-BOUND binds, anti-loop only 31B path.
   (ii) v004 stays CPU draft, no slot; fold codex NB2 pipefail fix at system.md:33 next time source touched, label UNSCREENED; no repack.
   (iii) next 31B GPU arm = exact-repeat loops.
-  ARM F (item 2-3): pre-registered eval/plans/005.md Addendum F (05:30Z) BEFORE pack. 31b-v008-p5f = bundles/31b/v008 =
-  v006 + root temperature 0.2->0.6 ONLY (code_analyzer sub-agent 0.2 unchanged), dist/31b-v008.zip
-  sha256=e1513aac762e97b9191ec315e87a4132d6657df03d7888a40bdfd19bc135cfe9 (commit 4ead877); diff -r + unzip diff = sampling.yaml only.
-  Rule: not V->INVALID; F empty>=5 or F-empty-only>=3 -> HARM; 0 tasks run>=5 & empty<=4 & F-only<=2 -> LOOP-REDUCED; else NO-EFFECT.
-  Arm F run + post-processed (report 015).
+  ARM F (31b-v008-p5f, v006 + root T 0.6, sha e1513aac..) DONE NO-EFFECT (report 015). Raw rows: runs/31b-v008-p5f-timing/timing.jsonl.
   Item 4: plan 007 pre-reg (33-dev pass rate; H1 env; thinking off vs on paired arm) DUE 2026-11-07T18:00Z (may use leftover quota pre-reset).
   Item 5: Nov 8 slot candidate + 1-para justification DUE 2026-11-07T12:00Z (e4b-v002 repeat / e4b-v003 if packed+reviewed+smoke / 31b-v002 repeat).
   Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
