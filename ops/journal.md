@@ -291,3 +291,4 @@
 2026-11-06T06:51:31Z | plan 007 r1 review 064331: BLOCKING x3; rev 2 classification written (eval/plans/007.md), codex-build plan007-classifier launched | ops/codex/review-20261106T064331.md
 2026-11-06T06:56Z | plan 007 classifier merged (codex 63f6866) + frozen sha 69ab78f2; tests 783/4skip; arm F check 7 KNOWN-DIAG 0 H-SETUP | eval/plans/007.md results/plan007_classifier_armF_check.json
 2026-11-06T06:57Z | codex re-review of plan 007 rev 2 launched on fe8df91 | ops/jobs/codex-review-plan007r2-light.status
+2026-11-06T07:03Z | codex rev-2 review 065651: 1 BLOCKING (classifier fail-open); fixed r6/r7, classifier RE-FROZEN sha 18afdbbd, tests 794/4skip, arm F unchanged; Director FYI; rev-3 review launched | eval/plans/007.md ops/codex/review-20261106T065651.md

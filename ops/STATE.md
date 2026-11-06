@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 06:57Z (cycle 123, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 07:03Z (cycle 124, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -25,7 +25,9 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (06:57Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-plan007r2-light (rev 2 re-review of fe8df91).
+## Running jobs (07:03Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-plan007r3-light (rev 3 re-review of 2fc49b5).
+- REV 3 (2fc49b5): rev-2 review 065651 = 1 BLOCKING (fail-open on null/invalid patch evidence, 'Harness task failure' w/o messages).
+  Fixed r6/r7 -> H-ROW; RE-FROZEN sha256=18afdbbd..af08 (plan 007 RE-FROZEN line); tests 794/4skip; arm F unchanged; Director noted 07:02Z.
 - Plan 007 r1 review 064331: BLOCKING x3 (KNOWN-DIAG chain rejected 0/7 arm-F rows; agent-caused verify msgs + exit 124 became H;
   per-pass/filtered-patch evidence missing). REV 2: eval/plans/007.md classification rewritten -> eval/kaggle/classify_rows.py
   (codex-build plan007-classifier, spec ops/codex/build-plan007-classifier.spec) + 3 row fields in agent_timing.py (wrapper only).
@@ -74,6 +76,6 @@
 - Forum question (dec 035): Aniket posts report 009 s6; Builder posts NOTHING; summarize any answer (no task data) in next report.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. On review codex-review-plan007r2-light: if no BLOCKING push smoke (budget 5400, log quota); gate PASS -> main ids 4..33 --seed-max by 15:30Z; else after reset.
+1. On review codex-review-plan007r3-light: if no BLOCKING push smoke (budget 5400, log quota); gate PASS -> main ids 4..33 --seed-max by 15:30Z; else after reset.
 2. Dec 055 at 2026-11-07T00:00Z FIRST: (2)(3) hold; re-check (2) live, do (4) commit, (5) journal T=5.007 h <= 6.0 PASS, then submit.
 3. Nov 8 slot proposal (due 11-07T12:00Z); pass-rate summarizer script (codex-reviewed) before reading arm-1 rows; dec 038 paper evidence by Nov 9.
