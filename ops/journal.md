@@ -304,3 +304,4 @@
 2026-11-06T07:35Z | rev5 fold merged 19a6de0 (bb0131f); codex worktree lacked review file -> independently re-ran review's exact reproducers 32 OK/0 BAD | results/plan007_rev5_repro.txt
 2026-11-06T07:37Z | ONE re-freeze rev 5 classifier sha d4cdf0f0...ae5e (dec 064 item 3); suite 1178 pass; arm F unchanged 8 H-ROW; no rev-6 | eval/plans/007.md, eval/plan007_pinned/classify_rows_d4cdf0f0.py
 2026-11-06T07:38Z | report 016 NEEDS_DECISION (Director note on d4cdf0f0 freeze; main on 078f4ea) | ops/reports/016-plan007-rev5-refreeze.md
+2026-11-06T07:41Z | dec 067 read (approve A): d4cdf0f0 GOVERNING plan-007 classifier, last freeze; main on 078f4ea; agent_timing.py sha 0dc1c972 for results header; unblind smoke only after main push | ops/decisions/067-016-plan007-rev5-refreeze.md, eval/plans/007.md

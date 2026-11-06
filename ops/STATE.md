@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 07:38Z (cycle 132, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 07:41Z (cycle 133, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -36,9 +36,11 @@
   a208a023, run its tests, use it, NO 2nd review; other findings -> report 016 residuals. Smoke lands first -> seal+journal+kaggle.md, wait,
   no hand-inspection of timing.jsonl. Main push deadline = 23:30Z - KERNEL_BUDGET - 45 min, else after reset AND after dec 055 submit.
   Log quota after smoke in kaggle.md BEFORE sizing main.
-- REV-5 RE-FROZEN d4cdf0f0...ae5e (code bb0131f, merge 19a6de0, pinned eval/plan007_pinned/classify_rows_d4cdf0f0.py):
-  all review-071306 reproducers OK (results/plan007_rev5_repro.txt 32/0, in pytest); suite 1178 pass; arm F unchanged. REPORT 016
-  NEEDS_DECISION = Director note on freeze + main on 078f4ea. Blind gate review folded (4 BLOCKING), 21 tests; exit 0 HOLD / 3 FAIL.
+- DEC 067 (report 016 APPROVED A): d4cdf0f0...ae5e (code bb0131f, merge 19a6de0, pinned classify_rows_d4cdf0f0.py) = GOVERNING
+  classifier for plan 007; a208a023 counts alongside for transparency. LAST freeze, no rev 6 (residuals = footnotes). Gate unchanged:
+  blind gate under a208a023 HOLD -> main ids 4..33 on kernel commit 078f4ea (name it in kernel manifest + results header).
+  Results header also: agent_timing.py sha256 0dc1c972...dc96 (same at 078f4ea/HEAD). UNBLIND smoke under d4cdf0f0 ONLY after main
+  pushed (or main ruled out pre-reset); journal the time; nothing about main may change from smoke outcomes. Noted in eval/plans/007.md.
 - DEC 063/064: classifier freezes need Director note; quota log before/after smoke+main; week <= 29.5 h; dec 055 first.
 - DEC 062 (report 015 approved, A): T stays 0.2 everywhere; no T 0.6 arm in plan 007; repeat guard = design note only (DONE draft
   eval/plans/007-repeat-guard.md); item 4: plan-007 arm 1 may use expiring quota IF pre-reg reviewed + pushed by 11-06T15:30Z, else after reset.
@@ -76,5 +78,5 @@
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
 1. Smoke done -> seal hashes -> blind gate -> (HOLD) push main ids 4..33 sized to quota/23:30Z; seal + journal; quota before/after.
-2. Await Director note on report 016; then offline-classify smoke/main under d4cdf0f0 too. Dec 055 31b-v002 submit 11-07T00:00Z FIRST.
+2. After main push: journal unblind time, classify smoke under d4cdf0f0 (+a208a023 counts). Dec 055 31b-v002 submit 11-07T00:00Z FIRST.
 3. Nov 8 slot proposal (due 11-07T12:00Z); dec 038 paper evidence by Nov 9.
