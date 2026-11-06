@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 14:01Z (cycle 145, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 14:04Z (cycle 146, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -31,6 +31,8 @@
   submitted_without_test 23/33 -> arm-2 limit 26; no successful submit 7. Script not yet codex-reviewed (review after d73 build, same pass).
   On d73 build: review diff, merge, re-run base (totals must be identical), bin/pack v010 -> NEW sha, load check, MANIFEST + D73.4 sha line,
   then ONE codex-review (gate + metrics + D73 text + v011 unchanged). Smoke only if CLEAN by ~22:00Z, else post-reset AFTER dec 055 submit.
+- DEC 074 APPROVE D73: D73.5 (submit_unverifiable counts AGAINST arm 2; metrics arm2 mode must implement - d73 build only REPORTS it, add after merge)
+  + D73.6 (combined review = LAST full round; BLOCKING -> fix + 1 targeted re-review; not CLEAN after that or by 11-07T06:00Z -> arm 2 = v011, no smoke) written to 008.md.
 - DEC 073 APPROVE (D72 accepted as governing pre-data defs; metrics asserts mech2 17/empty 12 fail -> STOP+report, never adjust; arm-1 safety base committed BEFORE arm-2 rows; new gate-changing BLOCKING -> new sha + D72.x line + 1-line FYI; re-verify /tmp if reuse_containers ever set).
 - DEC 072: gate = harness-equal eligibility + observable reasons + failure-safe counter + SUBMIT FAILED (1a3b831); fc24fcc3 VOID (D73). Plan 008 D72 = pinned metric defs.
 - DEC 071 (gate approved w/ conditions): items 1-3 DONE 787b465. Plan 008 Addendum D71: wiring (a) YES same Context (gate alive),
@@ -75,6 +77,6 @@
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. On codex-plan008-d73: merge, base re-run identical, repack v010 (new sha), combined codex-review; smoke (008-smoke-ids) if CLEAN by ~22:00Z, else post-reset AFTER dec 055 submit.
+1. On codex-plan008-d73: merge, implement D73.5 counting in arm2 mode, base re-run identical, repack v010 (new sha), combined codex-review (LAST full round, D73.6); smoke (008-smoke-ids) if CLEAN by ~22:00Z, else post-reset AFTER dec 055 submit.
 2. Dec 055 31b-v002 submit 11-07T00:00Z FIRST (checklist in Best bundles).
 3. Nov 8 slot proposal (due 11-07T12:00Z); arm-3 thinking addendum (dec 070 item 5) due 11-07T18:00Z; dec 038 paper evidence by Nov 9.

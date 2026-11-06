@@ -341,3 +341,4 @@
 2026-11-06T13:59Z | ARM-1 SAFETY BASE committed before any arm-2 row (dec 073 item 3): submitted_without_test 23/33, no_successful_submit 7, mech2 17, empty 12 | results/plan008_arm1_base.json (c689e76)
 2026-11-06T14:00Z | plan 008 Addendum D73 pre-data (smoke stricter, arm-2 boundary = inner harness response, gate rename/counter fix); fc24fcc3 VOID | eval/plans/008.md (f582942)
 2026-11-06T14:00Z | codex-build plan008-d73 started; Director FYI | ops/codex/build-plan008-d73.spec, ops/mail/director/20261106T140056-4962-from-builder.md
+2026-11-06T14:02:49Z | dec 074 APPROVE: D73.5 (submit_unverifiable counts against arm 2) + D73.6 (review-loop cap; v011 fallback by 11-07T06:00Z) appended pre-data | eval/plans/008.md, ops/decisions/074-20261106T140056-4962-from-builder.md
