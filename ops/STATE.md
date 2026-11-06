@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 14:18Z (cycle 147, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 14:19Z (cycle 148, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -29,6 +29,7 @@
   dist/31b-v010.zip sha256=b0785a30e2ad3451f0bbb0fb574e6cde53412ca2381ab04394e66792886d33ce (fc24fcc3 VOID), pack+load PASS; D73.4 sha line in 008.md.
   Director FYI'd. On review: CLEAN -> smoke (008-smoke-ids, quota log before/after) if by ~22:00Z and quota (2.34 h) allows; BLOCKING -> fix + ONE
   targeted re-review of fix diff; not CLEAN after that or by 11-07T06:00Z -> arm 2 = v011 (no smoke).
+- DEC 075 (ack FYI): MANIFEST v010 l.1 fixed -> b0785a30, fc24fcc3/c7a86295 VOID (MANIFEST excluded from zip, sha unchanged). Review CLEAN -> NO decision request, proceed + 1-line FYI; decision only if arms/ids/thresholds/rule change.
 - DEC 074 APPROVE D73: D73.5 (submit_unverifiable counts AGAINST arm 2; metrics arm2 mode must implement - d73 build only REPORTS it, add after merge)
   + D73.6 (combined review = LAST full round; BLOCKING -> fix + 1 targeted re-review; not CLEAN after that or by 11-07T06:00Z -> arm 2 = v011, no smoke) written to 008.md.
 - DEC 073 APPROVE (D72 accepted as governing pre-data defs; metrics asserts mech2 17/empty 12 fail -> STOP+report, never adjust; arm-1 safety base committed BEFORE arm-2 rows; new gate-changing BLOCKING -> new sha + D72.x line + 1-line FYI; re-verify /tmp if reuse_containers ever set).

@@ -1,4 +1,4 @@
-# 31b-v010-p8 (PLAN 008 ARM-2 candidate, dec 069 item 3). CPU DRAFT, UNVALIDATED, packed: dist/31b-v010.zip sha256=fc24fcc3eeb98f1bdcd5914d61d597ed2b309d74eb64bed717a2ba5b47bd7c42 (bin/pack PASS).
+# 31b-v010-p8 (PLAN 008 ARM-2 candidate, dec 069 item 3). CPU DRAFT, UNVALIDATED, packed: dist/31b-v010.zip sha256=b0785a30e2ad3451f0bbb0fb574e6cde53412ca2381ab04394e66792886d33ce (bin/pack PASS, D73.4 repack). VOID (never run): fc24fcc3eeb98f1bdcd5914d61d597ed2b309d74eb64bed717a2ba5b47bd7c42, c7a86295...
 - parent: 31b-v009-p7a1 (dist/31b-v009.zip sha256=d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d).
 - WHY a gate sub-agent: the harness submit_patch cannot be wrapped from a bundle (swegemma 0.2.11 registers no callbacks:
   CallbackRegistry unused), and agent_runner breaks the session as soon as context.patch_submitted is set, even for an

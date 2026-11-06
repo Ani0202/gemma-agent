@@ -346,3 +346,4 @@
 2026-11-06T14:15Z | D73.5 implemented in arm2 metrics (submit_unverifiable counts against arm 2) 6ee4f1f; eval/tests 1475 pass; arm-1 base re-run identical totals+rows (17/12/23/7) | eval/plan008_metrics.py results/plan008_arm1_base.json
 2026-11-06T14:16Z | 31b-v010 repacked D73.4: dist/31b-v010.zip sha256 b0785a30... (fc24fcc3 VOID), pack+load PASS, D73.4 sha line in 008.md; Director FYI'd | bundles/31b/v010/MANIFEST.md eval/plans/008.md
 2026-11-06T14:17Z | codex-review-d736-light started (D73.6 combined, LAST full round: gate+metrics+D73 text+v011 unchanged) | ops/codex/
+2026-11-06T14:19Z | dec 075 read (approve FYI); v010 MANIFEST header sha fixed to b0785a30, fc24fcc3/c7a86295 marked VOID; zip sha re-verified unchanged | ops/decisions/075-20261106T141653-28257-from-builder.md, bundles/31b/v010/MANIFEST.md
