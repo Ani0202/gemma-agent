@@ -10,6 +10,8 @@ reasons == ['verify:contradictory_failure_evidence'] exactly, AND in the raw tim
   result_error and agent_error_text are null or empty, and no patch-apply or verify-failure message
   (any VERIFY_AGENT_PREFIXES prefix) appears in result_error / agent_error_text.
 Any H row that does not match exactly stays under plan 007's existing H-row rule.
+Pairing (cls_row and timing_row describe the same instance_id) is the CALLER's job and is validated
+separately (see assert_paired); it is not part of the predicate (codex review 081225 B1).
 """
 
 # Copied verbatim from classify_rows_d4cdf0f0.py (kept local so the pinned classifier stays untouched).
@@ -33,8 +35,6 @@ def is_h_verify_empty_patch(cls_row, timing_row):
     """True iff the row is the pre-registered H-VERIFY(empty-patch) sub-case (pure; no I/O)."""
     if cls_row.get('h') != 'H-VERIFY' or cls_row.get('reasons') != EMPTY_PATCH_REASONS:
         return False
-    if cls_row.get('instance_id') != timing_row.get('instance_id'):
-        return False
     pb = timing_row.get('verified_patch_bytes')
     if type(pb) is not int or pb != 0:
         return False
@@ -43,9 +43,19 @@ def is_h_verify_empty_patch(cls_row, timing_row):
         return False
     if timing_row.get('resolved') is not False:
         return False
-    messages = (timing_row.get('result_error'), timing_row.get('agent_error_text'))
+    # Keys must be PRESENT (null/empty values qualify; absent keys do not) - codex review 081225 B2.
+    if 'result_error' not in timing_row or 'agent_error_text' not in timing_row:
+        return False
+    messages = (timing_row['result_error'], timing_row['agent_error_text'])
     if not all(_blank(m) for m in messages):
         return False
     if any(isinstance(m, str) and m.strip().startswith(VERIFY_AGENT_PREFIXES) for m in messages):
         return False
     return True
+
+
+def assert_paired(cls_row, timing_row):
+    """Raise ValueError unless both rows carry the same non-empty instance_id (pairing check, not the predicate)."""
+    a, b = cls_row.get('instance_id'), timing_row.get('instance_id')
+    if not a or a != b:
+        raise ValueError(f'unpaired rows: {a!r} vs {b!r}')
