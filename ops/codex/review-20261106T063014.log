@@ -2086,3 +2086,925 @@ exec
   1358	if __name__ == '__main__':
   1359	    main()
 
+exec
+/bin/bash -lc "nl -ba eval/kaggle/agent_timing.py | sed -n '400,630p;740,1127p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   400	                        runtime = distribution(name)
+   401	                    except PackageNotFoundError:
+   402	                        runtime = None
+   403	                    if runtime is not None and runtime.version in req.specifier:
+   404	                        source = copy_runtime_package(name, destination)
+   405	                        if source != 'missing':
+   406	                            current = runtime.metadata
+   407	                            row['source'] = source
+   408	                if current is not None:
+   409	                    installed[name] = current
+   410	                    sources[name] = row['source']
+   411	                    row['version_installed'] = current['Version']
+   412	            entries.append(row)
+   413	            if current is not None:
+   414	                queue.append(current)
+   415	            elif name not in missing:
+   416	                missing.append(name)
+   417	    return entries, missing
+   418	
+   419	
+   420	# Capture setup.py's otherwise discarded subprocess output without changing setup.py.
+   421	# Write after EVERY call so an outer timeout still leaves completed calls visible.
+   422	SETUP_OBSERVER = r'''import json, runpy, subprocess, sys, time
+   423	from pathlib import Path
+   424	original = subprocess.run
+   425	calls = []
+   426	log = Path(__file__).with_name('setup_subprocesses.json')
+   427	log.write_text('[]')
+   428	full_log = log.with_name('setup_subprocesses_full.jsonl')
+   429	full_log.write_text('')
+   430	def run(*args, **kwargs):
+   431	    start = time.perf_counter()
+   432	    argv = args[0] if args else kwargs.get('args')
+   433	    result = None
+   434	    try:
+   435	        result = original(*args, **kwargs)
+   436	        return result
+   437	    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+   438	        result = exc
+   439	        raise
+   440	    finally:
+   441	        def decode(value):
+   442	            return value.decode(errors='replace') if isinstance(value, bytes) else (value or '')
+   443	        out, err = decode(getattr(result, 'stdout', '')), decode(getattr(result, 'stderr', ''))
+   444	        with full_log.open('a') as stream:
+   445	            stream.write(json.dumps(dict(argv=argv, stdout=out, stderr=err)) + '\n')
+   446	        calls.append(dict(argv=argv, duration_s=time.perf_counter()-start,
+   447	            start_offset_s=start-origin, rc=getattr(result, 'returncode', None),
+   448	            stdout=out.encode()[-2048:].decode(errors='ignore'),
+   449	            stderr=err.encode()[-2048:].decode(errors='ignore'),
+   450	            retrying_lines=sum('Retrying' in line for line in (out+'\n'+err).splitlines()),
+   451	            interpreter_version=sys.version))
+   452	        log.write_text(json.dumps(calls))
+   453	origin = time.perf_counter()
+   454	subprocess.run = run
+   455	sys.argv = sys.argv[1:]
+   456	runpy.run_path(sys.argv[0], run_name='__main__')
+   457	'''
+   458	
+   459	
+   460	def patch_subprocess_deps(data_dir, state=None):
+   461	    """Install scorer tools in each venv, using that interpreter's ABI, entirely offline."""
+   462	    import swegemma.harness.container_setup as cs
+   463	    from packaging.utils import parse_wheel_filename
+   464	    orig = getattr(cs.install_test_dependencies, '_timing_original', cs.install_test_dependencies)
+   465	    wheels = data_dir / 'wheels'
+   466	    if not wheels.is_dir():
+   467	        wheels = WHEELHOUSE
+   468	    setup = data_dir / 'sandbox' / 'setup.py'
+   469	    if not setup.exists():
+   470	        setup = next(iter(data_dir.rglob('setup.py')), setup)
+   471	
+   472	    def install(docker, container_id, repo='', *, fast_path=True, config=None):
+   473	        if type(docker).__name__ not in {'SubprocessManager', 'SubprocessSandbox'}:
+   474	            return orig(docker, container_id, repo, fast_path=fast_path, config=config)
+   475	        current = state.get() if state is not None else dict(
+   476	            started=time.perf_counter(), setup_calls=[], setup_failed=False)
+   477	        fixed = os.environ.get('SETUP_FIX', '1') == '1'
+   478	        current['setup_fix'] = int(fixed)
+   479	        venv = docker.sandboxes[container_id]['venv']
+   480	        sp = next(iter(sorted(venv.glob('lib/python3*/site-packages'))))
+   481	        if not fixed:
+   482	            # Preserve the original injector's wheel selection and base tar exactly.
+   483	            def original_base():
+   484	                base, large, _modules, _requirements = cs._inspect_wheels_dir(wheels)
+   485	                if large:
+   486	                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+   487	                current['wheel_tags_chosen'] = [p.name for p in base]
+   488	                inject_base(cs, base, sp, current)
+   489	            setup_step(current, 'base_tar_extraction', original_base)
+   490	            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+   491	        else:
+   492	            # A subprocess venv otherwise exposes every kernel package via _host_env.pth.
+   493	            # Only the scorer's image tools and public base wheels belong here.
+   494	            def isolate_venv():
+   495	                for pth in sp.glob('_host_env.pth'):
+   496	                    pth.unlink()
+   497	                cfg = venv / 'pyvenv.cfg'
+   498	                if cfg.exists():
+   499	                    cfg.write_text(cfg.read_text().replace(
+   500	                        'include-system-site-packages = true', 'include-system-site-packages = false'))
+   501	            setup_step(current, 'venv_fidelity', isolate_venv)
+   502	            pip_wheel = fallback_wheel(wheels, 'pip')
+   503	            def bootstrap_pip():
+   504	                if pip_wheel:
+   505	                    current['setup_calls'][-1]['source'] = str(pip_wheel)
+   506	                    import zipfile
+   507	                    with zipfile.ZipFile(pip_wheel) as zf:
+   508	                        zf.extractall(sp)
+   509	                else:
+   510	                    current['setup_calls'][-1]['source'] = copy_runtime_package('pip', sp)
+   511	                    if current['setup_calls'][-1]['source'] == 'missing':
+   512	                        raise RuntimeError('No offline pip source available')
+   513	                return docker.exec(container_id, 'python3 -m pip --version', timeout=30)
+   514	            result = setup_step(current, 'pip_bootstrap', bootstrap_pip)
+   515	            if result.exit_code != 0:
+   516	                raise RuntimeError('Sandbox pip bootstrap failed')
+   517	            probe = ("import sys,json;from pip._vendor.packaging.tags import sys_tags;"
+   518	                     "from pip._vendor.packaging.markers import default_environment;"
+   519	                     "print(json.dumps({'version':sys.version,'tags':[str(t) for t in sys_tags()],"
+   520	                     "'environment':default_environment()}))")
+   521	            result = setup_step(current, 'interpreter_probe', lambda: docker.exec(
+   522	                container_id, 'python3 -c ' + shlex.quote(probe), timeout=30))
+   523	            if result.exit_code != 0:
+   524	                raise RuntimeError('Sandbox interpreter probe failed')
+   525	            identity = json.loads(result.stdout)
+   526	            current['interpreter_version'] = identity['version']
+   527	            selected = compatible_wheels(wheels, identity['tags'])
+   528	            # The image pins pytest-timeout, even if a newer wheel is present.
+   529	            selected.pop('pytest-timeout', None)
+   530	            for path in pytest_timeout_wheels(wheels):
+   531	                if {str(t) for t in parse_wheel_filename(path.name)[3]} & set(identity['tags']):
+   532	                    selected['pytest-timeout'] = path
+   533	                    break
+   534	            current['wheel_tags_chosen'] = [p.name for p in selected.values()]
+   535	            def validate_tools():
+   536	                missing = [n for n in SCORER_TOOLS if n not in selected and n not in ('pip', 'pytest-timeout')]
+   537	                if missing:
+   538	                    raise RuntimeError('Required compatible tools missing: ' + ', '.join(missing))
+   539	            setup_step(current, 'tool_sources', validate_tools)
+   540	            def timeout_source():
+   541	                source = selected.get('pytest-timeout')
+   542	                current['setup_calls'][-1]['source'] = str(source) if source else copy_runtime_package('pytest-timeout', sp)
+   543	                if current['setup_calls'][-1]['source'] == 'missing':
+   544	                    raise RuntimeError('No offline pytest-timeout 2.1.0 source available')
+   545	            setup_step(current, 'pytest_timeout_source', timeout_source)
+   546	            def install_tools():
+   547	                for path in selected.values():
+   548	                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+   549	                tools = ['/wheels/' + selected[n].name for n in SCORER_TOOLS
+   550	                         if n in selected and n != 'pip']
+   551	                return docker.exec(container_id,
+   552	                    'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
+   553	                    ' '.join(shlex.quote(n) for n in tools), timeout=60)
+   554	            result = setup_step(current, 'tool_install', install_tools)
+   555	            if result.exit_code != 0:
+   556	                raise RuntimeError('Offline scorer tool installation failed')
+   557	            def tool_deps():
+   558	                from importlib.metadata import distributions
+   559	                roots = [wheel_metadata(selected[n]) for n in SCORER_TOOLS if n in selected]
+   560	                roots.extend(d.metadata for d in distributions(path=[str(sp)])
+   561	                             if d.metadata['Name'].lower() in ('pip', 'pytest-timeout')
+   562	                             and d.metadata['Name'].lower() not in selected)
+   563	                def install_dependency(path):
+   564	                    docker.copy_to(container_id, path, '/wheels/' + path.name)
+   565	                    result = docker.exec(container_id,
+   566	                        'python3 -m pip install --ignore-installed --no-index --find-links=/wheels --no-deps ' +
+   567	                        shlex.quote('/wheels/' + path.name), timeout=60)
+   568	                    setup_artifact(current, dict(step='tool_deps', wheel=path.name,
+   569	                        stdout=result.stdout, stderr=result.stderr))
+   570	                    current['setup_calls'][-1]['retrying_lines'] += sum(
+   571	                        'Retrying' in line for line in (result.stdout + '\n' + result.stderr).splitlines())
+   572	                    return result
+   573	                entries, missing = close_tool_dependencies(
+   574	                    roots, wheels, identity['tags'], identity['environment'], sp, install_dependency)
+   575	                current['setup_calls'][-1]['dependencies'] = entries
+   576	                current['missing_tool_deps'] = missing
+   577	                if missing:
+   578	                    current.update(status='failed', reason='missing_tool_deps')
+   579	                    raise RuntimeError('missing_tool_deps: ' + ', '.join(missing))
+   580	            setup_step(current, 'tool_deps', tool_deps)
+   581	            setup_step(current, 'pip_check', lambda: docker.exec(
+   582	                container_id, 'python3 -m pip check', timeout=30), fatal=False)
+   583	            # Docker's hook ignores failure, but observe the real pip rc and both streams.
+   584	            setup_step(current, 'workspace_editable', lambda: docker.exec(container_id,
+   585	                'python3 -m pip install --no-index --find-links=/wheels --no-build-isolation --no-deps -e /workspace',
+   586	                timeout=280), fatal=False)
+   587	            current['workspace_editable_rc'] = current['setup_calls'][-1]['rc']
+   588	            current['editable_failed'] = current['workspace_editable_rc'] != 0
+   589	            current['setup_failed'] |= current['editable_failed']
+   590	            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+   591	            def extract_base():
+   592	                base = [p for name, p in selected.items() if name not in BASE_SKIP]
+   593	                if any(p.stat().st_size >= cs._LARGE_WHEEL_THRESHOLD_BYTES for p in base):
+   594	                    raise RuntimeError('large wheels present; workspace-import scan not emulated')
+   595	                inject_base(cs, base, sp, current)
+   596	            setup_step(current, 'base_tar_extraction', extract_base)
+   597	            record_distributions(docker, container_id, repo, current['setup_calls'][-1])
+   598	        def run_setup():
+   599	            docker.copy_to(container_id, setup, '/tmp/setup.py')
+   600	            # All observer files are scratch files, never workspace patch inputs.
+   601	            observer = docker.sandboxes[container_id]['tmp'] / 'setup_observer.py'
+   602	            observer.write_text(SETUP_OBSERVER)
+   603	            return docker.exec(container_id, setup_command(repo, fast_path), timeout=280)
+   604	        try:
+   605	            setup_step(current, 'setup.py', run_setup)
+   606	        finally:
+   607	            log = docker.sandboxes[container_id]['tmp'] / 'setup_subprocesses.json'
+   608	            calls = json.loads(log.read_text()) if log.exists() else []
+   609	            full_log = log.with_name('setup_subprocesses_full.jsonl')
+   610	            if full_log.exists():
+   611	                for line in full_log.read_text().splitlines():
+   612	                    setup_artifact(current, dict(step='setup.py', **json.loads(line)))
+   613	            current['setup_subprocesses'] = calls
+   614	            setup_row = next(c for c in reversed(current['setup_calls']) if c['step'] == 'setup.py')
+   615	            setup_row['subprocesses'] = calls
+   616	            setup_row['retrying_lines'] += sum(c['retrying_lines'] for c in calls)
+   617	            current['retrying_lines'] = sum(c['retrying_lines'] for c in current['setup_calls'])
+   618	            editable = [c for c in calls if isinstance(c['argv'], list) and '-e' in c['argv']]
+   619	            current['editable_rc'] = editable[0]['rc'] if editable else None
+   620	            current['editable_final_rc'] = editable[-1]['rc'] if editable else None
+   621	            current['editable_failed'] = any(c['rc'] != 0 for c in editable) or current.get('workspace_editable_rc', 0) != 0
+   622	            current['setup_failed'] |= current['editable_failed']
+   623	            record_distributions(docker, container_id, repo, setup_row)
+   624	            if calls:
+   625	                current['interpreter_version'] = calls[0]['interpreter_version']
+   626	            else:
+   627	                current.setdefault('interpreter_version', None)
+   628	        current['status'] = 'failed' if current['setup_failed'] else 'passed'
+   629	        return current
+   630	    install._timing_original = orig
+   740	        delay = args[0] if args else kwargs.get('delay')
+   741	
+   742	        class ObservedTimeout:
+   743	            async def __aenter__(self):
+   744	                self.current = state.get(None)
+   745	                if self.current is not None:
+   746	                    self.current.update(agent_timeout_seconds=delay, timeout_enter=time.perf_counter())
+   747	                return await cm.__aenter__()
+   748	
+   749	            async def __aexit__(self, *exc_info):
+   750	                exit_exc = exc_info[1]
+   751	                try:
+   752	                    return await cm.__aexit__(*exc_info)
+   753	                except BaseException as exc:
+   754	                    exit_exc = exc
+   755	                    raise
+   756	                finally:
+   757	                    if self.current is not None:
+   758	                        self.current.update(timeout_exit=time.perf_counter(),
+   759	                            agent_timeout_fired=bool(getattr(cm, 'expired', lambda: False)())
+   760	                                or isinstance(exit_exc, TimeoutError))
+   761	
+   762	        return ObservedTimeout()
+   763	
+   764	
+   765	def observe_sandbox(original, state, name):
+   766	    """Forward identical arguments/results/exceptions and time sandbox boundaries."""
+   767	    async def observed(*args, **kwargs):
+   768	        current = state.get(None)
+   769	        start = time.perf_counter()
+   770	        row = None
+   771	        if current is not None:
+   772	            if name == 'sandbox_start':
+   773	                current['sandbox_start_begin'] = start
+   774	            elif name == 'sandbox_exec' and current.get('timeout_exit') is not None:
+   775	                cmd = args[2] if len(args) > 2 else kwargs.get('command', kwargs.get('cmd', ''))
+   776	                row = dict(cmd=str(cmd)[:40], duration_s=None, rc=None)
+   777	                current.setdefault('finalization_exec', []).append(row)
+   778	        try:
+   779	            result = await original(*args, **kwargs)
+   780	            if row is not None:
+   781	                row['rc'] = getattr(result, 'exit_code', None)
+   782	            return result
+   783	        except BaseException as exc:
+   784	            if row is not None:
+   785	                row['exception'] = type(exc).__name__
+   786	            raise
+   787	        finally:
+   788	            end = time.perf_counter()
+   789	            if current is not None:
+   790	                if name in ('sandbox_start', 'sandbox_stop'):
+   791	                    current[name + '_end'] = end
+   792	                    current[name + '_duration'] = end - start
+   793	                if row is not None:
+   794	                    row['duration_s'] = end - start
+   795	    return observed
+   796	
+   797	
+   798	async def skip_verification(docker, config, task, snapshot_path, *, agent_patch='',
+   799	                            agent_error=None, trace=None, start_time=0.0, **kwargs):
+   800	    """Return the harness result type without starting Container B or running tests."""
+   801	    from swegemma.models import TaskResult
+   802	    result = TaskResult(instance_id=task.instance_id, repo=task.repo, resolved=False,
+   803	        agent_patch=agent_patch, test_output='', test_exit_code=0,
+   804	        duration_seconds=time.perf_counter() - start_time, error=agent_error, trace=trace)
+   805	    # swegemma 0.2.11 annotates this field int, with assignment validation disabled.
+   806	    result.test_exit_code = None
+   807	    return result
+   808	
+   809	
+   810	def phase1_fields(current, run_seconds, total, context, patch):
+   811	    def difference(end, start):
+   812	        return current[end] - current[start] if current.get(end) is not None and current.get(start) is not None else None
+   813	    phase1 = difference('sandbox_stop_end', 'sandbox_start_begin')
+   814	    source = 'sandbox_wrappers' if phase1 is not None else 'run_agent_sandbox'
+   815	    phase1 = run_seconds if phase1 is None else phase1
+   816	    submitted = bool(context.patch_submitted) if context is not None else None
+   817	    return dict(agent_timeout_seconds=current.get('agent_timeout_seconds'),
+   818	        agent_clock_seconds=difference('timeout_exit', 'timeout_enter'),
+   819	        agent_timeout_fired=current.get('agent_timeout_fired'),
+   820	        finalization_seconds=difference('sandbox_stop_end', 'timeout_exit'),
+   821	        finalization_exec=current.get('finalization_exec', []),
+   822	        teardown_seconds=current.get('sandbox_stop_duration'),
+   823	        phase1_wall_seconds=phase1, phase1_source=source,
+   824	        pre_agent_seconds=difference('timeout_enter', 'sandbox_start_begin'),
+   825	        post_phase1_seconds=total - phase1, patch_submitted=submitted,
+   826	        fallback_patch_used=(not submitted and bool(patch.strip())) if submitted is not None else None,
+   827	        verification_skipped=SKIP_VERIFICATION)
+   828	
+   829	
+   830	# Normal agent end states that swegemma reports through agent_error (agent_runner.py 0.2.11).
+   831	AGENT_OUTCOMES = (('timeout', re.compile(r'Agent exceeded session timeout\b')),
+   832	                  ('turns', re.compile(r'Agent exceeded (turns budget|maximum allowed LLM turns)\b')),
+   833	                  ('tool_calls', re.compile(r'Agent exceeded tool call budget\b')),
+   834	                  ('no_submit', re.compile(r'Agent completed execution without calling submit_patch\b')))
+   835	IMAGE_EMULATION_STEPS = ('venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'tool_sources',
+   836	                         'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check')
+   837	
+   838	
+   839	def agent_outcome(message):
+   840	    """Name of a known normal agent end state, else None (including for empty messages)."""
+   841	    text = (message or '').strip()
+   842	    return next((name for name, pattern in AGENT_OUTCOMES if pattern.match(text)), None)
+   843	
+   844	
+   845	def harness_error(result, agent_error):
+   846	    """Fail closed: any error that is not a known normal agent end state is a harness failure."""
+   847	    messages = [m for m in ((result.error if result is not None else None), agent_error) if m]
+   848	    return 'Harness task failure' if any(agent_outcome(m) is None for m in messages) else None
+   849	
+   850	
+   851	def platform_probe(host='pypi.org', port=443, timeout=10.0):
+   852	    """P2 (plan 006 addendum): docker presence, DNS, and one TCP connect. Sends no payload."""
+   853	    out = dict(docker_which=shutil.which('docker'), docker_sock=os.path.exists('/var/run/docker.sock'),
+   854	               host=host, port=port, dns=None, dns_seconds=None, tcp=None, tcp_seconds=None, tcp_errno=None)
+   855	    box = {}
+   856	    def resolve():
+   857	        try:
+   858	            box['addrs'] = sorted({ai[4][0] for ai in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)})
+   859	        except Exception as exc:
+   860	            box['error'] = type(exc).__name__
+   861	    start = time.perf_counter()
+   862	    worker = threading.Thread(target=resolve, daemon=True)
+   863	    worker.start(); worker.join(timeout)
+   864	    out['dns_seconds'] = round(time.perf_counter() - start, 3)
+   865	    if worker.is_alive():
+   866	        out['dns'], out['tcp'] = 'timeout', 'skipped'
+   867	        return out
+   868	    if 'error' in box or not box.get('addrs'):
+   869	        out['dns'], out['tcp'] = 'failed:' + box.get('error', 'empty'), 'skipped'
+   870	        return out
+   871	    out['dns'] = 'resolved'
+   872	    out['dns_addr_count'] = len(box['addrs'])
+   873	    start = time.perf_counter()
+   874	    try:
+   875	        sock = socket.create_connection((box['addrs'][0], port), timeout=timeout)
+   876	        sock.close()
+   877	        out['tcp'] = 'connected'
+   878	    except socket.timeout:
+   879	        out['tcp'] = 'timeout'  # blackhole: SYN dropped
+   880	    except ConnectionRefusedError:
+   881	        out['tcp'] = 'refused'
+   882	    except OSError as exc:
+   883	        out['tcp'], out['tcp_errno'] = 'unreachable', exc.errno
+   884	    out['tcp_seconds'] = round(time.perf_counter() - start, 3)
+   885	    return out
+   886	
+   887	def stock_setup_probe(config, iid, repo):
+   888	    """P1 (plan 006 addendum): time swegemma's STOCK subprocess setup sequence on this task's snapshot.
+   889	    Mirrors eval/tools/stock_subprocess_setup_timing.py (agent_runner.py ~l.553-584); the stock
+   890	    install_test_dependencies is used even though patch_subprocess_deps rebinds it. Never raises."""
+   891	    steps, error, mgr, sid = {}, None, None, None
+   892	    t0 = time.perf_counter()
+   893	    deadline = t0 + P1_DEADLINE_SECONDS
+   894	    # BaseException prevents stock helpers' broad Exception handlers from swallowing the deadline.
+   895	    class Deadline(BaseException):
+   896	        pass
+   897	    def expired(*args):
+   898	        raise Deadline()
+   899	    def remaining():
+   900	        left = deadline - time.perf_counter()
+   901	        if left <= 0:
+   902	            raise Deadline()
+   903	        return left
+   904	    old_handler, old_timer = None, None
+   905	    try:
+   906	        old_handler = signal.signal(signal.SIGALRM, expired)
+   907	        old_timer = signal.setitimer(signal.ITIMER_REAL, remaining())
+   908	        import swegemma.harness.container_setup as cs
+   909	        from swegemma.sandbox.subprocess import SubprocessManager
+   910	        install_deps = getattr(cs.install_test_dependencies, '_timing_original', cs.install_test_dependencies)
+   911	        mgr = SubprocessManager(timeout_seconds=120)
+   912	        original_exec = mgr.exec
+   913	        def bounded_exec(*args, **kwargs):
+   914	            kwargs['timeout'] = min(120, remaining())
+   915	            return original_exec(*args, **kwargs)
+   916	        mgr.exec = bounded_exec
+   917	        remaining()
+   918	        s = time.perf_counter(); sid = mgr.start(); steps['start_venv'] = round(time.perf_counter() - s, 3)
+   919	        for name, fn, args, kwargs in (
+   920	                ('setup_container_wheels', cs.setup_container_wheels, (mgr, sid, config), {}),
+   921	                ('extract_snapshot', cs.extract_snapshot, (mgr, sid, Path(config.snapshots_dir) / f'{iid}.tgz'), {}),
+   922	                ('setup_git_exclude', cs.setup_git_exclude, (mgr, sid), {}),
+   923	                ('install_editable_package', cs.install_editable_package, (mgr, sid), {}),
+   924	                ('install_test_dependencies', install_deps, (mgr, sid, repo), dict(config=config)),
+   925	                ('setup_workspace_test_config', cs.setup_workspace_test_config, (mgr, sid), dict(repo=repo)),
+   926	                ('setup_baseline_commit', cs.setup_baseline_commit, (mgr, sid, 'baseline'), {})):
+   927	            remaining()
+   928	            s = time.perf_counter()
+   929	            try:
+   930	                fn(*args, **kwargs)
+   931	                remaining()
+   932	            finally:
+   933	                steps[name] = round(time.perf_counter() - s, 3)
+   934	    except Deadline:
+   935	        error = 'deadline'
+   936	    except Exception as exc:
+   937	        error = type(exc).__name__
+   938	    finally:
+   939	        try:
+   940	            if old_timer is not None:
+   941	                # Cleanup always gets a bounded chance, even after the overall deadline.
+   942	                signal.setitimer(signal.ITIMER_REAL, max(.001, min(30, deadline - time.perf_counter()))
+   943	                                 if time.perf_counter() < deadline else 30)
+   944	            if mgr is not None:
+   945	                mgr.cleanup_all()
+   946	        except Deadline:
+   947	            error = 'deadline'
+   948	        except Exception as exc:
+   949	            error = error or 'cleanup ' + type(exc).__name__
+   950	        finally:
+   951	            if time.perf_counter() >= deadline:
+   952	                error = 'deadline'
+   953	            if old_timer is not None:
+   954	                signal.setitimer(signal.ITIMER_REAL, 0)
+   955	            if old_handler is not None:
+   956	                signal.signal(signal.SIGALRM, old_handler)
+   957	            if old_timer is not None:
+   958	                if old_timer[0]:
+   959	                    signal.setitimer(signal.ITIMER_REAL,
+   960	                                     max(.001, old_timer[0] - (time.perf_counter() - t0)), old_timer[1])
+   961	    return dict(total_s=round(time.perf_counter() - t0, 3), steps_s=steps, error=error)
+   962	
+   963	def llm_calls(trace, limit=200):
+   964	    """P3 (plan 006 addendum): one row per trace entry carrying usage (ADK attaches usage once per
+   965	    model event), with the gap since the previous entry of any type (approx. model latency)."""
+   966	    rows, prev = [], None
+   967	    entries = trace.entries if trace else []
+   968	    first = entries[0].timestamp if entries else None
+   969	    for e in entries:
+   970	        if e.usage:
+   971	            rows.append(dict(t=round(e.timestamp - first, 3), gap_s=round(e.timestamp - prev, 3) if prev is not None else None,
+   972	                             event_type=e.event_type,
+   973	                             completion_tokens=e.usage.get('completion_tokens'), prompt_tokens=e.usage.get('prompt_tokens')))
+   974	        prev = e.timestamp
+   975	    return rows[:limit]
+   976	
+   977	def image_emulation_seconds(setup_calls):
+   978	    """Seconds spent emulating Dockerfile.public image layers the scorer image already has."""
+   979	    return sum(c.get('duration_s') or 0 for c in setup_calls if c.get('step') in IMAGE_EMULATION_STEPS)
+   980	
+   981	def distribution(values):
+   982	    values = sorted(values)
+   983	    def percentile(q):
+   984	        x = (len(values) - 1) * q
+   985	        lo = int(x)
+   986	        return values[lo] + (values[min(lo + 1, len(values)-1)] - values[lo]) * (x-lo)
+   987	    return dict(mean=sum(values)/len(values), p50=percentile(.5), p90=percentile(.9), max=max(values)) if values else dict.fromkeys(('mean', 'p50', 'p90', 'max'))
+   988	
+   989	def extract_bundle(encoded, destination):
+   990	    payload = base64.b64decode(encoded, validate=True)
+   991	    destination.mkdir(parents=True, exist_ok=True)
+   992	    with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as tf:
+   993	        tf.extractall(destination, filter='data')
+   994	    return hashlib.sha256(payload).hexdigest(), hashlib.sha256((destination / 'agent.yaml').read_bytes()).hexdigest()
+   995	
+   996	def append(stream, row):
+   997	    stream.write(json.dumps(row, allow_nan=False) + '\n')
+   998	    stream.flush(); os.fsync(stream.fileno())
+   999	
+  1000	async def evaluate(config, journal, started, caps, totals):
+  1001	    from contextvars import ContextVar
+  1002	    from swegemma.evaluate import Evaluator
+  1003	    from swegemma.models import load_tasks
+  1004	    from swegemma.harness.verification import _is_protected_test_or_config_path
+  1005	    import swegemma.evaluate as ev
+  1006	    import swegemma.harness.verification as vf
+  1007	    import swegemma.harness.agent_runner as ar
+  1008	    state = ContextVar('timing')
+  1009	    original_asyncio = ar.asyncio
+  1010	    original_sandbox = {name: getattr(ar, name) for name in ('sandbox_start', 'sandbox_stop', 'sandbox_exec')}
+  1011	    ar.asyncio = AsyncioTimingProxy(original_asyncio, state)
+  1012	    for name, original in original_sandbox.items():
+  1013	        setattr(ar, name, observe_sandbox(original, state, name))
+  1014	    original_verify, original_strip = ev.verify_task, vf.strip_protected_files_from_patch
+  1015	    vf.strip_protected_files_from_patch = observe_patch_strip(original_strip, state)
+  1016	    async def verify(*args, **kwargs):
+  1017	        start = time.perf_counter()
+  1018	        try:
+  1019	            return await (skip_verification if SKIP_VERIFICATION else original_verify)(*args, **kwargs)
+  1020	        finally:
+  1021	            state.get()['verification'] = time.perf_counter() - start
+  1022	    ev.verify_task = verify
+  1023	    class TimingEvaluator(Evaluator):
+  1024	        agent_seconds, patch, trace, agent_error = 0.0, '', None, ''
+  1025	        def _hydrate_task_from_secret(self, task):
+  1026	            return task
+  1027	        def _get_secret_bundle_data(self):
+  1028	            return {}, {}, None
+  1029	        async def _run_agent_sandbox(self, task, *args, **kwargs):
+  1030	            safe = dataclasses.replace(task, patch='', test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=())
+  1031	            self.context = kwargs['context']
+  1032	            self.context.task = safe
+  1033	            start = time.perf_counter()
+  1034	            state.get()['agent_active'] = True
+  1035	            try:
+  1036	                self.patch, self.agent_error, self.trace = await super()._run_agent_sandbox(safe, *args, **kwargs)
+  1037	                return self.patch, self.agent_error, self.trace
+  1038	            finally:
+  1039	                self.agent_seconds = time.perf_counter() - start
+  1040	                state.get()['agent_active'] = False
+  1041	    try:
+  1042	        inventory = {t.instance_id: t for t in load_tasks(config.tasks_path)}
+  1043	        if len(set(TASK_IDS)) != len(TASK_IDS) or set(TASK_IDS) - inventory.keys():
+  1044	            raise ValueError('Duplicate or missing task IDs')
+  1045	        patch_subprocess_deps(DATA, state)
+  1046	        for iid in TASK_IDS:
+  1047	            if should_stop(time.monotonic()-started + (P1_DEADLINE_SECONDS + 30 if STOCK_PROBE else 0), caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
+  1048	                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+  1049	                break
+  1050	            task = dataclasses.replace(inventory[iid], patch='')
+  1051	            stock = stock_setup_probe(config, iid, task.repo) if STOCK_PROBE else None
+  1052	            if STOCK_PROBE and should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max(totals, default=0), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS))):
+  1053	                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+  1054	                break
+  1055	            times = dict(instance_id=task.instance_id, verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+  1056	            state.set(times)
+  1057	            evaluator, result, error = TimingEvaluator(config), None, None
+  1058	            original_start = evaluator.docker.start
+  1059	            evaluator.docker.start = lambda: setup_step(times, 'venv', original_start)
+  1060	            start = time.perf_counter()
+  1061	            try:
+  1062	                result = await evaluator.evaluate_task(task)
+  1063	                error = harness_error(result, evaluator.agent_error)
+  1064	            except Exception as exc:
+  1065	                error = 'Evaluation exception (' + type(exc).__name__ + ')'
+  1066	            finally:
+  1067	                try:
+  1068	                    evaluator.docker.cleanup_all()
+  1069	                except Exception as exc:
+  1070	                    error = 'Cleanup exception (' + type(exc).__name__ + ')'
+  1071	            total = time.perf_counter() - start
+  1072	            totals.append(total)
+  1073	            patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch) or ''
+  1074	            try:
+  1075	                counts, tokens, seconds = trace_counts(evaluator.trace)
+  1076	            except Exception as exc:  # never lose the run over trace parsing
+  1077	                counts, tokens, seconds = {}, dict(prompt_tokens=None, completion_tokens=None), {}
+  1078	                error = (error or '') + ' trace parse (' + type(exc).__name__ + ')'
+  1079	            code = result.test_exit_code if result else None
+  1080	            raw_error = (result.error or '') if result else error or ''
+  1081	            phase = phase1_fields(times, evaluator.agent_seconds, total,
+  1082	                                  getattr(evaluator, 'context', None),
+  1083	                                  result.agent_patch if result else evaluator.patch)
+  1084	            phase.update(agent_outcome=agent_outcome(evaluator.agent_error or raw_error),
+  1085	                         image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
+  1086	            try:
+  1087	              append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+  1088	                **phase,
+  1089	                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+  1090	                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+  1091	                editable_failed=times.get('editable_failed', False),
+  1092	                setup_output_artifact=times.get('setup_output_artifact'),
+  1093	                missing_tool_deps=times.get('missing_tool_deps', []),
+  1094	                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+  1095	                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
+  1096	                llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
+  1097	                tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
+  1098	                completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
+  1099	                stock_setup=stock, llm_calls=llm_calls(evaluator.trace),
+  1100	                **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+  1101	                timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+  1102	            except Exception as exc:
+  1103	                append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+  1104	                                     **phase,
+  1105	                                     wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+  1106	                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+  1107	                editable_failed=times.get('editable_failed', False),
+  1108	                setup_output_artifact=times.get('setup_output_artifact'),
+  1109	                missing_tool_deps=times.get('missing_tool_deps', []),
+  1110	                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+  1111	                stock_setup=stock,
+  1112	                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
+  1113	            # Raw artifacts are diagnostics written after the row; never lose the remaining tasks over them.
+  1114	            try:
+  1115	                raw = WORK / 'runs' / iid
+  1116	                raw.mkdir(parents=True, exist_ok=True)
+  1117	                (raw / 'agent.patch').write_text(patch)
+  1118	                (raw / 'trace.json').write_text(json.dumps(evaluator.trace.to_dict(format='legacy') if evaluator.trace else {}, default=str))
+  1119	                (raw / 'result.json').write_text(json.dumps(result.model_dump(exclude={'trace'}) if result else {'error': error}, default=str))
+  1120	            except Exception as exc:
+  1121	                append(journal, {'_artifact_error': dict(instance_id=iid, type=type(exc).__name__)})
+  1122	    finally:
+  1123	        ev.verify_task, vf.strip_protected_files_from_patch = original_verify, original_strip
+  1124	        ar.asyncio = original_asyncio
+  1125	        for name, original in original_sandbox.items():
+  1126	            setattr(ar, name, original)
+  1127	
+
+exec
+/bin/bash -lc "rg --files -g '"'!data/**'"' -g '"'!ops/decisions/**'"' -g '*swegemma*' -g '*verif*' -g '*timing*' -g '*stat*' && git diff --no-index bundles/31b/v006 bundles/31b/v009; ls -l dist/31b-v009.zip; nl -ba bundles/31b/v009/MANIFEST.md; nl -ba bundles/31b/v009/eval_config.yaml; cat eval/plans/007-smoke-ids.txt eval/plans/007-arm1-ids.txt" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+bin/status
+ops/jobs/review-eval-runner-fix.status
+ops/jobs/memguard-fix5-livetest.status
+ops/jobs/kernel-setup-accept6.status
+ops/jobs/review-memguard-fix6d-light.status
+ops/jobs/timing-31b-v006-wait-light.unit
+ops/jobs/gold-diag2-wait.status
+ops/jobs/timing-31b-v005-wait-light.status
+ops/jobs/codex-memguard-fix4.status
+ops/jobs/timing-31b-v003-wait-light.log
+ops/jobs/timing-31b-v008-wait-light.status
+ops/jobs/e4b-v001-timing-v5-wait-light.unit
+ops/jobs/e4b-timing-wait.status
+ops/jobs/timing-31b-v005-wait-light.unit
+ops/jobs/timing-31b-wait-light.status
+ops/jobs/e4b-timing-wait.cmd
+ops/jobs/lb-e4b-v002-wait-light.status
+ops/jobs/main-tests-stack.status
+ops/jobs/dl-data.status
+ops/jobs/timing-31b-v006-wait-light.cmd
+ops/jobs/review-memguard-fix2-light.status
+ops/jobs/kernel-setup-accept5.status
+ops/jobs/timing-31b-v005-wait-light.cmd
+ops/jobs/kernel-setup-accept.status
+ops/jobs/codex-pack-harden.status
+ops/jobs/review-memguard.status
+ops/jobs/kernel-setup-accept7.status
+ops/jobs/timing-31b-v005-wait-light.log
+ops/jobs/ask-shadowing.status
+ops/jobs/review-p5cd-fix-light.status
+ops/jobs/e4b-timing-wait2.status
+ops/jobs/codex-pack.status
+ops/jobs/gold-smoke-wait7.status
+ops/jobs/review-submit-guard6-light.status
+ops/jobs/e4b-timing-wait.log
+ops/jobs/setup-nostub-check.status
+ops/jobs/review-kernel-setup4-light.status
+ops/jobs/codex-memguard-fix3.status
+ops/jobs/codex-memguard-fix5b.status
+ops/jobs/review-kernel-setup-fix5c-light.status
+ops/jobs/kernel-setup-accept-r4.status
+ops/jobs/timing-31b-wait-light.cmd
+ops/jobs/hosttests-main-dockerorder.status
+ops/jobs/review-memguard-fix6c-light.status
+ops/jobs/review-memguard-fix3-light.status
+ops/jobs/e4b-v001-timing-v5-wait-light.cmd
+ops/jobs/review-submit-guard3-light.status
+ops/jobs/review-kernel-setup-fix5b-light.status
+ops/jobs/kernel-setup-accept4.status
+ops/jobs/review-submit-guard5-light.status
+ops/jobs/codex-kernel-setup-fix.status
+ops/jobs/timing-31b-v007-wait-light.unit
+ops/jobs/review-p5d-light.status
+ops/jobs/timing-31b-v006-wait-light.status
+ops/jobs/gold-smoke-wait.status
+ops/jobs/review-p5e-light.status
+ops/jobs/e4b-v001-timing-v5-wait-light.status
+ops/jobs/memguard.status
+ops/jobs/e4b-v001-timing-v5-wait-light.log
+ops/jobs/codex-eval-runner.status
+ops/jobs/codex-review-v007-light.status
+ops/jobs/hosttests-fix6-dockerorder.status
+ops/jobs/codex-review-v008-light.status
+ops/jobs/pipfb-light.status
+ops/jobs/timing-31b-v003-wait-light.unit
+ops/jobs/review-submit-guard4-light.status
+ops/jobs/review-job-patch2-light.status
+ops/jobs/timing-31b-wait-light.log
+ops/jobs/gold-smoke-wait2.status
+ops/jobs/review-memguard-fix4-light.status
+ops/jobs/codex-review-v000.status
+ops/jobs/review-p5cd-fix3-light.status
+ops/jobs/timing-31b-v007-wait-light.cmd
+ops/jobs/codex-kernel-setup-check.status
+ops/jobs/gold-diag3-wait.status
+ops/jobs/gold-smoke-wait5.status
+ops/jobs/codex-probes-fix7.status
+ops/jobs/review-submit-guard-light.status
+ops/jobs/gold-smoke-wait6.status
+ops/jobs/kernel-setup-accept3.status
+ops/jobs/setup-nostub-check4.status
+ops/jobs/ask-setup-210s.status
+ops/jobs/timing-31b-v008-wait-light.cmd
+ops/jobs/codex-review-v004-light.status
+ops/jobs/e4b-timing-wait2.cmd
+ops/jobs/review-submit-guard2-light.status
+ops/jobs/codex-timing-kernel.cmd
+ops/jobs/codex-memguard-fix2.status
+ops/jobs/codex-sandbox-limits.status
+ops/jobs/review-memguard-fix5-light.status
+ops/jobs/gold-diag4-wait.status
+ops/jobs/gold-diag-wait.status
+ops/jobs/timing-31b-v008-wait-light.unit
+ops/jobs/e4b-v001-timing-wait-light.unit
+ops/jobs/review-eval-runner-fix2.status
+ops/jobs/review-eval-runner-fix3.status
+ops/jobs/review-sandbox-limits3-light.status
+ops/jobs/e4b-v001-timing-wait-light.status
+ops/jobs/codex-timing-kernel.status
+ops/jobs/review-e4b-v002-light.status
+ops/jobs/review-p5c-light.status
+ops/jobs/pipfb2-light.status
+ops/jobs/timing-31b-v007-wait-light.status
+ops/jobs/codex-kernel-setup-fix5.status
+ops/jobs/memguard-light.status
+ops/jobs/timing-31b-v006-wait-light.log
+ops/jobs/review-memguard-fix-light.status
+ops/jobs/codex-review-armF-compare-light.status
+ops/jobs/codex-memguard-fix.status
+ops/jobs/codex-kernel-setup-fix4.status
+ops/jobs/codex-review-armF-compare2-light.status
+ops/jobs/review-kernel-probes-gate-light.status
+ops/jobs/codex-gold-kernel.status
+ops/jobs/gold-smoke-wait8.status
+ops/jobs/review-memguard-fix6-light.status
+ops/jobs/memguard-fix4-livetest.status
+ops/jobs/memguard-fix3-livetest.status
+ops/jobs/review-router.status
+ops/jobs/gold-rerun-b5.status
+ops/jobs/memguard-fix6-livetest.status
+ops/jobs/review-plan005-fix-light.status
+ops/jobs/e4b-timing-wait2.log
+ops/jobs/review-p5cd-fix2-light.status
+ops/jobs/review-docker-order-light.status
+ops/jobs/timing-31b-v003-wait-light.cmd
+ops/jobs/e4b-timing-wait3.log
+ops/jobs/codex-sandbox-limits2.status
+ops/jobs/codex-sandbox-limits3.status
+ops/jobs/codex-memguard-fix6.status
+ops/jobs/submit-window-31b-light.status
+ops/jobs/review-kernel-probes-light.status
+ops/jobs/memguard-fix6-maintests.status
+ops/jobs/review-kernel-gate-finfix-light.status
+ops/jobs/timing-31b-v007-wait-light.log
+ops/jobs/codex-review-plan007-light.status
+ops/jobs/addb-feasibility-ask-light.status
+ops/jobs/review-31b-v002-light.status
+ops/jobs/timing-31b-v003-wait-light.status
+ops/jobs/setup-nostub-check2.status
+ops/jobs/review-eval-runner.status
+ops/jobs/e4b-v001-timing-wait-light.cmd
+ops/jobs/review-memguard-fix6e-light.status
+ops/jobs/codex-memguard-fix5.status
+ops/jobs/review-kernel-setup3-light.status
+ops/jobs/gold-smoke-wait3.status
+ops/jobs/review-sandbox-limits.status
+ops/jobs/codex-eval-runner-fix.status
+ops/jobs/gold-wait.status
+ops/jobs/memguard-test.status
+ops/jobs/e4b-timing-wait3.status
+ops/jobs/sandbox-limits3-hosttest.status
+ops/jobs/timing-31b-wait-light.unit
+ops/jobs/codex-timing-kernel.log
+ops/jobs/review-plan005-light.status
+ops/jobs/review-e4b-v001.status
+ops/jobs/review-v000.status
+ops/jobs/review-kernel-setup-fix5-light.status
+ops/jobs/review-probes-fix7-light.status
+ops/jobs/gold-null.status
+ops/jobs/codex-kernel-setup-fix3.status
+ops/jobs/review-memguard-fix6b-light.status
+ops/jobs/memguard-fix-livetest.status
+ops/jobs/ask-item4-light.status
+ops/jobs/gold-full-wait.status
+ops/jobs/e4b-timing-wait3.cmd
+ops/jobs/review-job-fallback.status
+ops/jobs/kernel-setup-accept8.status
+ops/jobs/timing-31b-v008-wait-light.log
+ops/jobs/e4b-v001-timing-wait-light.log
+ops/jobs/setup-nostub-check3.status
+ops/jobs/gold-smoke-wait4.status
+ops/jobs/memguard-fix6-maintests2.status
+ops/jobs/codex-sandbox-env-docker-order.status
+ops/jobs/gold-local.status
+ops/scout/2026-11-05-timing-caps.md
+ops/reports/003-e4b-v000-timing-gate-fail.md
+ops/reports/010-31b-timing-g1.md
+ops/decisions/022-003-e4b-v000-timing-gate-fail.md
+ops/decisions/055-010-31b-timing-g1.md
+ops/status
+eval/tool_timing.py
+eval/plans/001-timing-ids.txt
+eval/tools/stock_subprocess_setup_timing.py
+eval/tests/test_agent_timing.py
+eval/kaggle/timing_summary.py
+eval/kaggle/timing_push.sh
+eval/kaggle/agent_timing.py
+ops/codex/build-timing-kernel.spec
+ops/codex/build-timing-kernel.md
+ops/codex/build-timing-kernel.sh
+ops/codex/build-timing-kernel.log
+results/kaggle_timing_31b_v007.json
+results/kaggle_timing_e4b_v001.NOTE.md
+results/kaggle_timing_31b_v003.json
+results/kaggle_timing_e4b_v000_setup.json
+results/kaggle_timing_31b_v008.json
+results/kaggle_timing_31b_v001.json
+results/kaggle_timing_31b_v006.json
+results/kaggle_timing_31b_v005.json
+results/kaggle_timing_e4b_v001.json
+results/kaggle_timing_e4b_v000.json
+results/kaggle_timing_e4b_v000_setup_breakdown.json
+diff --git a/bundles/31b/v006/MANIFEST.md b/bundles/31b/v009/MANIFEST.md
+index 3ce7b3e..a74660e 100644
+--- a/bundles/31b/v006/MANIFEST.md
++++ b/bundles/31b/v009/MANIFEST.md
+@@ -1,9 +1,9 @@
+-# 31b-v006-p5d (SCREEN bundle ONLY for plan 005 Addendum D, cap 4.0; conditional on arm C, dec 058 item 4). NOT a submission candidate.
+-- Name: 31b-v006-p5d (directory bundles/31b/v006, file dist/31b-v006.zip).
+-- parent: 31b-v005-p5c (dist/31b-v005.zip sha256=e8fbcfdc5800d927e6f6e7522b98f252766c6f85a72dcf67adbcc3abc00344f3) = arm C.
+-- built from repo git SHA: see the commit that adds this file.
+-- changes (EXACTLY one file): configs/sampling.yaml thinking_config.thinking_budget 1024 -> 0 (=> enable_thinking=false per
+-  adk_submission/resolvers/generation.py:407). Prompt, caps, analyzer unchanged.
++# 31b-v009-p7a1 (PLAN 007 ARM-1 quality-eval bundle, dec 062 item 4). NOT a submission candidate.
++- Name: 31b-v009-p7a1 (directory bundles/31b/v009, file dist/31b-v009.zip).
++- parent: 31b-v006-p5d (dist/31b-v006.zip sha256=b7b2eb3d139629a5893647546348c1b436c1ff94c786cbdf4e6ec1be12f660a0) = plan 005 arm D (thinking off).
++- changes (EXACTLY one file besides MANIFEST): eval_config.yaml max_time_minutes 4.0 -> 3.5 (= 31b-v002 cap; FINALS RULE max if v002 scores) + header comment.
++- unchanged: prompts (plan-005 arm-B prompt; no repo-named hint, grep -i fastapi = 0), root temperature 0.2, root thinking_budget 0,
++  analyzer sub-agent (temperature 0.2, own thinking_budget 4096), max_output_tokens 8192 x2, 40 calls / 50 turns.
+ - status: UNVALIDATED.
+-- packed 2026-11-06T02:23Z with bin/pack --zip (PASS, 9091 unpacked bytes, zip 5350 bytes). zip sha256: b7b2eb3d139629a5893647546348c1b436c1ff94c786cbdf4e6ec1be12f660a0
+-zip sha256: b7b2eb3d139629a5893647546348c1b436c1ff94c786cbdf4e6ec1be12f660a0
++zip sha256: d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d
++- packed 2026-11-06T06:28Z with bin/pack --zip (PASS, 9067 unpacked bytes, zip 5365 bytes). zip sha256: d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d
+diff --git a/bundles/31b/v006/eval_config.yaml b/bundles/31b/v009/eval_config.yaml
+index fd6952c..a8bcbad 100644
+--- a/bundles/31b/v006/eval_config.yaml
++++ b/bundles/31b/v009/eval_config.yaml
+@@ -1,8 +1,7 @@
+-# v001: TIMING bundle for plan 006 (dec 034 item 2): cap 4.0 min. Quota run only, NOT a submission candidate as-is.
+-# Under H3 (S 221.6 s emulated setup) this cap would NOT fit: (240+7+221.6)/60*125+30 = 1006 min > 660.
+-# Under H1/H2 (stock path S <= 30 s): (240+7+30)/60*125+30 = 607 min <= 660. Any submission needs G1 + cap <= 3.5 (dec 034 item 3).
++# v009: PLAN 007 ARM-1 bundle (dec 062 item 4) = 31b-v006-p5d with ONLY max_time_minutes 4.0 -> 3.5 (+ this comment). Quality eval bundle; NOT a submission candidate.
++# Under H1/H2 (stock path S <= 30 s): (210+7+30)/60*125+30 = 544.6 min <= 660. Under H3 (S 221.6 s): 943.8 > 660 (FINALS RULE: cap 3.5 only if 31b-v002 SCORES).
+ evaluation:
+   timeout_seconds: 60
+   max_tool_calls: 40
+-  max_time_minutes: 4.0
++  max_time_minutes: 3.5
+   max_turns: 50
+-rw------- 1 ubuntu ubuntu 5365 Nov  6 06:28 dist/31b-v009.zip
+     1	# 31b-v009-p7a1 (PLAN 007 ARM-1 quality-eval bundle, dec 062 item 4). NOT a submission candidate.
+     2	- Name: 31b-v009-p7a1 (directory bundles/31b/v009, file dist/31b-v009.zip).
+     3	- parent: 31b-v006-p5d (dist/31b-v006.zip sha256=b7b2eb3d139629a5893647546348c1b436c1ff94c786cbdf4e6ec1be12f660a0) = plan 005 arm D (thinking off).
+     4	- changes (EXACTLY one file besides MANIFEST): eval_config.yaml max_time_minutes 4.0 -> 3.5 (= 31b-v002 cap; FINALS RULE max if v002 scores) + header comment.
+     5	- unchanged: prompts (plan-005 arm-B prompt; no repo-named hint, grep -i fastapi = 0), root temperature 0.2, root thinking_budget 0,
+     6	  analyzer sub-agent (temperature 0.2, own thinking_budget 4096), max_output_tokens 8192 x2, 40 calls / 50 turns.
+     7	- status: UNVALIDATED.
+     8	zip sha256: d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d
+     9	- packed 2026-11-06T06:28Z with bin/pack --zip (PASS, 9067 unpacked bytes, zip 5365 bytes). zip sha256: d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d
+     1	# v009: PLAN 007 ARM-1 bundle (dec 062 item 4) = 31b-v006-p5d with ONLY max_time_minutes 4.0 -> 3.5 (+ this comment). Quality eval bundle; NOT a submission candidate.
+     2	# Under H1/H2 (stock path S <= 30 s): (210+7+30)/60*125+30 = 544.6 min <= 660. Under H3 (S 221.6 s): 943.8 > 660 (FINALS RULE: cap 3.5 only if 31b-v002 SCORES).
+     3	evaluation:
+     4	  timeout_seconds: 60
+     5	  max_tool_calls: 40
+     6	  max_time_minutes: 3.5
+     7	  max_turns: 50
+# plan 007 arm-1 smoke: first 3 ids of eval/plans/007-arm1-ids.txt
+rich_3063
+rich_3953
+fastapi_14372
+# plan 007 arm-1 order: 33 dev ids (eval/splits/dev.txt) sorted by sha256("plan007:"+id); pre-registered; smoke = first 3 (2 rich + 1 fastapi)
+rich_3063
+rich_3953
+fastapi_14372
+fastapi_14258
+rich_3180
+rich_3454
+rich_3521
+rich_3480
+rich_2943
+rich_3468
+rich_3938
+rich_3471
+rich_3067
+fastapi_14851
+rich_3470
+rich_3930
+rich_3061
+rich_3043
+fastapi_14986
+rich_3894
+rich_3675
+rich_2725
+rich_3006
+rich_3944
+rich_3535
+rich_3518
+rich_3935
+fastapi_15800
+rich_3905
+rich_3052
+rich_3718
+fastapi_15661
+rich_3506
+

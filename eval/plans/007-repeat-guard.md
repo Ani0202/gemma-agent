@@ -1,4 +1,4 @@
-# Plan 007 appendix: repeat-guard design note (dec 062 item 3). CPU-only design. NOT built, NOT packed. Written 2026-11-06T07:25Z.
+# Plan 007 appendix: repeat-guard design note (dec 062 item 3). CPU-only design. NOT built, NOT packed. Written 2026-11-06T06:32Z.
 
 ## Problem (evidence, counts only)
 - Arm D (31b-v006, thinking off): 22 cmd_error_shell in one task, 21 of them byte-identical back-to-back repeats
