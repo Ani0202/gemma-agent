@@ -16,8 +16,28 @@ LOOP_MIN = 5
 def main(out):
     ids = [l.strip() for l in open("eval/plans/004-gpu-retime-ids.txt") if l.strip() and not l.startswith("#")]
     assert len(ids) == 8, ids
-    tim = {k: {t["instance_id"]: t for t in json.load(open(f"results/kaggle_timing_31b_{v}.json"))["tasks"]} for k, v in VER.items()}
-    tte = {k: {t["instance_id"]: t for t in json.load(open(f"results/trace_tool_errors_31b_{v}.json"))["tasks"]} for k, v in VER.items()}
+    assert len(set(ids)) == 8, f"duplicate planned ids: {ids}"
+    problems = []  # integrity failures (codex review 20261106T053515 BLOCKING 1-2): any entry -> verdict INVALID
+    raw = {}
+    for k, v in VER.items():
+        for src in ("kaggle_timing", "trace_tool_errors"):
+            lst = [t["instance_id"] for t in json.load(open(f"results/{src}_31b_{v}.json"))["tasks"]]
+            dup = sorted({i for i in lst if lst.count(i) > 1})
+            if dup: problems.append(f"{src}_31b_{v}: duplicate ids {dup}")
+            if set(lst) != set(ids):
+                problems.append(f"{src}_31b_{v}: ids != planned 8 (missing {sorted(set(ids) - set(lst))}, extra {sorted(set(lst) - set(ids))})")
+            raw[(src, k)] = json.load(open(f"results/{src}_31b_{v}.json"))["tasks"]
+    tim = {k: {t["instance_id"]: t for t in raw[("kaggle_timing", k)]} for k in VER}
+    tte = {k: {t["instance_id"]: t for t in raw[("trace_tool_errors", k)]} for k in VER}
+    for k in VER:
+        for i in ids:
+            pb = tte[k].get(i, {}).get("patch_bytes")
+            if not (isinstance(pb, int) and not isinstance(pb, bool) and pb >= 0):
+                problems.append(f"arm {k} {i}: patch_bytes={pb!r} not a nonnegative int (missing/unknown patch)")
+    if problems:
+        res = {"_schema": "plan005_arm_compare_v1", "plan": "eval/plans/005.md Addendum F", "generator": "eval/plan005_armF_compare.py",
+               "verdict_armF": "INVALID", "integrity_problems": problems}
+        json.dump(res, open(out, "w"), indent=1); print(json.dumps(res, indent=1)); sys.exit(3)
     rows = []
     for i in ids:
         r = {"id": i}
@@ -58,6 +78,7 @@ def main(out):
     tb_ids = set(tbt) if isinstance(tbt, dict) else {v["instance_id"] for v in tbt}
     assert tb_ids == set(ids), f"thinking-bound ids != planned 8 ids: {sorted(tb_ids ^ set(ids))}"
     addon = all(v.get("has_summary") and v.get("root_usage_turns", 0) >= 1 for v in (tbt.values() if isinstance(tbt, dict) else tbt))
+    res["integrity_problems"] = []
     res["gates_armF"] = gate; res["V_gates"] = gate["status"] == "PASS"; res["V_addon"] = addon
     V = res["V_gates"] and addon
     if not V: verdict = "INVALID"
