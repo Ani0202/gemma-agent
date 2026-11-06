@@ -1,31 +1,154 @@
 #!/usr/bin/env bash
-# Guarded Kaggle submission. Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>"
-# Refuses unless: a Director decision contains "SUBMIT: AUTHORIZE sha256=<this zip's sha256> track=<track>",
-# that authorization is unused, and no submission was made yet today (UTC).
+# Guarded Kaggle submission (code competition: submissions are a notebook version's /kaggle/working/submission.zip).
+# Usage: bin/kaggle-submit <submission.zip> <31b|e4b> "<message>" <kernel_version>
+# Refuses unless ALL hold (fail closed on any doubt; dec 041-048, reviews ops/codex/review-20261105T2316*-2338*.md):
+#  - a Director decision line, exactly "SUBMIT: AUTHORIZE sha256=<sha of the zip> track=<track>" optionally followed by
+#    " bundle=<this zip path>", exists in ops/decisions/*.md;
+#  - the local ledger ops/submissions.jsonl (every line parsed as JSON; any unreadable/malformed state refuses) has no
+#    record with this sha256 and none for today (UTC);
+#  - no ops/submissions.pending exists (left by any attempt without a "Submission ref"; a human removes it only after
+#    reconciling with `kaggle competitions submissions`);
+#  - the OUTPUT submission.zip of kernel version <kernel_version> of $SUBMIT_KERNEL is byte-identical to the zip and has
+#    exactly one regular root member named agent.yaml; size < 3 GiB;
+#  - defence in depth: Kaggle's own submission list shows nothing dated today and nothing carrying sha:<12 hex>.
+# One exclusive lock is held from the first check to the ledger write. Success is recorded only on "Submission ref: N".
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source ./config.env
-zip=$1; track=$2; msg=${3:-"$track $(basename "$zip")"}
-[ -f "$zip" ] || { echo "no such zip: $zip"; exit 1; }
+[ $# -eq 4 ] || { echo "usage: bin/kaggle-submit <zip> <31b|e4b> <message> <kernel_version>"; exit 1; }
+zip=$1; track=$2; msg=$3; kver=$4
+[ -f "$zip" ] && [ ! -L "$zip" ] || { echo "no such regular file: $zip"; exit 1; }
 [[ "$track" =~ ^(31b|e4b)$ ]] || { echo "track must be 31b or e4b"; exit 1; }
+[ "${SUBMIT_MODE:-}" = kernel ] || { echo "REFUSED: SUBMIT_MODE must be kernel (file upload is not accepted by this competition)"; exit 3; }
+[[ "${SUBMIT_KERNEL:-}" =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]] || { echo "REFUSED: SUBMIT_KERNEL must be owner/slug"; exit 3; }
+[[ "$kver" =~ ^[1-9][0-9]*$ ]] || { echo "REFUSED: kernel version must be a positive integer"; exit 3; }
+exec 9>>ops/.submit.lock
+flock -n 9 || { echo "REFUSED: another bin/kaggle-submit is running"; exit 3; }
+[ ! -e ops/submissions.pending ] || { echo "REFUSED: ops/submissions.pending exists (earlier attempt without a Submission ref); reconcile with 'kaggle competitions submissions' first"; exit 3; }
 sha=$(sha256sum "$zip" | cut -d' ' -f1)
-auth=$(grep -l "^SUBMIT: AUTHORIZE sha256=$sha track=$track" ops/decisions/*.md 2>/dev/null | tail -1 || true)
-[ -n "$auth" ] || { echo "REFUSED: no Director authorization for sha256=$sha track=$track"; exit 3; }
+[[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "REFUSED: cannot hash $zip"; exit 3; }
+auth=$(python3 -I - "$sha" "$track" "$zip" <<'PY'
+import glob, re, sys
+sha, track, zp = sys.argv[1:]
+line = re.compile(r"SUBMIT: AUTHORIZE sha256=([0-9a-f]{64}) track=(31b|e4b)(?: bundle=(\S+))?", re.ASCII)
+hits = []
+for f in sorted(glob.glob("ops/decisions/*.md")):
+    with open(f, encoding="utf-8") as fh:  # unreadable decision files raise -> refuse
+        for raw in fh.read().splitlines():
+            m = line.fullmatch(raw)
+            if m and m.group(1) == sha and m.group(2) == track and m.group(3) in (None, zp):
+                hits.append(f)
+if not hits:
+    sys.exit(1)
+print(hits[-1])
+PY
+) || { echo "REFUSED: no exact Director authorization for sha256=$sha track=$track"; exit 3; }
 touch ops/submissions.jsonl
-grep -q "\"sha256\": \"$sha\"" ops/submissions.jsonl && { echo "REFUSED: this zip was already submitted"; exit 3; }
+ledger_ok() {  # <day>: exit 0 only if the ledger is fully parseable and has no record for this sha or for <day>
+  python3 -I - "$sha" "$1" <<'PY'
+import json, sys
+sha, day = sys.argv[1:]
+with open("ops/submissions.jsonl", encoding="utf-8") as fh:
+    lines = fh.read().splitlines()
+for n, raw in enumerate(lines, 1):
+    try:
+        r = json.loads(raw)
+    except ValueError:
+        print("REFUSED: ops/submissions.jsonl line %d is not JSON" % n); sys.exit(1)
+    if not isinstance(r, dict) or not isinstance(r.get("sha256"), str) or not isinstance(r.get("day"), str):
+        print("REFUSED: ops/submissions.jsonl line %d lacks sha256/day" % n); sys.exit(1)
+    if r["sha256"] == sha:
+        print("REFUSED: this zip was already submitted (ledger line %d)" % n); sys.exit(1)
+    if day in (r["day"], r.get("day_checked")):
+        print("REFUSED: already submitted on UTC %s (ledger line %d)" % (day, n)); sys.exit(1)
+PY
+}
+check_zip() {  # <path> <label>: exactly one regular root member named agent.yaml; size < 3 GiB
+  python3 -I - "$1" <<'PY' || { echo "REFUSED: $2: no single regular root member named exactly agent.yaml"; exit 3; }
+import stat, sys, zipfile
+ms = zipfile.ZipFile(sys.argv[1]).infolist()
+i = [m for m in ms if m.filename == "agent.yaml" or m.orig_filename == "agent.yaml"]
+mode = (i[0].external_attr >> 16) if len(i) == 1 else -1
+ok = (len(i) == 1 and i[0].orig_filename == "agent.yaml" and not i[0].is_dir()
+      and stat.S_IFMT(mode) in (0, stat.S_IFREG) and not any("\x00" in m.orig_filename for m in ms))
+sys.exit(0 if ok else 1)
+PY
+  local size; size=$(stat -c %s "$1"); [ "$size" -lt 3221225472 ] || { echo "REFUSED: $2: zip >= 3 GiB"; exit 3; }
+}
 today=$(date -u +%F)
-grep -q "\"day\": \"$today\"" ops/submissions.jsonl && { echo "REFUSED: already submitted today (UTC $today)"; exit 3; }
-unzip -l "$zip" | awk '{print $4}' | grep -qx 'agent.yaml' || { echo "REFUSED: agent.yaml not at zip root"; exit 3; }
-size=$(stat -c %s "$zip"); [ "$size" -lt 3221225472 ] || { echo "REFUSED: zip >= 3 GiB"; exit 3; }
-echo "Submitting $zip ($track, sha256=$sha) authorized by $auth"
-if [ "$SUBMIT_MODE" = "kernel" ]; then
-  [ -n "$SUBMIT_KERNEL" ] || { echo "SUBMIT_KERNEL not set"; exit 1; }
-  # Builder: verify exact flags with `kaggle competitions submit -h` in Phase 0 before first use.
-  kaggle competitions submit "$COMP" -k "$SUBMIT_KERNEL" -f submission.zip -m "$msg"
+ledger_ok "$today" || exit 3
+check_zip "$zip" "local zip"
+# 'kaggle kernels output owner/slug/N' fetches the output of version N (CLI sets version_label=vN), so the hash is tied
+# to the version that is submitted.
+out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
+kaggle kernels output "$SUBMIT_KERNEL/$kver" -p "$out" -q >/dev/null || { echo "REFUSED: cannot download kernel v$kver output"; exit 3; }
+[ -f "$out/submission.zip" ] && [ ! -L "$out/submission.zip" ] || { echo "REFUSED: kernel v$kver has no regular submission.zip output"; exit 3; }
+osha=$(sha256sum "$out/submission.zip" | cut -d' ' -f1)
+[ "$osha" = "$sha" ] || { echo "REFUSED: kernel v$kver output sha256=$osha != authorized $sha"; exit 3; }
+check_zip "$out/submission.zip" "kernel output"
+echo "Kernel $SUBMIT_KERNEL v$kver output verified: sha256=$osha"
+# Re-check the UTC day right before submitting (the download can cross midnight).
+now=$(date -u +%F)
+ledger_ok "$now" || exit 3
+# Server-side pre-check (defence in depth; strict and fail-closed). The CLI prints no next-page token, so one page of 100
+# is requested and a full page refuses. Known, accepted limitation (dec 048): assumes the server honours --page-size.
+msg="sha:${sha:0:12} $msg"
+subs=$(kaggle competitions submissions "$COMP" -v --page-size 100 2>&1) || { echo "REFUSED: cannot list server-side submissions"; exit 3; }
+printf '%s' "$subs" | python3 -I -c 'import csv, datetime, io, re, sys
+today, pre = sys.argv[1], "sha:" + sys.argv[2][:12]
+HEADER = ["ref", "fileName", "date", "description", "status", "publicScore", "privateScore"]
+DATE = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]{1,6})?(\+00:00)?", re.ASCII)
+def refuse(why):
+    print("REFUSED: server-side submissions list: " + why); sys.exit(1)
+text = sys.stdin.read()
+if text.strip() == "No submissions found":
+    sys.exit(0)
+try:
+    rows = list(csv.reader(io.StringIO(text, newline=""), strict=True))
+except csv.Error as e:
+    refuse("csv error " + str(e))
+while rows and rows[-1] == []:
+    rows.pop()
+if not rows or rows[0] != HEADER:
+    refuse("unexpected header")
+body = rows[1:]
+if not body:
+    refuse("header without rows")
+if len(body) >= 100:
+    refuse("full page (100 rows): older submissions not visible")
+for r in body:
+    if len(r) != len(HEADER):
+        refuse("row with %d fields" % len(r))
+    ref, date, desc = r[0], r[2], r[3]
+    m = DATE.fullmatch(date)
+    if not re.fullmatch(r"[0-9]+", ref, re.ASCII) or not m:
+        refuse("malformed ref/date in a row")
+    try:
+        d = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        refuse("impossible date in a row")
+    if d.date().isoformat() == today or pre in desc:
+        refuse("a submission dated today (UTC) or carrying this sha exists: ref " + ref)' "$now" "$sha" || exit 3
+[ "$(date -u +%F)" = "$now" ] || { echo "REFUSED: UTC day changed during the pre-check; re-run"; exit 3; }
+record() {  # <file> <status> <ref>; JSON-serialized
+  python3 -I -c 'import json, sys; a = sys.argv[1:]
+print(json.dumps(dict(day=a[0], day_checked=a[1], t=a[2], status=a[3], ref=a[4] or None, track=a[5], sha256=a[6], zip=a[7],
+                      auth=a[8], msg=a[9], kernel=a[10], kernel_version=int(a[11]))))' \
+    "$(date -u +%F)" "$now" "$(date -u +%FT%TZ)" "$2" "$3" "$track" "$sha" "$zip" "$auth" "$msg" "$SUBMIT_KERNEL" "$kver" >> "$1"
+}
+record ops/submissions.pending pending ""
+echo "Submitting $zip ($track, sha256=$sha, kernel $SUBMIT_KERNEL v$kver) authorized by $auth"
+set +e
+resp=$(kaggle competitions submit "$COMP" -k "$SUBMIT_KERNEL" -v "$kver" -f submission.zip -m "$msg" 2>&1); rc=$?
+set -e
+printf '%s\n' "$resp"
+ref=$(printf '%s\n' "$resp" | sed -n 's/^Submission ref: \([0-9][0-9]*\)$/\1/p' | tail -1)
+if [ -n "$ref" ]; then
+  record ops/submissions.jsonl submitted "$ref"   # day = acceptance day; day_checked = pre-submit day (both block)
+  rm -f ops/submissions.pending
+  bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle (ref $ref)." || true
+  echo "logged to ops/submissions.jsonl (ref $ref)"
 else
-  kaggle competitions submit "$COMP" -f "$zip" -m "$msg"
+  # No positive acceptance evidence: ALWAYS ambiguous (dec 046 fail-closed; review 20261105T233800 item 1).
+  echo "NO 'Submission ref' (rc=$rc): ops/submissions.pending kept; reconcile with 'kaggle competitions submissions' before any retry"; exit 5
 fi
-printf '{"day": "%s", "t": "%s", "track": "%s", "sha256": "%s", "zip": "%s", "auth": "%s", "msg": "%s"}\n' \
-  "$today" "$(date -u +%FT%TZ)" "$track" "$sha" "$zip" "$auth" "$msg" >> ops/submissions.jsonl
-bin/notify default "Gemma: submitted $track" "$(basename "$zip") queued on Kaggle. Score in ~12-15h."
-echo "logged to ops/submissions.jsonl"
