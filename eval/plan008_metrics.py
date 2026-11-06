@@ -7,7 +7,7 @@ Usage: plan008_metrics.py base OUT_JSON | smoke RUN_DIR OUT_JSON | arm2 RUN_DIR 
            [--base-dirs DIR ...] --classifiers DIR=D4_JSON,A2_JSON [--classifiers ...]
            --smoke-json PATH [--base-verdict-json PATH]
        Dirs are supplied in push order: smoke, main, chunk1, chunk2, ...
-       Both arm3 modes require --identity-json PATH --bundle v01N --transport DIR=SHA256 (each arm3 dir).
+       Both arm3 modes require --identity-json PATH --bundle v01N --transport DIR=SHA256 --push-event DIR=EVENT (each arm3 dir).
        --base-verdict-json (base arm2) = the journaled plan-008 ruling file, {"verdict": "<plan 008 verdict>"};
        the raw arm2-mode output carries no verdict and therefore fails closed. Only SHIP-ELIGIBLE is a valid arm2 base.
 
@@ -29,6 +29,9 @@ from collections import defaultdict, deque
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import plan007_arm1_summary as base
+
+BUNDLES_ROOT = Path(__file__).resolve().parents[1] / 'bundles/31b'
+PUSH_EVENT = re.compile(r'(smoke|main|chunk[1-9][0-9]*)')
 
 ROOT = 'swe_baseline_agent'
 GATE_YAML = Path('bundles/31b/v010/sub_agents/submit_gate.yaml')
@@ -729,49 +732,97 @@ def _readable_file(path):
         return False
 
 
-def identity_check(dirs, identity_json, bundle, transports, smoke_dirs):
-    """Check each push against its event proof and its separate transport hash."""
-    data = _read_json(identity_json)
-    records = data.get('records', [])
-    events = defaultdict(set)
-    for record in records if isinstance(records, list) else []:
-        if not isinstance(record, dict) or not isinstance(record.get('bundles'), dict):
-            continue
-        proof = record['bundles'].get(bundle, {})
-        if not isinstance(proof, dict):
-            continue
-        if all(proof.get(k) is True for k in ('pass', 'zip_ok', 'content_ok')):
-            agent = proof.get('agent_yaml_sha256')
-            if isinstance(agent, str) and re.fullmatch('[0-9a-f]{64}', agent):
-                events[record.get('event')].add(agent)
-    # All pushes must prove the same registered agent bytes.
-    agents = set().union(*events.values()) if events else set()
+def _manifest_path(bundle):
+    return BUNDLES_ROOT / bundle / 'MANIFEST.md' if isinstance(bundle, str) and re.fullmatch(r'v01[0-9]+', bundle) else None
+
+
+def _push_errors(dirs, push_events, smoke_dirs, smoke_only=False):
+    dirs = [str(Path(d)) for d in dirs]
+    errors = []
+    if len(set(dirs)) != len(dirs) or set(push_events) != set(dirs):
+        errors.append('push-event dirs must match run dirs exactly')
+    events = list(push_events.values())
+    if any(not isinstance(e, str) or not PUSH_EVENT.fullmatch(e) for e in events):
+        errors.append('invalid push event')
+    if len(set(events)) != len(events):
+        errors.append('duplicate push event')
+    if smoke_only:
+        if len(dirs) != 1 or events != ['smoke']:
+            errors.append('arm3smoke requires one smoke push')
+    elif events.count('smoke') != 1 or events.count('main') != 1:
+        errors.append('arm3 requires exactly one smoke and one main push')
+    if {d for d, e in push_events.items() if e == 'smoke'} != smoke_dirs:
+        errors.append('smoke push must supply both counted smoke rows')
+    return errors
+
+
+def identity_check(dirs, identity_json, bundle, transports, smoke_dirs, push_events=None, *, smoke_only=False):
+    """Only the latest exact-event proof can authorize a push; hash types stay separate."""
+    push_events = push_events or {}
+    mapping_errors = _push_errors(dirs, push_events, smoke_dirs, smoke_only)
+    if set(transports) != {str(Path(d)) for d in dirs}:
+        mapping_errors.append('transport dirs must match run dirs exactly')
+    records = _read_json(identity_json).get('records', [])
+    records = records if isinstance(records, list) else []
+    manifest = _manifest_path(bundle)
+    try:
+        matches = re.findall(r'^zip sha256:\s*([0-9a-fA-F]{64})[ \t]*$', manifest.read_text(), re.MULTILINE)
+        registered_zip = matches[0].lower() if len(matches) == 1 else None
+    except (OSError, AttributeError, UnicodeError):
+        registered_zip = None
     results = []
-    main_index = 0
     for directory in dirs:
         directory = str(Path(directory))
+        event = push_events.get(directory)
+        matching = [r for r in records if isinstance(r, dict) and event is not None and r.get('event') == event]
+        latest = matching[-1] if matching else {}
+        bundles = latest.get('bundles', {})
+        proof = bundles.get(bundle, {}) if isinstance(bundles, dict) else {}
+        proof = proof if isinstance(proof, dict) else {}
+        reasons = list(mapping_errors)
+        if not matching:
+            reasons.append('missing event record')
+        for key in ('pass', 'zip_ok', 'content_ok'):
+            if proof.get(key) is not True:
+                reasons.append(key + ' must be true')
+        hashes = {}
+        for key in ('zip_sha256', 'manifest_zip_sha256', 'agent_yaml_sha256'):
+            value = proof.get(key)
+            hashes[key] = value.lower() if isinstance(value, str) and re.fullmatch('[0-9a-fA-F]{64}', value) else None
+            if hashes[key] is None:
+                reasons.append(key + ' missing/invalid')
+        if hashes['zip_sha256'] != hashes['manifest_zip_sha256']:
+            reasons.append('ZIP differs from proof manifest')
+        if registered_zip is None or hashes['zip_sha256'] != registered_zip:
+            reasons.append('registered MANIFEST ZIP missing/mismatched')
+        for key in ('only_in_zip', 'only_in_dir', 'byte_mismatch', 'duplicate_members'):
+            if not isinstance(proof.get(key), list) or proof[key]:
+                reasons.append(key + ' must be an empty list')
+        if not isinstance(proof.get('zip_path'), str) or not proof['zip_path'].endswith(f'31b-{bundle}.zip'):
+            reasons.append('zip_path missing/invalid')
         timing = Path(directory) / 'timing.jsonl'
-        rows = base.load_rows(timing) if timing.is_file() else []
-        needed = ['smoke'] if directory in smoke_dirs else []
-        if directory not in smoke_dirs or any(r['instance_id'] not in base.ids_file(base.ARM_IDS)[:2] for r in rows):
-            needed.append('main' if main_index == 0 else 'chunkN')
-            main_index += 1
         headers = _headers(timing) if timing.is_file() else []
-        event_ok = all(any(re.fullmatch(r'chunk[0-9]+', str(event)) and values == agents
-                           for event, values in events.items()) if e == 'chunkN'
-                       else events.get(e) == agents for e in needed)
         transport = transports.get(directory)
-        ok = (bool(needed) and event_ok and len(agents) == 1 and bool(headers)
-              and isinstance(transport, str) and re.fullmatch('[0-9a-f]{64}', transport) is not None
-              and all(h.get('bundle_sha256') == transport and h.get('agent_yaml_sha256') in agents
-                      for h in headers))
-        results.append(dict(dir=directory, events=needed, checked=bool(ok),
-                            transport_sha256=transport, agent_yaml_sha256=sorted(agents)))
-    return dict(checked=all(r['checked'] for r in results), runs=results,
+        if not headers:
+            reasons.append('missing headers')
+        if not isinstance(transport, str) or not re.fullmatch('[0-9a-f]{64}', transport) or any(h.get('bundle_sha256') != transport for h in headers):
+            reasons.append('transport header mismatch')
+        if any(h.get('agent_yaml_sha256') != hashes['agent_yaml_sha256'] for h in headers):
+            reasons.append('agent header mismatch')
+        results.append(dict(dir=directory, event=event, record_count=len(matching),
+                            zip_sha256=hashes['zip_sha256'], agent_yaml_sha256=hashes['agent_yaml_sha256'],
+                            transport_sha256=transport, failure_reasons=reasons))
+    for key in ('zip_sha256', 'agent_yaml_sha256'):
+        if len({r[key] for r in results if r[key] is not None}) > 1:
+            for r in results:
+                r['failure_reasons'].append(key + ' differs across pushes')
+    for r in results:
+        r['checked'] = not r['failure_reasons']
+    return dict(checked=bool(results) and all(r['checked'] for r in results), runs=results,
                 mismatching_dirs=[r['dir'] for r in results if not r['checked']])
 
 
-def arm3smoke_metrics(run_dir, classifier, identity_json=None, bundle=None, transports=None):
+def arm3smoke_metrics(run_dir, classifier, identity_json=None, bundle=None, transports=None, push_events=None):
     timing = Path(run_dir) / 'timing.jsonl'
     paths = [base.ARM_IDS, base.__file__, 'eval/plan007_report.py', 'eval/thinking_bound.py']
     expected = base.ids_file(base.ARM_IDS)[:2]
@@ -788,9 +839,12 @@ def arm3smoke_metrics(run_dir, classifier, identity_json=None, bundle=None, tran
     cii = dict(status='UNVERIFIABLE' if missing_time else 'PASS' if ti['timing_pass'] else 'FAIL', **ti)
     headers = _headers(timing) if timing.is_file() else []
     identity = {k: [h.get(k) for h in headers] for k in ('agent_yaml_sha256', 'bundle_sha256')}
-    checked_identity = identity_check([run_dir], identity_json, bundle, transports or {}, {str(Path(run_dir))})
+    checked_identity = identity_check([run_dir], identity_json, bundle, transports or {}, {str(Path(run_dir))}, push_events, smoke_only=True)
     if identity_json and _readable_file(identity_json):
         paths.append(identity_json)
+    manifest = _manifest_path(bundle)
+    if manifest and _readable_file(manifest):
+        paths.append(manifest)
     startup = [r.get('_vllm') for r in map(json.loads, filter(str.strip, timing.read_text().splitlines())) if '_vllm' in r] if timing.is_file() else []
     vllm_up = any(isinstance(v, dict) and _finite_number(v.get('startup_seconds'))
                   and v['startup_seconds'] > 0 for v in startup)
@@ -970,7 +1024,7 @@ def arm3_decision(on, off, p, h_count, smoke_invalid, vetoes, *, pairing_void_re
 
 
 def arm3_metrics(base_name, arm3_dirs, base_dirs, classifiers, smoke_json=None, *, base_verdict_json=None,
-                 identity_json=None, bundle=None, transports=None):
+                 identity_json=None, bundle=None, transports=None, push_events=None):
     paths = [base.ARM_IDS, base.SCREENED_IDS, base.__file__, 'eval/plan007_report.py', 'eval/thinking_bound.py']
     if base_name == 'arm1':
         base_dirs = [str(Path(t).parent) for _, t, _, _ in base.PARTS]
@@ -1016,13 +1070,23 @@ def arm3_metrics(base_name, arm3_dirs, base_dirs, classifiers, smoke_json=None, 
     evidence = schema.get('input_shas', {}) if isinstance(schema, dict) else {}
     if not isinstance(evidence, dict):
         evidence = {}
-    required_evidence = [*traces, *(Path(d) / 'timing.jsonl' for d in smoke_dirs)]
+    required_evidence = [*(classifiers[d][0] for d in smoke_dirs), *traces, *(Path(d) / 'timing.jsonl' for d in smoke_dirs)]
     smoke_bound = all(evidence.get(str(p)) == base.sha(p) for p in required_evidence)
     # A smoke report must name exactly the timing files that supplied the counted rows.
     smoke_bound = smoke_bound and {str(Path(p)) for p in evidence if Path(p).name == 'timing.jsonl'} == {
         str(Path(d) / 'timing.jsonl') for d in smoke_dirs}
     ci = thinking_criterion(traces)
-    identity = identity_check(arm3_dirs, identity_json, bundle, transports or {}, smoke_dirs)
+    identity = identity_check(arm3_dirs, identity_json, bundle, transports or {}, smoke_dirs, push_events)
+    recomputed = None
+    if len(smoke_dirs) == 1:
+        smoke_dir = next(iter(smoke_dirs))
+        recomputed = arm3smoke_metrics(smoke_dir, classifiers[smoke_dir][0], identity_json, bundle,
+                                      {smoke_dir: (transports or {}).get(smoke_dir)},
+                                      {smoke_dir: (push_events or {}).get(smoke_dir)})
+    failed_smoke = [k for k, c in recomputed['criteria'].items() if c['status'] != 'PASS'] if recomputed else ['iii']
+    manifest = _manifest_path(bundle)
+    if manifest and _readable_file(manifest):
+        paths.append(manifest)
     base_verdict = _read_json(base_verdict_json)
     verdicts = [base_verdict[k] for k in ('decision', 'verdict') if k in base_verdict]
     # Plan 009 l.17-19: base = arm 2 iff plan 008 returned SHIP-ELIGIBLE; any other verdict means base = arm 1.
@@ -1045,6 +1109,9 @@ def arm3_metrics(base_name, arm3_dirs, base_dirs, classifiers, smoke_json=None, 
                     base_valid=base_valid, identity_valid=identity['checked'], smoke_bound=smoke_bound,
                     thinking_pass=ci['status'] == 'PASS'),
                 decision_inputs=inputs, label='thinking ACTIVE != budget enforced')
+    if identity['checked'] and base_valid and not envs['pairing_void_candidate'] and failed_smoke:
+        result['decision'] = 'INVALID (smoke recomputed: ' + ','.join(failed_smoke) + ')'
+    inputs['smoke_recomputed'] = recomputed
     if not identity['checked']:
         # Rejected pushes are visible as first-attempt sensitivity, never counted.
         excluded = set(identity['mismatching_dirs'])
@@ -1065,6 +1132,7 @@ def arm3_cli(argv):
     parser.add_argument('--identity-json', required=True)
     parser.add_argument('--bundle', required=True)
     parser.add_argument('--transport', action='append', required=True)
+    parser.add_argument('--push-event', action='append', required=True)
     def transports_for(args, dirs):
         transports = {}
         for value in args.transport:
@@ -1073,19 +1141,35 @@ def arm3_cli(argv):
             directory, sha = value.rsplit('=', 1)
             if not re.fullmatch('[0-9a-f]{64}', sha):
                 parser.error('--transport requires a SHA256')
+            if str(Path(directory)) in transports:
+                parser.error('duplicate --transport dir')
             transports[str(Path(directory))] = sha
-        if any(str(Path(d)) not in transports for d in dirs):
+        if set(transports) != {str(Path(d)) for d in dirs}:
             parser.error('--transport required for every arm3 dir')
         if not re.fullmatch(r'v01[0-9]+', args.bundle):
             parser.error('--bundle requires v01N')
         return transports
+    def events_for(args, dirs):
+        events = {}
+        for value in args.push_event:
+            if '=' not in value:
+                parser.error('--push-event requires DIR=EVENT')
+            directory, event = value.rsplit('=', 1)
+            directory = str(Path(directory))
+            if directory in events:
+                parser.error('duplicate --push-event dir')
+            events[directory] = event
+        errors = _push_errors(dirs, events, {d for d, e in events.items() if e == 'smoke'}, args.mode == 'arm3smoke')
+        if errors:
+            parser.error('; '.join(errors))
+        return events
     if argv[1] == 'arm3smoke':
         parser.add_argument('run_dir')
         parser.add_argument('classifier')
         parser.add_argument('out_json')
         args = parser.parse_args(argv[1:])
         out = arm3smoke_metrics(args.run_dir, args.classifier, args.identity_json, args.bundle,
-                                 transports_for(args, [args.run_dir]))
+                                 transports_for(args, [args.run_dir]), events_for(args, [args.run_dir]))
     else:
         parser.add_argument('base', choices=['arm1', 'arm2'])
         parser.add_argument('out_json')
@@ -1112,7 +1196,8 @@ def arm3_cli(argv):
         try:
             out = arm3_metrics(args.base, args.arm3, args.base_dirs, classifiers, args.smoke_json,
                                base_verdict_json=args.base_verdict_json, identity_json=args.identity_json,
-                               bundle=args.bundle, transports=transports_for(args, args.arm3))
+                               bundle=args.bundle, transports=transports_for(args, args.arm3),
+                               push_events=events_for(args, args.arm3))
         except IncompleteRun as exc:
             print('INCOMPLETE arm3 inventory; no results written:', json.dumps(exc.args[0]))
             return 3

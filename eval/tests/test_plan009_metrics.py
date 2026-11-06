@@ -16,6 +16,15 @@ LEGACY_BLOB = '9119467d4ec6de8b4fec253f5379608fd1c1bda4'
 SAVED = ROOT if (ROOT / 'runs').exists() else Path('/home/ubuntu/work/gemma')
 
 
+@pytest.fixture(autouse=True)
+def synthetic_manifest(tmp_path, monkeypatch):
+    root = tmp_path / 'bundles'
+    manifest = root / 'v012' / 'MANIFEST.md'
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('zip sha256: ' + 'd'*64 + '\n')
+    monkeypatch.setattr(m, 'BUNDLES_ROOT', root)
+
+
 @pytest.fixture
 def legacy(tmp_path):
     source = subprocess.check_output(['git', 'show', LEGACY_BLOB], cwd=ROOT)
@@ -65,13 +74,15 @@ def make_run(tmp_path, name, ids, *, h=(), resolved=(), blocks=3):
 def evidence(tmp_path, directory, cs):
     identity = tmp_path / 'identity.json'
     identity.write_text(json.dumps(dict(records=[dict(event=e, bundles={'v012': dict(
-        zip_ok=True, content_ok=True, **{'pass': True}, agent_yaml_sha256='a'*64)})
+        zip_ok=True, content_ok=True, **{'pass': True}, agent_yaml_sha256='a'*64,
+        zip_sha256='d'*64, manifest_zip_sha256='d'*64, zip_path='dist/31b-v012.zip',
+        only_in_zip=[], only_in_dir=[], byte_mismatch=[], duplicate_members=[])})
         for e in ('smoke', 'main', 'chunk1') ])))
-    opts = dict(identity_json=str(identity), bundle='v012', transports={directory: 'b'*64})
+    opts = dict(identity_json=str(identity), bundle='v012', transports={directory: 'b'*64}, push_events={directory: 'smoke'})
     timing = Path(directory) / 'timing.jsonl'
     traces = [Path(directory) / 'runs' / iid / 'trace.json'
               for iid in m.base.ids_file(m.base.ARM_IDS)[:2]]
-    smoke = dict(overall='PASS', _schema=m._schema('arm3smoke', [timing, *(p for p in traces if p.is_file())]))
+    smoke = dict(overall='PASS', _schema=m._schema('arm3smoke', [timing, cs[directory][0], *(p for p in traces if p.is_file())]))
     path = tmp_path / 'smoke.json'
     path.write_text(json.dumps(smoke))
     verdict = tmp_path / 'base.json'
@@ -79,9 +90,16 @@ def evidence(tmp_path, directory, cs):
     return dict(**opts, smoke_json=str(path), base_verdict_json=str(verdict))
 
 
+def pair_evidence(tmp_path, smoke, main, cs):
+    opts = evidence(tmp_path, smoke, cs)
+    opts['transports'][main] = 'b'*64
+    opts['push_events'][main] = 'main'
+    return opts
+
+
 def smoke_options(tmp_path, directory, cs):
     opts = evidence(tmp_path, directory, cs)
-    return {k: opts[k] for k in ('identity_json', 'bundle', 'transports')}
+    return {k: opts[k] for k in ('identity_json', 'bundle', 'transports', 'push_events')}
 
 
 def assert_no_text(value):
@@ -121,10 +139,13 @@ def test_bad_inventory_exit_no_file(tmp_path, registered, duplicate, capsys):
     directory, cs = make_run(tmp_path, 'bad', ids)
     out = tmp_path / 'output.json'
     opts = evidence(tmp_path, directory, cs)
-    rc = m.main(['metrics', 'arm3', 'arm2', str(out), '--arm3', directory,
+    main, cm = make_run(tmp_path, 'main', [])
+    rc = m.main(['metrics', 'arm3', 'arm2', str(out), '--arm3', directory, main,
                  '--base-dirs', directory, '--classifiers', directory + '=' + ','.join(cs[directory]),
                  '--identity-json', opts['identity_json'], '--bundle', 'v012',
-                 '--transport', directory + '=' + 'b'*64, '--smoke-json', opts['smoke_json']])
+                 '--transport', directory + '=' + 'b'*64, '--push-event', directory + '=smoke',
+                 '--push-event', main + '=main', '--transport', main + '=' + 'b'*64,
+                 '--classifiers', main + '=' + ','.join(cm[main]), '--smoke-json', opts['smoke_json']])
     assert rc == 3 and not out.exists()
     assert 'inventory' in capsys.readouterr().out
 
@@ -193,9 +214,11 @@ def test_decision(on, off, p, h, smoke, vetoes, expected):
 
 
 def test_full_synthetic(tmp_path, registered):
-    d1, c1 = make_run(tmp_path, 'on', registered, resolved=registered[:1])
+    d1, c1 = make_run(tmp_path, 'on', registered[:2], resolved=registered[:1])
+    main, cm = make_run(tmp_path, 'main', registered[2:])
+    c1 |= cm
     d2, c2 = make_run(tmp_path, 'off', registered)
-    result = m.arm3_metrics('arm2', [d1], [d2], c1 | c2, **evidence(tmp_path, d1, c1))
+    result = m.arm3_metrics('arm2', [d1, main], [d2], c1 | c2, **pair_evidence(tmp_path, d1, main, c1))
     assert result['primary']['on_only']['count'] == 1
     assert result['decision'] == 'NO-DIFFERENCE'
     assert result['arms']['arm3']['safety']['submitted_without_test']['count'] == 0
@@ -204,9 +227,9 @@ def test_full_synthetic(tmp_path, registered):
     paths = result['_schema']['input_shas']
     assert str(Path(d1) / 'runs' / registered[0] / 'trace.json') in paths
     smoke = tmp_path / 'smoke.json'; smoke.write_text('{"overall":"FAIL"}')
-    opts = evidence(tmp_path, d1, c1)
+    opts = pair_evidence(tmp_path, d1, main, c1)
     smoke.write_text('{"overall":"FAIL"}')
-    result = m.arm3_metrics('arm2', [d1], [d2], c1 | c2, **opts)
+    result = m.arm3_metrics('arm2', [d1, main], [d2], c1 | c2, **opts)
     assert result['decision'].startswith('INVALID')
     assert str(smoke) in result['_schema']['input_shas']
 
@@ -253,9 +276,11 @@ def test_legacy_other_modes_identical(legacy, monkeypatch, tmp_path, registered)
 
 
 def test_missing_safety_and_environment(tmp_path, registered):
-    d1, c1 = make_run(tmp_path, 'on', registered)
+    d1, c1 = make_run(tmp_path, 'on', registered[:2])
+    main, cm = make_run(tmp_path, 'main', registered[2:])
+    c1 |= cm
     d2, c2 = make_run(tmp_path, 'off', registered)
-    records, _, _, headers = m.aggregate_arm([d1], c1)
+    records, _, _, headers = m.aggregate_arm([d1, main], c1)
     for row, _, _, _ in records:
         row.pop('test_files_edited')
         row.pop('verified_patch_bytes')
@@ -277,7 +302,7 @@ def test_missing_safety_and_environment(tmp_path, registered):
         c = json.loads(Path(path).read_text())
         c['input_sha256'] = m.base.sha(timing)
         Path(path).write_text(json.dumps(c))
-    out = m.arm3_metrics('arm2', [d1], [d2], c1 | c2, **evidence(tmp_path, d1, c1))
+    out = m.arm3_metrics('arm2', [d1, main], [d2], c1 | c2, **pair_evidence(tmp_path, d1, main, c1))
     assert out['env_drift']['pairing_void_candidate'] is True
     assert set(out['env_drift']['differences']) == {'kernel_code', 'gpu_count'}
     assert out['decision'].startswith('INVALID (pairing voided:')
@@ -306,8 +331,10 @@ def full_pair(tmp_path, monkeypatch):
     off, c3 = make_run(tmp_path, 'off', ids)
     opts = evidence(tmp_path, smoke, c1)
     opts['transports'][main] = 'b'*64
+    opts['push_events'][main] = 'main'
     actual_smoke = m.arm3smoke_metrics(smoke, c1[smoke][0], **{
-        k: opts[k] for k in ('identity_json', 'bundle', 'transports')})
+        k: ({smoke: opts[k][smoke]} if k in ('transports', 'push_events') else opts[k])
+        for k in ('identity_json', 'bundle', 'transports', 'push_events')})
     assert actual_smoke['overall'] == 'PASS'
     Path(opts['smoke_json']).write_text(json.dumps(actual_smoke))
     return [smoke, main], [off], c1 | c2 | c3, opts, ids
@@ -336,7 +363,7 @@ def test_full_33_quality_verdicts(full_pair, quality, expected):
 
 @pytest.mark.parametrize('change,expected', [
     ('foreign_smoke', 'INVALID (smoke evidence not bound)'),
-    ('zero_thinking', 'INVALID (smoke i)'),
+    ('zero_thinking', 'INVALID (smoke recomputed: i)'),
     ('failed_smoke', 'INVALID'),
     ('agent_path', 'INVALID (pairing voided:'),
     ('verification_path', 'INVALID (pairing voided:'),
@@ -426,14 +453,15 @@ def test_smoke_mechanics_bound(tmp_path, registered, change, status):
     assert result['overall'] != 'PASS'
 
 
-@pytest.mark.parametrize('missing', ['smoke-json', 'identity-json', 'bundle', 'transport'])
+@pytest.mark.parametrize('missing', ['smoke-json', 'identity-json', 'bundle', 'transport', 'push-event'])
 def test_required_cli_evidence(full_pair, tmp_path, missing):
     dirs, off, cs, opts, _ = full_pair
     argv = ['metrics', 'arm3', 'arm2', str(tmp_path / 'out.json'), '--arm3', *dirs,
             '--base-dirs', *off]
     for name, value in [('smoke-json', opts['smoke_json']), ('identity-json', opts['identity_json']),
                         ('bundle', 'v012'), ('transport', dirs[0] + '=' + 'b'*64),
-                        ('transport', dirs[1] + '=' + 'b'*64)]:
+                        ('transport', dirs[1] + '=' + 'b'*64),
+                        ('push-event', dirs[0] + '=smoke'), ('push-event', dirs[1] + '=main')]:
         if name != missing:
             argv.extend(['--' + name, value])
     for d, pair in cs.items():
@@ -452,6 +480,7 @@ def test_chunk_identity_and_duplicate_outcomes(full_pair, tmp_path):
             record['event'] = 'chunk7'
     Path(opts['identity_json']).write_text(json.dumps(data))
     opts['transports'][chunk] = 'f'*64
+    opts['push_events'][chunk] = 'chunk7'
     rewrite_timing(chunk, extra, lambda rs: rs[0].update(bundle_sha256='f'*64))
     result = m.arm3_metrics('arm2', dirs + [chunk], off, cs | extra, **opts)
     assert result['decision'] == 'ON-ADOPT'
@@ -489,7 +518,7 @@ def test_arm1_self_pair_literal_h(full_pair, monkeypatch):
     monkeypatch.setattr(m.base, 'PARTS', [(str(n), str(Path(d) / 'timing.jsonl'), *cs[d])
                                          for n, d in enumerate(dirs)])
     result = m.arm3_metrics('arm1', dirs, [], cs, **opts)
-    assert result['decision'] == 'INVALID'
+    assert result['decision'].startswith('INVALID')
     assert result['arms']['arm3']['h_rows']['count'] == 7
     assert result['decision_inputs']['base_valid'] is True
     assert 'ENV CONTROL' in result['base_validity']
@@ -516,7 +545,7 @@ def test_zero_thinking_with_stale_pass_smoke(full_pair):
     dirs, off, cs, opts, ids = full_pair
     for iid in ids[:2]:
         (Path(dirs[0]) / 'runs' / iid / 'trace.json').write_text('{"entries":[]}')
-    assert m.arm3_metrics('arm2', dirs, off, cs, **opts)['decision'] == 'INVALID (smoke i)'
+    assert m.arm3_metrics('arm2', dirs, off, cs, **opts)['decision'] == 'INVALID (smoke recomputed: i)'
 
 
 @pytest.mark.parametrize('mode', ['arm3', 'arm3smoke'])
@@ -524,11 +553,11 @@ def test_cli_valid_evidence(full_pair, tmp_path, mode):
     dirs, off, cs, opts, _ = full_pair
     out = tmp_path / 'cli-output.json'
     common = ['--identity-json', opts['identity_json'], '--bundle', 'v012',
-              '--transport', dirs[0] + '=' + 'b'*64]
+              '--transport', dirs[0] + '=' + 'b'*64, '--push-event', dirs[0] + '=smoke']
     if mode == 'arm3':
         argv = ['metrics', mode, 'arm2', str(out), '--arm3', *dirs, '--base-dirs', *off,
                 '--smoke-json', opts['smoke_json'], '--base-verdict-json', opts['base_verdict_json'],
-                '--transport', dirs[1] + '=' + 'b'*64, *common]
+                '--transport', dirs[1] + '=' + 'b'*64, '--push-event', dirs[1] + '=main', *common]
         for d, pair in cs.items():
             argv.extend(['--classifiers', d + '=' + ','.join(pair)])
     else:
@@ -536,3 +565,174 @@ def test_cli_valid_evidence(full_pair, tmp_path, mode):
     assert m.main(argv) == 0
     result = json.loads(out.read_text())
     assert result.get('decision', result.get('overall')) == ('ON-ADOPT' if mode == 'arm3' else 'PASS')
+
+
+def edit_identity(opts, edit):
+    path = Path(opts['identity_json'])
+    data = json.loads(path.read_text())
+    edit(data['records'])
+    path.write_text(json.dumps(data))
+
+
+def test_two_chunks_need_two_proofs(full_pair, tmp_path):
+    dirs, off, cs, opts, ids = full_pair
+    chunks = []
+    for n in (1, 2):
+        directory, pair = make_run(tmp_path, f'chunk{n}', [ids[n + 1]])
+        chunks.append(directory)
+        cs |= pair
+        opts['push_events'][directory] = f'chunk{n}'
+        opts['transports'][directory] = 'b'*64
+    result = m.arm3_metrics('arm2', dirs + chunks, off, cs, **opts)
+    assert result['decision'] == 'INVALID (identity mismatch)'
+    assert result['inventory']['arm3']['identity_excluded_dirs'] == [chunks[1]]
+    runs = result['decision_inputs']['identity']['runs']
+    assert runs[-1]['event'] == 'chunk2' and runs[-1]['record_count'] == 0
+    assert runs[-2]['checked']
+
+
+@pytest.mark.parametrize('field', ['pass', 'zip_ok', 'content_ok', 'zip_sha256',
+    'manifest_zip_sha256', 'agent_yaml_sha256', 'only_in_zip', 'only_in_dir',
+    'byte_mismatch', 'duplicate_members', 'zip_path'])
+def test_partial_identity_rejected(full_pair, field):
+    dirs, off, cs, opts, _ = full_pair
+    edit_identity(opts, lambda rs: rs[1]['bundles']['v012'].pop(field))
+    assert m.arm3_metrics('arm2', dirs, off, cs, **opts)['decision'] == 'INVALID (identity mismatch)'
+
+
+@pytest.mark.parametrize('change', ['different_zip', 'manifest_mismatch', 'manifest_missing',
+                                  'manifest_unparseable', 'nonempty_list', 'not_list'])
+def test_registered_zip_proof(full_pair, change):
+    dirs, off, cs, opts, _ = full_pair
+    if change.startswith('manifest_'):
+        path = m.BUNDLES_ROOT / 'v012/MANIFEST.md'
+        if change == 'manifest_missing':
+            path.unlink()
+        else:
+            path.write_text('zip sha256: ' + ('e'*64 if change == 'manifest_mismatch' else 'invalid'))
+    else:
+        def mutate(rs):
+            proof = rs[1]['bundles']['v012']
+            if change == 'different_zip':
+                proof.update(zip_sha256='e'*64, manifest_zip_sha256='e'*64)
+            else:
+                proof['duplicate_members'] = ['agent.yaml'] if change == 'nonempty_list' else ''
+        edit_identity(opts, mutate)
+    result = m.arm3_metrics('arm2', dirs, off, cs, **opts)
+    assert result['decision'] == 'INVALID (identity mismatch)'
+    path = m.BUNDLES_ROOT / 'v012/MANIFEST.md'
+    if path.is_file():
+        assert result['_schema']['input_shas'][str(path)] == m.base.sha(path)
+
+
+@pytest.mark.parametrize('latest_pass', [False, True])
+def test_latest_exact_event_record(full_pair, latest_pass):
+    dirs, off, cs, opts, _ = full_pair
+    def mutate(rs):
+        newer = json.loads(json.dumps(rs[1]))
+        rs[1]['bundles']['v012']['pass'] = not latest_pass
+        newer['bundles']['v012']['pass'] = latest_pass
+        rs.append(newer)
+    edit_identity(opts, mutate)
+    result = m.arm3_metrics('arm2', dirs, off, cs, **opts)
+    assert result['decision'] == ('ON-ADOPT' if latest_pass else 'INVALID (identity mismatch)')
+    assert result['decision_inputs']['identity']['runs'][1]['record_count'] == 2
+
+
+@pytest.mark.parametrize('criterion', ['h', 'timing', 'startup', 'verification'])
+def test_recompute_full_smoke(full_pair, criterion):
+    dirs, off, cs, opts, _ = full_pair
+    if criterion == 'h':
+        path = Path(cs[dirs[0]][0])
+        data = json.loads(path.read_text()); data['rows'][0]['h'] = 'H'
+        path.write_text(json.dumps(data))
+    else:
+        def mutate(rs):
+            if criterion == 'timing':
+                rs[1]['agent_clock_seconds'] = 221
+            elif criterion == 'startup':
+                rs.pop()
+            else:
+                rs[1]['resolved'] = None
+        rewrite_timing(dirs[0], cs, mutate)
+    # Bind the modified inputs to isolate current mechanics from saved-json binding.
+    smoke = json.loads(Path(opts['smoke_json']).read_text())
+    for path in (str(Path(dirs[0]) / 'timing.jsonl'), cs[dirs[0]][0]):
+        smoke['_schema']['input_shas'][path] = m.base.sha(path)
+    Path(opts['smoke_json']).write_text(json.dumps(smoke))
+    result = m.arm3_metrics('arm2', dirs, off, cs, **opts)
+    assert result['decision'].startswith('INVALID (smoke recomputed:')
+    kwargs = {k: opts[k] for k in ('identity_json', 'bundle')}
+    kwargs.update(transports={dirs[0]: opts['transports'][dirs[0]]}, push_events={dirs[0]: 'smoke'})
+    assert m.arm3smoke_metrics(dirs[0], cs[dirs[0]][0], **kwargs)['overall'] == 'FAIL'
+
+
+def test_missing_classifier_binding(full_pair):
+    dirs, off, cs, opts, _ = full_pair
+    path = Path(opts['smoke_json'])
+    smoke = json.loads(path.read_text())
+    assert smoke['_schema']['input_shas'].pop(cs[dirs[0]][0]) == m.base.sha(cs[dirs[0]][0])
+    path.write_text(json.dumps(smoke))
+    assert m.arm3_metrics('arm2', dirs, off, cs, **opts)['decision'] == 'INVALID (smoke evidence not bound)'
+
+
+@pytest.mark.parametrize('change', ['missing', 'duplicate', 'two_main', 'foreign_event', 'foreign_transport', 'wrong_smoke'])
+def test_push_mapping_fail_closed(full_pair, change):
+    dirs, off, cs, opts, _ = full_pair
+    if change == 'missing':
+        opts['push_events'].pop(dirs[1])
+    elif change in ('duplicate', 'two_main'):
+        opts['push_events'][dirs[0]] = 'main'
+    elif change == 'foreign_event':
+        opts['push_events']['/tmp/foreign'] = 'chunk2'
+    elif change == 'foreign_transport':
+        opts['transports']['/tmp/foreign'] = 'b'*64
+    else:
+        opts['push_events'] = {dirs[0]: 'main', dirs[1]: 'smoke'}
+    assert m.arm3_metrics('arm2', dirs, off, cs, **opts)['decision'] == 'INVALID (identity mismatch)'
+
+
+def test_changed_classifier_with_stale_pass(full_pair):
+    dirs, off, cs, opts, _ = full_pair
+    path = Path(cs[dirs[0]][0])
+    data = json.loads(path.read_text()); data['rows'][0]['h'] = 'H'
+    path.write_text(json.dumps(data))
+    result = m.arm3_metrics('arm2', dirs, off, cs, **opts)
+    assert not result['decision_inputs']['smoke_bound']
+    assert result['decision'] == 'INVALID (smoke recomputed: iii)'
+
+
+@pytest.mark.parametrize('mode', ['arm3', 'arm3smoke'])
+@pytest.mark.parametrize('change', ['missing', 'duplicate', 'foreign_event', 'foreign_transport', 'invalid_event'])
+def test_cli_rejects_bad_push_mapping(full_pair, tmp_path, mode, change):
+    dirs, off, cs, opts, _ = full_pair
+    events = dict(opts['push_events']) if mode == 'arm3' else {dirs[0]: 'smoke'}
+    transports = dict(opts['transports']) if mode == 'arm3' else {dirs[0]: 'b'*64}
+    if change == 'missing':
+        events.pop(dirs[0])
+    elif change == 'duplicate':
+        events[dirs[0]] = 'main'
+    elif change == 'foreign_event':
+        events['/tmp/foreign'] = 'chunk2'
+    elif change == 'foreign_transport':
+        transports['/tmp/foreign'] = 'b'*64
+    else:
+        events[dirs[0]] = 'chunk0'
+    out = tmp_path / 'rejected.json'
+    argv = ['metrics', mode]
+    if mode == 'arm3':
+        argv += ['arm2', str(out), '--arm3', *dirs, '--base-dirs', *off,
+                 '--smoke-json', opts['smoke_json']]
+        for d, pair in cs.items():
+            argv += ['--classifiers', d + '=' + ','.join(pair)]
+    else:
+        argv += [dirs[0], cs[dirs[0]][0], str(out)]
+    argv += ['--identity-json', opts['identity_json'], '--bundle', 'v012']
+    for d, event in events.items():
+        argv += ['--push-event', d + '=' + event]
+    for d, transport in transports.items():
+        argv += ['--transport', d + '=' + transport]
+    with pytest.raises(SystemExit) as exc:
+        m.main(argv)
+    assert exc.value.code == 2
+    assert not out.exists()
