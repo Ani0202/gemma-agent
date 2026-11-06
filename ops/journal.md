@@ -293,3 +293,4 @@
 2026-11-06T06:57Z | codex re-review of plan 007 rev 2 launched on fe8df91 | ops/jobs/codex-review-plan007r2-light.status
 2026-11-06T07:03Z | codex rev-2 review 065651: 1 BLOCKING (classifier fail-open); fixed r6/r7, classifier RE-FROZEN sha 18afdbbd, tests 794/4skip, arm F unchanged; Director FYI; rev-3 review launched | eval/plans/007.md ops/codex/review-20261106T065651.md
 2026-11-06T07:03:41Z | dec 063 approve: rev-3 classifier freeze 18afdbbd OK; code SHA b6e120f recorded in plan 007; smoke gated on review r3 clean | ops/decisions/063-20261106T070229-17561-from-builder.md
+2026-11-06T07:09Z | Review r3 (070228) 1 BLOCKING: verdict evidence fail-open; fixed rev 4 r8/r9/contradictory_resolved, RE-FROZEN sha a208a023, tests 819/4; review r4 launched; Director FYI'd | eval/plans/007.md, ops/codex/review-20261106T070228.md
