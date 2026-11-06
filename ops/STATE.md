@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 02:23Z (cycle 105, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-06 02:27Z (cycle 106, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
@@ -26,7 +26,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 ## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
-## Running jobs (02:17Z): lb-e4b-v002-wait-light, memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), review-p5c-light (codex-review of 31b-v005-p5c).
+## Running jobs (02:17Z): lb-e4b-v002-wait-light, memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), review-p5c-light, review-p5d-light (codex reviews of 31b-v005/v006).
 - PLAN 005 ARM B DONE (c105): verdict MECHANISM-ONLY per pre-registered rule (V pass: gates a/b/d/e PASS, trace exit 0; M met:
   write_outside_ws 8->0, edit_missing_param 19->6; E NOT met: empty 4/8 (A 4/8), discordant A-only 2 / B-only 2, sign p1=0.69).
   Files: results/trace_tool_errors_31b_v003.json, results/kaggle_timing_31b_v003.json; quota 9.42 h after (+2.14).
@@ -34,8 +34,13 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   tool exec <1 s/task, ~100% of 240 s is generation (~30 tok/s, 4.5-7.3k completion tok/task); classes: no-edit budget burn (3953),
   long thinking 87+68 s turns (3063), repeat reads 22/40 after history drops (14851), broad exploration (3930). Test-runtime cap = no help.
   Codex feasibility ops/codex/ask-20261106T021410.md: M1/M3 NOT FEASIBLE; M2 only model-invoked skill (chosen, dated line). Addendum C
-  (thinking_budget 4096->1024) pre-registered; screen bundle 31b-v005-p5c dist/31b-v005.zip e8fbcfdc...44f3 pack PASS. REPORT 012 SENT
-  (NEEDS_DECISION: quota ~2.1 h arm C, optional M2). v004 name still reserved (dec 056 item 5).
+  (thinking_budget 4096->1024) pre-registered; screen bundle 31b-v005-p5c dist/31b-v005.zip e8fbcfdc...44f3 pack PASS. v004 reserved.
+- DEC 058: arm C APPROVED (push after review-p5c-light clean; any byte fix -> re-pack + dated sha line first). Push cmd (dry-run OK):
+  eval/kaggle/timing_push.sh aniket0202/gemma-31b-timing bundles/31b/v005 eval/plans/004-gpu-retime-ids.txt 6000 (log quota before/after;
+  waiter like timing-31b-v003-wait-light -> runs/31b-v005-p5c-timing, kernel version 3). Report B vs C per-turn max completion tokens.
+  M2 DECLINED (Addendum B on file, don't build). ARM D (Addendum D, 31b-v006-p5d thinking_budget 0, dist/31b-v006.zip b7b2eb3d...60a0):
+  run ONLY IF C valid AND Mc AND pushable by 2026-11-06T21:00Z, else drop. NOT-ENFORCED -> one e4b line "thinking lever dead".
+  Item 6: fold /tmp fix + hint removal into next candidate (CPU draft OK). Item 7: plan 007 (33-dev pass rate) pre-reg next week.
 - DEC 057 (FastAPI/docs_src hint): dec 055 UNCHANGED (don't touch 31b-v002/zip/kernel). Standing rule: no new bundle/draft carries any
   repo-named hint (31b-v004+, e4b-v003+, drafts). v004 diff vs v002 = prompts/system.md + MANIFEST only, and MUST remove the line.
   bundles/drafts/item4-system.md line REMOVED (c104). FINALS: no final with a repo-specific line -> e4b-v003 = e4b-v002 + generic
@@ -43,13 +48,11 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   carry an inherited FastAPI/docs_src hint; their LB scores may be tilted toward FastAPI-like tasks (paper + finals evidence say so).
 - Dec 055 checklist at 2026-11-07T00:00Z has PRIORITY over arm-B analysis.
 - KERNEL v5 (e4b, 87001e4): GATE FAIL (ctx overflow 7/8, max 305.6>296), two-strike STOP; legacy 'decision' field in results/kaggle_timing_e4b_v001.json is not the gate.
-- DEC 027 FIDELITY: kernel = Dockerfile.public only (offline); NO PIP_* prefixes; setup_calls logging mandatory.
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
 - Kaggle GPU this week: 7.28/30 h per `kaggle quota` 01:00Z (plan 006 used +2.10). Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
 ## Live caveats
-- Job naming (dec 024): waiters, codex-ask and codex-review jobs end in -light; builds, test suites and evals never do.
-- LORO with only 2 repos (rich, fastapi) is weak; report 002 must say so (dec 014 item 3).
+- Standing: kernel = Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light suffix for waiters/asks/reviews only (dec 024); LORO 2-repo weak (dec 014).
 - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
   (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
   results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
@@ -69,11 +72,10 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   gemma-wt/codex-kernel-probes-gate). Summary: timing_summary.py --gate-mode stock-path --gate-vllm-seconds 600. Slug/push: ops/budget/kaggle.md.
 - Gates for that run: (a) 8/8 no harness error; (b) max(Phase-1 - emulation) <= 277 s; (d) vLLM <= 600 s; (e) >= 1 non-empty diff.
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
-- e4b-v002 submit: record submit time, completion time, any runtime field from the Kaggle API/CLI in ops/budget/kaggle.md (weak evidence; never act on it alone).
-- Forum question (dec 035, E4 YES): Aniket posts report 009 s6 from his own account; Builder posts NOTHING. When an answer appears, summarize it (no task data) in the next report. Nothing waits on it; G1 governs.
+- Forum question (dec 035): Aniket posts report 009 s6; Builder posts NOTHING; summarize any answer (no task data) in next report.
 - OPEN eval-design question (dec 034 item 6): under H1, test deps come from the scorer's own site-packages, not setup.py. Before local
   pass-rate evals start, pre-register which environment the local sandbox models and why. Don't act on it before then.
 ## Next 3
-1. On decision for report 012: push arm C (needs review-p5c-light clean); if M2 approved, codex-build the skill + review before ~18:00Z.
+1. review-p5c-light clean -> push arm C (dec 058 item 1); then D per Addendum D condition. Dec 055 checklist at 11-07T00:00Z FIRST.
 2. e4b waiter final -> fill results/lb_e4b_v002.json + budget log, compute T. At 2026-11-07T00:00Z: run the dec 055 checklist above (priority).
 3. Addendum B ADK feasibility codex-ask (CPU); dec 038 paper evidence by Nov 9 23:59Z; plan 007; ops/patches cleanup (dec 045 item 4).

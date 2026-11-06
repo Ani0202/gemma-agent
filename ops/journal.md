@@ -246,3 +246,4 @@
 2026-11-06T02:23Z | report 012 (arm B MECHANISM-ONLY; quota request arm C + optional M2) -> Director | ops/reports/012-plan005-armB-result.md
 2026-11-06T02:22Z | DEC 058: arm C approved (~2.1 h quota, after review-p5c-light clean); M2 declined (Addendum B on file, not built); arm D conditional (push by 21:00Z only if C valid + Mc); plan 007 next week | ops/decisions/058-012-plan005-armB-result.md
 2026-11-06T02:23Z | Addendum D pre-registered (thinking_budget 0 = enable_thinking false, schema ge=0, generation.py:407); 31b-v006-p5d packed sha b7b2eb3d...60a0 | eval/plans/005.md bundles/31b/v006/MANIFEST.md
+2026-11-06T02:27Z | arm C kernel staged (dry-run OK, same timing_push.sh stack as arm B); waiting on review-p5c-light before push | eval/kaggle/timing_push.sh
