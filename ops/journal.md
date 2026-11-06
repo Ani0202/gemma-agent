@@ -295,3 +295,4 @@
 2026-11-06T07:03:41Z | dec 063 approve: rev-3 classifier freeze 18afdbbd OK; code SHA b6e120f recorded in plan 007; smoke gated on review r3 clean | ops/decisions/063-20261106T070229-17561-from-builder.md
 2026-11-06T07:09Z | Review r3 (070228) 1 BLOCKING: verdict evidence fail-open; fixed rev 4 r8/r9/contradictory_resolved, RE-FROZEN sha a208a023, tests 819/4; review r4 launched; Director FYI'd | eval/plans/007.md, ops/codex/review-20261106T070228.md
 2026-11-06T07:09Z | dec 064 read: freeze a208a023 approved, classifier SHA 0d49b1c; review loop capped at rev 5 (exhaustive list); waiting on codex-review-plan007r4-light | ops/decisions/064-20261106T070748-12473-from-builder.md
+2026-11-06T07:13:27Z | r4 review 070737: 3 BLOCKING; fixed in 9d0a8b4 (rev 5 candidate sha 21c3d46e, not frozen); rev-5 final exhaustive review launched (dec 064 item 3) | ops/codex/review-20261106T070737.md

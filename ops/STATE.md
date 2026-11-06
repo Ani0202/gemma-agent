@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 07:09Z (cycle 127, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 07:14Z (cycle 128, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -24,7 +24,11 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (07:08Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-plan007r4-light (rev 4 re-review of 0d49b1c).
+## Running jobs (07:14Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-plan007r5-light (FINAL rev-5 exhaustive review of 9d0a8b4).
+- REV 5 CANDIDATE (9d0a8b4, sha 21c3d46e.., NOT frozen): r4 review 070737 = 3 BLOCKING (resolved+verify-failure msg -> PASS; non-str msgs;
+  malformed setup_calls/rc=False) all fixed: verify:resolved_with_verify_failure, r10-r13, setup_shape_ok, dup-id CLI reject; tests 933/4skip;
+  arm F unchanged. Director FYI'd 07:13Z. ON r5: fold EVERY listed item -> ONE re-freeze -> Director note -> smoke (if before 15:30Z).
+  If r5 not clean/foldable: NO rev 6; report residuals + arm-F exposure to Director (dec 064 item 3).
 - REV 4 (0d49b1c): review r3 070228 = 1 BLOCKING (invalid/contradictory verdict evidence avoided H). Fixed r8 (resolved non-bool) / r9 (exit_code non-int)
   -> H-ROW; verify:contradictory_resolved -> H-VERIFY; RE-FROZEN sha256=a208a023..4e6b; tests 819/4skip; arm F unchanged; Director FYI'd 07:08Z,
   DEC 064 APPROVED freeze a208a023 (note on file); classifier code SHA = 0d49b1c (replaces b6e120f). Smoke gate = dec 063 item 3.
@@ -75,6 +79,6 @@
 - Forum question (dec 035): Aniket posts report 009 s6; Builder posts NOTHING; summarize any answer (no task data) in next report.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. On review codex-review-plan007r4-light: if 0 BLOCKING AND Director note on a208a023 -> push smoke (budget 5400, log quota) before 15:30Z; gate PASS -> main ids 4..33 --seed-max; new BLOCKING -> fix, no launch same cycle; else after reset.
+1. On codex-review-plan007r5-light: fold all items into ONE re-freeze (update 007.md line, armF json, tests) -> Director note -> smoke (budget 5400, quota log) before 15:30Z; else after reset. Not clean -> residuals report, no rev 6.
 2. Dec 055 at 2026-11-07T00:00Z FIRST: (2)(3) hold; re-check (2) live, do (4) commit, (5) journal T=5.007 h <= 6.0 PASS, then submit.
 3. Nov 8 slot proposal (due 11-07T12:00Z); pass-rate summarizer script (codex-reviewed) before reading arm-1 rows; dec 038 paper evidence by Nov 9.
