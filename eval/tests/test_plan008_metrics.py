@@ -245,7 +245,8 @@ def test_smoke_cli_counts_only(tmp_path, monkeypatch, capsys):
     assert 'gate_run_cmds' not in out['rows'][0]
     assert NEW not in dest.read_text()
     assert m._gate_command(YAML) not in dest.read_text()
-    assert out['_schema']['script_sha256'] == old.sha(m.__file__)
+    # Plan009 preserves the frozen legacy fingerprint for byte-identical outputs.
+    assert out['_schema']['script_sha256'] == 'b9c2cb5efed8a5d2e0e3b0bcbb0f530f4cc8ab59dcb3daa0d414c42dabe4557a'
     assert len(out['_schema']['input_shas']) == 5
     assert set(json.loads(capsys.readouterr().out)) == {'n_rows', 'overall'}
     r = dict(row(patch_submitted=False, agent_timeout_fired=True), instance_id='synthetic', fallback_patch_bytes=len(NEW))
