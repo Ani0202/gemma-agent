@@ -15,7 +15,6 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
 - Edit existing files with `edit_file` and a SHORT anchor (1-3 lines) copied exactly from a fresh `read_file` of those lines. If an edit fails, re-read the exact lines and retry with a shorter unique anchor.
 - NEVER use `write_file` on an existing file, and never rebuild a file from a partial read (`read_file` shows at most 150 lines). Use `write_file` only for a small NEW source file.
 - Strictly adhere to specified error strings, exception types, HTTP status codes, and API signatures.
-- For documentation code tasks (e.g. FastAPI), edit executable code under `docs_src/`.
 
 ### 3. Run Targeted Tests Only (Existing Tests May Be Broken)
 - **Run ONLY Targeted Tests**: Run only the specific test file or test method directly verifying the bug or feature you modified, with short output: e.g. `pytest tests/test_target.py -k test_feature -x -q 2>&1 | tail -30`.

@@ -231,3 +231,8 @@
 2026-11-06T01:06Z | fixed: Addendum A dated correction (total V/E/M rule); prompt-text-only edits; 31b-v003 re-packed sha e9e603ab...4d2f (3fa08f76 superseded, never run); trace_tool_errors.py pairing/ids check (arm A unchanged) | eval/plans/005.md bundles/31b/v003/MANIFEST.md 7879aef
 2026-11-06T01:06Z | plan 005 Addendum B pre-registered 01:03Z (truncation-safe/early-edit mechanism, dec 056 item 6) | eval/plans/005.md
 2026-11-06T01:06Z | review-plan005-fix-light launched (narrow confirm before arm-B push) | ops/jobs
+2026-11-06T01:06Z | review-plan005-fix-light CLEAN (0 BLOCKING, 0 NON-BLOCKING) | ops/codex/review-20261106T010444.md
+2026-11-06T01:06Z | dec 057: repo-specific FastAPI/docs_src hint; dec 055 unchanged; no new bundle/draft carries repo hints; finals need hint-free successors both tracks | ops/decisions/057-20261106T010506-10980-from-builder.md
+2026-11-06T01:06Z | dec 057 item 4 NOTE: bundles v000-v002 (31b AND e4b) carry an inherited FastAPI/docs_src prompt hint (e.g. bundles/31b/v002/prompts/system.md:16); any LB score from them is possibly tilted toward FastAPI-like tasks | ops/decisions/057-20261106T010506-10980-from-builder.md
+2026-11-06T01:08Z | bundles/drafts/item4-system.md: docs_src/FastAPI line removed (dec 057 item 2) | bundles/drafts/item4-system.md
+2026-11-06T01:07:03Z | PLAN 005 ARM B PUSHED: aniket0202/gemma-31b-timing v2 (31b-v003-p5t4 e9e603ab, cap 4.0, budget 6000, NvidiaL4); quota before 7.28 h; waiter timing-31b-v003-wait-light | ops/budget/kaggle.md
