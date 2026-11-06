@@ -2990,3 +2990,2467 @@ p.write_text(s)
 PY
 python3 /tmp/d73_gate_tests.py" in /home/ubuntu/work/gemma-wt/codex-plan008-d73
  succeeded in 0ms:
+codex
+The gate now parses status entries and checks both paths of a rename or copy. I’m adding tests that run the YAML command in real Git repos and compare eligibility with the harness’s stripped diff. Next I’ll update metrics to associate each inner submit with its enclosing root gate call.
+exec
+/bin/bash -lc "cat > /tmp/d73_metrics_edit.py <<'PY'
+from pathlib import Path
+p=Path('eval/plan008_metrics.py')
+s=p.read_text().replace('Plan 008 D71.2/D72.2 metrics. CPU/stdlib only;', 'Plan 008 D73 metrics. CPU/offline only;').replace('smoke RUN_DIR OUT_JSON\\n', 'smoke RUN_DIR OUT_JSON | arm2 RUN_DIR OUT_JSON\\n\\nSmoke loads task.test_files with swegemma.models.load_tasks, as both eval runners do.\\nTasks default to data/raw/tasks.jsonl (local) or the Kaggle competition tasks.jsonl;\\nPLAN008_TASKS_PATH overrides that location for downloaded runs. Missing tasks fail smoke.\\n')
+s=s.replace('import math\\n', 'import math\\nimport os\\n')
+s=s.replace(\"'success': 'first root submit with patch_size and no error, or gate reply starting SUBMITTED',\", \"'success': 'first root harness patch_size response (builtin), or gate-authored inner harness patch_size response attributed to its enclosing root submit; acknowledgement not required',\\n    'submit_unverifiable': 'inner/builtin success vs explicit patch_submitted mismatch, or flag unavailable; missing flag derived from harness response only, not acknowledgement; rows counted and listed',\")
+s=s.replace(\"'smoke': '008.md D71.2 i-v and D72.2;\", \"'smoke': '008.md D73.2 i-v;\")
+a=s.index('def successful_submit_index(')
+b=s.index('\\ndef submitted_without_test',a)
+s=s[:a]+'''def gate_invocations(entries):
+    \"\"\"Legacy traces lack event IDs: enclose children by root call/reply interval.
+
+    A missing acknowledgement ends at the next root call or trace end. This retains
+    inner captures interrupted by a deadline, without assigning them to a later call.
+    Only the root tool_response is a canonical gate reply.
+    \"\"\"
+    pairs = _pairs(entries)
+    roots = [c for c in pairs if c.get('author') == ROOT]
+    gates = []
+    for i, c in enumerate(roots):
+        if c.get('tool') "'!= '"'submit_patch':
+            continue
+        end = roots[i + 1]['entry_index'] if i + 1 < len(roots) else len(entries)
+        reply_index = c['response_index']
+        canonical = (reply_index is not None and reply_index < end
+                     and entries[reply_index].get('type') == 'tool_response')
+        if canonical:
+            end = reply_index
+        children = [p for p in pairs if p.get('author') == 'submit_patch'
+                    and c['entry_index'] < p['entry_index'] < end]
+        inner = [p for p in children if p.get('tool') == 'submit_patch'
+                 and p['response_index'] is not None and p['response_index'] < end
+                 and _patch_size(p['response']) is not None]
+        gates.append(dict(c, root_index=i, children=children, inner_successes=inner,
+                          canonical_reply=_reply(c['response']) if canonical else '',
+                          canonical_index=reply_index if canonical else None))
+    return gates
+
+
+def successful_submit_index(entries):
+    gates = {g['entry_index']: g for g in gate_invocations(entries)}
+    for i, c in enumerate(root_tool_calls(entries)):
+        if c.get('tool') == 'submit_patch' and (
+                _patch_size(c['response']) is not None
+                or gates[c['entry_index']]['inner_successes']):
+            return i
+    return None
+
+
+def submit_evidence(row, entries):
+    observed = successful_submit_index(entries) is not None
+    flag = row.get('patch_submitted')
+    known = type(flag) is bool
+    return dict(submit_unverifiable=not known or flag "'!= observed,
+                patch_submitted=flag if known else observed,
+                patch_submitted_source='"'row' if known else 'derived_from_harness_response',
+                successful_submit=observed)
+
+''' + s[b:]
+s=s.replace(\"return (c.get('args', c.get('arguments')) or {}).get('command', '')\", \"args = c.get('args', c.get('arguments'))\\n    return args.get('command', '') if isinstance(args, dict) and isinstance(args.get('command', ''), str) else ''\")
+a=s.index('def gate_descriptives(')
+b=s.index('\\ndef untracked_only',a)
+s=s[:a]+'''def gate_descriptives(entries, row=None):
+    roots = root_tool_calls(entries)
+    gates = gate_invocations(entries)
+    cmds = [c for g in gates for c in g['children'] if c.get('tool') == 'run_command']
+    limit = any('LlmCallsLimitExceeded' in _response_text(e) for e in entries
+                if e.get('author') == 'submit_patch')
+    if row and gates:
+        limit |= any('LlmCallsLimitExceeded' in str(row.get(k, ''))
+                     for k in ('agent_error', 'agent_error_text', 'result_error', 'error'))
+    return dict(gate_calls=len(gates),
+                bounces=sum(g['canonical_reply'].startswith('NOT SUBMITTED') for g in gates),
+                forced=sum('reason=forced' in _response_text(c['response']) for c in cmds),
+                check_error=sum('reason=check_error' in _response_text(c['response']) for c in cmds),
+                submit_failed=sum(g['canonical_reply'].startswith('SUBMIT FAILED') for g in gates),
+                bounce_no_followup=sum(g['root_index'] == len(roots) - 1 and
+                                       g['canonical_reply'].startswith('NOT SUBMITTED') for g in gates),
+                gate_llm_limit=int(limit),
+                unacknowledged_inner_submits=sum(bool(g['inner_successes']) and
+                                                g['canonical_reply'] "'!= '"'SUBMITTED' for g in gates),
+                gate_run_cmds=[_command(c) for c in cmds],
+                gate_internal_visible=any(g['children'] for g in gates))
+
+''' + s[b:]
+a=s.index('def _cap_exempt(')
+b=s.index('\\ndef _schema',a)
+s=s[:a]+'''def smoke_check(row, entries, gate_yaml_path, scored_patch=None, test_files_loaded=False):
+    \"\"\"D73.2 i..v. scored_patch must already be stripped with task.test_files.
+
+    Missing evidence is UNVERIFIABLE, which is FAIL for the overall smoke.
+    Reasons are fixed descriptions; commands, patches and task text are never emitted.
+    \"\"\"
+    out = {}
+    gates = gate_invocations(entries)
+    desc = gate_descriptives(entries, row)
+    expected = _gate_command(gate_yaml_path)
+    failures, missing = [], []
+    captures = []
+    if not gates:
+        failures.append('no gate invocation in task')
+    for gate in gates:
+        children = gate['children']
+        if not children:
+            missing.append('gate internals absent')
+            continue
+        if gate['canonical_index'] is None:
+            missing.append('canonical gate response absent')
+        cmds = [c for c in children if c.get('tool') == 'run_command']
+        subs = [c for c in children if c.get('tool') == 'submit_patch']
+        captures.extend(gate['inner_successes'])
+        if len(cmds) "'!= 1 or _command(cmds[0]) != expected:
+            failures.append('"'gate check command differs or count differs')
+        elif cmds[0]['response_index'] is None:
+            missing.append('gate check response absent')
+        else:
+            text = _response_text(cmds[0]['response'])
+            need_submit = 'VERDICT=SUBMIT' in text or 'VERDICT=EDIT_FIRST' not in text
+            if need_submit and (len(subs) "'!= 1 or subs[0]['"'entry_index'] <= cmds[0]['response_index']
+                                or not gate['inner_successes']):
+                failures.append('successful inner submit absent or out of order')
+            if not need_submit and subs:
+                failures.append('inner submit after EDIT_FIRST')
+        if gate['canonical_reply'] == 'SUBMITTED':
+            for e in entries[gate['canonical_index'] + 1:]:
+                if e.get('author') "'!= ROOT or e.get('"'type') in ('tool_response', 'tool_result'):
+                    continue
+                if e.get('type') == 'final' and e.get('content') == gate['canonical_reply']:
+                    continue  # legacy recorder's mirrored function-response display
+                failures.append('root model event after successful gate response')
+                break
+    if gates and not captures:
+        failures.append('no successful inner submit')
+    # A missing flag can be derived only from a real inner harness capture.
+    flag = row.get('patch_submitted')
+    if flag is False or (flag is not True and not captures):
+        failures.append('run did not end with patch_submitted true')
+    out['i'] = _criterion('FAIL' if failures else 'UNVERIFIABLE' if missing else 'PASS',
+                          '; '.join(failures or missing) or 'gate sequence and termination observed')
+
+    actual = row.get('verified_patch_bytes')
+    if not test_files_loaded or scored_patch is None or not captures or type(actual) is not int:
+        out['ii'] = _criterion('UNVERIFIABLE', 'task test_files, saved patch or capture evidence missing')
+    else:
+        size = _patch_size(captures[-1]['response'])
+        agrees = len(scored_patch) == size and len(scored_patch.encode('utf-8')) == actual
+        out['ii'] = _criterion('PASS' if agrees else 'FAIL',
+                               'stripped patch characters and UTF-8 bytes agree' if agrees else 'stripped patch sizes differ')
+
+    errors = bool(desc['check_error'] or desc['submit_failed'])
+    for key in ('agent_error', 'agent_error_text', 'result_error', 'error'):
+        err = row.get(key)
+        if err and not re.search(r'budget|timeout|timed out', str(err), re.I):
+            errors = True
+    for e in entries:
+        if e.get('author') not in (ROOT, 'submit_patch'):
+            continue
+        if e.get('type') in ('tool_response', 'tool_result'):
+            text = _response_text(e.get('result', ''))
+            errors |= _has_error(text) or bool(re.search(r'unknown[ _-]tool|ToolErrorPlugin|compile error|validator error', text, re.I))
+    malformed = False
+    for gate in gates:
+        args = gate.get('args', gate.get('arguments'))
+        malformed |= not (isinstance(args, dict) and set(args) == {'request'}
+                          and isinstance(args['request'], str) and bool(args['request'].strip()))
+        malformed |= gate['canonical_reply'] not in ('SUBMITTED', BOUNCE)
+        for c in gate['children']:
+            args = c.get('args', c.get('arguments'))
+            if c.get('tool') == 'run_command':
+                malformed |= args "'!= {'"'command': expected}
+            elif c.get('tool') == 'submit_patch':
+                malformed |= args "'!= {}
+            else:
+                malformed = True
+    out['"'iii'] = _criterion('FAIL' if errors or malformed else 'PASS',
+                            'error or malformed gate call/reply observed' if errors or malformed else 'no errors or malformed gate calls/replies observed')
+    clock = row.get('agent_clock_seconds')
+    valid = type(clock) in (int, float) and math.isfinite(clock) and clock >= 0
+    out['iv'] = _criterion('UNVERIFIABLE' if not valid else 'PASS' if clock <= 210 else 'FAIL',
+                           'agent clock missing or invalid' if not valid else 'agent clock within 210 seconds' if clock <= 210 else 'agent clock exceeds 210 seconds')
+    out['v'] = _criterion('PASS' if desc['bounces'] <= 2 else 'FAIL',
+                          'at most two EDIT_FIRST replies' if desc['bounces'] <= 2 else 'more than two EDIT_FIRST replies')
+    return out
+
+''' + s[b:]
+s=s.replace(\"    return dict(_schema=_schema('base', paths)\", \"    assert totals['submitted_without_test'] == 23, 'arm-1 safety baseline changed'\\n    assert totals['count_no_successful_submit'] == 7, 'arm-1 no-submit baseline changed'\\n    return dict(_schema=_schema('base', paths)\")
+a=s.index('def smoke_metrics(')
+b=s.index('\\ndef main(',a)
+s=s[:a]+'''def load_task_test_files(tasks_path):
+    # Match agent_timing.evaluate / run_agent_eval.run: the Task property derives
+    # these paths from test_patch. Never use gold patch or test text as agent input.
+    from swegemma.models import load_tasks
+    tasks = load_tasks(Path(tasks_path))
+    inventory = {t.instance_id: list(t.test_files) for t in tasks}
+    if len(inventory) "'!= len(tasks):
+        raise ValueError('"'duplicate task IDs')
+    return inventory
+
+
+def _tasks_path():
+    if os.environ.get('PLAN008_TASKS_PATH'):
+        return Path(os.environ['PLAN008_TASKS_PATH'])
+    kaggle = Path('/kaggle/input/competitions/gemma-4-developer-agent/tasks.jsonl')
+    return kaggle if kaggle.is_file() else Path('data/raw/tasks.jsonl')
+
+
+def _artifacts(run_dir, iid):
+    # Kaggle: runs/<iid>; local eval runner: <iid>.
+    nested = Path(run_dir) / 'runs' / iid
+    return nested if nested.is_dir() else Path(run_dir) / iid
+
+
+def smoke_metrics(run_dir, tasks_path=None):
+    timing = Path(run_dir) / 'timing.jsonl'
+    paths, rows = [timing, GATE_YAML], []
+    tasks_path = Path(tasks_path) if tasks_path is not None else _tasks_path()
+    try:
+        test_files = load_task_test_files(tasks_path)
+        paths.append(tasks_path)
+    except Exception:
+        test_files = {}  # criterion ii is UNVERIFIABLE for every missing task
+    for row in base.load_rows(timing):
+        artifacts = _artifacts(run_dir, row['instance_id'])
+        trace, patch = artifacts / 'trace.json', artifacts / 'agent.patch'
+        paths.append(trace)
+        entries = json.loads(trace.read_text()).get('entries', [])
+        scored = None
+        loaded = row['instance_id'] in test_files
+        if patch.is_file():
+            paths.append(patch)
+            if loaded:
+                from swegemma.harness.verification import strip_protected_files_from_patch
+                scored = strip_protected_files_from_patch(patch.read_text(),
+                            extra_protected_paths=test_files[row['instance_id']])
+        desc = gate_descriptives(entries, row)
+        desc.pop('gate_run_cmds')
+        rows.append(dict(instance_id=row['instance_id'],
+                         criteria=smoke_check(row, entries, GATE_YAML, scored, loaded), **desc))
+    passed = bool(rows) and all(c['status'] == 'PASS' for r in rows for c in r['criteria'].values())
+    return dict(_schema=_schema('smoke', paths), n_rows=len(rows), overall='PASS' if passed else 'FAIL', rows=rows)
+
+
+GATE_COUNTS = ('gate_calls', 'bounces', 'forced', 'check_error', 'submit_failed',
+               'bounce_no_followup', 'gate_llm_limit', 'unacknowledged_inner_submits', 'untracked_only_submits')
+
+
+def arm2_metrics(run_dir):
+    timing = Path(run_dir) / 'timing.jsonl'
+    paths, rows, inputs = [timing], [], []
+    for row in base.load_rows(timing):
+        artifacts = _artifacts(run_dir, row['instance_id'])
+        trace = artifacts / 'trace.json'
+        paths.append(trace)
+        entries = json.loads(trace.read_text()).get('entries', [])
+        inputs.append((row, entries, artifacts))
+    # Builtin responses carry patch_size; gate requests carry request, children
+    # have author submit_patch. Header labels/SHA cover runs that never called it.
+    headers = [json.loads(line) for line in timing.read_text().splitlines() if line.strip()
+               and 'instance_id' not in json.loads(line)]
+    header_text = json.dumps(headers)
+    has_gate = ('v010' in header_text or any(
+        e.get('author') == 'submit_patch' or
+        (e.get('author') == ROOT and e.get('tool') == 'submit_patch' and
+         (isinstance(e.get('args'), dict) and 'request' in e['args'] or
+          _reply(e.get('result')) in ('SUBMITTED', BOUNCE)))
+        for _, entries, _ in inputs for e in entries))
+    for row, entries, artifacts in inputs:
+        rep = identical_runs_root(entries)
+        desc = gate_descriptives(entries, row) if has_gate else {}
+        desc.pop('gate_run_cmds', None)
+        if has_gate:
+            patch = artifacts / 'agent.patch'
+            desc['untracked_only_submits'] = None
+            if patch.is_file():
+                paths.append(patch)
+                # D72 defines this on scored sections, not protected raw edits.
+                result = artifacts / 'result.json'
+                if not result.is_file():
+                    result = artifacts / 'output.json'
+                scored = json.loads(result.read_text()).get('agent_patch') if result.is_file() else None
+                if result.is_file():
+                    paths.append(result)
+                if scored is None:
+                    try:
+                        from swegemma.harness.verification import strip_protected_files_from_patch
+                        tests = load_task_test_files(_tasks_path())[row['instance_id']]
+                        scored = strip_protected_files_from_patch(patch.read_text(), extra_protected_paths=tests)
+                    except Exception:
+                        scored = None
+                if scored is not None:
+                    desc['untracked_only_submits'] = bool(successful_submit_index(entries) is not None and untracked_only(scored))
+        else:
+            desc = dict.fromkeys((*GATE_COUNTS, 'gate_internal_visible'), 'n/a (no gate)')
+        rows.append(dict(instance_id=row['instance_id'], **rep, mechanism2=rep['max_run'] >= 5,
+                         mechanism1_empty=row.get('verified_patch_bytes') == 0,
+                         submitted_without_test=submitted_without_test(entries),
+                         **submit_evidence(row, entries), **desc))
+    totals = dict(mechanism2=sum(r['mechanism2'] for r in rows),
+                  mechanism1_empty=sum(r['mechanism1_empty'] for r in rows),
+                  submitted_without_test=sum(r['submitted_without_test'] is True for r in rows),
+                  count_no_successful_submit=sum(r['submitted_without_test'] is None for r in rows),
+                  max_run=max((r['max_run'] for r in rows), default=0),
+                  runs_ge3=sum(r['runs_ge3'] for r in rows), runs_ge5=sum(r['runs_ge5'] for r in rows),
+                  repeated_calls=sum(r['repeated_calls'] for r in rows),
+                  submit_unverifiable=sum(r['submit_unverifiable'] for r in rows))
+    for key in GATE_COUNTS:
+        totals[key] = (sum(r[key] for r in rows if r[key] is not None) if has_gate else 'n/a (no gate)')
+    totals['untracked_only_unverifiable'] = sum(r.get('untracked_only_submits') is None for r in rows) if has_gate else 'n/a (no gate)'
+    return dict(_schema=_schema('arm2', paths), n_rows=len(rows), totals=totals,
+                submit_unverifiable_rows=[r['instance_id'] for r in rows if r['submit_unverifiable']], rows=rows)
+
+''' + s[b:]
+s=s.replace(\"    elif len(argv) == 4 and argv[1] == 'smoke':\\n        out = smoke_metrics(argv[2])\", \"    elif len(argv) == 4 and argv[1] in ('smoke', 'arm2'):\\n        out = (smoke_metrics if argv[1] == 'smoke' else arm2_metrics)(argv[2])\")
+p.write_text(s)
+PY
+python3 /tmp/d73_metrics_edit.py" in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 0ms:
+exec
+/bin/bash -lc "rg -n 'LlmCallsLimit|llm calls|LLM calls' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py && sed -n '1,135p' eval/tests/test_submit_gate.py && sed -n '35,65p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py && rg -n 'type.*final|tool_response|raw' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py && sed -n '218,245p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/models/task.py" in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 0ms:
+16:from google.adk.agents.invocation_context import LlmCallsLimitExceededError
+1026:        except (TimeoutError, LlmCallsLimitExceededError) as e:
+"""Runs the exact gate command from bundles/31b/v010/sub_agents/submit_gate.yaml in temp git repos (CPU only).
+
+Eligibility must equal the harness rule: a path counts iff swegemma.harness.verification._is_protected_test_or_config_path
+is False for it (task-specific extra test_files are unknown to the gate; residual, see eval/plans/008.md D72)."""
+import os, subprocess
+from pathlib import Path
+import pytest
+import yaml
+
+GATE = Path(__file__).resolve().parents[2] / 'bundles/31b/v010/sub_agents/submit_gate.yaml'
+
+
+def gate_cmd(ws, counter):
+    ins = yaml.safe_load(GATE.read_text())['instruction']
+    lines = ins.splitlines()
+    cmd = lines[lines.index(next(l for l in lines if 'exactly this command' in l)) + 2].strip()
+    assert cmd.startswith('cd /workspace && ') and cmd.count('/tmp/.submit_gate_n') == 2
+    return cmd.replace('/workspace', str(ws)).replace('/tmp/.submit_gate_n', str(counter))
+
+
+BASE_FILES = ['src/a.py', 'tests/test_a.py', 'pyproject.toml', 'src/latest_x.py', 'tox.ini', 'testing/helper.py',
+              'Tests/helper.py', 'tests/a.py', 'tests/data.json', 'docs/x.md']
+
+
+def make_repo(tmp_path, tag=True):
+    ws = tmp_path / 'ws'
+    for f in BASE_FILES:
+        (ws / f).parent.mkdir(parents=True, exist_ok=True)
+        (ws / f).write_text(f + '\nx\n')
+    subprocess.run('git init -q && git add -A && git -c user.email=a@b -c user.name=a commit -qm i'
+                   + (' && git tag _swegemma_baseline' if tag else ''), shell=True, check=True, cwd=ws)
+    return ws
+
+
+def run(cmd):
+    p = subprocess.run(['/bin/bash', '-c', cmd], capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    out = p.stdout.strip().splitlines()
+    assert len(out) == 2 and out[0].startswith('GATE call='), p.stdout
+    return out
+
+
+def verdict(out):
+    v = out[1].replace('VERDICT=', '')
+    return v.replace(' reason=', ':')
+
+
+def apply(ws, edits):
+    for e in edits:
+        if e.startswith('DEL '):
+            (ws / e[4:]).unlink()
+        elif e.startswith('CP '):
+            import shutil
+            a, b = e[3:].split(' -> ')
+            (ws / b).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ws / a, ws / b)
+        elif e.startswith('MODE '):
+            (ws / e[5:]).chmod(0o755)
+        elif e.startswith('MV '):
+            a, b = e[3:].split(' -> ')
+            (ws / b).parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(['git', 'mv', a, b], check=True, cwd=ws)
+        else:
+            (ws / e).parent.mkdir(parents=True, exist_ok=True)
+            with open(ws / e, 'a') as fh:
+                fh.write('y\n')
+
+
+S, E, F = 'SUBMIT:changes', 'EDIT_FIRST', 'SUBMIT:forced'
+CASES = [([], [E, E, F, F]), (['src/a.py'], [S]),
+         (['tests/test_a.py'], [E]), (['pyproject.toml'], [E]), (['tox.ini'], [E]),
+         (['testing/helper.py'], [E]), (['Tests/helper.py'], [E]), (['tests/test a.py'], [E]),
+         (['src/latest_x.py'], [S]), (['src/new.py'], [S]), (['tests/test_new.py'], [E]),
+         (['test_repro.py'], [E]), (['DEL src/a.py'], [S]), (['conftest.py'], [E]), (['x.pth'], [E]),
+         (['src/tests/x.py'], [E]), (['test/x.py'], [E]), (['src/my file.py'], [S]), (['src/a test_b.py'], [S]),
+         (['src/dir with space/test_q.py'], [E]), (['src/sp ace.py'], [S]), (['src/ünï.py'], [S]),
+         # non-.py files under tests/ are NOT protected by the harness, so they stay in the patch: eligible
+         (['tests/data.json'], [S]),
+         # prose/doc files stay in the patch (harness keeps them): eligible by design, not a "source" check
+         (['docs/x.md'], [S]),
+         (['tests/test_a.py', 'src/a.py'], [S]),
+         (['MV src/a.py -> tests/b.py'], [E]),
+         (['MV tests/a.py -> src/b.py'], [E]),
+         (['MV src/a.py -> src2/a.py'], [S]),
+         (['CP src/a.py -> src/b.py'], [S]),
+         (['DEL tests/a.py'], [E]),
+         (['MODE src/a.py'], [S]),
+         (['src/Tests/helper.py'], [E]),
+         (['src/testing/helper.py'], [E]),
+         ]
+
+
+@pytest.mark.parametrize('edits,expected', CASES)
+def test_gate(tmp_path, edits, expected):
+    ws = make_repo(tmp_path)
+    apply(ws, edits)
+    cmd = gate_cmd(ws, tmp_path / 'n')
+    got = [verdict(run(cmd)) for _ in expected]
+    assert got == expected
+
+
+@pytest.mark.parametrize('edits', [c[0] for c in CASES])
+@pytest.mark.parametrize('baseline', ['tag', 'branch'])
+def test_stripped_patch_parity(tmp_path, edits, baseline):
+    from swegemma.harness.verification import strip_protected_files_from_patch
+    ws = make_repo(tmp_path, tag=baseline == 'tag')
+    if baseline == 'branch':
+        subprocess.run(['git', 'branch', '_swegemma_baseline'], cwd=ws, check=True)
+    apply(ws, edits)
+    subprocess.run(['git', 'add', '-N', '.'], cwd=ws, check=True)
+    patch = subprocess.run(['git', 'diff', '--binary', '_swegemma_baseline'],
+                           capture_output=True, text=True, cwd=ws, check=True).stdout
+    want = bool(strip_protected_files_from_patch(patch))
+    out = run(gate_cmd(ws, tmp_path / 'n'))
+    kept = int(out[0].split('kept_files=')[1])
+    assert (kept > 0) == want, 'gate/stripped patch eligibility differs'
+
+
+# Keep the 26-case path-predicate parity check independently of patch section handling.
+PREDICATE_PATHS = [
+    'src/a.py', 'tests/test_a.py', 'pyproject.toml', 'tox.ini', 'testing/helper.py',
+    'Tests/helper.py', 'tests/test a.py', 'src/latest_x.py', 'src/new.py', 'tests/test_new.py',
+    'test_repro.py', 'conftest.py', 'x.pth', 'src/tests/x.py', 'test/x.py',
+    'src/my file.py', 'src/a test_b.py', 'src/dir with space/test_q.py', 'src/sp ace.py',
+    'src/ünï.py', 'tests/data.json', 'docs/x.md', 'setup.cfg', 'pytest.ini',
+    'sitecustomize.py', 'src/a_test.py',
+]
+
+
+@pytest.mark.parametrize('path', PREDICATE_PATHS)
+def test_predicate_parity(path):
+    from swegemma.harness.verification import _is_protected_test_or_config_path as prot
+    import pathlib
+    ins = yaml.safe_load(GATE.read_text())['instruction']
+    predicate = ins.split('P=lambda q: ', 1)[1].split('; T=iter', 1)[0]
+        tool_result: Serialized tool response (for tool_response events).
+        usage: Token usage metadata (prompt, completion, total counts).
+        model_version: Model identifier that produced this event.
+        metadata: Arbitrary metadata for custom events.
+    """
+
+    timestamp: float
+    elapsed: float  # seconds since trace start
+    event_type: (
+        str  # "thinking", "tool_call", "tool_response", "text", "final", "error"
+    )
+    author: str = ""
+    content: str = ""
+    tool_name: str = ""
+    tool_args: dict[str, Any] | None = None
+    tool_result: str = ""
+    usage: dict[str, Any] | None = None  # token counts
+    model_version: str = ""
+    metadata: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the trace entry to a dictionary."""
+        d = {
+            "timestamp": self.timestamp,
+            "elapsed_s": round(self.elapsed, 3),
+            "type": self.event_type,
+        }
+        if self.author:
+            d["author"] = self.author
+        if self.content:
+            d["content"] = self.content
+16:from adk_eval_core.utils.utils import unwrap_tool_response
+29:        event_type: Category of event (e.g., "tool_call", "tool_response",
+33:        tool_name: Name of the tool (for tool_call and tool_response events).
+35:        tool_result: Serialized tool response (for tool_response events).
+44:        str  # "thinking", "tool_call", "tool_response", "text", "final", "error"
+218:        parsed = unwrap_tool_response(fr)
+224:                event_type="tool_response",
+273:                event_type="final" if is_final else "text",
+523:                            event_type="tool_response",
+def load_tasks(path: Path) -> list[Task]:
+    """Load and deduplicate tasks from a JSONL file."""
+    task_field_names = {f.name for f in dataclasses.fields(Task)}
+    seen: set[str] = set()
+    tasks: list[Task] = []
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            if not line.strip():
+                continue
+            data = json.loads(line)
+            instance_id = data.get('instance_id')
+            if instance_id and instance_id not in seen:
+                seen.add(instance_id)
+                filtered_data = {k: v for k, v in data.items() if k in task_field_names}
+                tasks.append(Task(**filtered_data))
+    return tasks
+
+exec
+/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_submit_gate.py -q --tb=no' in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ exited 1 in 5690ms:
+FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF [ 51%]
+FFFFFFFFFFFFFFFFFFFFFFFFFFF..........................FFFFFFFFFFFFFFF.    [100%]
+=========================== short test summary info ============================
+FAILED eval/tests/test_submit_gate.py::test_gate[edits0-expected0] - assert (...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits1-expected1] - assert (...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits2-expected2] - assert (...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits3-expected3] - assert (...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits4-expected4] - assert (...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits5-expected5] - assert (...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits6-expected6] - assert (...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits7-expected7] - assert (...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits8-expected8] - assert (...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits9-expected9] - assert (...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits10-expected10] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits11-expected11] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits12-expected12] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits13-expected13] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits14-expected14] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits15-expected15] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits16-expected16] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits17-expected17] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits18-expected18] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits19-expected19] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits20-expected20] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits21-expected21] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits22-expected22] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits23-expected23] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits24-expected24] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits25-expected25] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits26-expected26] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits27-expected27] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits28-expected28] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits29-expected29] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits30-expected30] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits31-expected31] - assert...
+FAILED eval/tests/test_submit_gate.py::test_gate[edits32-expected32] - assert...
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits0]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits1]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits2]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits3]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits4]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits5]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits6]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits7]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits8]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits9]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits10]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits11]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits12]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits13]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits14]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits15]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits16]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits17]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits18]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits19]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits20]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits21]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits22]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits23]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits24]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits25]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits26]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits27]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits28]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits29]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits30]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits31]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[tag-edits32]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits0]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits1]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits2]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits3]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits4]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits5]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits6]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits7]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits8]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits9]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits10]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits11]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits12]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits13]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits14]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits15]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits16]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits17]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits18]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits19]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits20]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits21]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits22]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits23]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits24]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits25]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits26]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits27]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits28]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits29]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits30]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits31]
+FAILED eval/tests/test_submit_gate.py::test_stripped_patch_parity[branch-edits32]
+FAILED eval/tests/test_submit_gate.py::test_no_baseline_tag_falls_back_to_head
+FAILED eval/tests/test_submit_gate.py::test_counter_unwritable_forces_submit
+FAILED eval/tests/test_submit_gate.py::test_counter_states_and_bound[None-EDIT_FIRST]
+FAILED eval/tests/test_submit_gate.py::test_counter_states_and_bound[-SUBMIT:forced]
+FAILED eval/tests/test_submit_gate.py::test_counter_states_and_bound[08-SUBMIT:forced]
+FAILED eval/tests/test_submit_gate.py::test_counter_states_and_bound[9-SUBMIT:forced]
+FAILED eval/tests/test_submit_gate.py::test_counter_states_and_bound[99-SUBMIT:forced]
+FAILED eval/tests/test_submit_gate.py::test_counter_states_and_bound[123-SUBMIT:forced]
+FAILED eval/tests/test_submit_gate.py::test_counter_states_and_bound[9223372036854775807-SUBMIT:forced]
+FAILED eval/tests/test_submit_gate.py::test_counter_states_and_bound[-1-SUBMIT:forced]
+FAILED eval/tests/test_submit_gate.py::test_counter_states_and_bound[abc-SUBMIT:forced]
+FAILED eval/tests/test_submit_gate.py::test_counter_read_only_forces_submit
+FAILED eval/tests/test_submit_gate.py::test_counter_decimal_no_octal - assert...
+FAILED eval/tests/test_submit_gate.py::test_check_error_fails_open - assert (...
+FAILED eval/tests/test_submit_gate.py::test_not_a_git_repo_fails_open - asser...
+114 failed, 27 passed in 4.43s
+
+exec
+/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_submit_gate.py -x -q --tb=short' in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ exited 1 in 249ms:
+F
+=================================== FAILURES ===================================
+_________________________ test_gate[edits0-expected0] __________________________
+eval/tests/test_submit_gate.py:97: in test_gate
+    cmd = gate_cmd(ws, tmp_path / 'n')
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+eval/tests/test_submit_gate.py:17: in gate_cmd
+    assert cmd.startswith('cd /workspace && ') and cmd.count('/tmp/.submit_gate_n') == 2
+E   assert (True and 3 == 2)
+E    +  where True = <built-in method startswith of str object at 0x7ed1e60>('cd /workspace && ')
+E    +    where <built-in method startswith of str object at 0x7ed1e60> = 'cd /workspace && git add -N . ; if [ -e /tmp/.submit_gate_n ]; then n=$(cat /tmp/.submit_gate_n 2>/dev/null); if [[ "...T=SUBMIT reason=forced; elif [ "$c" -gt 0 ]; then echo VERDICT=SUBMIT reason=changes; else echo VERDICT=EDIT_FIRST; fi'.startswith
+E    +  and   3 = <built-in method count of str object at 0x7ed1e60>('/tmp/.submit_gate_n')
+E    +    where <built-in method count of str object at 0x7ed1e60> = 'cd /workspace && git add -N . ; if [ -e /tmp/.submit_gate_n ]; then n=$(cat /tmp/.submit_gate_n 2>/dev/null); if [[ "...T=SUBMIT reason=forced; elif [ "$c" -gt 0 ]; then echo VERDICT=SUBMIT reason=changes; else echo VERDICT=EDIT_FIRST; fi'.count
+=========================== short test summary info ============================
+FAILED eval/tests/test_submit_gate.py::test_gate[edits0-expected0] - assert (...
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed in 0.23s
+
+exec
+/bin/bash -lc "sed -n '1020,1046p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py && sed -n '96,160p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/models/task.py && rg -n 'submit_gate|smoke_check|successful_submit_index|gate_descriptives' eval/tests --glob '*.py'" in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 0ms:
+
+                        current_message = genai_types.Content(
+                            role='user',
+                            parts=[genai_types.Part(text=nudge_prompt)],
+                        )
+
+        except (TimeoutError, LlmCallsLimitExceededError) as e:
+            if isinstance(e, TimeoutError):
+                agent_error = (
+                    f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+                )
+                logger.warning('Task %s agent timed out.', task.instance_id)
+            else:
+                agent_error = (
+                    f'Agent exceeded turns budget ({config.budget.turns} turns)'
+                    if config.budget.turns is not None
+                    else 'Agent exceeded maximum allowed LLM turns'
+                )
+                logger.warning('Task %s agent exceeded turns budget.', task.instance_id)
+        except Exception as e:
+            logger.exception(
+                'Error during sandbox execution for task %s', task.instance_id
+            )
+            agent_error = f'Sandbox execution error: {e}'
+
+        if context is not None and hasattr(context, 'stop_agent_session'):
+            context.stop_agent_session()
+                rem_old -= 1
+            elif line.startswith('+'):
+                rem_new -= 1
+            if rem_old <= 0 and rem_new <= 0:
+                in_hunk = False
+            continue
+        if line.startswith('diff --git '):
+            deleted_current_file = False
+            continue
+        if line.startswith('--- '):
+            continue
+        if line.startswith('deleted file mode'):
+            deleted_current_file = True
+        elif line.startswith('rename to '):
+            _add(_unquote_git_path(line[len('rename to ') :]))
+        elif line.startswith('+++ ') and not deleted_current_file:
+            _add(_unquote_git_path(line[4:]))
+    return files
+
+
+@dataclass(frozen=True)
+class Task:
+    """A single SWE-bench task instance."""
+
+    instance_id: str
+    repo: str
+    base_commit: str
+    problem_statement: str
+    patch: str = ''  # gold solution (never shown to agent)
+    test_patch: str = ''  # verification tests (applied in eval container)
+    hints_text: str = ''
+    created_at: str = ''
+    FAIL_TO_PASS: tuple[str, ...] = ()
+    PASS_TO_PASS: tuple[str, ...] = ()
+    environment_setup_commit: str = ''
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, 'FAIL_TO_PASS', _normalize_test_nodes(self.FAIL_TO_PASS))
+        object.__setattr__(self, 'PASS_TO_PASS', _normalize_test_nodes(self.PASS_TO_PASS))
+
+    @property
+    def repo_org(self) -> str:
+        """Repository organization (e.g., 'fastapi')."""
+        parts = self.repo.split('/', 1)
+        return parts[0]
+
+    @property
+    def repo_name(self) -> str:
+        """Repository name (e.g., 'fastapi')."""
+        parts = self.repo.split('/', 1)
+        return parts[1] if len(parts) > 1 else parts[0]
+
+    @property
+    def test_files(self) -> list[str]:
+        """File paths modified by the test_patch."""
+        return extract_test_files_from_patch(self.test_patch)
+
+
+class TaskResult(BaseTaskResult):
+    """Result of evaluating a single task."""
+
+    model_config = ConfigDict(populate_by_name=True, extra='allow')
+
+    repo: str = Field(
+        default='', description="Repository identifier (e.g., 'fastapi/fastapi')."
+eval/tests/test_plan008_metrics.py:77:    assert m.successful_submit_index(es) == 3
+eval/tests/test_plan008_metrics.py:90:    assert m.successful_submit_index(gate('SUBMIT FAILED: failure')) is None
+eval/tests/test_plan008_metrics.py:97:def test_gate_descriptives():
+eval/tests/test_plan008_metrics.py:99:    d = m.gate_descriptives(es)
+eval/tests/test_plan008_metrics.py:104:    assert m.gate_descriptives(gate(m.BOUNCE))['bounce_no_followup'] == 1
+eval/tests/test_plan008_metrics.py:105:    assert m.gate_descriptives(gate(reason='check_error'))['check_error'] == 1
+eval/tests/test_plan008_metrics.py:106:    assert m.gate_descriptives(gate('SUBMIT FAILED: error'))['submit_failed'] == 1
+eval/tests/test_plan008_metrics.py:108:    assert m.gate_descriptives(hidden)['gate_internal_visible'] is False
+eval/tests/test_plan008_metrics.py:123:    criteria = m.smoke_check(row(), gate(), YAML)
+eval/tests/test_plan008_metrics.py:127:    assert all(c['status'] == 'PASS' for c in m.smoke_check(row(), es, YAML).values())
+eval/tests/test_plan008_metrics.py:146:    assert m.smoke_check(r, es, YAML)['i']['status'] == 'FAIL'
+eval/tests/test_plan008_metrics.py:150:    assert m.smoke_check(row(verified_patch_bytes=24), gate(), YAML)['ii']['status'] == 'FAIL'
+eval/tests/test_plan008_metrics.py:151:    assert m.smoke_check(row(verified_patch_bytes=None), gate(), YAML)['ii']['status'] == 'UNVERIFIABLE'
+eval/tests/test_plan008_metrics.py:154:    assert m.smoke_check(row(), es, YAML)['ii']['status'] == 'UNVERIFIABLE'
+eval/tests/test_plan008_metrics.py:174:    assert m.smoke_check(r, es, YAML)['iii']['status'] == 'FAIL'
+eval/tests/test_plan008_metrics.py:178:    assert m.smoke_check(row(agent_clock_seconds=210.01), gate(), YAML)['iv']['status'] == 'FAIL'
+eval/tests/test_plan008_metrics.py:182:    assert m.smoke_check(r, gate(), YAML)['iv']['status'] == 'UNVERIFIABLE'
+eval/tests/test_plan008_metrics.py:183:    assert m.smoke_check(row(), gate(m.BOUNCE) * 3 + gate(), YAML)['v']['status'] == 'FAIL'
+eval/tests/test_plan008_metrics.py:188:    assert m.smoke_check(row(), hidden, YAML)['i']['status'] == 'UNVERIFIABLE'
+eval/tests/test_plan008_metrics.py:191:    cs = m.smoke_check(r, [], YAML)
+eval/tests/test_plan008_metrics.py:194:    assert m.smoke_check(r, gate(m.BOUNCE), YAML)['ii']['status'] == 'PASS'
+eval/tests/test_plan008_metrics.py:196:    assert m.smoke_check(r, [], YAML)['ii']['status'] == 'UNVERIFIABLE'
+eval/tests/test_submit_gate.py:1:"""Runs the exact gate command from bundles/31b/v010/sub_agents/submit_gate.yaml in temp git repos (CPU only).
+eval/tests/test_submit_gate.py:10:GATE = Path(__file__).resolve().parents[2] / 'bundles/31b/v010/sub_agents/submit_gate.yaml'
+eval/tests/test_submit_gate.py:17:    assert cmd.startswith('cd /workspace && ') and cmd.count('/tmp/.submit_gate_n') == 2
+eval/tests/test_submit_gate.py:18:    return cmd.replace('/workspace', str(ws)).replace('/tmp/.submit_gate_n', str(counter))
+
+exec
+/bin/bash -lc "sed -n '1088,1128p' eval/kaggle/agent_timing.py && rg -n 'timing.jsonl|journal =|environment' eval/run_agent_eval.py | tail -12 && sed -n '1,38p' bundles/31b/v010/sub_agents/submit_gate.yaml" in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 0ms:
+            raw_error = (result.error or '') if result else error or ''
+            phase = phase1_fields(times, evaluator.agent_seconds, total,
+                                  getattr(evaluator, 'context', None),
+                                  result.agent_patch if result else evaluator.patch)
+            phase.update(agent_outcome=agent_outcome(evaluator.agent_error or raw_error),
+                         image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
+            try:
+              append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+                result_error=(result.error[:4096] if result is not None and result.error else None),
+                agent_error_text=(evaluator.agent_error[:4096] if evaluator.agent_error else None),
+                verified_patch_bytes=(len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+                **phase,
+                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                editable_failed=times.get('editable_failed', False),
+                setup_output_artifact=times.get('setup_output_artifact'),
+                missing_tool_deps=times.get('missing_tool_deps', []),
+                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
+                llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
+                tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
+                completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
+                stock_setup=stock, llm_calls=llm_calls(evaluator.trace),
+                **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+                timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+            except Exception as exc:
+                evidence = {}
+                for key, value in (
+                    ('result_error', lambda: result.error[:4096] if result is not None and result.error else None),
+                    ('agent_error_text', lambda: evaluator.agent_error[:4096] if evaluator.agent_error else None),
+                    ('verified_patch_bytes', lambda: len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+                ):
+                    try:
+                        evidence[key] = value()
+                    except Exception:
+                        evidence[key] = None
+                append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+                                     **evidence,
+                                     **phase,
+                                     wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+423:    environment = setup_scorer_env(args.data_dir, out_dir=args.out, repo_root=ROOT,
+425:    patched = environment['patched']
+434:                  python_version=sys.version, wheels_listing_sha256=wheels_listing_sha(environment['wheels_dir']),
+435:                  sandbox=environment['sandbox'], bwrap_argv_template=environment['bwrap_argv_template'],
+447:    journal = Journal(journal_path, header, args.force_new)
+546:                   sandbox=environment['sandbox'], cmd_timeouts=times.get('cmd_timeouts', 0),
+name: submit_patch
+description: 'Submit your patch (final action). Call with request="submit". It first checks that your diff changes at least one file that is not a test or test-config file; if none is changed, it does NOT submit and tells you to edit a source file first.'
+model: gemma-4-31b-it-qat-w4a16-ct
+instruction: |
+  You are a submission gate. Do exactly these steps and nothing else.
+
+  1. Call `run_command` ONCE with exactly this command:
+
+  cd /workspace && git add -N . ; if [ -e /tmp/.submit_gate_n ]; then n=$(cat /tmp/.submit_gate_n 2>/dev/null); if [[ "$n" =~ ^[0-9][0-9]?$ ]]; then n=$((10#$n+1)); else n=9; fi; else n=1; fi; printf %s "$n" > /tmp/.submit_gate_n || n=9; c=$(set -o pipefail; (git diff --name-status -z _swegemma_baseline 2>/dev/null || git diff --name-status -z HEAD) | python3 -c "import sys,pathlib; N=('conftest.py','pytest.ini','pyproject.toml','tox.ini','setup.cfg','.pytest.ini','sitecustomize.py','usercustomize.py','_swegemma_stubs.py'); P=lambda q: q.name in N or q.name.endswith('.pth') or (q.name.startswith('test_') and q.name.endswith('.py')) or q.name.endswith('_test.py') or (q.name.endswith('.py') and any(x.lower() in ('tests','test','testing') for x in q.parts[:-1])); T=iter(sys.stdin.read().split(chr(0))[:-1]); c=0; exec('for s in T:\n p=[next(T) for _ in range(2 if s.startswith((chr(82),chr(67))) else 1)]\n c+=not any(P(pathlib.PurePosixPath(f)) for f in p)'); print(c)") || c=err; echo "GATE call=$n kept_files=$c"; if ! [ "$c" -ge 0 ] 2>/dev/null; then echo VERDICT=SUBMIT reason=check_error; elif [ "$n" -gt 2 ]; then echo VERDICT=SUBMIT reason=forced; elif [ "$c" -gt 0 ]; then echo VERDICT=SUBMIT reason=changes; else echo VERDICT=EDIT_FIRST; fi
+
+  2. If the output contains VERDICT=SUBMIT, call `submit_patch` once. If it returns a patch_size, reply with the single word SUBMITTED. If it returns an error, reply exactly: SUBMIT FAILED: followed by the error message.
+
+  3. If the output contains VERDICT=EDIT_FIRST, do NOT call submit_patch. Reply exactly: NOT SUBMITTED: no non-test source file is changed. Make your source edit with edit_file (or a /tmp Python script), confirm it with git diff --stat, then call submit_patch again.
+
+  4. If `run_command` returns an error (for example a budget error) or its output contains no VERDICT line, call `submit_patch` once and reply as in step 2.
+tools:
+- run_command
+- submit_patch
+generate_content_config:
+  temperature: 0.0
+  top_p: 1.0
+  max_output_tokens: 1024
+  thinking_config:
+    thinking_budget: 0
+    include_thoughts: true
+
+exec
+/bin/bash -lc "cat > /tmp/d73_fix.py <<'PY'
+from pathlib import Path
+p=Path('bundles/31b/v010/sub_agents/submit_gate.yaml')
+s=p.read_text().replace('n="'$(cat /tmp/.submit_gate_n 2>/dev/null); if [[ "$n" =~ ''^[0-9][0-9]?$ ]]; then n=$((10#$n+1));'"', 'n="'$(cat /tmp/.submit_gate_n 2>/dev/null && printf x); if [[ "$n" =~ ''^[0-9][0-9]?x$ ]]; then n=$(printf %s "$n" | tr -d x); n=$((10#$n+1));'"')
+p.write_text(s)
+p=Path('eval/tests/test_submit_gate.py')
+s=p.read_text().replace(\"cmd.count('/tmp/.submit_gate_n') == 2\", \"cmd.count('/tmp/.submit_gate_n') == 3\")
+s=s.replace(\"def make_repo(tmp_path, tag=True):\", \"def make_repo(tmp_path, tag=True, reverse=False):\")
+s=s.replace(\"'Tests/helper.py', 'tests/a.py',\", \"'Tests/helper.py',\")
+s=s.replace(\"    for f in BASE_FILES:\\n\", \"    files = [f for f in BASE_FILES if not (reverse and f == 'src/a.py')]\\n    if reverse:\\n        files.append('tests/a.py')\\n    for f in files:\\n\")
+s=s.replace(\"MV src/a.py -> tests/b.py\", \"MV src/a.py -> tests/a.py\").replace(\"MV tests/a.py -> src/b.py\", \"MV tests/a.py -> src/a.py\")
+s=s.replace(\"DEL tests/a.py\", \"DEL tests/test_a.py\")
+s=s.replace(\"    ws = make_repo(tmp_path)\\n    apply(ws, edits)\", \"    ws = make_repo(tmp_path, reverse='MV tests/a.py -> src/a.py' in edits)\\n    apply(ws, edits)\")
+s=s.replace(\"ws = make_repo(tmp_path, tag=baseline == 'tag')\", \"ws = make_repo(tmp_path, tag=baseline == 'tag', reverse='MV tests/a.py -> src/a.py' in edits)\")
+s=s.replace(\"('9223372036854775807', F), ('-1', F), ('abc', F),\", \"('9223372036854775807', F), ('-1', F), ('abc', F), ('1\\\\n\\\\n', F), ('0x', F),\")
+s=s.replace('Eligibility must equal the harness rule: a path counts iff swegemma.harness.verification._is_protected_test_or_config_path\\nis False for it', 'Eligibility must equal the stripped patch rule: an entry counts iff every path is unprotected')
+p.write_text(s)
+p=Path('eval/plan008_metrics.py')
+s=p.read_text()
+s=s.replace(\"        if not children:\\n            missing.append('gate internals absent')\\n            continue\", \"        if not children:\\n            missing.append('gate internals absent')\\n            continue\")
+s=s.replace(\"    if gates and not captures:\\n        failures.append('no successful inner submit')\", \"    if gates and not captures:\\n        missing.append('no successful inner submit evidence')\")
+# Do not infer the flag for smoke: D73 smoke requires explicit terminal evidence.
+s=s.replace(\"    # A missing flag can be derived only from a real inner harness capture.\\n    flag = row.get('patch_submitted')\\n    if flag is False or (flag is not True and not captures):\\n        failures.append('run did not end with patch_submitted true')\", \"    flag = row.get('patch_submitted')\\n    if flag is False:\\n        failures.append('run did not end with patch_submitted true')\\n    elif flag is not True:\\n        missing.append('terminal patch_submitted flag absent')\")
+s=s.replace(\"    if row and gates:\\n        limit |= any('LlmCallsLimitExceeded' in str(row.get(k, ''))\\n                     for k in ('agent_error', 'agent_error_text', 'result_error', 'error'))\", \"    if row and gates and gates[-1]['canonical_index'] is None:\\n        limit |= any(re.search(r'LlmCallsLimitExceeded|exceeded turns budget|maximum allowed LLM turns', str(row.get(k, ''))) is not None\\n                     for k in ('agent_error', 'agent_error_text', 'result_error', 'error'))\")
+s=s.replace(\"        paths.append(trace)\\n        entries = json.loads(trace.read_text()).get('entries', [])\", \"        if trace.is_file():\\n            paths.append(trace)\\n        entries = json.loads(trace.read_text()).get('entries', []) if trace.is_file() else []\")
+s=s.replace(\"    'untracked_only':\", \"    'gate_llm_limit': 'gate-authored limit evidence, or an unacknowledged enclosing gate with the runner turns-budget error; inferred from saved evidence',\\n    'gate_detection': 'v010 header label or gate request/reply/child events; otherwise builtin layout and gate counts n/a',\\n    'untracked_only':\")
+p.write_text(s)
+PY
+python3 /tmp/d73_fix.py
+PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_submit_gate.py -q --tb=short" in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 9908ms:
+........................................................................ [ 50%]
+.......................................................................  [100%]
+143 passed in 8.64s
+
+exec
+/bin/bash -lc "cat > /tmp/d73_metric_tests_edit.py <<'PY'
+from pathlib import Path
+p=Path('eval/tests/test_plan008_metrics.py')
+s=p.read_text()
+s=s.replace(\"        es += invoke('submit_patch', result={'status': 'ok', 'patch_size': size}, author='submit_patch')\", \"        result = {'error': 'synthetic'} if reply.startswith('SUBMIT FAILED') else {'status': 'ok', 'patch_size': size}\\n        es += invoke('submit_patch', result=result, author='submit_patch')\")
+s=s.replace(\"bounce_no_followup=0, gate_internal_visible=True)\", \"bounce_no_followup=0, gate_llm_limit=0, unacknowledged_inner_submits=0, gate_internal_visible=True)\")
+s=s.replace('m.smoke_check(', 'check(')
+a=s.index('\\ndef test_smoke_pass')
+s=s[:a]+'''
+def check(r, es, yaml=YAML, patch='x' * 23, loaded=True):
+    return m.smoke_check(r, es, yaml, scored_patch=patch, test_files_loaded=loaded)
+
+''' + s[a:]
+a=s.index('def test_smoke_unverifiable_and_fallback')
+b=s.index(\"@pytest.mark.skipif\", a)
+s=s[:a]+'''def test_smoke_unverifiable_and_no_exemption():
+    hidden = invoke('submit_patch', result={'raw': 'SUBMITTED'})
+    assert check(row(), hidden)['i']['status'] == 'UNVERIFIABLE'
+    r = row(patch_submitted=False, agent_timeout_fired=True)
+    r['fallback_patch_bytes'] = 23
+    cs = check(r, [])
+    assert cs['i']['status'] == 'FAIL'
+    assert cs['ii']['status'] == 'UNVERIFIABLE'
+    assert check(r, gate(m.BOUNCE))['ii']['status'] == 'UNVERIFIABLE'
+
+
+def make_run(tmp_path, entries, r=None, patch=NEW, nested=True, header=None):
+    run = tmp_path / 'run'
+    artifacts = run / 'runs' / 'synthetic' if nested else run / 'synthetic'
+    artifacts.mkdir(parents=True)
+    r = dict(row() if r is None else r, instance_id='synthetic')
+    lines = ([json.dumps(header)] if header else []) + [json.dumps(r)]
+    (run / 'timing.jsonl').write_text('\\\\n'.join(lines) + '\\\\n')
+    (artifacts / 'trace.json').write_text(json.dumps({'entries': entries}))
+    (artifacts / 'agent.patch').write_text(patch)
+    (artifacts / 'result.json').write_text(json.dumps({'agent_patch': patch}))
+    return run, artifacts
+
+
+def task_inventory(tmp_path, test_patch=''):
+    path = tmp_path / 'tasks.jsonl'
+    path.write_text(json.dumps(dict(instance_id='synthetic', repo='synthetic/repo', base_commit='abc',
+                                   problem_statement='', patch='', test_patch=test_patch)) + '\\\\n')
+    return path
+
+
+def test_smoke_cli_counts_only(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(ROOT_DIR)
+    tasks = task_inventory(tmp_path)
+    monkeypatch.setenv('PLAN008_TASKS_PATH', str(tasks))
+    run, artifacts = make_run(tmp_path, gate(size=len(NEW)), row(verified_patch_bytes=len(NEW.encode())))
+    dest = tmp_path / 'out.json'
+    assert m.main(['metrics', 'smoke', str(run), str(dest)]) == 0
+    out = json.loads(dest.read_text())
+    assert out['overall'] == 'PASS'
+    assert 'gate_run_cmds' not in out['rows'][0]
+    assert NEW not in dest.read_text()
+    assert m._gate_command(YAML) not in dest.read_text()
+    assert out['_schema']['script_sha256'] == old.sha(m.__file__)
+    assert len(out['_schema']['input_shas']) == 5
+    assert set(json.loads(capsys.readouterr().out)) == {'n_rows', 'overall'}
+    r = dict(row(patch_submitted=False, agent_timeout_fired=True), instance_id='synthetic', fallback_patch_bytes=len(NEW))
+    (run / 'timing.jsonl').write_text(json.dumps(r) + '\\\\n')
+    (artifacts / 'trace.json').write_text(json.dumps({'entries': []}))
+    assert m.main(['metrics', 'smoke', str(run), str(dest)]) == 0
+    out = json.loads(dest.read_text())
+    assert out['overall'] == 'FAIL'
+    assert out['rows'][0]['criteria']['i']['status'] == 'FAIL'
+
+
+@pytest.mark.parametrize('args', [{}, {'request': ''}, {'request': ' '}, {'request': None},
+    {'request': 1}, {'request': []}, {'request': 'submit', 'extra': 1}, [], None])
+def test_malformed_root_gate_args(args):
+    es = gate()
+    es[0]['args'] = args
+    assert check(row(), es)['iii']['status'] == 'FAIL'
+    # Even submit_patch({}) can execute successfully in ADK; evidence still fails schema.
+    assert m.successful_submit_index(es) == 0
+
+
+@pytest.mark.parametrize('index,args', [(1, {}), (1, {'command': 'other'}),
+    (1, {'command': m._gate_command(YAML), 'extra': 1}), (1, []),
+    (3, {'extra': 1}), (3, None), (3, [])])
+def test_malformed_child_args(index, args):
+    es = gate()
+    es[index]['args'] = args
+    assert check(row(), es)['iii']['status'] == 'FAIL'
+
+
+def test_canonical_replies_and_mirrored_display():
+    es = gate(m.BOUNCE)
+    es.append(dict(type='final', author=m.ROOT, content=m.BOUNCE))
+    es.append(dict(type='final', author='submit_patch', content=m.BOUNCE))
+    es += gate(m.BOUNCE)
+    es.append(dict(type='final', author=m.ROOT, content=m.BOUNCE))
+    es += gate()
+    es.append(dict(type='final', author=m.ROOT, content='SUBMITTED'))
+    assert all(c['status'] == 'PASS' for c in check(row(), es).values())
+    assert m.gate_descriptives(es)['bounces'] == 2
+    assert check(row(), es + [call('read_file')])['i']['status'] == 'FAIL'
+    assert check(row(), es + [dict(type='final', author=m.ROOT, content='other')])['i']['status'] == 'FAIL'
+    es[-2]['author'] = 'other'
+    assert check(row(), es)['iii']['status'] == 'FAIL'
+
+
+@pytest.mark.parametrize('change', ['wrong_author', 'missing_check_reply', 'inner_error', 'edit_first_submit', 'missing_flag'])
+def test_smoke_i_missing_and_failed_evidence(change):
+    es, r = gate(), row()
+    if change == 'wrong_author':
+        for e in es[1:5]:
+            e['author'] = 'other'
+    elif change == 'missing_check_reply':
+        del es[2]
+    elif change == 'inner_error':
+        es[4]['result'] = json.dumps({'error': 'synthetic'})
+    elif change == 'edit_first_submit':
+        es[2]['result'] = json.dumps({'stdout': 'VERDICT=EDIT_FIRST'})
+    elif change == 'missing_flag':
+        del r['patch_submitted']
+    assert check(r, es)['i']['status'] in ('FAIL', 'UNVERIFIABLE')
+
+
+@pytest.mark.parametrize('patch,loaded', [(None, True), ('x' * 23, False)])
+def test_smoke_ii_missing_patch_or_tasks(patch, loaded):
+    assert check(row(), gate(), patch=patch, loaded=loaded)['ii']['status'] == 'UNVERIFIABLE'
+
+
+def test_smoke_ii_utf8_and_final_capture():
+    text = 'é' * 23
+    es = gate(size=1) + gate(size=len(text))
+    assert check(row(verified_patch_bytes=len(text.encode())), es, patch=text)['ii']['status'] == 'PASS'
+    assert check(row(verified_patch_bytes=len(text)), es, patch=text)['ii']['status'] == 'FAIL'
+    assert check(row(verified_patch_bytes=len(text.encode())), gate(size=24), patch=text)['ii']['status'] == 'FAIL'
+
+
+def test_smoke_real_strip_with_task_extras(tmp_path, monkeypatch):
+    monkeypatch.chdir(ROOT_DIR)
+    from swegemma.harness.verification import strip_protected_files_from_patch
+    source = NEW.replace('+x', '+é')
+    protected = NEW.replace('a.py', 'custom/checks.py')
+    raw = source + protected
+    tasks = task_inventory(tmp_path, protected)
+    assert m.load_task_test_files(tasks) == {'synthetic': ['custom/checks.py']}
+    scored = strip_protected_files_from_patch(raw, extra_protected_paths=['custom/checks.py'])
+    assert scored == source
+    r = row(verified_patch_bytes=len(scored.encode()))
+    run, artifacts = make_run(tmp_path, gate(size=len(scored)), r, patch=raw)
+    assert m.smoke_metrics(run, tasks)['overall'] == 'PASS'
+    # Without loadable task test_files, criterion ii must fail closed.
+    assert m.smoke_metrics(run, tmp_path / 'missing')['rows'][0]['criteria']['ii']['status'] == 'UNVERIFIABLE'
+    other_tasks = json.loads(tasks.read_text())
+    other_tasks['instance_id'] = 'other'
+    tasks.write_text(json.dumps(other_tasks) + '\\\\n')
+    assert m.smoke_metrics(run, tasks)['rows'][0]['criteria']['ii']['status'] == 'UNVERIFIABLE'
+    artifacts.joinpath('agent.patch').unlink()
+    assert m.smoke_metrics(run, tasks)['overall'] == 'FAIL'
+
+
+@pytest.mark.parametrize('clock', [-1, float('nan'), float('inf'), '210', True])
+def test_smoke_clock_invalid(clock):
+    assert check(row(agent_clock_seconds=clock), gate())['iv']['status'] == 'UNVERIFIABLE'
+
+
+def test_deadline_between_capture_and_ack():
+    es = gate()[:-1]
+    r = row(agent_error_text='Agent exceeded session timeout (3.5 min)')
+    assert m.successful_submit_index(es) == 0
+    assert m.submitted_without_test(es) is True
+    assert m.gate_descriptives(es, r)['unacknowledged_inner_submits'] == 1
+    assert m.submit_evidence(r, es)['submit_unverifiable'] is False
+    assert check(r, es)['iii']['status'] == 'FAIL'  # smoke still requires canonical reply
+    # A test after the root gate call is outside the safety boundary.
+    es[3:3] = invoke('run_command', {'command': 'pytest'})
+    assert m.submitted_without_test(es) is None  # the root call closes the enclosing interval
+
+
+@pytest.mark.parametrize('flag,success,unverifiable', [(True, True, False), (False, False, False),
+    (False, True, True), (True, False, True), (None, True, True), (None, False, True)])
+def test_submit_consistency(flag, success, unverifiable):
+    es = gate()[:-1] if success else gate(m.BOUNCE)
+    evidence = m.submit_evidence(row(patch_submitted=flag), es)
+    assert evidence['submit_unverifiable'] is unverifiable
+    assert evidence['successful_submit'] is success
+    if flag is None:
+        assert evidence['patch_submitted'] is success
+        assert evidence['patch_submitted_source'] == 'derived_from_harness_response'
+
+
+def test_gate_llm_limit_attribution():
+    es = gate()[:3]
+    r = row(patch_submitted=False, agent_error_text='Agent exceeded turns budget (50 turns)')
+    assert m.gate_descriptives(es, r)['gate_llm_limit'] == 1
+    assert m.gate_descriptives([], r)['gate_llm_limit'] == 0
+    assert m.gate_descriptives(gate(m.BOUNCE), r)['gate_llm_limit'] == 0
+    assert m.gate_descriptives(es + [dict(type='error', author='submit_patch', content='LlmCallsLimitExceededError')])['gate_llm_limit'] == 1
+
+
+@pytest.mark.parametrize('nested', [True, False])
+@pytest.mark.parametrize('builtin', [True, False])
+def test_arm2_cli(tmp_path, monkeypatch, nested, builtin):
+    monkeypatch.chdir(ROOT_DIR)
+    es = invoke('submit_patch', result={'patch_size': len(NEW)}) if builtin else gate(size=len(NEW))[:-1]
+    run, _ = make_run(tmp_path, es, nested=nested,
+                      header={'_schema': 'synthetic', 'bundle': 'v011' if builtin else 'v010'})
+    dest = tmp_path / 'out.json'
+    assert m.main(['metrics', 'arm2', str(run), str(dest)]) == 0
+    out = json.loads(dest.read_text())
+    totals = out['totals']
+    assert totals['mechanism2'] == totals['mechanism1_empty'] == totals['count_no_successful_submit'] == 0
+    assert totals['submitted_without_test'] == 1
+    assert totals['submit_unverifiable'] == 0
+    if builtin:
+        assert all(totals[k] == 'n/a (no gate)' for k in m.GATE_COUNTS)
+    else:
+        assert totals['unacknowledged_inner_submits'] == totals['untracked_only_submits'] == 1
+    assert 'gate_run_cmds' not in dest.read_text()
+    assert NEW not in dest.read_text()
+
+
+def test_arm2_mismatch_and_derived_flag(tmp_path, monkeypatch):
+    monkeypatch.chdir(ROOT_DIR)
+    run, artifacts = make_run(tmp_path, gate()[:-1], row(patch_submitted=False))
+    out = m.arm2_metrics(run)
+    assert out['totals']['submitted_without_test'] == 1
+    assert out['totals']['submit_unverifiable'] == 1
+    assert out['submit_unverifiable_rows'] == ['synthetic']
+    r = json.loads((run / 'timing.jsonl').read_text())
+    del r['patch_submitted']
+    (run / 'timing.jsonl').write_text(json.dumps(r) + '\\\\n')
+    assert m.arm2_metrics(run)['rows'][0]['patch_submitted_source'] == 'derived_from_harness_response'
+    artifacts.joinpath('trace.json').unlink()
+    out = m.arm2_metrics(run)
+    assert out['n_rows'] == 1
+    assert out['totals']['submit_unverifiable'] == 1
+
+
+''' + s[b:]
+s=s.replace(\"assert out['totals']['mechanism1_empty'] == 12\", \"assert out['totals']['mechanism1_empty'] == 12\\n    assert out['totals']['submitted_without_test'] == 23\\n    assert out['totals']['count_no_successful_submit'] == 7\")
+p.write_text(s)
+PY
+python3 /tmp/d73_metric_tests_edit.py
+PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_plan008_metrics.py -q --tb=short" in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 3855ms:
+........................................................................ [ 92%]
+.....s                                                                   [100%]
+77 passed, 1 skipped in 2.59s
+
+codex
+All 143 gate tests pass, including both rename directions, real stripped-diff parity, decimal counter states, and corrupt or unwritable counters. The metrics changes are in place; I’m checking synthetic traces for each smoke criterion and for a deadline between capture and acknowledgement before running the full suite.
+exec
+/bin/bash -lc "git diff --stat && sed -n '1,290p' eval/plan008_metrics.py" in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 0ms:
+ bundles/31b/v010/MANIFEST.md                 |   2 +-
+ bundles/31b/v010/sub_agents/submit_gate.yaml |   2 +-
+ eval/plan008_metrics.py                      | 355 ++++++++++++++++++++-------
+ eval/tests/test_plan008_metrics.py           | 251 ++++++++++++++++---
+ eval/tests/test_submit_gate.py               | 114 +++++++--
+ 5 files changed, 583 insertions(+), 141 deletions(-)
+#!/usr/bin/env python3
+"""Plan 008 D73 metrics. CPU/offline only; output contains counts, never task text.
+
+Usage: plan008_metrics.py base OUT_JSON | smoke RUN_DIR OUT_JSON | arm2 RUN_DIR OUT_JSON
+
+Smoke loads task.test_files with swegemma.models.load_tasks, as both eval runners do.
+Tasks default to data/raw/tasks.jsonl (local) or the Kaggle competition tasks.jsonl;
+PLAN008_TASKS_PATH overrides that location for downloaded runs. Missing tasks fail smoke.
+"""
+import json
+import math
+import os
+from pathlib import Path
+import re
+import sys
+from collections import defaultdict, deque
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import plan007_arm1_summary as base
+
+ROOT = 'swe_baseline_agent'
+GATE_YAML = Path('bundles/31b/v010/sub_agents/submit_gate.yaml')
+TEST = re.compile(r'\bpytest\b|-m\s+unittest\b|\btox\b')
+BOUNCE = ('NOT SUBMITTED: no non-test source file is changed. Make your source edit with '
+          'edit_file (or a /tmp Python script), confirm it with git diff --stat, then call submit_patch again.')
+DEFINITIONS = {
+    'mechanism1_empty': 'verified_patch_bytes == 0 (plan007 empty definition)',
+    'mechanism2': 'rows with max_run >= 5; root-author tool calls only; same tool and sort_keys JSON args; nested calls excluded before runs',
+    'repeated_calls': 'sum(length - 1) over root identical runs',
+    'submitted_without_test': 'successful root submit with no prior root run_command matching \\bpytest\\b|-m\\s+unittest\\b|\\btox\\b; no success excluded and counted separately',
+    'success': 'first root harness patch_size response (builtin), or gate-authored inner harness patch_size response attributed to its enclosing root submit; acknowledgement not required',
+    'submit_unverifiable': 'inner/builtin success vs explicit patch_submitted mismatch, or flag unavailable; missing flag derived from harness response only, not acknowledgement; rows counted and listed',
+    'smoke': '008.md D73.2 i-v; missing evidence UNVERIFIABLE; overall PASS requires every criterion PASS',
+    'gate_descriptives': 'root submit calls; reply-prefix bounces/failures; gate run_command response forced/check_error counts; terminal bounces; internal visibility',
+    'gate_llm_limit': 'gate-authored limit evidence, or an unacknowledged enclosing gate with the runner turns-budget error; inferred from saved evidence',
+    'gate_detection': 'v010 header label or gate request/reply/child events; otherwise builtin layout and gate counts n/a',
+    'untracked_only': 'nonempty patch with diff --git sections all declaring new file mode',
+}
+
+
+def _parsed(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (ValueError, TypeError):
+            pass
+    return value
+
+
+def _reply(value):
+    """Legacy AgentTool text is JSON {raw: text} (sometimes {result: text})."""
+    value = _parsed(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for k in ('raw', 'result'):
+            if k in value:
+                return _reply(value[k])
+    return ''
+
+
+def _pairs(entries):
+    # Legacy trace has no call IDs. FIFO by (author, tool) also isolates nested tools.
+    pending, calls = defaultdict(deque), []
+    for i, e in enumerate(entries):
+        key = (e.get('author'), e.get('tool'))
+        if e.get('type') == 'tool_call':
+            c = dict(e, entry_index=i, response=None, response_index=None)
+            calls.append(c)
+            pending[key].append(c)
+        elif e.get('type') in ('tool_response', 'tool_result') and pending[key]:
+            c = pending[key].popleft()
+            c.update(response=e.get('result', ''), response_index=i)
+    return calls
+
+
+def root_tool_calls(entries, root=ROOT):
+    """Ordered call dictionaries, enriched with response text and entry/response indices."""
+    return [c for c in _pairs(entries) if c.get('author') == root]
+
+
+def identical_runs_root(entries):
+    lens, cur, prev = [], 0, object()
+    for c in root_tool_calls(entries):
+        key = (c.get('tool'), json.dumps(c.get('args', c.get('arguments')), sort_keys=True))
+        if key == prev:
+            cur += 1
+        else:
+            if cur:
+                lens.append(cur)
+            cur = 1
+        prev = key
+    if cur:
+        lens.append(cur)
+    return dict(max_run=max(lens, default=0), runs_ge3=sum(n >= 3 for n in lens),
+                runs_ge5=sum(n >= 5 for n in lens), repeated_calls=sum(n - 1 for n in lens))
+
+
+def _has_error(value):
+    value = _parsed(value)
+    if isinstance(value, dict):
+        if value.get('error') or str(value.get('status', '')).lower() in ('error', 'failed', 'failure'):
+            return True
+        return any(_has_error(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_error(v) for v in value)
+    return False
+
+
+def _patch_size(value):
+    value = _parsed(value)
+    if isinstance(value, dict) and not _has_error(value):
+        n = value.get('patch_size')
+        if type(n) is int and n >= 0:
+            return n
+    return None
+
+
+def gate_invocations(entries):
+    """Legacy traces lack event IDs: enclose children by root call/reply interval.
+
+    A missing acknowledgement ends at the next root call or trace end. This retains
+    inner captures interrupted by a deadline, without assigning them to a later call.
+    Only the root tool_response is a canonical gate reply.
+    """
+    pairs = _pairs(entries)
+    roots = [c for c in pairs if c.get('author') == ROOT]
+    gates = []
+    for i, c in enumerate(roots):
+        if c.get('tool') != 'submit_patch':
+            continue
+        end = roots[i + 1]['entry_index'] if i + 1 < len(roots) else len(entries)
+        reply_index = c['response_index']
+        canonical = (reply_index is not None and reply_index < end
+                     and entries[reply_index].get('type') == 'tool_response')
+        if canonical:
+            end = reply_index
+        children = [p for p in pairs if p.get('author') == 'submit_patch'
+                    and c['entry_index'] < p['entry_index'] < end]
+        inner = [p for p in children if p.get('tool') == 'submit_patch'
+                 and p['response_index'] is not None and p['response_index'] < end
+                 and _patch_size(p['response']) is not None]
+        gates.append(dict(c, root_index=i, children=children, inner_successes=inner,
+                          canonical_reply=_reply(c['response']) if canonical else '',
+                          canonical_index=reply_index if canonical else None))
+    return gates
+
+
+def successful_submit_index(entries):
+    gates = {g['entry_index']: g for g in gate_invocations(entries)}
+    for i, c in enumerate(root_tool_calls(entries)):
+        if c.get('tool') == 'submit_patch' and (
+                _patch_size(c['response']) is not None
+                or gates[c['entry_index']]['inner_successes']):
+            return i
+    return None
+
+
+def submit_evidence(row, entries):
+    observed = successful_submit_index(entries) is not None
+    flag = row.get('patch_submitted')
+    known = type(flag) is bool
+    return dict(submit_unverifiable=not known or flag != observed,
+                patch_submitted=flag if known else observed,
+                patch_submitted_source='row' if known else 'derived_from_harness_response',
+                successful_submit=observed)
+
+
+def submitted_without_test(entries):
+    index = successful_submit_index(entries)
+    if index is None:
+        return None
+    return not any(c.get('tool') == 'run_command' and TEST.search(_command(c))
+                   for c in root_tool_calls(entries)[:index])
+
+
+def _command(c):
+    args = c.get('args', c.get('arguments'))
+    return args.get('command', '') if isinstance(args, dict) and isinstance(args.get('command', ''), str) else ''
+
+
+def _response_text(value):
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def gate_descriptives(entries, row=None):
+    roots = root_tool_calls(entries)
+    gates = gate_invocations(entries)
+    cmds = [c for g in gates for c in g['children'] if c.get('tool') == 'run_command']
+    limit = any('LlmCallsLimitExceeded' in _response_text(e) for e in entries
+                if e.get('author') == 'submit_patch')
+    if row and gates and gates[-1]['canonical_index'] is None:
+        limit |= any(re.search(r'LlmCallsLimitExceeded|exceeded turns budget|maximum allowed LLM turns', str(row.get(k, ''))) is not None
+                     for k in ('agent_error', 'agent_error_text', 'result_error', 'error'))
+    return dict(gate_calls=len(gates),
+                bounces=sum(g['canonical_reply'].startswith('NOT SUBMITTED') for g in gates),
+                forced=sum('reason=forced' in _response_text(c['response']) for c in cmds),
+                check_error=sum('reason=check_error' in _response_text(c['response']) for c in cmds),
+                submit_failed=sum(g['canonical_reply'].startswith('SUBMIT FAILED') for g in gates),
+                bounce_no_followup=sum(g['root_index'] == len(roots) - 1 and
+                                       g['canonical_reply'].startswith('NOT SUBMITTED') for g in gates),
+                gate_llm_limit=int(limit),
+                unacknowledged_inner_submits=sum(bool(g['inner_successes']) and
+                                                g['canonical_reply'] != 'SUBMITTED' for g in gates),
+                gate_run_cmds=[_command(c) for c in cmds],
+                gate_internal_visible=any(g['children'] for g in gates))
+
+
+def untracked_only(patch_text):
+    sections = re.split(r'^diff --git ', patch_text, flags=re.M)[1:]
+    return bool(patch_text.strip() and sections) and all(
+        re.search(r'^new file mode [0-7]+\s*$', s, re.M) is not None for s in sections)
+
+
+def _gate_command(path):
+    # Read the literal YAML instruction block without a YAML dependency.
+    lines = Path(path).read_text().splitlines()
+    i = next(i for i, line in enumerate(lines) if '1. Call `run_command` ONCE' in line)
+    return next(line[2:] for line in lines[i + 1:] if line.strip())
+
+
+def _criterion(status, reason):
+    return dict(status=status, reason=reason)
+
+
+def smoke_check(row, entries, gate_yaml_path, scored_patch=None, test_files_loaded=False):
+    """D73.2 i..v. scored_patch must already be stripped with task.test_files.
+
+    Missing evidence is UNVERIFIABLE, which is FAIL for the overall smoke.
+    Reasons are fixed descriptions; commands, patches and task text are never emitted.
+    """
+    out = {}
+    gates = gate_invocations(entries)
+    desc = gate_descriptives(entries, row)
+    expected = _gate_command(gate_yaml_path)
+    failures, missing = [], []
+    captures = []
+    if not gates:
+        failures.append('no gate invocation in task')
+    for gate in gates:
+        children = gate['children']
+        if not children:
+            missing.append('gate internals absent')
+            continue
+        if gate['canonical_index'] is None:
+            missing.append('canonical gate response absent')
+        cmds = [c for c in children if c.get('tool') == 'run_command']
+        subs = [c for c in children if c.get('tool') == 'submit_patch']
+        captures.extend(gate['inner_successes'])
+        if len(cmds) != 1 or _command(cmds[0]) != expected:
+            failures.append('gate check command differs or count differs')
+        elif cmds[0]['response_index'] is None:
+            missing.append('gate check response absent')
+        else:
+            text = _response_text(cmds[0]['response'])
+            need_submit = 'VERDICT=SUBMIT' in text or 'VERDICT=EDIT_FIRST' not in text
+            if need_submit and (len(subs) != 1 or subs[0]['entry_index'] <= cmds[0]['response_index']
+                                or not gate['inner_successes']):
+                failures.append('successful inner submit absent or out of order')
+            if not need_submit and subs:
+                failures.append('inner submit after EDIT_FIRST')
+        if gate['canonical_reply'] == 'SUBMITTED':
+            for e in entries[gate['canonical_index'] + 1:]:
+                if e.get('author') != ROOT or e.get('type') in ('tool_response', 'tool_result'):
+                    continue
+                if e.get('type') == 'final' and e.get('content') == gate['canonical_reply']:
+                    continue  # legacy recorder's mirrored function-response display
+                failures.append('root model event after successful gate response')
+                break
+    if gates and not captures:
+        missing.append('no successful inner submit evidence')
+    flag = row.get('patch_submitted')
+    if flag is False:
+        failures.append('run did not end with patch_submitted true')
+    elif flag is not True:
+        missing.append('terminal patch_submitted flag absent')
+    out['i'] = _criterion('FAIL' if failures else 'UNVERIFIABLE' if missing else 'PASS',
+                          '; '.join(failures or missing) or 'gate sequence and termination observed')
+
+    actual = row.get('verified_patch_bytes')
+    if not test_files_loaded or scored_patch is None or not captures or type(actual) is not int:
+        out['ii'] = _criterion('UNVERIFIABLE', 'task test_files, saved patch or capture evidence missing')
+    else:
+        size = _patch_size(captures[-1]['response'])
+        agrees = len(scored_patch) == size and len(scored_patch.encode('utf-8')) == actual
+        out['ii'] = _criterion('PASS' if agrees else 'FAIL',
+                               'stripped patch characters and UTF-8 bytes agree' if agrees else 'stripped patch sizes differ')
+
+    errors = bool(desc['check_error'] or desc['submit_failed'])
+    for key in ('agent_error', 'agent_error_text', 'result_error', 'error'):
+
+exec
+/bin/bash -lc "sed -n '345,550p' eval/plan008_metrics.py && sed -n '424,451p' eval/run_agent_eval.py && rg -n 'class Journal|verified_patch_bytes' eval/run_agent_eval.py" in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 0ms:
+            trace = Path(timing).parent / 'runs' / iid / 'trace.json'
+            entries = json.loads(trace.read_text())['entries']
+            paths.append(trace)
+            rep = identical_runs_root(entries)
+            rows.append(dict(instance_id=iid, part=part, **rep, mechanism2=rep['max_run'] >= 5,
+                             mechanism1_empty=t.get('verified_patch_bytes') == 0,
+                             submitted_without_test=submitted_without_test(entries)))
+    assert [r['instance_id'] for r in rows] == base.ids_file(base.ARM_IDS)
+    totals = dict(mechanism2=sum(r['mechanism2'] for r in rows),
+                  mechanism1_empty=sum(r['mechanism1_empty'] for r in rows),
+                  submitted_without_test=sum(r['submitted_without_test'] is True for r in rows),
+                  count_no_successful_submit=sum(r['submitted_without_test'] is None for r in rows),
+                  max_run=max((r['max_run'] for r in rows), default=0),
+                  runs_ge3=sum(r['runs_ge3'] for r in rows), runs_ge5=sum(r['runs_ge5'] for r in rows),
+                  repeated_calls=sum(r['repeated_calls'] for r in rows))
+    assert totals['mechanism2'] == 17, 'arm-1 mechanism2 baseline changed'
+    assert totals['mechanism1_empty'] == 12, 'arm-1 empty baseline changed'
+    assert totals['submitted_without_test'] == 23, 'arm-1 safety baseline changed'
+    assert totals['count_no_successful_submit'] == 7, 'arm-1 no-submit baseline changed'
+    return dict(_schema=_schema('base', paths), n_rows=len(rows), totals=totals, rows=rows)
+
+
+def load_task_test_files(tasks_path):
+    # Match agent_timing.evaluate / run_agent_eval.run: the Task property derives
+    # these paths from test_patch. Never use gold patch or test text as agent input.
+    from swegemma.models import load_tasks
+    tasks = load_tasks(Path(tasks_path))
+    inventory = {t.instance_id: list(t.test_files) for t in tasks}
+    if len(inventory) != len(tasks):
+        raise ValueError('duplicate task IDs')
+    return inventory
+
+
+def _tasks_path():
+    if os.environ.get('PLAN008_TASKS_PATH'):
+        return Path(os.environ['PLAN008_TASKS_PATH'])
+    kaggle = Path('/kaggle/input/competitions/gemma-4-developer-agent/tasks.jsonl')
+    return kaggle if kaggle.is_file() else Path('data/raw/tasks.jsonl')
+
+
+def _artifacts(run_dir, iid):
+    # Kaggle: runs/<iid>; local eval runner: <iid>.
+    nested = Path(run_dir) / 'runs' / iid
+    return nested if nested.is_dir() else Path(run_dir) / iid
+
+
+def smoke_metrics(run_dir, tasks_path=None):
+    timing = Path(run_dir) / 'timing.jsonl'
+    paths, rows = [timing, GATE_YAML], []
+    tasks_path = Path(tasks_path) if tasks_path is not None else _tasks_path()
+    try:
+        test_files = load_task_test_files(tasks_path)
+        paths.append(tasks_path)
+    except Exception:
+        test_files = {}  # criterion ii is UNVERIFIABLE for every missing task
+    for row in base.load_rows(timing):
+        artifacts = _artifacts(run_dir, row['instance_id'])
+        trace, patch = artifacts / 'trace.json', artifacts / 'agent.patch'
+        if trace.is_file():
+            paths.append(trace)
+        entries = json.loads(trace.read_text()).get('entries', []) if trace.is_file() else []
+        scored = None
+        loaded = row['instance_id'] in test_files
+        if patch.is_file():
+            paths.append(patch)
+            if loaded:
+                from swegemma.harness.verification import strip_protected_files_from_patch
+                scored = strip_protected_files_from_patch(patch.read_text(),
+                            extra_protected_paths=test_files[row['instance_id']])
+        desc = gate_descriptives(entries, row)
+        desc.pop('gate_run_cmds')
+        rows.append(dict(instance_id=row['instance_id'],
+                         criteria=smoke_check(row, entries, GATE_YAML, scored, loaded), **desc))
+    passed = bool(rows) and all(c['status'] == 'PASS' for r in rows for c in r['criteria'].values())
+    return dict(_schema=_schema('smoke', paths), n_rows=len(rows), overall='PASS' if passed else 'FAIL', rows=rows)
+
+
+GATE_COUNTS = ('gate_calls', 'bounces', 'forced', 'check_error', 'submit_failed',
+               'bounce_no_followup', 'gate_llm_limit', 'unacknowledged_inner_submits', 'untracked_only_submits')
+
+
+def arm2_metrics(run_dir):
+    timing = Path(run_dir) / 'timing.jsonl'
+    paths, rows, inputs = [timing], [], []
+    for row in base.load_rows(timing):
+        artifacts = _artifacts(run_dir, row['instance_id'])
+        trace = artifacts / 'trace.json'
+        if trace.is_file():
+            paths.append(trace)
+        entries = json.loads(trace.read_text()).get('entries', []) if trace.is_file() else []
+        inputs.append((row, entries, artifacts))
+    # Builtin responses carry patch_size; gate requests carry request, children
+    # have author submit_patch. Header labels/SHA cover runs that never called it.
+    headers = [json.loads(line) for line in timing.read_text().splitlines() if line.strip()
+               and 'instance_id' not in json.loads(line)]
+    header_text = json.dumps(headers)
+    has_gate = ('v010' in header_text or any(
+        e.get('author') == 'submit_patch' or
+        (e.get('author') == ROOT and e.get('tool') == 'submit_patch' and
+         (isinstance(e.get('args'), dict) and 'request' in e['args'] or
+          _reply(e.get('result')) in ('SUBMITTED', BOUNCE)))
+        for _, entries, _ in inputs for e in entries))
+    for row, entries, artifacts in inputs:
+        rep = identical_runs_root(entries)
+        desc = gate_descriptives(entries, row) if has_gate else {}
+        desc.pop('gate_run_cmds', None)
+        if has_gate:
+            patch = artifacts / 'agent.patch'
+            desc['untracked_only_submits'] = None
+            if patch.is_file():
+                paths.append(patch)
+                # D72 defines this on scored sections, not protected raw edits.
+                result = artifacts / 'result.json'
+                if not result.is_file():
+                    result = artifacts / 'output.json'
+                scored = json.loads(result.read_text()).get('agent_patch') if result.is_file() else None
+                if result.is_file():
+                    paths.append(result)
+                if scored is None:
+                    try:
+                        from swegemma.harness.verification import strip_protected_files_from_patch
+                        tests = load_task_test_files(_tasks_path())[row['instance_id']]
+                        scored = strip_protected_files_from_patch(patch.read_text(), extra_protected_paths=tests)
+                    except Exception:
+                        scored = None
+                if scored is not None:
+                    desc['untracked_only_submits'] = bool(successful_submit_index(entries) is not None and untracked_only(scored))
+        else:
+            desc = dict.fromkeys((*GATE_COUNTS, 'gate_internal_visible'), 'n/a (no gate)')
+        rows.append(dict(instance_id=row['instance_id'], **rep, mechanism2=rep['max_run'] >= 5,
+                         mechanism1_empty=row.get('verified_patch_bytes') == 0,
+                         submitted_without_test=submitted_without_test(entries),
+                         **submit_evidence(row, entries), **desc))
+    totals = dict(mechanism2=sum(r['mechanism2'] for r in rows),
+                  mechanism1_empty=sum(r['mechanism1_empty'] for r in rows),
+                  submitted_without_test=sum(r['submitted_without_test'] is True for r in rows),
+                  count_no_successful_submit=sum(r['submitted_without_test'] is None for r in rows),
+                  max_run=max((r['max_run'] for r in rows), default=0),
+                  runs_ge3=sum(r['runs_ge3'] for r in rows), runs_ge5=sum(r['runs_ge5'] for r in rows),
+                  repeated_calls=sum(r['repeated_calls'] for r in rows),
+                  submit_unverifiable=sum(r['submit_unverifiable'] for r in rows))
+    for key in GATE_COUNTS:
+        totals[key] = (sum(r[key] for r in rows if r[key] is not None) if has_gate else 'n/a (no gate)')
+    totals['untracked_only_unverifiable'] = sum(r.get('untracked_only_submits') is None for r in rows) if has_gate else 'n/a (no gate)'
+    return dict(_schema=_schema('arm2', paths), n_rows=len(rows), totals=totals,
+                submit_unverifiable_rows=[r['instance_id'] for r in rows if r['submit_unverifiable']], rows=rows)
+
+
+def main(argv=None):
+    argv = sys.argv if argv is None else argv
+    if len(argv) == 3 and argv[1] == 'base':
+        out = base_metrics()
+    elif len(argv) == 4 and argv[1] in ('smoke', 'arm2'):
+        out = (smoke_metrics if argv[1] == 'smoke' else arm2_metrics)(argv[2])
+    else:
+        print(__doc__)
+        return 2
+    Path(argv[-1]).write_text(json.dumps(out, indent=2) + '\n')
+    print(json.dumps(out.get('totals', dict(n_rows=out['n_rows'], overall=out.get('overall')))))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+                                   allow_unsandboxed=args.allow_unsandboxed)
+    patched = environment['patched']
+    assert_dependency_bindings(patched)
+    header = dict(_schema='agent_eval_v2', fields=FIELDS, bundle=str(args.bundle),
+                  bundle_sha256=bundle_sha(args.bundle), **runner_revision(),
+                  setup_script=setup_script_identity(args.data_dir),
+                  tasks_sha256=sha_file(args.data_dir / 'tasks.jsonl'),
+                  split=dict(path=str(args.split), sha256=sha_file(args.split)), caps=caps,
+                  versions={name: importlib.metadata.version(name) for name in
+                            ('swegemma', 'adk_submission', 'google-adk', 'litellm')},
+                  python_version=sys.version, wheels_listing_sha256=wheels_listing_sha(environment['wheels_dir']),
+                  sandbox=environment['sandbox'], bwrap_argv_template=environment['bwrap_argv_template'],
+                  effective_config=config_snapshot(config),
+                  concurrency=args.concurrency, endpoint=args.endpoint,
+                  models_yaml=sha_file(args.models_yaml) if args.models_yaml else None,
+                  data_dir=str(args.data_dir), created_utc=datetime.now(timezone.utc).isoformat())
+    journal_path = (args.out / f'{args.run_name}.jsonl' if args.out_explicit else
+                    ROOT / 'results' / f'{args.run_name}.jsonl')
+    if args.force_new_out and journal_path.exists():
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')
+        journal_path.rename(journal_path.with_name(journal_path.stem + '-' + stamp + '.jsonl'))
+        raw_dir.rename(raw_dir.with_name(raw_dir.name + '-' + stamp))
+        raw_dir.mkdir()
+    journal = Journal(journal_path, header, args.force_new)
+    if not journal.finished <= split_ids:
+        journal.close()
+        raise ValueError('Resume records contain IDs outside the split')
+    file_handler = logging.FileHandler(raw_dir / 'harness.log')
+92:class Journal:
+
+exec
+/bin/bash -lc "cat > /tmp/d73_refine.py <<'PY'
+from pathlib import Path
+p=Path('eval/plan008_metrics.py')
+s=p.read_text()
+s=s.replace(\"    'untracked_only': 'nonempty patch with diff --git sections all declaring new file mode',\", \"    'untracked_only': 'D72.2: canonical SUBMITTED reply and nonempty scored patch with all sections declaring new file mode; absent scored-patch evidence reported separately',\")
+s=s.replace(\"        children = [p for p in pairs if p.get('author') == 'submit_patch'\\n                    and c['entry_index'] < p['entry_index'] < end]\", \"        children = [dict(p, response=None, response_index=None)\\n                    if p['response_index'] is not None and p['response_index'] >= end else p\\n                    for p in pairs if p.get('author') == 'submit_patch'\\n                    and c['entry_index'] < p['entry_index'] < end]\")
+a=s.index('def successful_submit_index(')
+b=s.index('\\ndef _command(',a)
+s=s[:a]+'''def successful_submit_index(entries, gate_mode=None):
+    gates = {g['entry_index']: g for g in gate_invocations(entries)}
+    for i, c in enumerate(root_tool_calls(entries)):
+        if c.get('tool') "'!= '"'submit_patch':
+            continue
+        gate = gates[c['entry_index']]
+        args = c.get('args', c.get('arguments'))
+        is_gate = gate_mode if gate_mode is not None else bool(
+            gate['children'] or isinstance(args, dict) and 'request' in args
+            or gate['canonical_reply'] in ('SUBMITTED', BOUNCE)
+            or gate['canonical_reply'].startswith('SUBMIT FAILED'))
+        if (gate['inner_successes'] if is_gate else _patch_size(c['response']) is not None):
+            return i
+    return None
+
+
+def _terminal_flag(row, entries):
+    if type(row.get('patch_submitted')) is bool:
+        return row['patch_submitted'], 'row'
+    flags = [e['patch_submitted'] for e in entries if type(e.get('patch_submitted')) is bool]
+    return (flags[-1], 'trace') if flags else (None, 'derived_from_harness_response')
+
+
+def submit_evidence(row, entries, gate_mode=None, trace_loaded=True):
+    observed = successful_submit_index(entries, gate_mode) is not None
+    flag, source = _terminal_flag(row, entries)
+    known = type(flag) is bool
+    return dict(submit_unverifiable=not trace_loaded or not known or flag "'!= observed,
+                patch_submitted=flag if known else observed,
+                patch_submitted_source=source,
+                successful_submit=observed)
+
+
+def submitted_without_test(entries, gate_mode=None):
+    index = successful_submit_index(entries, gate_mode)
+    if index is None:
+        return None
+    return not any(c.get('"'tool') == 'run_command' and TEST.search(_command(c))
+                   for c in root_tool_calls(entries)[:index])
+
+''' + s[b:]
+s=s.replace(\"    if row and gates and gates[-1]['canonical_index'] is None:\", \"    if row and gates and gates[-1]['canonical_index'] is None and gates[-1]['root_index'] == len(roots) - 1:\")
+s=s.replace(\"        limit |= any(re.search\", \"        limit |= row.get('agent_outcome') == 'turns'\\n        limit |= any(re.search\")
+s=s.replace(\"    flag = row.get('patch_submitted')\\n    if flag is False:\", \"    flag, _ = _terminal_flag(row, entries)\\n    if flag is False:\")
+s=s.replace(\"and bool(args['request'].strip()))\", \"and bool(args['request']))\")
+s=s.replace(\"        if err and not re.search(r'budget|timeout|timed out', str(err), re.I):\", \"        if err and (re.search(r'unknown[ _-]tool|ToolErrorPlugin|compile|validator', str(err), re.I)\\n                    or not re.search(r'budget|timeout|timed out', str(err), re.I)):\")
+s=s.replace(\"    try:\\n        test_files = load_task_test_files(tasks_path)\\n        paths.append(tasks_path)\", \"    if tasks_path.is_file():\\n        paths.append(tasks_path)\\n    try:\\n        test_files = load_task_test_files(tasks_path)\")
+s=s.replace(\"                scored = strip_protected_files_from_patch(patch.read_text(),\\n                            extra_protected_paths=test_files[row['instance_id']])\", \"                try:\\n                    scored = strip_protected_files_from_patch(patch.read_bytes().decode('utf-8'),\\n                                extra_protected_paths=test_files[row['instance_id']])\\n                except (OSError, UnicodeError, ValueError):\\n                    scored = None\")
+s=s.replace(\"    # have author submit_patch. Header labels/SHA cover runs that never called it.\", \"    # have author submit_patch. Header/directory labels cover runs with no calls.\")
+s=s.replace(\"has_gate = ('v010' in header_text or any(\", \"has_gate = ('v010' in header_text or 'v010' in Path(run_dir).name or any(\")
+s=s.replace(\"            desc['untracked_only_submits'] = None\\n            if patch.is_file():\", \"            acknowledged = any(g['canonical_reply'] == 'SUBMITTED' for g in gate_invocations(entries))\\n            desc['untracked_only_submits'] = None if acknowledged else False\\n            if acknowledged and patch.is_file():\")
+s=s.replace(\"                        scored = strip_protected_files_from_patch(patch.read_text(), extra_protected_paths=tests)\", \"                        scored = strip_protected_files_from_patch(patch.read_bytes().decode('utf-8'), extra_protected_paths=tests)\")
+s=s.replace(\"desc['untracked_only_submits'] = bool(successful_submit_index(entries) is not None and untracked_only(scored))\", \"desc['untracked_only_submits'] = untracked_only(scored)\")
+s=s.replace(\"submitted_without_test=submitted_without_test(entries),\\n                         **submit_evidence(row, entries),\", \"submitted_without_test=submitted_without_test(entries, has_gate),\\n                         **submit_evidence(row, entries, has_gate, (artifacts / 'trace.json').is_file()),\")
+p.write_text(s)
+p=Path('eval/tests/test_plan008_metrics.py')
+s=p.read_text().replace(\"{'request': ''}, {'request': ' '}, {'request': None}\", \"{'request': ''}, {'request': None}\")
+s=s.replace(\"assert totals['unacknowledged_inner_submits'] == totals['untracked_only_submits'] == 1\", \"assert totals['unacknowledged_inner_submits'] == 1\\n        assert totals['untracked_only_submits'] == 0  # D72 descriptive still requires acknowledgement\")
+p.write_text(s)
+p=Path('eval/tests/test_submit_gate.py')
+s=p.read_text().replace(\"        elif e.startswith('CP '):\", \"        elif e == 'COPIES':\\n            subprocess.run(['git', 'config', 'diff.renames', 'copies'], check=True, cwd=ws)\\n        elif e.startswith('CP '):\")
+s=s.replace(\"         (['CP src/a.py -> src/b.py'], [S]),\", \"         (['CP src/a.py -> src/b.py'], [S]),\\n         (['COPIES', 'CP src/a.py -> src/b.py', 'src/a.py'], [S]),\\n         (['COPIES', 'CP tests/test_a.py -> src/b.py', 'tests/test_a.py'], [E]),\")
+s=s.replace(\"    want = bool(strip_protected_files_from_patch(patch))\", \"    if 'COPIES' in edits:\\n        statuses = subprocess.run(['git', 'diff', '--name-status', '-z', '_swegemma_baseline'],\\n                                 capture_output=True, text=True, cwd=ws, check=True).stdout\\n        assert 'C100\\\\0' in statuses, 'fixture must exercise two-path copy entries'\\n    want = bool(strip_protected_files_from_patch(patch))\")
+p.write_text(s)
+PY
+python3 /tmp/d73_refine.py
+PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_submit_gate.py eval/tests/test_plan008_metrics.py -q --tb=short" in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+exec
+/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q .' in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 10477ms:
+........................................................................ [ 31%]
+........................................................................ [ 63%]
+........................................................................ [ 95%]
+.........s                                                               [100%]
+225 passed, 1 skipped in 9.05s
+
+ succeeded in 29240ms:
+........................................................................ [  4%]
+........................................................................ [  9%]
+........................................................................ [ 14%]
+........................................................................ [ 19%]
+........................................................................ [ 24%]
+........................................................................ [ 29%]
+........................................................................ [ 34%]
+.....................................................s.................. [ 39%]
+.................................................................... [ 44%]
+..................................s..................................... [ 49%]
+........................................................................ [ 54%]
+........................................................................ [ 58%]
+........................................................................ [ 63%]
+........................................................................ [ 68%]
+........................................................................ [ 73%]
+.....s.................................................................. [ 78%]
+..............s......................................................... [ 83%]
+....................s...............ss.................................. [ 88%]
+........................................................................ [ 93%]
+........................................................................ [ 98%]
+......................                                                   [100%]
+1451 passed, 7 skipped, 4 subtests passed in 27.64s
+
+codex
+The targeted suites pass: 225 passed, 1 skipped. The skipped test replays real arm-1 artifacts, which are absent from this checkout; all four base-count assertions remain intact. The requested full eval command is running now. Arm-2 metrics count an inner capture without requiring acknowledgement and list missing or inconsistent submit-state evidence.
+exec
+/bin/bash -lc 'git diff --check && df -h . /tmp && rg --files eval/tests | wc -l' in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 0ms:
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1       145G   58G   87G  41% /home/ubuntu/work/gemma-wt/codex-plan008-d73
+/dev/sda1       145G   58G   87G  41% /tmp
+17
+
+exec
+/bin/bash -lc "cat > /tmp/d73_last_edit.py <<'PY'
+from pathlib import Path
+p=Path('eval/plan008_metrics.py')
+s=p.read_text()
+s=s.replace(\"'unacknowledged_inner_submits=sum(bool(g['inner_successes'])\", \"'unacknowledged_inner_submits=sum(len(g['inner_successes'])\") if False else s
+s=s.replace(\"unacknowledged_inner_submits=sum(bool(g['inner_successes']) and\\n                                                g['canonical_reply'] "'!= '"'SUBMITTED' for g in gates)\", \"unacknowledged_inner_submits=sum(len(g['inner_successes']) for g in gates\\n                                                if g['canonical_reply'] "'!= '"'SUBMITTED')\")
+s=s.replace(\"submitted_without_test=submitted_without_test(entries)))\", \"submitted_without_test=submitted_without_test(entries, gate_mode=False)))\")
+a=s.index('        if has_gate:\\n            patch = artifacts')
+b=s.index('        else:\\n            desc = dict.fromkeys',a)
+s=s[:a]+'''        if has_gate:
+            # D72's untracked-only descriptive requires a canonical acknowledgement;
+            # the D73 SAFETY boundary below needs only an inner harness capture.
+            acknowledged = any(g['canonical_reply'] == 'SUBMITTED' for g in gate_invocations(entries))
+            desc['untracked_only_submits'] = None if acknowledged else False
+            if acknowledged:
+                result = artifacts / 'result.json'
+                if not result.is_file():
+                    result = artifacts / 'output.json'
+                scored = None
+                if result.is_file():
+                    paths.append(result)
+                    scored = json.loads(result.read_text()).get('agent_patch')
+                patch = artifacts / 'agent.patch'
+                if scored is None and patch.is_file():
+                    paths.append(patch)
+                    try:
+                        from swegemma.harness.verification import strip_protected_files_from_patch
+                        tasks_path = _tasks_path()
+                        if tasks_path.is_file():
+                            paths.append(tasks_path)
+                        tests = load_task_test_files(tasks_path)[row['instance_id']]
+                        scored = strip_protected_files_from_patch(patch.read_bytes().decode('utf-8'), extra_protected_paths=tests)
+                    except Exception:
+                        scored = None
+                if isinstance(scored, str):
+                    desc['untracked_only_submits'] = untracked_only(scored)
+''' + s[b:]
+p.write_text(s)
+p=Path('eval/tests/test_plan008_metrics.py')
+s=p.read_text()
+a=s.index(\"@pytest.mark.skipif\")
+s=s[:a]+'''def test_builtin_and_gate_response_authority():
+    # A gate's own patch_size-shaped reply is not an inner harness capture.
+    es = [call('submit_patch', {'request': 'submit'}), response('submit_patch', {'patch_size': 23})]
+    assert m.successful_submit_index(es) is None
+    # The same shape is authoritative for the builtin arm, independent of arguments.
+    assert m.successful_submit_index(es, gate_mode=False) == 0
+    assert m.successful_submit_index(es, gate_mode=True) is None
+    es = gate()[:-1]
+    es += invoke('submit_patch', result={'patch_size': 23}, author='submit_patch')
+    assert m.gate_descriptives(es)['unacknowledged_inner_submits'] == 2
+
+
+def test_trace_terminal_flag():
+    es = gate() + [dict(type='state', patch_submitted=True)]
+    r = row()
+    del r['patch_submitted']
+    assert m.submit_evidence(r, es)['patch_submitted_source'] == 'trace'
+    assert m.submit_evidence(r, es)['submit_unverifiable'] is False
+    assert check(r, es)['i']['status'] == 'PASS'
+
+
+def test_smoke_iii_budget_does_not_hide_compile_error():
+    assert check(row(agent_error_text='compile error after budget'), gate())['iii']['status'] == 'FAIL'
+    es = gate()
+    es[0]['args'] = {'request': ' '}
+    assert check(row(), es)['iii']['status'] == 'PASS'  # non-empty string, exact D73 schema
+
+
+def test_smoke_saved_crlf_patch(tmp_path, monkeypatch):
+    monkeypatch.chdir(ROOT_DIR)
+    tasks = task_inventory(tmp_path)
+    patch = NEW.replace('+x\\\\n', '+x\\\\r\\\\n')
+    r = row(verified_patch_bytes=len(patch.encode()))
+    run, _ = make_run(tmp_path, gate(size=len(patch)), r, patch=patch)
+    assert m.smoke_metrics(run, tasks)['overall'] == 'PASS'
+
+
+@pytest.mark.parametrize('missing', ['patch', 'result', 'tasks'])
+def test_arm2_acknowledged_untracked_evidence(tmp_path, monkeypatch, missing):
+    monkeypatch.chdir(ROOT_DIR)
+    tasks = task_inventory(tmp_path)
+    monkeypatch.setenv('PLAN008_TASKS_PATH', str(tasks))
+    run, artifacts = make_run(tmp_path, gate())
+    if missing == 'patch':
+        artifacts.joinpath('agent.patch').unlink()
+    else:
+        artifacts.joinpath('result.json').unlink()
+        if missing == 'tasks':
+            tasks.unlink()
+    out = m.arm2_metrics(run)
+    assert out['totals']['untracked_only_submits'] == (0 if missing == 'tasks' else 1)
+    assert out['totals']['untracked_only_unverifiable'] == int(missing == 'tasks')
+
+
+def test_arm2_multirow_totals(tmp_path, monkeypatch):
+    monkeypatch.chdir(ROOT_DIR)
+    run = tmp_path / 'v010'
+    run.mkdir()
+    sequences = [invoke('read_file') * 5 + invoke('run_command', {'command': 'pytest'}) + gate()[:-1],
+                 gate(m.BOUNCE), gate()[:3]]
+    timing = []
+    for i, es in enumerate(sequences):
+        iid = f'synthetic{i}'
+        artifacts = run / 'runs' / iid
+        artifacts.mkdir(parents=True)
+        artifacts.joinpath('trace.json').write_text(json.dumps({'entries': es}))
+        r = dict(row(patch_submitted=i "'!= 1, verified_patch_bytes=0 if i == 1 else 23), instance_id=iid)
+        if i == 2:
+            r['"'agent_error_text'] = 'Agent exceeded turns budget (50 turns)'
+        timing.append(r)
+    run.joinpath('timing.jsonl').write_text(''.join(json.dumps(r) + '\\\\n' for r in timing))
+    out = m.arm2_metrics(run)
+    t = out['totals']
+    assert out['n_rows'] == 3
+    assert t['mechanism2'] == t['mechanism1_empty'] == 1
+    assert t['submitted_without_test'] == 0
+    assert t['count_no_successful_submit'] == 2
+    assert t['repeated_calls'] == 4
+    assert t['bounces'] == t['bounce_no_followup'] == t['unacknowledged_inner_submits'] == t['gate_llm_limit'] == 1
+    assert out['submit_unverifiable_rows'] == ['synthetic2']
+
+
+''' + s[a:]
+p.write_text(s)
+p=Path('eval/tests/test_submit_gate.py')
+s=p.read_text()
+s += '''\\n\\n@pytest.mark.parametrize('state', ['', 'abc', '123', '9223372036854775807'])
+def test_corrupt_counter_forces_even_with_changes(tmp_path, state):
+    ws = make_repo(tmp_path)
+    apply(ws, ['src/a.py'])
+    counter = tmp_path / 'n'
+    counter.write_text(state)
+    assert verdict(run(gate_cmd(ws, counter))) == F
+'''
+p.write_text(s)
+PY
+python3 /tmp/d73_last_edit.py
+PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_submit_gate.py eval/tests/test_plan008_metrics.py -q --tb=short" in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 10551ms:
+........................................................................ [ 30%]
+........................................................................ [ 60%]
+........................................................................ [ 90%]
+.....................s                                                   [100%]
+237 passed, 1 skipped in 9.23s
+
+codex
+The full suite passed: 1,451 passed, 7 skipped, and 4 subtests passed. I’m adding final checks for CRLF preservation in saved patches and missing evidence in arm-2 totals, then I’ll rerun the suite. No packing or commits have been performed.
+exec
+/bin/bash -lc 'git diff --check && git status --short && git diff --numstat' in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 76ms:
+ M bundles/31b/v010/MANIFEST.md
+ M bundles/31b/v010/sub_agents/submit_gate.yaml
+ M eval/plan008_metrics.py
+ M eval/tests/test_plan008_metrics.py
+ M eval/tests/test_submit_gate.py
+1	1	bundles/31b/v010/MANIFEST.md
+1	1	bundles/31b/v010/sub_agents/submit_gate.yaml
+301	95	eval/plan008_metrics.py
+305	29	eval/tests/test_plan008_metrics.py
+109	22	eval/tests/test_submit_gate.py
+
+exec
+/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q .' in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+exec
+/bin/bash -lc 'git diff -- eval/plan008_metrics.py' in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 0ms:
+diff --git a/eval/plan008_metrics.py b/eval/plan008_metrics.py
+index f63cdd3..9b9942e 100644
+--- a/eval/plan008_metrics.py
++++ b/eval/plan008_metrics.py
+@@ -1,10 +1,15 @@
+ #!/usr/bin/env python3
+-"""Plan 008 D71.2/D72.2 metrics. CPU/stdlib only; output contains counts, never task text.
++"""Plan 008 D73 metrics. CPU/offline only; output contains counts, never task text.
+ 
+-Usage: plan008_metrics.py base OUT_JSON | smoke RUN_DIR OUT_JSON
++Usage: plan008_metrics.py base OUT_JSON | smoke RUN_DIR OUT_JSON | arm2 RUN_DIR OUT_JSON
++
++Smoke loads task.test_files with swegemma.models.load_tasks, as both eval runners do.
++Tasks default to data/raw/tasks.jsonl (local) or the Kaggle competition tasks.jsonl;
++PLAN008_TASKS_PATH overrides that location for downloaded runs. Missing tasks fail smoke.
+ """
+ import json
+ import math
++import os
+ from pathlib import Path
+ import re
+ import sys
+@@ -23,10 +28,13 @@ DEFINITIONS = {
+     'mechanism2': 'rows with max_run >= 5; root-author tool calls only; same tool and sort_keys JSON args; nested calls excluded before runs',
+     'repeated_calls': 'sum(length - 1) over root identical runs',
+     'submitted_without_test': 'successful root submit with no prior root run_command matching \\bpytest\\b|-m\\s+unittest\\b|\\btox\\b; no success excluded and counted separately',
+-    'success': 'first root submit with patch_size and no error, or gate reply starting SUBMITTED',
+-    'smoke': '008.md D71.2 i-v and D72.2; missing evidence UNVERIFIABLE; overall PASS requires every criterion PASS',
++    'success': 'first root harness patch_size response (builtin), or gate-authored inner harness patch_size response attributed to its enclosing root submit; acknowledgement not required',
++    'submit_unverifiable': 'inner/builtin success vs explicit patch_submitted mismatch, or flag unavailable; missing flag derived from harness response only, not acknowledgement; rows counted and listed',
++    'smoke': '008.md D73.2 i-v; missing evidence UNVERIFIABLE; overall PASS requires every criterion PASS',
+     'gate_descriptives': 'root submit calls; reply-prefix bounces/failures; gate run_command response forced/check_error counts; terminal bounces; internal visibility',
+-    'untracked_only': 'nonempty patch with diff --git sections all declaring new file mode',
++    'gate_llm_limit': 'gate-authored limit evidence, or an unacknowledged enclosing gate with the runner turns-budget error; inferred from saved evidence',
++    'gate_detection': 'v010 header label or gate request/reply/child events; otherwise builtin layout and gate counts n/a',
++    'untracked_only': 'D72.2: canonical SUBMITTED reply and nonempty scored patch with all sections declaring new file mode; absent scored-patch evidence reported separately',
+ }
+ 
+ 
+@@ -108,16 +116,73 @@ def _patch_size(value):
+     return None
+ 
+ 
+-def successful_submit_index(entries):
++def gate_invocations(entries):
++    """Legacy traces lack event IDs: enclose children by root call/reply interval.
++
++    A missing acknowledgement ends at the next root call or trace end. This retains
++    inner captures interrupted by a deadline, without assigning them to a later call.
++    Only the root tool_response is a canonical gate reply.
++    """
++    pairs = _pairs(entries)
++    roots = [c for c in pairs if c.get('author') == ROOT]
++    gates = []
++    for i, c in enumerate(roots):
++        if c.get('tool') != 'submit_patch':
++            continue
++        end = roots[i + 1]['entry_index'] if i + 1 < len(roots) else len(entries)
++        reply_index = c['response_index']
++        canonical = (reply_index is not None and reply_index < end
++                     and entries[reply_index].get('type') == 'tool_response')
++        if canonical:
++            end = reply_index
++        children = [dict(p, response=None, response_index=None)
++                    if p['response_index'] is not None and p['response_index'] >= end else p
++                    for p in pairs if p.get('author') == 'submit_patch'
++                    and c['entry_index'] < p['entry_index'] < end]
++        inner = [p for p in children if p.get('tool') == 'submit_patch'
++                 and p['response_index'] is not None and p['response_index'] < end
++                 and _patch_size(p['response']) is not None]
++        gates.append(dict(c, root_index=i, children=children, inner_successes=inner,
++                          canonical_reply=_reply(c['response']) if canonical else '',
++                          canonical_index=reply_index if canonical else None))
++    return gates
++
++
++def successful_submit_index(entries, gate_mode=None):
++    gates = {g['entry_index']: g for g in gate_invocations(entries)}
+     for i, c in enumerate(root_tool_calls(entries)):
+-        if c.get('tool') == 'submit_patch' and (
+-                _patch_size(c['response']) is not None or _reply(c['response']).startswith('SUBMITTED')):
++        if c.get('tool') != 'submit_patch':
++            continue
++        gate = gates[c['entry_index']]
++        args = c.get('args', c.get('arguments'))
++        is_gate = gate_mode if gate_mode is not None else bool(
++            gate['children'] or isinstance(args, dict) and 'request' in args
++            or gate['canonical_reply'] in ('SUBMITTED', BOUNCE)
++            or gate['canonical_reply'].startswith('SUBMIT FAILED'))
++        if (gate['inner_successes'] if is_gate else _patch_size(c['response']) is not None):
+             return i
+     return None
+ 
+ 
+-def submitted_without_test(entries):
+-    index = successful_submit_index(entries)
++def _terminal_flag(row, entries):
++    if type(row.get('patch_submitted')) is bool:
++        return row['patch_submitted'], 'row'
++    flags = [e['patch_submitted'] for e in entries if type(e.get('patch_submitted')) is bool]
++    return (flags[-1], 'trace') if flags else (None, 'derived_from_harness_response')
++
++
++def submit_evidence(row, entries, gate_mode=None, trace_loaded=True):
++    observed = successful_submit_index(entries, gate_mode) is not None
++    flag, source = _terminal_flag(row, entries)
++    known = type(flag) is bool
++    return dict(submit_unverifiable=not trace_loaded or not known or flag != observed,
++                patch_submitted=flag if known else observed,
++                patch_submitted_source=source,
++                successful_submit=observed)
++
++
++def submitted_without_test(entries, gate_mode=None):
++    index = successful_submit_index(entries, gate_mode)
+     if index is None:
+         return None
+     return not any(c.get('tool') == 'run_command' and TEST.search(_command(c))
+@@ -125,25 +190,36 @@ def submitted_without_test(entries):
+ 
+ 
+ def _command(c):
+-    return (c.get('args', c.get('arguments')) or {}).get('command', '')
++    args = c.get('args', c.get('arguments'))
++    return args.get('command', '') if isinstance(args, dict) and isinstance(args.get('command', ''), str) else ''
+ 
+ 
+ def _response_text(value):
+     return value if isinstance(value, str) else json.dumps(value)
+ 
+ 
+-def gate_descriptives(entries):
++def gate_descriptives(entries, row=None):
+     roots = root_tool_calls(entries)
+-    submits = [(i, c) for i, c in enumerate(roots) if c.get('tool') == 'submit_patch']
+-    cmds = [c for c in _pairs(entries) if c.get('author') == 'submit_patch' and c.get('tool') == 'run_command']
+-    return dict(gate_calls=len(submits),
+-                bounces=sum(_reply(c['response']).startswith('NOT SUBMITTED') for _, c in submits),
++    gates = gate_invocations(entries)
++    cmds = [c for g in gates for c in g['children'] if c.get('tool') == 'run_command']
++    limit = any('LlmCallsLimitExceeded' in _response_text(e) for e in entries
++                if e.get('author') == 'submit_patch')
++    if row and gates and gates[-1]['canonical_index'] is None and gates[-1]['root_index'] == len(roots) - 1:
++        limit |= row.get('agent_outcome') == 'turns'
++        limit |= any(re.search(r'LlmCallsLimitExceeded|exceeded turns budget|maximum allowed LLM turns', str(row.get(k, ''))) is not None
++                     for k in ('agent_error', 'agent_error_text', 'result_error', 'error'))
++    return dict(gate_calls=len(gates),
++                bounces=sum(g['canonical_reply'].startswith('NOT SUBMITTED') for g in gates),
+                 forced=sum('reason=forced' in _response_text(c['response']) for c in cmds),
+                 check_error=sum('reason=check_error' in _response_text(c['response']) for c in cmds),
+-                submit_failed=sum(_reply(c['response']).startswith('SUBMIT FAILED') for _, c in submits),
+-                bounce_no_followup=sum(i == len(roots) - 1 and _reply(c['response']).startswith('NOT SUBMITTED') for i, c in submits),
++                submit_failed=sum(g['canonical_reply'].startswith('SUBMIT FAILED') for g in gates),
++                bounce_no_followup=sum(g['root_index'] == len(roots) - 1 and
++                                       g['canonical_reply'].startswith('NOT SUBMITTED') for g in gates),
++                gate_llm_limit=int(limit),
++                unacknowledged_inner_submits=sum(len(g['inner_successes']) for g in gates
++                                                if g['canonical_reply'] != 'SUBMITTED'),
+                 gate_run_cmds=[_command(c) for c in cmds],
+-                gate_internal_visible=any(e.get('author') == 'submit_patch' for e in entries))
++                gate_internal_visible=any(g['children'] for g in gates))
+ 
+ 
+ def untracked_only(patch_text):
+@@ -163,77 +239,74 @@ def _criterion(status, reason):
+     return dict(status=status, reason=reason)
+ 
+ 
+-def _cap_exempt(row):
+-    return bool(row.get('agent_timeout_fired') or row.get('timed_out') or row.get('budget_exceeded'))
+-
++def smoke_check(row, entries, gate_yaml_path, scored_patch=None, test_files_loaded=False):
++    """D73.2 i..v. scored_patch must already be stripped with task.test_files.
+ 
+-def smoke_check(row, entries, gate_yaml_path):
+-    """Return criteria i..v. Reasons are fixed descriptions, never trace/task text."""
++    Missing evidence is UNVERIFIABLE, which is FAIL for the overall smoke.
++    Reasons are fixed descriptions; commands, patches and task text are never emitted.
++    """
+     out = {}
+-    pairs = _pairs(entries)
+-    roots = root_tool_calls(entries)
+-    gates = [c for c in roots if c.get('tool') == 'submit_patch']
+-    desc = gate_descriptives(entries)
++    gates = gate_invocations(entries)
++    desc = gate_descriptives(entries, row)
+     expected = _gate_command(gate_yaml_path)
+     failures, missing = [], []
++    captures = []
+     if not gates:
+-        out['i'] = _criterion('PASS' if _cap_exempt(row) else 'UNVERIFIABLE',
+-                              'cap before any gate call; exempt pending cross-task check' if _cap_exempt(row) else 'no gate call observed')
+-    else:
+-        if not desc['gate_internal_visible']:
++        failures.append('no gate invocation in task')
++    for gate in gates:
++        children = gate['children']
++        if not children:
+             missing.append('gate internals absent')
+-        for gate in gates:
+-            end = gate['response_index']
+-            if end is None:
+-                missing.append('gate response absent')
+-                continue
+-            children = [c for c in pairs if c.get('author') == 'submit_patch'
+-                        and gate['entry_index'] < c['entry_index'] < end]
+-            cmds = [c for c in children if c.get('tool') == 'run_command']
+-            subs = [c for c in children if c.get('tool') == 'submit_patch']
+-            if not children:
+-                missing.append('gate internals absent')
+-                continue
+-            if len(cmds) != 1 or _command(cmds[0]) != expected:
+-                failures.append('gate check command differs or count differs')
+-            elif cmds[0]['response_index'] is None:
+-                missing.append('gate check response absent')
+-            else:
+-                text = _response_text(cmds[0]['response'])
+-                need_submit = 'VERDICT=SUBMIT' in text or 'VERDICT=EDIT_FIRST' not in text
+-                if need_submit and (len(subs) != 1 or subs[0]['entry_index'] <= cmds[0]['response_index']):
+-                    failures.append('inner submit absent or out of order')
+-                if not need_submit and subs:
+-                    failures.append('inner submit after EDIT_FIRST')
+-            if _reply(gate['response']).startswith('SUBMITTED'):
+-                if any(e.get('author') == ROOT and e.get('type') != 'tool_response' for e in entries[end + 1:]):
+-                    failures.append('root model event after successful gate response')
+-        if row.get('patch_submitted') is not True:
+-            failures.append('run did not end with patch_submitted true')
+-        out['i'] = _criterion('FAIL' if failures else 'UNVERIFIABLE' if missing else 'PASS',
+-                              '; '.join(failures or missing) or 'gate sequence and termination observed')
+-
+-    sizes = [_patch_size(c['response']) for c in pairs
+-             if c.get('author') == 'submit_patch' and c.get('tool') == 'submit_patch']
+-    sizes = [s for s in sizes if s is not None]
+-    if not sizes and row.get('patch_submitted') is False:
+-        fallback = row.get('fallback_patch_bytes')
+-        if fallback is None:
+-            for e in entries:
+-                m = re.search(r'Captured unsubmitted working tree modifications as fallback patch \((\d+) bytes\)', e.get('content') or '')
+-                if m:
+-                    fallback = int(m[1])
+-        sizes = [] if fallback is None else [fallback]
++            continue
++        if gate['canonical_index'] is None:
++            missing.append('canonical gate response absent')
++        cmds = [c for c in children if c.get('tool') == 'run_command']
++        subs = [c for c in children if c.get('tool') == 'submit_patch']
++        captures.extend(gate['inner_successes'])
++        if len(cmds) != 1 or _command(cmds[0]) != expected:
++            failures.append('gate check command differs or count differs')
++        elif cmds[0]['response_index'] is None:
++            missing.append('gate check response absent')
++        else:
++            text = _response_text(cmds[0]['response'])
++            need_submit = 'VERDICT=SUBMIT' in text or 'VERDICT=EDIT_FIRST' not in text
++            if need_submit and (len(subs) != 1 or subs[0]['entry_index'] <= cmds[0]['response_index']
++                                or not gate['inner_successes']):
++                failures.append('successful inner submit absent or out of order')
++            if not need_submit and subs:
++                failures.append('inner submit after EDIT_FIRST')
++        if gate['canonical_reply'] == 'SUBMITTED':
++            for e in entries[gate['canonical_index'] + 1:]:
++                if e.get('author') != ROOT or e.get('type') in ('tool_response', 'tool_result'):
++                    continue
++                if e.get('type') == 'final' and e.get('content') == gate['canonical_reply']:
++                    continue  # legacy recorder's mirrored function-response display
++                failures.append('root model event after successful gate response')
++                break
++    if gates and not captures:
++        missing.append('no successful inner submit evidence')
++    flag, _ = _terminal_flag(row, entries)
++    if flag is False:
++        failures.append('run did not end with patch_submitted true')
++    elif flag is not True:
++        missing.append('terminal patch_submitted flag absent')
++    out['i'] = _criterion('FAIL' if failures else 'UNVERIFIABLE' if missing else 'PASS',
++                          '; '.join(failures or missing) or 'gate sequence and termination observed')
++
+     actual = row.get('verified_patch_bytes')
+-    out['ii'] = _criterion('UNVERIFIABLE' if not sizes or actual is None else
+-                           'PASS' if len(sizes) == 1 and actual == sizes[0] else 'FAIL',
+-                           'scored and captured patch sizes agree' if len(sizes) == 1 and actual == sizes[0]
+-                           else 'patch size evidence missing' if not sizes or actual is None else 'patch sizes differ or multiple captures')
++    if not test_files_loaded or scored_patch is None or not captures or type(actual) is not int:
++        out['ii'] = _criterion('UNVERIFIABLE', 'task test_files, saved patch or capture evidence missing')
++    else:
++        size = _patch_size(captures[-1]['response'])
++        agrees = len(scored_patch) == size and len(scored_patch.encode('utf-8')) == actual
++        out['ii'] = _criterion('PASS' if agrees else 'FAIL',
++                               'stripped patch characters and UTF-8 bytes agree' if agrees else 'stripped patch sizes differ')
+ 
+     errors = bool(desc['check_error'] or desc['submit_failed'])
+-    for key in ('agent_error', 'agent_error_text', 'result_error'):
++    for key in ('agent_error', 'agent_error_text', 'result_error', 'error'):
+         err = row.get(key)
+-        if err and not re.search(r'budget|timeout|timed out', str(err), re.I):
++        if err and (re.search(r'unknown[ _-]tool|ToolErrorPlugin|compile|validator', str(err), re.I)
++                    or not re.search(r'budget|timeout|timed out', str(err), re.I)):
+             errors = True
+     for e in entries:
+         if e.get('author') not in (ROOT, 'submit_patch'):
+@@ -241,9 +314,22 @@ def smoke_check(row, entries, gate_yaml_path):
+         if e.get('type') in ('tool_response', 'tool_result'):
+             text = _response_text(e.get('result', ''))
+             errors |= _has_error(text) or bool(re.search(r'unknown[ _-]tool|ToolErrorPlugin|compile error|validator error', text, re.I))
+-    malformed = any(_reply(c['response']) not in ('SUBMITTED', BOUNCE) for c in gates)
++    malformed = False
++    for gate in gates:
++        args = gate.get('args', gate.get('arguments'))
++        malformed |= not (isinstance(args, dict) and set(args) == {'request'}
++                          and isinstance(args['request'], str) and bool(args['request']))
++        malformed |= gate['canonical_reply'] not in ('SUBMITTED', BOUNCE)
++        for c in gate['children']:
++            args = c.get('args', c.get('arguments'))
++            if c.get('tool') == 'run_command':
++                malformed |= args != {'command': expected}
++            elif c.get('tool') == 'submit_patch':
++                malformed |= args != {}
++            else:
++                malformed = True
+     out['iii'] = _criterion('FAIL' if errors or malformed else 'PASS',
+-                            'error or malformed gate reply observed' if errors or malformed else 'no errors or malformed gate replies observed')
++                            'error or malformed gate call/reply observed' if errors or malformed else 'no errors or malformed gate calls/replies observed')
+     clock = row.get('agent_clock_seconds')
+     valid = type(clock) in (int, float) and math.isfinite(clock) and clock >= 0
+     out['iv'] = _criterion('UNVERIFIABLE' if not valid else 'PASS' if clock <= 210 else 'FAIL',
+@@ -279,7 +365,7 @@ def base_metrics():
+             rep = identical_runs_root(entries)
+             rows.append(dict(instance_id=iid, part=part, **rep, mechanism2=rep['max_run'] >= 5,
+                              mechanism1_empty=t.get('verified_patch_bytes') == 0,
+-                             submitted_without_test=submitted_without_test(entries)))
++                             submitted_without_test=submitted_without_test(entries, gate_mode=False)))
+     assert [r['instance_id'] for r in rows] == base.ids_file(base.ARM_IDS)
+     totals = dict(mechanism2=sum(r['mechanism2'] for r in rows),
+                   mechanism1_empty=sum(r['mechanism1_empty'] for r in rows),
+@@ -290,33 +376,153 @@ def base_metrics():
+                   repeated_calls=sum(r['repeated_calls'] for r in rows))
+     assert totals['mechanism2'] == 17, 'arm-1 mechanism2 baseline changed'
+     assert totals['mechanism1_empty'] == 12, 'arm-1 empty baseline changed'
++    assert totals['submitted_without_test'] == 23, 'arm-1 safety baseline changed'
++    assert totals['count_no_successful_submit'] == 7, 'arm-1 no-submit baseline changed'
+     return dict(_schema=_schema('base', paths), n_rows=len(rows), totals=totals, rows=rows)
+ 
+ 
+-def smoke_metrics(run_dir):
++def load_task_test_files(tasks_path):
++    # Match agent_timing.evaluate / run_agent_eval.run: the Task property derives
++    # these paths from test_patch. Never use gold patch or test text as agent input.
++    from swegemma.models import load_tasks
++    tasks = load_tasks(Path(tasks_path))
++    inventory = {t.instance_id: list(t.test_files) for t in tasks}
++    if len(inventory) != len(tasks):
++        raise ValueError('duplicate task IDs')
++    return inventory
++
++
++def _tasks_path():
++    if os.environ.get('PLAN008_TASKS_PATH'):
++        return Path(os.environ['PLAN008_TASKS_PATH'])
++    kaggle = Path('/kaggle/input/competitions/gemma-4-developer-agent/tasks.jsonl')
++    return kaggle if kaggle.is_file() else Path('data/raw/tasks.jsonl')
++
++
++def _artifacts(run_dir, iid):
++    # Kaggle: runs/<iid>; local eval runner: <iid>.
++    nested = Path(run_dir) / 'runs' / iid
++    return nested if nested.is_dir() else Path(run_dir) / iid
++
++
++def smoke_metrics(run_dir, tasks_path=None):
+     timing = Path(run_dir) / 'timing.jsonl'
+     paths, rows = [timing, GATE_YAML], []
++    tasks_path = Path(tasks_path) if tasks_path is not None else _tasks_path()
++    if tasks_path.is_file():
++        paths.append(tasks_path)
++    try:
++        test_files = load_task_test_files(tasks_path)
++    except Exception:
++        test_files = {}  # criterion ii is UNVERIFIABLE for every missing task
+     for row in base.load_rows(timing):
+-        trace = Path(run_dir) / 'runs' / row['instance_id'] / 'trace.json'
+-        paths.append(trace)
+-        entries = json.loads(trace.read_text())['entries']
+-        desc = gate_descriptives(entries)
+-        # Commands are used only for comparison, never serialized (counts-only output).
++        artifacts = _artifacts(run_dir, row['instance_id'])
++        trace, patch = artifacts / 'trace.json', artifacts / 'agent.patch'
++        if trace.is_file():
++            paths.append(trace)
++        entries = json.loads(trace.read_text()).get('entries', []) if trace.is_file() else []
++        scored = None
++        loaded = row['instance_id'] in test_files
++        if patch.is_file():
++            paths.append(patch)
++            if loaded:
++                from swegemma.harness.verification import strip_protected_files_from_patch
++                try:
++                    scored = strip_protected_files_from_patch(patch.read_bytes().decode('utf-8'),
++                                extra_protected_paths=test_files[row['instance_id']])
++                except (OSError, UnicodeError, ValueError):
++                    scored = None
++        desc = gate_descriptives(entries, row)
+         desc.pop('gate_run_cmds')
+-        rows.append(dict(instance_id=row['instance_id'], criteria=smoke_check(row, entries, GATE_YAML), **desc))
+-    if rows and all(r['gate_calls'] == 0 for r in rows):
+-        for row in rows:
+-            row['criteria']['i'] = _criterion('UNVERIFIABLE', 'no task exercised the gate')
++        rows.append(dict(instance_id=row['instance_id'],
++                         criteria=smoke_check(row, entries, GATE_YAML, scored, loaded), **desc))
+     passed = bool(rows) and all(c['status'] == 'PASS' for r in rows for c in r['criteria'].values())
+     return dict(_schema=_schema('smoke', paths), n_rows=len(rows), overall='PASS' if passed else 'FAIL', rows=rows)
+ 
+ 
++GATE_COUNTS = ('gate_calls', 'bounces', 'forced', 'check_error', 'submit_failed',
++               'bounce_no_followup', 'gate_llm_limit', 'unacknowledged_inner_submits', 'untracked_only_submits')
++
++
++def arm2_metrics(run_dir):
++    timing = Path(run_dir) / 'timing.jsonl'
++    paths, rows, inputs = [timing], [], []
++    for row in base.load_rows(timing):
++        artifacts = _artifacts(run_dir, row['instance_id'])
++        trace = artifacts / 'trace.json'
++        if trace.is_file():
++            paths.append(trace)
++        entries = json.loads(trace.read_text()).get('entries', []) if trace.is_file() else []
++        inputs.append((row, entries, artifacts))
++    # Builtin responses carry patch_size; gate requests carry request, children
++    # have author submit_patch. Header/directory labels cover runs with no calls.
++    headers = [json.loads(line) for line in timing.read_text().splitlines() if line.strip()
++               and 'instance_id' not in json.loads(line)]
++    header_text = json.dumps(headers)
++    has_gate = ('v010' in header_text or 'v010' in Path(run_dir).name or any(
++        e.get('author') == 'submit_patch' or
++        (e.get('author') == ROOT and e.get('tool') == 'submit_patch' and
++         (isinstance(e.get('args'), dict) and 'request' in e['args'] or
++          _reply(e.get('result')) in ('SUBMITTED', BOUNCE)))
++        for _, entries, _ in inputs for e in entries))
++    for row, entries, artifacts in inputs:
++        rep = identical_runs_root(entries)
++        desc = gate_descriptives(entries, row) if has_gate else {}
++        desc.pop('gate_run_cmds', None)
++        if has_gate:
++            # D72's untracked-only descriptive requires a canonical acknowledgement;
++            # the D73 SAFETY boundary below needs only an inner harness capture.
++            acknowledged = any(g['canonical_reply'] == 'SUBMITTED' for g in gate_invocations(entries))
++            desc['untracked_only_submits'] = None if acknowledged else False
++            if acknowledged:
++                result = artifacts / 'result.json'
++                if not result.is_file():
++                    result = artifacts / 'output.json'
++                scored = None
++                if result.is_file():
++                    paths.append(result)
++                    scored = json.loads(result.read_text()).get('agent_patch')
++                patch = artifacts / 'agent.patch'
++                if scored is None and patch.is_file():
++                    paths.append(patch)
++                    try:
++                        from swegemma.harness.verification import strip_protected_files_from_patch
++                        tasks_path = _tasks_path()
++                        if tasks_path.is_file():
++                            paths.append(tasks_path)
++                        tests = load_task_test_files(tasks_path)[row['instance_id']]
++                        scored = strip_protected_files_from_patch(patch.read_bytes().decode('utf-8'), extra_protected_paths=tests)
++                    except Exception:
++                        scored = None
++                if isinstance(scored, str):
++                    desc['untracked_only_submits'] = untracked_only(scored)
++        else:
++            desc = dict.fromkeys((*GATE_COUNTS, 'gate_internal_visible'), 'n/a (no gate)')
++        rows.append(dict(instance_id=row['instance_id'], **rep, mechanism2=rep['max_run'] >= 5,
++                         mechanism1_empty=row.get('verified_patch_bytes') == 0,
++                         submitted_without_test=submitted_without_test(entries, has_gate),
++                         **submit_evidence(row, entries, has_gate, (artifacts / 'trace.json').is_file()), **desc))
++    totals = dict(mechanism2=sum(r['mechanism2'] for r in rows),
++                  mechanism1_empty=sum(r['mechanism1_empty'] for r in rows),
++                  submitted_without_test=sum(r['submitted_without_test'] is True for r in rows),
++                  count_no_successful_submit=sum(r['submitted_without_test'] is None for r in rows),
++                  max_run=max((r['max_run'] for r in rows), default=0),
++                  runs_ge3=sum(r['runs_ge3'] for r in rows), runs_ge5=sum(r['runs_ge5'] for r in rows),
++                  repeated_calls=sum(r['repeated_calls'] for r in rows),
++                  submit_unverifiable=sum(r['submit_unverifiable'] for r in rows))
++    for key in GATE_COUNTS:
++        totals[key] = (sum(r[key] for r in rows if r[key] is not None) if has_gate else 'n/a (no gate)')
++    totals['untracked_only_unverifiable'] = sum(r.get('untracked_only_submits') is None for r in rows) if has_gate else 'n/a (no gate)'
++    return dict(_schema=_schema('arm2', paths), n_rows=len(rows), totals=totals,
++                submit_unverifiable_rows=[r['instance_id'] for r in rows if r['submit_unverifiable']], rows=rows)
++
++
+ def main(argv=None):
+     argv = sys.argv if argv is None else argv
+     if len(argv) == 3 and argv[1] == 'base':
+         out = base_metrics()
+-    elif len(argv) == 4 and argv[1] == 'smoke':
+-        out = smoke_metrics(argv[2])
++    elif len(argv) == 4 and argv[1] in ('smoke', 'arm2'):
++        out = (smoke_metrics if argv[1] == 'smoke' else arm2_metrics)(argv[2])
+     else:
+         print(__doc__)
+         return 2
+
+exec
+/bin/bash -lc 'git diff --check' in /home/ubuntu/work/gemma-wt/codex-plan008-d73
+ succeeded in 0ms:
+ succeeded in 29390ms:
+........................................................................ [  4%]
+........................................................................ [  9%]
+........................................................................ [ 14%]
+........................................................................ [ 19%]
+........................................................................ [ 24%]
+........................................................................ [ 29%]
+........................................................................ [ 34%]
+.....................................................s.................. [ 39%]
+.................................................................... [ 43%]
+..................................s..................................... [ 48%]
+........................................................................ [ 53%]
+........................................................................ [ 58%]
+........................................................................ [ 63%]
+........................................................................ [ 68%]
+........................................................................ [ 73%]
+.....s.................................................................. [ 78%]
+..............s......................................................... [ 82%]
+............................s...............ss.......................... [ 87%]
+........................................................................ [ 92%]
+........................................................................ [ 97%]
+..................................                                       [100%]
+1463 passed, 7 skipped, 4 subtests passed in 27.80s
+
+codex
+Implemented D73 gate eligibility and counter fixes, strict smoke checks, arm-2 metrics, and offline regression tests.
+
+- Full suite: **1,463 passed, 7 skipped, 4 subtests passed**.
+- Open issue: real arm-1 replay unavailable; all four baseline assertions retained.
+- Sandbox prevented nothing. No packing, `dist/` changes, or commits.
+tokens used
+107,271
