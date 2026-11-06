@@ -24,10 +24,8 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 ## Re-grounding check (EVERY cycle, dec 021 item 1e + dec 025 item 2)
 - Linger (dec 025): `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
-- DEC 060 (on c109 FYI): v004 full-arm-B-prompt deviation ACCEPTED provisionally. Arm-E report MUST: (a) list every byte diff v004 vs v002
-  (prompt sections, thinking_budget, cap, quoting line) + which are screened; (b) describe minimal alt, DON'T pack unless asked; (c) label
-  quoting line UNSCREENED (covered only by later paired v004-vs-v002). Item 2: dec 059 last line superseded; Nov 7 31B submit write-up
-  must note v002 LB = ONLY result carrying the FastAPI hint caveat. Item 3: repeat metric added to plan 007 (Addendum). Priority unchanged.
+- DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
+  submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
 ## Running jobs (05:33Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-v008-light (started 05:30:48Z).
 - DEC 061 (on report 014): approve-with-changes. CAP-BOUND accepted; A + B approved. (i) dec 055 v002 submit at 11-07T00:00Z stays FIRST;
   if SCORED -> bring v004 cap choice w/ data (FINALS RULE allows cap<=3.5); if ERROR/timeout -> CAP-BOUND binds, anti-loop only 31B path.
@@ -46,22 +44,13 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   Item 5: Nov 8 slot candidate + 1-para justification DUE 2026-11-07T12:00Z (e4b-v002 repeat / e4b-v003 if packed+reviewed+smoke / 31b-v002 repeat).
   Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
 - Arm E DONE: CAP-BOUND (report 014, results/plan005_armE_vs_D.json); dec 056 item 6 = binding blocker for 31B final at cap<=1.23.
-- DEC 059 (on report 013): B approved. ARM E = 31b-v007-p5e (bundles/31b/v007, dist/31b-v007.zip 3a62f41fa5417ee5b129e845296c5a8e44d496f1d22501d5b3a4b29667be3c6f,
-  v006 + cap 1.23 only; light review-20261106T043550 no BLOCKING). Addendum E rule: not V -> INVALID; V & E empty<=4/8 & E-empty-only(vs D)<=2
-  -> USABLE; else CAP-BOUND. Analysis DONE c113 (report 014).
-- 31b-v004 CPU DRAFT (dec 059 item 1): dist/31b-v004.zip sha256=50537e1ddcf13f160fcaa9b2bfa145ac13ef91d99a2ce0b27d69f54ee125f7b3 (5f9b4ae) =
-  v007 + 1 quoting/no-repeat line (v002 + thinking 0 + plan-005 prompt + cap 1.23). DEVIATION from literal item 1 (full arm-B prompt kept)
-  -> argue in arm-E report, offer minimal alt. No slot until v002 LB exists; v004 vs repeat-v002 needs paired evidence. Correction sent:
-  arms B-E have no FastAPI line (dec 057 caveat = v000-v002 only).
-- codex-review v004 DONE (ops/codex/review-20261106T043840.md): BLOCKING none (not submission clearance). NB1 = dec 060 deviation (in report 014);
-  NB2 system.md:33 `python3 ... | tail` lacks pipefail (inherited from arm B/E prompt) -> list in report 014 as unscreened candidate, v004 NOT repacked;
-  NB3 timeout empty patch unguaranteed (dec 056 item 6). Cap 1.23 = zero margin under S assumptions. Full compiler validation blocked by sandbox.
-- Arm D DONE (report 013, PASS). Push cmd (dec 058): eval/kaggle/timing_push.sh aniket0202/gemma-31b-timing <bundle> eval/plans/004-gpu-retime-ids.txt 6000.
-- DEC 057 (FastAPI/docs_src hint): dec 055 UNCHANGED (don't touch 31b-v002/zip/kernel). Standing rule: no new bundle/draft carries any
-  repo-named hint (31b-v004+, e4b-v003+, drafts). v004 diff vs v002 = prompts/system.md + MANIFEST only, and MUST remove the line.
-  bundles/drafts/item4-system.md line REMOVED (c104). FINALS: no final with a repo-specific line -> e4b-v003 = e4b-v002 + generic
-  prompt fixes minus the line, CPU draft folded into dec 056 item 5; slot request later. Next report MUST state: v000-v002 (both tracks)
-  carry an inherited FastAPI/docs_src hint; their LB scores may be tilted toward FastAPI-like tasks (paper + finals evidence say so).
+- Arm E = 31b-v007-p5e (dist/31b-v007.zip 3a62f41f..., v006 + cap 1.23). Arm D = 31b-v006-p5d (b7b2eb3d..., report 013 PASS).
+  Push cmd: eval/kaggle/timing_push.sh aniket0202/gemma-31b-timing <bundle> eval/plans/004-gpu-retime-ids.txt 6000.
+- 31b-v004 CPU DRAFT: dist/31b-v004.zip sha256=50537e1ddcf13f160fcaa9b2bfa145ac13ef91d99a2ce0b27d69f54ee125f7b3 (5f9b4ae) = v007 +
+  1 quoting/no-repeat line. No slot (dec 061 ii). Review 043840: no BLOCKING; NB2 pipefail system.md:33 -> fold in next touch, UNSCREENED;
+  NB3 timeout empty patch unguaranteed (dec 056 item 6).
+- DEC 057: no new bundle/draft carries any repo-named hint; dec 055 v002 untouched. e4b-v003 = e4b-v002 + generic prompt fixes
+  minus the FastAPI line (CPU draft). Reports MUST state v000-v002 (both tracks) carry the hint; LB scores may tilt FastAPI-ward.
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
 - Kaggle GPU this week: 14.49/30 h per `kaggle quota` 05:23Z after arm E (+1.40). Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
@@ -77,7 +66,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 ## Open decisions / instructions in force
 - Dec 022: interim timing rule (cap + S) x125 + 30 <= 660 (S now per dec 034 hypotheses). Item 4 (truncation-safe diff, patch hygiene, tool-output trimming) pending = dec 032 item 8.
 - Dec 020 item 7 / dec 019 item 2: EV-1 (typing_inspection 0.4.5 eval-only, NOT yet implemented) + gold/null on 48 clean, on a cpu8 VM via bin/gpu (<=$3, <=3 h), after the sandbox-limits merge. Dec 019 items 3-4 (per-repo rates; collection-error note) to fold in.
-
 ## Dec 034 (report 009 ruled: option C with gated step-up) — in force
 - 31b-v001-t4 (dec 036 item 2 name; dir bundles/31b/v001) = TIMING bundle (cap 4.0, max_output_tokens 8192 x2): dist/31b-v001.zip sha256=3c3a264652ab1d72ff6b9c5609c482c34a2ab7af37eb600689e5cfa0bf810f6a,
   pack PASS, load check results/bundle_load_check_31b_v001.json (8192/8192, 240 s). NOT a submission candidate.

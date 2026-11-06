@@ -1025,3 +1025,1296 @@ Kaggle L4x4 gives about 15 h/week, reserved for exact-environment smoke tests an
 
 codex
 The source directories differ only in `sampling.yaml` and `MANIFEST.md`. Addendum F has the same thresholds as decision 061 and explicitly puts HARM before LOOP-REDUCED. I’m checking the ZIP payloads and installed harness code next to verify the hash and temperature forwarding.
+exec
+/bin/bash -lc "nl -ba bin/pack | sed -n '1,75p;320,445p'; nl -ba bundles/31b/v008/prompts/system.md; git status --short eval; git show 4ead877:eval/plans/005.md | tail -n 32; nl -ba eval/kaggle/agent_timing.py | sed -n '1120,1190p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	#!/usr/bin/env python3
+     2	"""Validate a declarative Gemma bundle; optionally build dist/<track>-<version>.zip.
+     3	
+     4	Without PyYAML, a conservative YAML subset is supported: block mappings/lists,
+     5	quoted/plain scalars, JSON flow collections, literal/folded blocks and !include.
+     6	Unsupported YAML syntax fails closed with a request to use PyYAML.
+     7	"""
+     8	import argparse
+     9	import hashlib
+    10	import json
+    11	import math
+    12	import os
+    13	from pathlib import Path, PureWindowsPath
+    14	import re
+    15	import shutil
+    16	import stat
+    17	import sys
+    18	import tempfile
+    19	import zipfile
+    20	
+    21	try:
+    22	    import yaml
+    23	except ImportError:
+    24	    yaml = None
+    25	
+    26	LIMIT = 3221225472
+    27	EXTENSIONS = {'.yaml', '.yml', '.md', '.txt', '.py', '.json', '.safetensors'}
+    28	MODELS = {f'gemma-4-{size}-it-qat-w4a16-ct' for size in ('31b', '12b', 'e4b', 'e2b')}
+    29	# Snapshot of HARNESS_README sections 2.4 and 6 (SwegemmaContext.create_tools).
+    30	TOOLS = {'run_command', 'submit_patch', 'get_status', 'read_file', 'edit_file',
+    31	         'write_file', 'get_code_neighbors', 'search_similar_code', 'get_code_subgraph'}
+    32	GENERATION_FIELDS = {'temperature', 'top_p', 'top_k', 'max_output_tokens',
+    33	                     'presence_penalty', 'frequency_penalty', 'stop_sequences',
+    34	                     'response_mime_type', 'seed', 'thinking_config'}
+    35	MAX_FILE_COUNT = 10000
+    36	MAX_YAML_FILES = 1000
+    37	MAX_YAML_BYTES = 50 * 1024 * 1024
+    38	MAX_SKILL_BYTES = 50 * 1024 * 1024
+    39	MAX_INSTRUCTION_CHARS = 1000000
+    40	MAX_TOTAL_INSTRUCTION_CHARS = 10000000
+    41	MAX_AGENTS = 500
+    42	MAX_DEPTH = 50
+    43	MAX_SKILLS = 1000
+    44	ROOTS = {'agent.yaml', 'agent.yml', 'root_agent.yaml', 'root_agent.yml'}
+    45	
+    46	
+    47	class Invalid(ValueError):
+    48	    pass
+    49	
+    50	
+    51	def require(condition, message):
+    52	    if not condition:
+    53	        raise Invalid(message)
+    54	
+    55	
+    56	def safe_path(value):
+    57	    require(isinstance(value, str) and value and '\0' not in value,
+    58	            'path must be a nonempty string without null bytes')
+    59	    parts = value.replace('\\', '/').split('/')
+    60	    require(not value.startswith(('/', '\\')) and not PureWindowsPath(value).drive
+    61	            and '..' not in parts, f'unsafe path: {value!r} (absolute or ..)')
+    62	    return value
+    63	
+    64	
+    65	def minimal_yaml(source, include):
+    66	    """Small fail-closed parser, deliberately not a general YAML implementation."""
+    67	    lines = source.splitlines()
+    68	
+    69	    def scalar(text):
+    70	        text = text.strip()
+    71	        if text.startswith('!include '):
+    72	            return include(scalar(text[9:]))
+    73	        if text.startswith(('"', "'")):
+    74	            # YAML single quotes escape by doubling; double quotes use JSON escapes.
+    75	            try:
+   320	        self.models.add(model)
+   321	        chars = 0
+   322	        for key in ('instruction', 'global_instruction', 'description'):
+   323	            if key in value:
+   324	                require(isinstance(value[key], str), f'{where}.{key}: must be text')
+   325	                if key == 'description':
+   326	                    require(len(value[key]) <= MAX_INSTRUCTION_CHARS,
+   327	                            f'{where}: description too long')
+   328	                else:
+   329	                    chars += len(value[key])
+   330	        require(chars <= MAX_INSTRUCTION_CHARS, f'{where}: instruction chars exceed {MAX_INSTRUCTION_CHARS}')
+   331	        self.instruction_chars += chars
+   332	        require(self.instruction_chars <= MAX_TOTAL_INSTRUCTION_CHARS,
+   333	                f'total instruction chars exceed {MAX_TOTAL_INSTRUCTION_CHARS}')
+   334	        if kind == 'LoopAgent':
+   335	            count = value.get('max_iterations', 500)
+   336	            require(type(count) is int and 1 <= count <= 500,
+   337	                    f'{where}: max_iterations must be integer 1..500')
+   338	        skills = value.get('skills', [])
+   339	        if skills is None:
+   340	            skills = []
+   341	        require(isinstance(skills, list), f'{where}: skills must be a list')
+   342	        self.skill_count += len(skills)
+   343	        require(self.skill_count <= MAX_SKILLS, f'max_skills exceeds {MAX_SKILLS}')
+   344	        for skill in skills:
+   345	            safe_path(skill)
+   346	            directory = self.root / skill
+   347	            require(directory.is_dir(), f'{where}: missing skill directory: {skill}')
+   348	            require(directory / 'SKILL.md' in self.files, f'{where}: skill requires SKILL.md: {skill}')
+   349	            size = sum(p.stat().st_size for p in self.files if p.is_relative_to(directory))
+   350	            require(size <= MAX_SKILL_BYTES, f'{where}: skill size exceeds {MAX_SKILL_BYTES}')
+   351	        tools = value.get('tools', [])
+   352	        require(isinstance(tools, list), f'{where}: tools must be a list')
+   353	        for index, tool in enumerate(tools):
+   354	            label = f'{where}.tools[{index}]'
+   355	            if isinstance(tool, str):
+   356	                require(tool in TOOLS, f'{label}: unknown harness tool: {tool}')
+   357	            else:
+   358	                self.agent(tool, label, depth + 1, active)
+   359	        children = value.get('sub_agents', [])
+   360	        require(isinstance(children, list), f'{where}: sub_agents must be a list')
+   361	        for index, child in enumerate(children):
+   362	            self.agent(child, f'{where}.sub_agents[{index}]', depth + 1, active)
+   363	
+   364	    def thinking(self, config, where):
+   365	        require(isinstance(config, dict), f'{where}: must be a mapping')
+   366	        require(not config.keys() - {'thinking_budget', 'thinking_level', 'include_thoughts'}, f'{where}: unknown fields')
+   367	        if 'thinking_budget' in config:
+   368	            budget = config['thinking_budget']
+   369	            require(type(budget) is int and 0 <= budget <= 32768, f'{where}: thinking_budget must be integer 0..32768')
+   370	        if 'thinking_level' in config:
+   371	            level = config['thinking_level']
+   372	            require(isinstance(level, str) and level.upper() in {'MINIMAL', 'LOW', 'MEDIUM', 'HIGH', 'NONE'}, f'{where}: invalid thinking_level')
+   373	        if 'include_thoughts' in config:
+   374	            require(type(config['include_thoughts']) is bool, f'{where}: include_thoughts must be boolean')
+   375	
+   376	    def validate(self):
+   377	        require(self.root.is_dir() and not self.root.is_symlink(), f'not a bundle directory (or symlink): {self.root}')
+   378	        total = 0
+   379	        yaml_count = 0
+   380	        for directory, dirs, files in os.walk(self.root, followlinks=False):
+   381	            for name in sorted(dirs + files):
+   382	                path = Path(directory) / name
+   383	                safe_path(path.relative_to(self.root).as_posix())
+   384	                mode = path.lstat().st_mode
+   385	                require(not stat.S_ISLNK(mode), f'symlink forbidden: {path}')
+   386	                require(stat.S_ISDIR(mode) or stat.S_ISREG(mode), f'not a regular file: {path}')
+   387	                if stat.S_ISREG(mode):
+   388	                    require(path.suffix in EXTENSIONS, f'extension not allowed: {path}')
+   389	                    if path == self.root / 'MANIFEST.md':
+   390	                        continue
+   391	                    total += path.stat().st_size
+   392	                    require(total < LIMIT, f'unpacked size must be < {LIMIT} bytes')
+   393	                    self.files.append(path)
+   394	                    require(len(self.files) <= MAX_FILE_COUNT, f'max_file_count exceeds {MAX_FILE_COUNT}')
+   395	                    if path.suffix in {'.yaml', '.yml'}:
+   396	                        yaml_count += 1
+   397	                        require(yaml_count <= MAX_YAML_FILES, f'max_yaml_files exceeds {MAX_YAML_FILES}')
+   398	                        require(path.stat().st_size <= MAX_YAML_BYTES,
+   399	                                f'YAML size exceeds {MAX_YAML_BYTES} bytes: {path}')
+   400	        self.files.sort()
+   401	        require(self.root / 'agent.yaml' in self.files, 'missing agent.yaml at bundle root')
+   402	        require(len(ROOTS & {p.name for p in self.files if p.parent == self.root}) == 1, 'multiple root agent configs')
+   403	        require(isinstance(self.load(self.root / 'agent.yaml'), dict), 'agent.yaml must be a mapping')
+   404	        for path in self.files:
+   405	            if path.suffix in {'.yaml', '.yml'}:
+   406	                value = self.load(path)
+   407	                self.walk(value, str(path), agent=path == self.root / 'agent.yaml')
+   408	            elif path.suffix != '.safetensors':
+   409	                source = path.read_text(encoding='utf-8')
+   410	                require('\0' not in source, f'null bytes in {path}')
+   411	                if 'prompts' in path.relative_to(self.root).parts:
+   412	                    self.prompt(source, str(path))
+   413	        root = self.root / 'agent.yaml'
+   414	        self.agent_documents.add(root)
+   415	        self.agent(self.load(root), str(root), active=(root,))
+   416	        # Validate standalone agent declarations, but do not count referenced files twice.
+   417	        # Visit referring documents before their dependencies.
+   418	        def references(value, seen=None):
+   419	            if seen is None:
+   420	                seen = set()
+   421	            if isinstance(value, (dict, list)):
+   422	                if id(value) in seen:
+   423	                    return
+   424	                seen.add(id(value))
+   425	            if isinstance(value, dict):
+   426	                for key, item in value.items():
+   427	                    if key == 'config_path':
+   428	                        yield self.target(item)
+   429	                    else:
+   430	                        yield from references(item, seen)
+   431	            elif isinstance(value, list):
+   432	                for item in value:
+   433	                    yield from references(item, seen)
+   434	        candidates = {}
+   435	        for path, value in self.cache.items():
+   436	            if isinstance(value, dict) and {'name', 'model', 'agent_class', 'instruction',
+   437	                                            'global_instruction', 'tools', 'sub_agents'} & value.keys():
+   438	                candidates[path] = value
+   439	        done = set()
+   440	        ordered = []
+   441	
+   442	        def visit(path, active=()):
+   443	            require(path not in active, f'config_path cycle: {path}')
+   444	            require(len(active) <= MAX_DEPTH, f'config_path depth exceeds {MAX_DEPTH}')
+   445	            if path in done:
+     1	You are an expert autonomous software engineer assigned to resolve an issue in a repository efficiently and decisively.
+     2	
+     3	## Core Objective: Fast, Minimal, and Precise Fixes
+     4	Aim to understand, resolve, and submit the fix in the minimum number of tool calls (under 8–10 turns). Move directly from the problem statement to the relevant files, apply the solution, verify with a targeted test, and submit.
+     5	
+     6	## Workflow
+     7	
+     8	### 1. Identify Target Files Immediately
+     9	- Extract filenames, functions, classes, CLI subcommands, or error messages directly from the problem statement.
+    10	- Read only the specific target files and lines using `read_file` or search tools. Do not wander across unrelated files.
+    11	- If the problem statement does not provide explicit file paths, use `search_similar_code` with keywords from the error message to locate relevant files efficiently, rather than running `find` or `grep` across the entire repo.
+    12	
+    13	### 2. Implement the Solution Directly
+    14	- Make your first source edit EARLY: you have at most 40 tool calls and a few minutes. Spend no more than about 10 calls reading and reproducing; make your first source edit by about tool call 12. A correct-looking edit in place beats a perfect plan that never lands.
+    15	- Edit existing files with `edit_file` and a SHORT anchor (1-3 lines) copied exactly from a fresh `read_file` of those lines. If an edit fails, re-read the exact lines and retry with a shorter unique anchor.
+    16	- Pick an `old_string` anchor that avoids backticks, quote characters and backslashes where possible: those characters can corrupt the tool call, and the error then says `old_string` is missing. If an edit fails twice with the same error, do NOT repeat it: anchor on a different short piece of the line or a neighbouring plain line, or make the edit from a `/tmp` Python script (see below) that reads the file, checks the old text occurs exactly once, replaces it, and writes the file back.
+    17	- NEVER use `write_file` on an existing file, and never rebuild a file from a partial read (`read_file` shows at most 150 lines). Use `write_file` only for a small NEW source file.
+    18	- Strictly adhere to specified error strings, exception types, HTTP status codes, and API signatures.
+    19	- If the task concerns example or documentation code, edit the executable example files that the task or its tests reference, not prose documentation.
+    20	
+    21	### 3. Run Targeted Tests Only (Existing Tests May Be Broken)
+    22	- **Run ONLY Targeted Tests**: Run only the specific test file or test method directly verifying the bug or feature you modified, with short output: e.g. `set -o pipefail; pytest tests/test_target.py -k test_feature -x -q 2>&1 | tail -30` (`pipefail` keeps pytest's exit status visible through `tail`).
+    23	- Keep every tool output small: read narrow line ranges, ask graph tools for few results, and pipe long commands through `tail`/`head`.
+    24	- A `grep` with no matches exits 1 and is reported as an error with an empty message: it only means "no match". A stderr line `Error in sitecustomize ... No module named 'wrapt'` is environment noise: ignore it and read the rest of the output.
+    25	- **Be Aware That Existing Tests May Be Broken**: Many repositories contain pre-existing test breakages, missing test data fixtures (e.g. `/test_data`), or environment import errors unrelated to your task.
+    26	- **Do NOT Attempt to Fix Existing Tests**: If an existing test fails due to pre-existing repository issues or missing fixtures, IGNORE IT. Never spend turns attempting to repair pre-existing test failures, create test stubs, or alter test code.
+    27	- **STRICT RULE: NEVER Run Bare Pytest or Full-Repo Sweeps**: NEVER run bare `pytest`, `pytest .`, `python3 -m unittest discover`, or full-repo test suites without specifying a target file. Full test suites take several minutes, cause catastrophic timeouts, and exhaust your turn and time budgets.
+    28	- If you need to locate the test file, find it explicitly with `find tests -name "*<name>*.py"` instead of running the test runner across the repo.
+    29	
+    30	### 4. Immediate Patch Submission
+    31	- Put ALL scratch files (reproduction scripts, notes, temp output) in `/tmp`, never in `/workspace`: anything in `/workspace` ends up in your submitted patch.
+    32	- `write_file` and `edit_file` only accept paths inside the repository: writing to `/tmp` with them always fails. Create scratch scripts with `run_command` and a QUOTED heredoc, then run them:
+    33	  `cat > /tmp/repro.py <<'EOF'` ... code ... `EOF` followed by `python3 /tmp/repro.py 2>&1 | tail -30`. Do not put multi-line code in `python3 -c` or `echo '...'`: the shell quoting breaks.
+    34	- Once your targeted test passes (or you have confirmed its only failures are pre-existing environment problems, see 3.), run `git status` and `git diff --stat` to confirm only intended source files changed (no test files, no scratch files); delete or revert any stray files.
+    35	- The diff must touch at least one non-test SOURCE file. Changes only to config/tooling files (e.g. `.pre-commit-config.yaml`, `pyproject.toml`, CI files) do not count unless the task itself is about that configuration: otherwise keep working on the source fix.
+    36	- Then call `submit_patch` ONCE as your final action, and end with a one-line summary of the fix. `submit_patch` freezes the patch: edits after it are lost, and an empty submission cannot be recovered. If you run out of time before submitting, your current workspace edits are collected automatically.
+    37	
+    38	## Anti-Patterns to Avoid
+    39	- **NEVER modify, create, or delete test files** (`*_test.py`, `test_*.py`, or anything under `tests/`). All changes must be to source implementation files. Modifying tests results in an automatic evaluation failure.
+    40	- **NEVER run full repository test suites** (e.g., bare `pytest` or `pytest .`) — always specify the exact test file path.
+    41	- **NEVER attempt to fix or repair existing tests or pre-existing repository breakages** — your task is strictly to implement the fix for the reported issue in source code.
+    42	- **NEVER search outside `/workspace`** for source files or packages (e.g., `/usr/local/lib/`, `/wheels/`, `/opt/`). All repository code and test dependencies are pre-installed. If `ModuleNotFoundError` occurs during test runs, focus on fixing code under `/workspace`, not looking for missing system packages.
+    43	- Do NOT spend turns running broad exploratory searches if the file path or symbol is obvious.
+    44	- Do NOT refactor or reformat unrelated functions or files.
+    45	- Do NOT conclude without submitting a non-empty patch (`patch_size > 0`). Every task requires concrete source modifications. Concluding that the codebase is already clean without making changes is an anti-pattern.
+ Correction (2026-11-06T04:42Z, before any arm-E result): the Honest-limits clause above is wrong about the hint. bundles/31b/v003..v007 prompts/system.md contain no FastAPI/docs_src line (grep -iE 'fastapi|docs_src' = 0 hits; v003 replaced it with a generic example-code line). The dec 057 hint caveat covers v000-v002 only; arm E carries the arm-B (plan 005) prompt, inherited from v002 otherwise. Rule text unchanged.
+
+## Addendum F (pre-registered 2026-11-06T05:30Z, BEFORE packing 31b-v008 and before any arm-F run; dec 061 items 2-3)
+Why: exact-repeat tool-call loops cost the most time in arms D and E (D: rich_3063 18x / 34.7 s, rich_3454 20x / 44.9 s; E: rich_3067 17x /
+55.6 s; results/plan005_armE_vs_D.json). Repeat loops don't depend on the cap. Arm F asks whether near-greedy decoding (temperature 0.2)
+drives them, by raising the root-agent temperature only.
+Bundle: 31b-v008-p5f = bundles/31b/v008 = 31b-v006-p5d (arm D: thinking_budget 0, cap 4.0) with ONLY configs/sampling.yaml
+temperature 0.2 -> 0.6 (+ MANIFEST). Byte diff vs v006 limited to configs/sampling.yaml + MANIFEST.md (diff -r checked before push).
+The code_analyzer sub-agent's own temperature (sub_agents/code_analyzer.yaml, 0.2) is NOT changed, per the literal single-file scope of dec 061 item 2.
+Design: same 8 ids (eval/plans/004-gpu-retime-ids.txt), same plan-006 kernel/flags (eval/kaggle/timing_push.sh, KERNEL_BUDGET 6000 s,
+--gate-mode stock-path), 40 calls / 50 turns, conc 1, k=1; paired vs arm D (same cap 4.0).
+Run condition: push before the 2026-11-07T00:00Z quota reset preferred; if not pushed by 2026-11-06T20:00Z, run after the reset with no
+further decision. The dec 055 checklist always has priority. Quota (`kaggle quota`) logged before and after in ops/budget/kaggle.md.
+Metric (pre-registered here; it was post hoc in E): max identical consecutive call run per task = longest run of consecutive tool_call
+trace entries with the same tool name AND byte-identical args JSON (json.dumps sort_keys), as computed by max_identical_run() in
+eval/plan005_armE_compare.py (any intervening different tool_call resets the run). "Empty" = patch_bytes == 0 in
+results/trace_tool_errors_31b_<v>.json, same as Addendum E.
+Decision rule (dec 061 item 3):
+ - not V -> INVALID (no verdict, not a strike). V as in Addenda A-E incl. the correction-1 add-on (8 traces with summary + >= 1 root
+   usage-bearing entry).
+ - LOOP-REDUCED if V AND F has 0 tasks with max identical consecutive call run >= 5 (D had 2: 18 and 20) AND F empty <= 4/8 AND
+   F-empty-only (vs D) <= 2.
+ - HARM if (V and) F empty >= 5/8 or F-empty-only >= 3. (HARM is checked before LOOP-REDUCED; they cannot both hold.)
+ - otherwise NO-EFFECT.
+ Consequences: LOOP-REDUCED -> temperature 0.6 becomes a candidate arm for plan 007, and a re-run at the legal cap follows the v002 LB
+ result. NO-EFFECT -> next candidate is a generic skill/prompt-level repeat guard (design only, not built). HARM -> temperature stays 0.2.
+Descriptive only (not gated): per-task max run + span; timeouts; first ok edit time (agent-clock s); edit_missing_param and cmd_error_shell
+counts (trace_tool_errors.py totals); agent clock sum; per-id patch bytes D -> F; exact sign test on empty discordants; gates a/b/d/e.
+Honest limits: n=8/k=1 is a mechanism screen, not quality evidence. Temperature 0.2 is itself stochastic, so arm D's loops may not recur
+at 0.2 on a re-run either; a LOOP-REDUCED verdict can't separate the temperature effect from run-to-run noise. An empty-diff count is not
+a pass rate. Temperature can change fix quality invisibly, so 0.6 can only enter plan 007 as a paired arm and can't ship on this screen.
+ Bundle (packed AFTER this addendum was written): 31b-v008-p5f = bundles/31b/v008, dist/31b-v008.zip sha256 e1513aac762e97b9191ec315e87a4132d6657df03d7888a40bdfd19bc135cfe9.
+  1120	            except Exception as exc:
+  1121	                append(journal, {'_artifact_error': dict(instance_id=iid, type=type(exc).__name__)})
+  1122	    finally:
+  1123	        ev.verify_task, vf.strip_protected_files_from_patch = original_verify, original_strip
+  1124	        ar.asyncio = original_asyncio
+  1125	        for name, original in original_sandbox.items():
+  1126	            setattr(ar, name, original)
+  1127	
+  1128	def start_server(holder):
+  1129	    import torch
+  1130	    from adk_submission import VllmConfig, VllmServer, discover_adapters
+  1131	    from adk_submission.discovery import discover_declared_models
+  1132	    from swegemma.config import ALLOWED_ADAPTER_EXTENSIONS
+  1133	    MODEL_VLLM_EXTRA_ARGS = {'gemma-4-12b-it-qat-w4a16-ct': (
+  1134	        '--hf-overrides', '{"architectures": ["Gemma4ForCausalLM"], "model_type": "gemma4"}')}
+  1135	    _SAFE_PATH_COMPONENT = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
+  1136	    declared_models = discover_declared_models(BUNDLE)
+  1137	    assert len(declared_models) == 1, f'Expected exactly 1 declared model, got: {sorted(declared_models)}'
+  1138	    declared_model = next(iter(declared_models))
+  1139	    assert declared_model in {'gemma-4-' + x + '-it-qat-w4a16-ct' for x in ('31b', '12b', 'e4b', 'e2b')}, 'Unsupported declared model'
+  1140	    MODEL_PATH = Path(f'/kaggle/input/models/google/gemma-4/other/{declared_model}/2')
+  1141	    assert MODEL_PATH.exists(), f'Model weights not found at {MODEL_PATH}. Ensure the model input is attached.'
+  1142	    adapters = discover_adapters(str(BUNDLE), adapter_extensions=ALLOWED_ADAPTER_EXTENSIONS)
+  1143	    adapter_map = getattr(adapters, 'adapters', None) or {}
+  1144	    for adapter_name in adapter_map:
+  1145	        assert _SAFE_PATH_COMPONENT.fullmatch(adapter_name), 'Unsafe adapter name'
+  1146	    detected_ranks = [r for info in adapter_map.values() if (r := getattr(info, 'rank', None)) is not None and r > 0]
+  1147	    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+  1148	    tp_size = 4 if gpu_count >= 4 else (2 if gpu_count >= 2 else 1)
+  1149	    vllm_cfg = VllmConfig(
+  1150	        model=str(MODEL_PATH), port=8000, host='127.0.0.1',
+  1151	        tool_call_parser='gemma4', reasoning_parser='gemma4', max_model_len=32768,
+  1152	        dtype='bfloat16' if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else 'auto',
+  1153	        gpu_memory_utilization=0.90, enable_auto_tool_choice=True,
+  1154	        enable_lora=bool(adapter_map), max_loras=max(1, len(adapter_map)),
+  1155	        max_lora_rank=max(detected_ranks) if detected_ranks else 128,
+  1156	        scheduler_reserve_full_isl=False, tensor_parallel_size=tp_size, startup_timeout=60 * 20,
+  1157	        extra_args=MODEL_VLLM_EXTRA_ARGS.get(declared_model, ()),
+  1158	    )
+  1159	    server_instance = VllmServer(vllm_cfg, adapter_manifest=adapters)
+  1160	    holder.append(server_instance)
+  1161	    start = time.perf_counter()
+  1162	    server_instance.start()
+  1163	    startup = time.perf_counter() - start
+  1164	    return server_instance, adapters, declared_model, startup
+  1165	
+  1166	class WrongAccelerator(RuntimeError):
+  1167	    pass
+  1168	
+  1169	
+  1170	def gpu_preflight():
+  1171	    """Raise WrongAccelerator unless nvidia-smi lists >= 4 L4 GPUs; skip if nvidia-smi is unavailable."""
+  1172	    try:
+  1173	        gpus = subprocess.run(['nvidia-smi', '-L'], capture_output=True, text=True, timeout=60).stdout.splitlines()
+  1174	    except (OSError, subprocess.SubprocessError):
+  1175	        return
+  1176	    if len(gpus) < 4 or not all('L4' in g for g in gpus):
+  1177	        raise WrongAccelerator('expected 4x L4 (nvidia-smi -L preflight)')
+  1178	
+  1179	
+  1180	def check_hook_targets():
+  1181	    """The observation hooks in evaluate() need these swegemma attributes; check before vLLM starts."""
+  1182	    import swegemma.evaluate as ev
+  1183	    import swegemma.harness.agent_runner as ar
+  1184	    import swegemma.harness.verification as vf
+  1185	    import swegemma.harness.container_setup as cs
+  1186	    wanted = ((ar, ('asyncio', 'sandbox_start', 'sandbox_stop', 'sandbox_exec')),
+  1187	              (cs, ('install_test_dependencies', '_inspect_wheels_dir', '_LARGE_WHEEL_THRESHOLD_BYTES')),
+  1188	              (ev, ('verify_task', 'Evaluator')),
+  1189	              (vf, ('strip_protected_files_from_patch', '_is_protected_test_or_config_path')))
+  1190	    missing = [m.__name__ + '.' + n for m, names in wanted for n in names if not hasattr(m, n)]
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+import hashlib, zipfile, stat
+from pathlib import Path
+zs={v:zipfile.ZipFile(f'dist/31b-{v}.zip') for v in ['v006','v008']}
+for v,z in zs.items():
+ p=Path(f'dist/31b-{v}.zip')
+ print(v, 'sha256', hashlib.sha256(p.read_bytes()).hexdigest(), 'size', p.stat().st_size)
+ print('entries',z.namelist())
+ print('unsafe', [i.filename for i in z.infolist() if '..' in Path(i.filename).parts or Path(i.filename).is_absolute() or stat.S_ISLNK(i.external_attr >> 16)])
+ print('duplicates',len(z.namelist()) "'!= len(set(z.namelist())))
+ print('"'source_mismatches', [n for n in z.namelist() if not n.endswith('/') and z.read(n) "'!= (Path('"'bundles/31b') / v / n).read_bytes()])
+a,b=zs.values()
+print('entry_set_diff',set(a.namelist()) "'^ set(b.namelist()))
+for n in sorted(set(a.namelist()) & set(b.namelist())):
+ if a.read(n)!=b.read(n):
+  print('"'DIFFERENT CONTENT',n)
+  print('old:',a.read(n).decode())
+  print('new:',b.read(n).decode())
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+v006 sha256 b7b2eb3d139629a5893647546348c1b436c1ff94c786cbdf4e6ec1be12f660a0 size 5350
+entries ['agent.yaml', 'configs/sampling.yaml', 'eval_config.yaml', 'prompts/analyzer.md', 'prompts/system.md', 'sub_agents/code_analyzer.yaml']
+unsafe []
+duplicates False
+source_mismatches []
+v008 sha256 e1513aac762e97b9191ec315e87a4132d6657df03d7888a40bdfd19bc135cfe9 size 5350
+entries ['agent.yaml', 'configs/sampling.yaml', 'eval_config.yaml', 'prompts/analyzer.md', 'prompts/system.md', 'sub_agents/code_analyzer.yaml']
+unsafe []
+duplicates False
+source_mismatches []
+entry_set_diff set()
+DIFFERENT CONTENT configs/sampling.yaml
+old: temperature: 0.2
+top_p: 0.95
+max_output_tokens: 8192
+thinking_config:
+  thinking_budget: 0
+  include_thoughts: true
+
+new: temperature: 0.6
+top_p: 0.95
+max_output_tokens: 8192
+thinking_config:
+  thinking_budget: 0
+  include_thoughts: true
+
+
+exec
+/bin/bash -lc "rg -n 'gemma-local|pyimg|site-packages|generation.py|resolve_generation|temperature' SETUP.md docs/ATTRIBUTION.md eval/tests ops/codex/review-20261106T022324.md ops/codex/ask-20261106T021410.md eval/kaggle/agent_timing.py eval/kaggle/timing_push.sh; ls /home/ubuntu/gemma-local; rg --files -uuu /home/ubuntu/gemma-local -g 'generation.py' -g '*vllm*.py' -g '*loader*.py' -g '*agent*.py' -g '*schema*.py' -g 'AGENTS.md'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+eval/kaggle/agent_timing.py:58:                    '/usr/local/lib/python*/site-packages/*cutlass*.pth'):
+eval/kaggle/agent_timing.py:338:    return 'runtime-site-packages:' + str(dist.locate_file(''))
+eval/kaggle/agent_timing.py:363:    sources = {name: 'runtime-site-packages:' + str(destination) for name in installed}
+eval/kaggle/agent_timing.py:480:        sp = next(iter(sorted(venv.glob('lib/python3*/site-packages'))))
+eval/kaggle/agent_timing.py:500:                        'include-system-site-packages = true', 'include-system-site-packages = false'))
+ops/codex/review-20261106T022324.md:11:- **Zero is accepted and mapped correctly.** Installed [schema.py:169](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:169) accepts zero; competition [config.py:62](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:62) also permits it. [generation.py:407](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:407) gives zero precedence over `include_thoughts: true`; [generation.py:434](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:434) emits `enable_thinking=false`, removes `thinking_token_budget`, and removes `reasoning_effort`. Schema and isolated resolver execution passed. Keeping `include_thoughts: true` preserves any returned reasoning for observation; it does not override zero.
+ops/codex/review-20261106T022324.md:15:- **Fields are measurable; Boolean branches are exhaustive.** Legacy traces contain `summary.thinking_entries`, `entries[].author`, and `entries[].usage.completion_tokens`; usage is consumed once per event ([trace.py:290](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:290)). All eight existing arm-B traces contain these fields. Scan every usage-bearing entry, including tool calls. [005.md:112](/home/ubuntu/work/gemma/eval/plans/005.md:112) covers every defined V/Md combination. Explicitly assign missing summary/usage to `INVALID`, and clarify whether ≥7/8 applies jointly to both Md conditions.
+ops/codex/ask-20261106T021410.md:15:SWEGemma calls `adk_submission.compile_submission`, supplying its tool registry and sandbox executor. That compiler validates the restricted submission schema rather than using ADK’s arbitrary Python configuration loader. See [agent_runner.py:616](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:616), [compiler.py:133](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/compiler.py:133), and [compiler.py:3](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/compiler.py:3).
+ops/codex/ask-20261106T021410.md:17:**Does it load bundle Python? Yes, as sandboxed skill scripts; no, as arbitrary agent/tool/callback modules.** Skill directories are loaded and attached to a `SkillToolset` with the harness executor. For `.py` scripts, ADK materializes the bundled source and executes it with `runpy.run_path`. See [resolvers/tools.py:213](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:213), [resolvers/tools.py:253](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:253), and [skill_toolset.py:1359](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/skill_toolset.py:1359).
+ops/codex/ask-20261106T021410.md:23:The restricted `AgentToolRef` accepts only `config_path` and `skip_summarization`; unknown fields are forbidden. The LLM agent schema likewise has no separate call, turn, or time budget. Compilation constructs `AgentTool(agent=..., skip_summarization=...)` without a budget argument. See [schema.py:95](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:95), [schema.py:247](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:247), [schema.py:277](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:277), and [resolvers/tools.py:115](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:115).
+ops/codex/ask-20261106T021410.md:27:- **Separate cap:** ADK exposes `max_llm_calls` through `RunConfig`. Its `AgentTool` inherits the caller’s run configuration; the nested invocation has its own counter against that inherited ceiling. This is **not a smaller analyzer-specific allowance configurable here**. See [run_config.py:271](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/run_config.py:271) and [agent_tool.py:320](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/agent_tool.py:320).
+ops/codex/ask-20261106T021410.md:28:- **Time accounting:** analyzer inference and tools execute inside the root’s enclosing session timeout. They consume the same `max_time_minutes`; there is no reserved root-edit interval. See [agent_runner.py:718](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:718) and [agent_runner.py:783](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:783).
+ops/codex/ask-20261106T021410.md:29:- **Tool accounting:** analyzer calls to registered harness tools consume the shared `max_tool_calls`. Both agents receive tools bound to the same context, and the budget decorator checks/increments that context. **The outer `agent_tool` invocation itself is not an additional harness-tool debit.** See [agent_runner.py:601](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:601), [resolvers/tools.py:64](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:64), [base.py:86](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/base.py:86), and [context.py:549](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:549).
+ops/codex/ask-20261106T021410.md:37:A checkpoint script can accept replacement arguments, check the live diff, and apply a validated source edit. `run_skill_script` receives script arguments and invokes the executor only when called. See [skill_toolset.py:1887](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/skill_toolset.py:1887) and [skill_toolset.py:2058](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/skill_toolset.py:2058).
+ops/codex/ask-20261106T021410.md:39:There is **no usable bundle callback for call N or deadline proximity**. Although callback-name fields exist, the harness passes no callback registry. The resolver immediately returns `{}` when that registry is `None`; declaring callback names therefore installs nothing. See [agent_runner.py:616](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:616) and [callbacks.py:83](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/callbacks.py:83).
+ops/codex/ask-20261106T021410.md:47:See [execution.py:132](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:132) and [base.py:47](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/base.py:47).
+ops/codex/ask-20261106T021410.md:57:**Its patch fields describe the submitted snapshot, not current workspace modifications.** Before submission, `patch_size=0` can coexist with a valid live source diff. It supplies no changed-file list, source classification, or remaining-turn count. See [execution.py:119](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:119).
+ops/codex/ask-20261106T021410.md:59:Both `get_status` and `submit_patch` are exempt from counted tool calls, although their budget wrapper still checks elapsed time. See [execution.py:76](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:76), [execution.py:119](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:119), and [context.py:527](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:527).
+ops/codex/ask-20261106T021410.md:61:`submit_patch` obtains the diff, strips protected files, then **unconditionally stores the result and sets `patch_submitted=True`**. Empty results—including a diff emptied by stripping tests—are accepted. That flag disables fallback collection. See [execution.py:97](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:97) and [agent_runner.py:1054](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1054).
+ops/codex/ask-20261106T021410.md:63:A skill can refuse its **own preflight**, but cannot prevent the model from calling the separately exposed `submit_patch`. Removing `submit_patch` from every agent’s tools is expressible and prevents premature snapshot capture, but still cannot create a missing edit. Tool exposure comes from each agent’s declared list: [llm.py:62](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:62).
+ops/codex/ask-20261106T021410.md:73:This requests termination at 15 seconds and forced termination one second later. The Docker backend itself uses `timeout`, establishing its availability there. The harness also automatically reduces command timeouts near the session deadline. See [execution.py:148](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:148), [docker.py:703](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/docker.py:703), and [execution.py:31](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:31).
+ops/codex/ask-20261106T021410.md:75:**Another numeric total-output cap per turn: NOT FEASIBLE.** `max_output_tokens` is the supported total generation limit. `thinking_budget` is separately expressible and forwarded as a thinking-specific backend setting; it is not another total-output cap. Stop sequences can terminate generation but provide no numeric bound. See [schema.py:202](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:202) and [generation.py:434](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:434).
+eval/tests/test_agent_timing.py:210:    sp = tmp_path / 'venv/lib/python3.12/site-packages'
+eval/tests/test_agent_timing.py:329:        return 'runtime-site-packages:/image'
+eval/tests/test_agent_timing.py:336:    assert entries[0]['source'] == 'runtime-site-packages:/image'
+eval/tests/test_agent_timing.py:368:    assert timing.copy_runtime_package('trove-classifiers', dest).startswith('runtime-site-packages:')
+eval/tests/test_agent_timing.py:702:    path = Path('/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py')
+eval/tests/test_eval_fixes.py:47:    (root / 'venv/pyvenv.cfg').write_text('home = /opt/pyimg/bin\n')
+eval/tests/test_eval_fixes.py:48:    monkeypatch.setattr(env.sys, 'base_prefix', '/opt/pyimg')
+eval/tests/test_eval_fixes.py:55:        Path('/opt/pyimg'), wheel.parent, wheel}
+eval/tests/test_eval_fixes.py:258:    site = tmp_path / 'venv/lib/python3.13/site-packages'
+eval/tests/test_eval_fixes.py:289:        assert not list(manager.sandboxes[sid]['venv'].glob('lib/python*/site-packages/_host_env.pth'))
+eval/tests/test_eval_fixes.py:369:    # uv's pyimg exposes cpython-3.13 -> cpython-3.13.18; venv symlinks use the alias.
+eval/tests/test_run_agent_eval.py:160:    with pytest.raises(ValueError, match='pyimg'):
+eval/tests/test_run_agent_eval.py:337:    pth = tmp_path / 'lib/python3.13/site-packages/_host_env.pth'
+eval/tests/test_run_agent_eval.py:339:    pth.write_text('/harness/site-packages\n')
+eval/tests/test_sandbox_deps.py:33:    site = tmp_path / 'venv/lib/python3.13/site-packages'
+eval/tests/test_setup_check.py:69:    sp = tmp_path / 'venv/lib/python3.13/site-packages'
+eval/tests/test_setup_check.py:182:    assert timing.copy_runtime_package('pip', target).startswith('runtime-site-packages:')
+fastapi_14258.json
+fastapi_14458.json
+imgrt-stub
+pyimg
+requests_7433.json
+rich_2725.json
+show.py
+venv
+wh
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/referencing/tests/test_jsonschema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/referencing/jsonschema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/botocore/configloader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/opentelemetry/semconv/attributes/user_agent_attributes.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/opentelemetry/semconv/_incubating/attributes/user_agent_attributes.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/opentelemetry/semconv/schemas.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/huggingface_hub/inference/_mcp/agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/huggingface_hub/utils/_detect_agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/yaml/loader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/jsonschema/benchmarks/nested_schemas.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/jsonschema/benchmarks/useless_applicator_schemas.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/jsonschema/benchmarks/json_schema_test_suite.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/jsonschema/tests/test_jsonschema_test_suite.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/lib/beta/agents/_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/resources/beta/agents/sessions/subagents/subagents.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/resources/beta/agents/agents.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/config/_validate_pyproject/fastjsonschema_exceptions.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/setuptools/config/_validate_pyproject/fastjsonschema_validations.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/botocore/useragent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/pydantic/v1/schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/pydantic/_internal/_schema_generation_shared.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/pydantic/_internal/_schema_gather.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/pydantic/_internal/_generate_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/pydantic/json_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/pydantic/plugin/_loader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/pydantic/plugin/_schema_validator.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/pydantic/experimental/arguments_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/pydantic/schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/shared_params/response_format_json_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/jinja2/loaders.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/beta_response_format_text_json_schema_config.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_environment_ready_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_failed_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_in_progress_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_environment_failed_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_browser_authentication_submit_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_web_search_call_item.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_tool.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/beta_response_format_text_json_schema_config_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_environment_expired_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_item_done_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_idle_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_output_text_delta_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agents/sessions/subagent_list_params.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agents/automation_agent_config.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_environment_reset_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_update_params.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_output_item_status.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_deleted.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_completed_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_output_item.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_environment_disconnected_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_interrupt_subagent_call_item.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_tool_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_input_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/multi_agent_config_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_in_progress_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_item.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_output_command_execution_output_delta_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_browser_origin_access_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_command_execution_item.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_reasoning.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_create_subagent_call_item.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_output_text_done_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_message_content.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_environment_suspended_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_browser_authentication_submit_param_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_environment_connected_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_mcp_call_item.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_created_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_resume_subagent_call_item.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/jsonschema_specifications/tests/test_jsonschema_specifications.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_browser_authentication_cancel_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_close_subagent_call_item.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_reasoning_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_function_call_item.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_text_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_content.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_text.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_assistant_message.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_cancelled_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_requires_action_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_failed_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_send_subagent_input_call_item.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_content_part_done_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/subagent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/multi_agent_config.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_deleted.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_content_part_added_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_function_call_output_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_list_params.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_created_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_function_call_status.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_browser_authentication_cancel_param_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_wait_for_subagents_call_item.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/persisted_agent_tool.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_reasoning_summary_text_done_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_error_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_subagent_closed_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_subagent_created_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_subagent_active_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/persisted_agent_tool_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_reasoning_item.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_environment_state.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_create_params.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_reasoning_summary_text_delta_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_reasoning_summary_part_done_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_item_added_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_turn_reasoning_summary_part_added_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_environment_pending_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_function_call_output.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_browser_origin_access_param_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_message.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/beta/agent_session_input_message_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/shared/response_format_json_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/webhooks/agent_session_idle_webhook_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/webhooks/agent_session_action_required_webhook_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/webhooks/agent_session_created_webhook_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/webhooks/agent_environment_failed_webhook_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/webhooks/agent_environment_expired_webhook_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/webhooks/agent_session_in_progress_webhook_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/webhooks/agent_environment_suspended_webhook_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/webhooks/agent_session_failed_webhook_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/webhooks/agent_environment_ready_webhook_event.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/botocore/loaders.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/responses/response_format_text_json_schema_config_param.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/openai/types/responses/response_format_text_json_schema_config.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/starlette/schemas.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_local_tokenizer_loader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/agents.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/models/getagent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/models/deleteagent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/models/createagent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/models/listagents.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/agents.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/types/agents/agenttool.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/types/agents/agentlistresponse.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/types/agents/agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/types/interactions/deepresearchagentconfig.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/types/interactions/agentoption.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/types/interactions/dynamicagentconfig.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/types/interactions/codemenderagentconfig.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/types/interactions/createagentinteraction.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/_gaos/types/interactions/antigravityagentconfig.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/tests/transformers/test_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/tests/local_tokenizer/test_local_tokenizer_loader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/tests/types/test_schema_from_json_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/genai/tests/types/test_schema_json_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/discovery_endpoints/agent_skills_endpoints.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/auth/_agent_identity_utils.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/discovery_endpoints/agent_skills_archive.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/common_utils/openapi_schema_compat.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/_experimental/mcp_server/auth/managed_agent_access.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/_experimental/mcp_server/AGENTS.md
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/evaluation/agent_evaluator.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/optimization/agent_optimizer.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/optimization/gepa_root_agent_prompt_optimizer.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/optimization/gepa_root_agent_optimizer.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/sessions/migration/_schema_check_utils.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/llm_agent_config.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/parallel_agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/config_agent_utils.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/sequential_agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/_agent_router.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/base_agent_config.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/sequential_agent_config.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/loop_agent_config.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/agent_config.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/langgraph_agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/remote_a2a_agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/llm_agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/base_agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/loop_agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/_managed_agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/agents/parallel_agent_config.py
+/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/unittest/loader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/cli/built_in_agents/adk_agent_builder_assistant.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/cli/built_in_agents/agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/cli/built_in_agents/tools/query_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/cli/agent_graph.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/cli/plugins/recordings_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/cli/utils/agent_change_handler.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/cli/utils/_nested_agent_loader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/cli/utils/base_agent_loader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/cli/utils/agent_loader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/cli/agent_test_runner.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/integrations/openai/_openai_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/integrations/agent_registry/agent_registry.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/integrations/vmaas/_agent_engine_environment.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/integrations/agent_identity/_agent_identity_credentials_provider.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/a2a/agent/_remote_a2a_agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/a2a/utils/agent_to_a2a.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/dependencies/_agentplatform.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/dependencies/_agentplatform_frameworks.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/a2a/utils/agent_card_builder.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/plugins/bigquery_agent_analytics_plugin.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/a2a/executor/a2a_agent_executor_impl.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/a2a/executor/a2a_agent_executor.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/workflow/_llm_agent_wrapper.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/rust_bridge/loader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/telemetry/_schema_version.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/rust_bridge/AGENTS.md
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/rust_bridge/host/AGENTS.md
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/telemetry/_agent_engine_metric_exporter.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/telemetry/_agent_engine.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/code_executors/agent_engine_sandbox_code_executor.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/agent_tool.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/sub_agents.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/management/users/schemas.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/data_agent/data_agent_toolset.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/data_agent/data_agent_tool.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/google_search_agent_tool.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/_gemini_schema_util.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/agent_simulator/agent_simulator_config.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/agent_simulator/agent_simulator_engine.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/agent_simulator/agent_simulator_factory.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/agent_simulator/agent_simulator_plugin.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/transfer_to_agent_tool.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/pydantic_core/core_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/mcp_tool/_agent_to_mcp.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/agent_transfer.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/extensions/_agent_transfer.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/tools/_agent_tools.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/prompt/_schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_agent_mode.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/output_schema_utils.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/agent_info.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/utils/_schema_utils.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/labs/antigravity/_sub_agent_tools.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/labs/antigravity/_antigravity_agent.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/guardrails/guardrail_hooks/agent_365/agent_365.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/_v2/cache/AGENTS.md
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/_v2/AGENTS.md
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/guardrails/guardrail_hooks/semantic_guard/route_loader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/harness/handlers/deepagents_handler.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/secret_managers/custom_secret_manager_loader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/types/proxy/discovery_endpoints/agent_skills_endpoints.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/types/proxy/agent_identity.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/types/proxy/guardrails/guardrail_hooks/agent_365.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/tracing/AGENTS.md
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/management_endpoints/sso/agent_subject_enrollment.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/management_endpoints/user_agent_analytics_endpoints.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/agent_endpoints/auth/agent_caller.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/agent_endpoints/auth/agent_permission_handler.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/agent_endpoints/auth/agent_access_groups.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/agent_endpoints/agent_registry.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/agent_endpoints/agent_search.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/types/llms/bedrock_agentcore.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/types/llms/bedrock_invoke_agents.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/a2a/agent_card.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/types/agents.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/google_endpoints/agents_endpoints.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/proxy/client/cli/commands/agents.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/litellm_core_utils/chat_completion_agentic_loop.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/litellm_core_utils/agentic_loop_settings.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/litellm_core_utils/agentic_followup_kwargs.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/anthropic/pass_through/messages/agentic_streaming_iterator.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/integrations/otel/presets/agentops.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/integrations/agentops/agentops.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/integrations/focus/schema.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/llms/openai_like/json_loader.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/integrations/litellm_agent/litellm_agent_model_resolver.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/litellm/integrations/clickhouse/schema.py
+
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py | sed -n '1,135p;330,480p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py | sed -n '45,150p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py | sed -n '55,135p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	"""Generation configuration resolution and validation."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	from typing import Any
+     6	
+     7	from google.genai import types as genai_types
+     8	
+     9	from ..context import CompilationContext
+    10	from ..schema import SandboxedLlmAgentConfig
+    11	
+    12	
+    13	def _get_genai_types(ctx: CompilationContext | None = None) -> Any:
+    14	    if ctx is not None and ctx.agent_factory and ctx.agent_factory.genai_types is not None:
+    15	        return ctx.agent_factory.genai_types
+    16	    return genai_types
+    17	
+    18	
+    19	def resolve_generation_config(
+    20	    config: SandboxedLlmAgentConfig,
+    21	    ctx: CompilationContext,
+    22	) -> Any:
+    23	    """Resolve and validate the LLM generation configuration against organizer constraints.
+    24	
+    25	    Args:
+    26	        config: The sandboxed LLM agent configuration object.
+    27	        ctx: The compilation context containing organizer-defined generation constraints.
+    28	
+    29	    Returns:
+    30	        A GenerateContentConfig instance if configuration or defaults exist, otherwise None.
+    31	
+    32	    Raises:
+    33	        SubmissionValidationError: If the generation configuration violates organizer-defined constraints.
+    34	    """
+    35	    types_mod = _get_genai_types(ctx)
+    36	    if config.generate_content_config is not None:
+    37	        config_dict = config.generate_content_config.model_dump(exclude_none=True)
+    38	
+    39	        if ctx.generation_constraints is not None:
+    40	            config_dict = ctx.generation_constraints.validate_config(
+    41	                config_dict, config.name
+    42	            )
+    43	
+    44	        if config_dict:
+    45	            return types_mod.GenerateContentConfig(**config_dict)
+    46	        return None
+    47	
+    48	    # No user config — apply organizer defaults if any
+    49	    if (
+    50	        ctx.generation_constraints is not None
+    51	        and ctx.generation_constraints.defaults
+    52	    ):
+    53	        validated = ctx.generation_constraints.validate_config({}, config.name)
+    54	        return types_mod.GenerateContentConfig(
+    55	            **validated
+    56	        )
+    57	
+    58	    return None
+    59	
+    60	
+    61	import functools
+    62	import inspect
+    63	
+    64	
+    65	def _normalize_reasoning_message(msg: Any) -> Any:
+    66	    """Ensure assistant messages with reasoning_content also populate reasoning for vLLM."""
+    67	    if isinstance(msg, dict):
+    68	        rc = msg.get("reasoning_content")
+    69	        if rc is not None and msg.get("reasoning") is None:
+    70	            msg["reasoning"] = rc
+    71	    elif isinstance(msg, list):
+    72	        for item in msg:
+    73	            if isinstance(item, dict):
+    74	                rc = item.get("reasoning_content")
+    75	                if rc is not None and item.get("reasoning") is None:
+    76	                    item["reasoning"] = rc
+    77	    return msg
+    78	
+    79	
+    80	def _strip_reasoning_from_messages(msg: Any) -> Any:
+    81	    """Remove reasoning and reasoning_content from assistant messages when include_thoughts is False."""
+    82	    if isinstance(msg, dict):
+    83	        msg.pop("reasoning_content", None)
+    84	        msg.pop("reasoning", None)
+    85	    elif isinstance(msg, list):
+    86	        for item in msg:
+    87	            if isinstance(item, dict):
+    88	                item.pop("reasoning_content", None)
+    89	                item.pop("reasoning", None)
+    90	    return msg
+    91	
+    92	
+    93	def _extract_include_thoughts(config_or_request: Any) -> bool | None:
+    94	    """Extract ThinkingConfig.include_thoughts from an LlmRequest, GenerateContentConfig, or dict."""
+    95	    if config_or_request is None:
+    96	        return None
+    97	    cfg = (
+    98	        getattr(config_or_request, "config", None)
+    99	        if hasattr(config_or_request, "config")
+   100	        else config_or_request
+   101	    )
+   102	    if cfg is None:
+   103	        return None
+   104	    thinking_cfg = (
+   105	        cfg.get("thinking_config")
+   106	        if isinstance(cfg, dict)
+   107	        else getattr(cfg, "thinking_config", None)
+   108	    )
+   109	    if thinking_cfg is None:
+   110	        return None
+   111	    inc = (
+   112	        thinking_cfg.get("include_thoughts")
+   113	        if isinstance(thinking_cfg, dict)
+   114	        else getattr(thinking_cfg, "include_thoughts", None)
+   115	    )
+   116	    return inc if isinstance(inc, bool) else None
+   117	
+   118	
+   119	def _strip_thought_parts_from_response(llm_response: Any) -> tuple[Any, bool]:
+   120	    """Remove Part(thought=True) from an LlmResponse while preserving visible text, tool calls, and metadata.
+   121	
+   122	    Returns:
+   123	        A tuple of (updated_llm_response, should_skip_partial).
+   124	    """
+   125	    content = getattr(llm_response, "content", None)
+   126	    parts = getattr(content, "parts", None) if content is not None else None
+   127	    if not isinstance(parts, list) or not any(
+   128	        getattr(p, "thought", False) is True for p in parts
+   129	    ):
+   130	        return llm_response, False
+   131	
+   132	    filtered_parts = [p for p in parts if not getattr(p, "thought", False)]
+   133	    is_partial = bool(getattr(llm_response, "partial", False))
+   134	    if (
+   135	        is_partial
+   330	                        continue
+   331	                yield llm_response
+   332	
+   333	        _patched_generate_content_async._adk_submission_include_thoughts_patched = True  # type: ignore[attr-defined]
+   334	        litellm_cls.generate_content_async = _patched_generate_content_async
+   335	        patched = True
+   336	
+   337	    return patched or bool(
+   338	        getattr(
+   339	            getattr(lite_llm, "_content_to_message_param", None),
+   340	            "_adk_submission_reasoning_patched",
+   341	            False,
+   342	        )
+   343	        and getattr(
+   344	            getattr(lite_llm, "_schema_to_dict", None),
+   345	            "_adk_submission_schema_patched",
+   346	            False,
+   347	        )
+   348	        and getattr(
+   349	            getattr(litellm_cls, "generate_content_async", None),
+   350	            "_adk_submission_include_thoughts_patched",
+   351	            False,
+   352	        )
+   353	    )
+   354	
+   355	
+   356	install_litellm_reasoning_patch()
+   357	
+   358	
+   359	def apply_thinking_config_to_model(model: Any, gen_config: Any) -> Any:
+   360	    """Attach thinking_config and seed from GenerateContentConfig to LiteLlm._additional_args.
+   361	
+   362	    Because ADK's LiteLlm._get_completion_inputs() does not forward Google GenAI
+   363	    thinking_config or seed to OpenAI-compatible endpoints (like vLLM), this bridges
+   364	    thinking_level, thinking_budget, include_thoughts, and seed into
+   365	    extra_body.chat_template_kwargs.enable_thinking, extra_body.thinking_token_budget,
+   366	    reasoning_effort, and seed on a cloned model instance.
+   367	    """
+   368	    install_litellm_reasoning_patch()
+   369	
+   370	    if model is None or gen_config is None:
+   371	        return model
+   372	
+   373	    if not hasattr(model, "_additional_args") or not isinstance(model._additional_args, dict):
+   374	        return model
+   375	
+   376	    if isinstance(gen_config, dict):
+   377	        seed = gen_config.get("seed")
+   378	        thinking_cfg = gen_config.get("thinking_config")
+   379	    else:
+   380	        seed = getattr(gen_config, "seed", None)
+   381	        thinking_cfg = getattr(gen_config, "thinking_config", None)
+   382	
+   383	    has_valid_seed = seed is not None and not isinstance(seed, bool)
+   384	
+   385	    enable_thinking: bool | None = None
+   386	    include_thoughts: bool | None = None
+   387	    level_str: str | None = None
+   388	    thinking_budget: int | float | None = None
+   389	
+   390	    if thinking_cfg is not None:
+   391	        if isinstance(thinking_cfg, dict):
+   392	            include_thoughts = thinking_cfg.get("include_thoughts")
+   393	            raw_level = thinking_cfg.get("thinking_level")
+   394	            thinking_budget = thinking_cfg.get("thinking_budget")
+   395	        else:
+   396	            include_thoughts = getattr(thinking_cfg, "include_thoughts", None)
+   397	            raw_level = getattr(thinking_cfg, "thinking_level", None)
+   398	            thinking_budget = getattr(thinking_cfg, "thinking_budget", None)
+   399	
+   400	        if raw_level is not None:
+   401	            level_str = str(getattr(raw_level, "value", raw_level)).lower()
+   402	
+   403	        has_budget = thinking_budget is not None and not isinstance(
+   404	            thinking_budget, bool
+   405	        )
+   406	
+   407	        if level_str == "none" or (has_budget and int(thinking_budget) <= 0):
+   408	            enable_thinking = False
+   409	        elif (
+   410	            level_str in {"minimal", "low", "medium", "high"}
+   411	            or (has_budget and int(thinking_budget) > 0)
+   412	        ):
+   413	            enable_thinking = True
+   414	        elif include_thoughts is False:
+   415	            enable_thinking = False
+   416	        elif include_thoughts is True:
+   417	            enable_thinking = True
+   418	
+   419	    if enable_thinking is None and not has_valid_seed and include_thoughts is None:
+   420	        return model
+   421	
+   422	    import copy
+   423	
+   424	    cloned = copy.copy(model)
+   425	    additional_args = copy.deepcopy(model._additional_args)
+   426	    if isinstance(include_thoughts, bool):
+   427	        cloned.__dict__["_adk_include_thoughts"] = include_thoughts
+   428	    else:
+   429	        cloned.__dict__.pop("_adk_include_thoughts", None)
+   430	
+   431	    if has_valid_seed:
+   432	        additional_args["seed"] = int(seed)  # type: ignore[arg-type]
+   433	
+   434	    if enable_thinking is not None:
+   435	        extra_body = dict(additional_args.get("extra_body") or {})
+   436	        chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+   437	        chat_template_kwargs["enable_thinking"] = enable_thinking
+   438	        extra_body["chat_template_kwargs"] = chat_template_kwargs
+   439	
+   440	        if (
+   441	            enable_thinking
+   442	            and thinking_budget is not None
+   443	            and not isinstance(thinking_budget, bool)
+   444	            and int(thinking_budget) > 0
+   445	        ):
+   446	            extra_body["thinking_token_budget"] = int(thinking_budget)
+   447	        else:
+   448	            extra_body.pop("thinking_token_budget", None)
+   449	
+   450	        additional_args["extra_body"] = extra_body
+   451	
+   452	        if enable_thinking and level_str in {"low", "medium", "high"}:
+   453	            additional_args["reasoning_effort"] = level_str
+   454	        elif not enable_thinking:
+   455	            additional_args.pop("reasoning_effort", None)
+   456	
+   457	    cloned._additional_args = additional_args
+   458	    return cloned
+   459	
+   460	
+   461	__all__ = [
+   462	    "_get_genai_types",
+   463	    "apply_thinking_config_to_model",
+   464	    "install_litellm_reasoning_patch",
+   465	    "resolve_generation_config",
+   466	]
+    45	        ctx: The compilation context tracking mutable state and limits.
+    46	        compile_agent_fn: Optional callable for recursive agent compilation.
+    47	
+    48	    Returns:
+    49	        A fully configured ADK Agent instance.
+    50	
+    51	    Raises:
+    52	        LimitExceededError: If instruction length, description length, or cumulative skill count limits are exceeded.
+    53	        PathTraversalError: If a referenced skill path escapes the submission root directory.
+    54	        SubmissionValidationError: If a skill directory is missing or fails to load.
+    55	        ToolNotFoundError: If a referenced tool is not found in the tool registry.
+    56	        ModelNotFoundError: If a referenced model alias is not found in the model registry.
+    57	        CallbackNotFoundError: If a referenced callback is not found in the callback registry.
+    58	    """
+    59	    check_instruction_length(config.instruction, config.name, ctx)
+    60	    check_description_length(config.description, config.name, ctx)
+    61	
+    62	    tools = [
+    63	        resolve_tool_item(item, ctx, compile_agent_fn)
+    64	        for item in (config.tools or [])
+    65	    ]
+    66	
+    67	    skill_toolset = resolve_skills(config, ctx, tools=tools)
+    68	    if skill_toolset is not None:
+    69	        tools.append(skill_toolset)
+    70	
+    71	    model = resolve_model(config, ctx)
+    72	    callback_kwargs = resolve_callbacks(config, ctx)
+    73	    sub_agents = compile_sub_agents(config.sub_agents, ctx, compile_agent_fn)
+    74	    gen_config = resolve_generation_config(config, ctx)
+    75	    model = apply_thinking_config_to_model(model, gen_config)
+    76	
+    77	    kwargs: dict[str, Any] = dict(
+    78	        name=config.name,
+    79	        description=config.description or "",
+    80	        model=model,
+    81	        instruction=config.instruction,
+    82	        tools=tools,
+    83	        sub_agents=sub_agents,
+    84	        output_key=config.output_key,
+    85	        include_contents=config.include_contents,
+    86	        generate_content_config=gen_config,
+    87	        **callback_kwargs,
+    88	    )
+    89	
+    90	    if config.disallow_transfer_to_parent is not None:
+    91	        kwargs["disallow_transfer_to_parent"] = config.disallow_transfer_to_parent
+    92	    if config.disallow_transfer_to_peers is not None:
+    93	        kwargs["disallow_transfer_to_peers"] = config.disallow_transfer_to_peers
+    94	
+    95	    agent_cls = _get_agent_cls(ctx)
+    96	    return agent_cls(**kwargs)
+    97	
+    98	
+    99	__all__ = [
+   100	    "_get_agent_cls",
+   101	    "compile_llm_agent",
+   102	]
+    55	    file containing the ``!include`` tag), then sandboxed against ``root_dir``.
+    56	
+    57	    Args:
+    58	        rel_path: The relative path specified in the ``!include`` tag.
+    59	        current_dir: The directory of the file containing the ``!include`` tag.
+    60	        root_dir: The submission root directory (sandbox boundary).
+    61	
+    62	    Returns:
+    63	        The resolved absolute Path object.
+    64	
+    65	    Raises:
+    66	        PathTraversalError: If the resolved path escapes root_dir, or if the target or any parent component is a symlink.
+    67	        SubmissionValidationError: If the file does not exist or has a disallowed extension.
+    68	    """
+    69	    raw_target = current_dir / rel_path
+    70	    return validate_sandboxed_path(
+    71	        path=raw_target,
+    72	        base_dir=root_dir,
+    73	        allow_relative=True,
+    74	        must_exist=True,
+    75	        allow_symlinks=False,
+    76	        allowed_extensions=_INCLUDABLE_EXTENSIONS,
+    77	        error_prefix="!include",
+    78	    )
+    79	
+    80	
+    81	def _measure_expanded_size(
+    82	    data: Any,
+    83	    max_chars: int,
+    84	    max_nodes: int = 50_000,
+    85	) -> int:
+    86	    """Measure expanded character size of parsed YAML data, aborting immediately if limits are exceeded."""
+    87	    total_chars = 0
+    88	    visited_nodes = 0
+    89	    stack: list[Any] = [data]
+    90	    while stack:
+    91	        curr = stack.pop()
+    92	        visited_nodes += 1
+    93	        if visited_nodes > max_nodes:
+    94	            raise LimitExceededError(
+    95	                f"Expanded YAML node count ({visited_nodes:,}) exceeds limit ({max_nodes:,}); "
+    96	                "possible YAML anchor bomb"
+    97	            )
+    98	        if isinstance(curr, dict):
+    99	            total_chars += 2
+   100	            for k, v in curr.items():
+   101	                total_chars += len(str(k)) + 4
+   102	                if total_chars > max_chars:
+   103	                    raise LimitExceededError(
+   104	                        f"Expanded YAML size ({total_chars:,} chars) exceeds limit ({max_chars:,})"
+   105	                    )
+   106	                stack.append(v)
+   107	        elif isinstance(curr, list):
+   108	            total_chars += 2 + max(0, len(curr) * 2)
+   109	            if total_chars > max_chars:
+   110	                raise LimitExceededError(
+   111	                    f"Expanded YAML size ({total_chars:,} chars) exceeds limit ({max_chars:,})"
+   112	                )
+   113	            stack.extend(curr)
+   114	        else:
+   115	            total_chars += len(str(curr))
+   116	            if total_chars > max_chars:
+   117	                raise LimitExceededError(
+   118	                    f"Expanded YAML size ({total_chars:,} chars) exceeds limit ({max_chars:,})"
+   119	                )
+   120	    return total_chars
+   121	
+   122	
+   123	class SandboxedYamlLoader(yaml.SafeLoader):
+   124	    """A ``yaml.SafeLoader`` subclass that resolves ``!include`` tags within a sandboxed root directory.
+   125	
+   126	    **Do not instantiate directly** — use :func:`make_sandboxed_loader`
+   127	    or :func:`load_yaml` instead.
+   128	
+   129	    Attributes:
+   130	        _root_dir: The submission root directory (sandbox boundary), set dynamically by make_sandboxed_loader.
+   131	        _current_dir: The directory of the file being loaded, set dynamically by make_sandboxed_loader.
+   132	        _depth: Current include nesting depth, used to enforce _MAX_INCLUDE_DEPTH.
+   133	    """
+   134	
+   135	    _root_dir: Path  # set by make_sandboxed_loader
+
+exec
+/bin/bash -lc "rg -n 'temperature|generate_content_config|resolve_generation|generation_config|extra_body' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/basic.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py | sed -n '590,640p'; tail -n 55 bin/pack" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/basic.py:57:  for field in ('timeout', 'retry_options', 'extra_body'):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/basic.py:113:  generate_content_config = agent.generate_content_config
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/basic.py:115:      _copy_request_scoped_fields(generate_content_config)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/basic.py:116:      if generate_content_config
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/basic.py:143:  if generate_content_config:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/basic.py:145:    if live_config.temperature is None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/basic.py:146:      live_config.temperature = generate_content_config.temperature
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/basic.py:148:      live_config.top_p = generate_content_config.top_p
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/basic.py:150:      live_config.top_k = generate_content_config.top_k
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/basic.py:152:      live_config.max_output_tokens = generate_content_config.max_output_tokens
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/basic.py:154:      live_config.seed = generate_content_config.seed
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/basic.py:156:      live_config.media_resolution = generate_content_config.media_resolution
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/limits.py:10:   generation parameters (e.g., temperature, token limits, stop sequences)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/limits.py:36:    (such as temperature, top_p, or token limits) within :class:`GenerationConstraints`.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/limits.py:229:        "temperature",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/limits.py:252:        "temperature",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/limits.py:275:        temperature: Bounding range constraint for the temperature parameter. If ``None``,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/limits.py:298:    temperature: NumericRange | None = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/limits.py:314:        """Validate and merge a submission's generate_content_config against constraints.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:3328:  if params.get("temperature") != 1:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:3329:    params.pop("temperature", None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:3445:        "temperature",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:4189:      if http_opts.extra_body is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/models/lite_llm.py:4190:        completion_args["extra_body"] = http_opts.extra_body
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:19:    resolve_generation_config,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:74:    gen_config = resolve_generation_config(config, ctx)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:86:        generate_content_config=gen_config,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:190:        temperature (Optional[float]): Sampling temperature. Must be >= 0.0. Defaults to None.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:204:    temperature: float | None = Field(default=None, ge=0.0)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:216:        "temperature",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:270:        generate_content_config (Optional[GenerateContentConfig]): Permissive generation parameters for the LLM. Defaults to None.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:293:    generate_content_config: GenerateContentConfig | None = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:19:def resolve_generation_config(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:36:    if config.generate_content_config is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:37:        config_dict = config.generate_content_config.model_dump(exclude_none=True)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:365:    extra_body.chat_template_kwargs.enable_thinking, extra_body.thinking_token_budget,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:435:        extra_body = dict(additional_args.get("extra_body") or {})
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:436:        chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:438:        extra_body["chat_template_kwargs"] = chat_template_kwargs
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:446:            extra_body["thinking_token_budget"] = int(thinking_budget)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:448:            extra_body.pop("thinking_token_budget", None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:450:        additional_args["extra_body"] = extra_body
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:465:    "resolve_generation_config",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/__init__.py:10:from .generation import _get_genai_types, resolve_generation_config
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/__init__.py:28:    "resolve_generation_config",
+   590	        enable_sandbox_testing = (
+   591	            bool(cfg_testing) if isinstance(cfg_testing, bool) else True
+   592	        )
+   593	        if not enable_sandbox_testing:
+   594	            await asyncio.to_thread(disable_test_runners_in_sandbox, docker, sandbox_id)
+   595	
+   596	        # Capture workspace layout for prompt injection
+   597	        tree_cmd = build_workspace_tree_command()
+   598	        tree_res = await sandbox_exec(docker, sandbox_id, tree_cmd)
+   599	        workspace_tree = tree_res.stdout.strip() if tree_res.exit_code == 0 else ''
+   600	
+   601	        tools = context.create_tools()
+   602	
+   603	        # Compile agent submission
+   604	        script_timeout = (
+   605	            config.harness.command_timeout_seconds
+   606	            if config.harness.command_timeout_seconds is not None
+   607	            else 300
+   608	        )
+   609	        code_executor = AdkSandboxCodeExecutor(
+   610	            sandbox=context.sandbox,
+   611	            timeout_seconds=script_timeout,
+   612	            start_time=context.task_start_time,
+   613	            max_time_minutes=config.budget.time_minutes,
+   614	            budget_check_fn=context.check_budget,
+   615	        )
+   616	        agent: BaseAgent = compile_submission(
+   617	            submission_dir=config.submission_dir,
+   618	            tool_registry=tools,
+   619	            model_registry=config.models,
+   620	            code_executor=code_executor,
+   621	            script_timeout=script_timeout,
+   622	            limits=config.limits,
+   623	            generation_constraints=config.generation_constraints,
+   624	            adapter_manifest=config.adapter_manifest,
+   625	            adapter_resolver_fn=lambda base, info: resolve_swegemma_adapter(
+   626	                base, info, config.models
+   627	            ),
+   628	        )
+   629	        _wrap_skill_toolset_tools(agent)
+   630	
+   631	        display_mode = getattr(config, 'display_mode', 'auto')
+   632	        if dashboard is not None or display_mode == 'quiet':
+   633	            display_mgr = EventDisplayManager(
+   634	                ctx=context,
+   635	                instance_id=task.instance_id,
+   636	                repo=task.repo,
+   637	                task_index=task_index,
+   638	                total_tasks=total_tasks,
+   639	                console=file_console,
+   640	                enable_live=False,
+
+
+def write_zip(bundle, dist):
+    track, version = bundle.root.parent.name, bundle.root.name
+    require(re.fullmatch(r'[A-Za-z0-9_-]+', track) and re.fullmatch(r'[A-Za-z0-9_-]+', version), 'invalid track/version for archive name')
+    dist.mkdir(parents=True, exist_ok=True)
+    destination = dist / f'{track}-{version}.zip'
+    fd, temporary = tempfile.mkstemp(prefix='.pack-', suffix='.zip', dir=dist)
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+            for path in bundle.files:
+                if path == bundle.root / 'MANIFEST.md':
+                    continue
+                info = zipfile.ZipInfo(path.relative_to(bundle.root).as_posix(), (1980, 1, 1, 0, 0, 0))
+                info.create_system = 3
+                info.external_attr = (stat.S_IFREG | 0o644) << 16
+                info.compress_type = zipfile.ZIP_DEFLATED
+                with path.open('rb') as source, archive.open(info, 'w', force_zip64=True) as target:
+                    shutil.copyfileobj(source, target, 1024*1024)
+        digest = hashlib.sha256()
+        with open(temporary, 'rb') as source:
+            for chunk in iter(lambda: source.read(1024*1024), b''):
+                digest.update(chunk)
+        checksum = digest.hexdigest()
+        os.replace(temporary, destination)
+        manifest = bundle.root / 'MANIFEST.md'
+        content = manifest.read_text(encoding='utf-8') if manifest.exists() else ''
+        lines = [line for line in content.splitlines() if not re.match(r'^\s*(?:[-*]\s*)?zip sha256\s*:', line, re.I)]
+        manifest.write_text('\n'.join(lines).rstrip() + f'\nzip sha256: {checksum}\n', encoding='utf-8')
+        print(f'{destination}\nsha256: {checksum}\nsize: {destination.stat().st_size} bytes')
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('bundle_dir')
+    parser.add_argument('--zip', action='store_true')
+    args = parser.parse_args()
+    try:
+        bundle = Bundle(args.bundle_dir)
+        total = bundle.validate()
+        if args.zip:
+            write_zip(bundle, Path(__file__).resolve().parent.parent / 'dist')
+        print(f'PASS: {args.bundle_dir} ({total} unpacked bytes)')
+        return 0
+    except (Invalid, OSError, UnicodeError, RecursionError) as exc:
+        print(f'FAIL: {exc}', file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+
