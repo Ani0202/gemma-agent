@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 05:15Z (cycle 112, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
+# STATE: snapshot 2026-11-06 05:27Z (cycle 113, Phase 0). Rewrite each cycle, ≤80 lines (dec 017).
 History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus (dec 010: local-first, two-strike).
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
@@ -28,8 +28,11 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   (prompt sections, thinking_budget, cap, quoting line) + which are screened; (b) describe minimal alt, DON'T pack unless asked; (c) label
   quoting line UNSCREENED (covered only by later paired v004-vs-v002). Item 2: dec 059 last line superseded; Nov 7 31B submit write-up
   must note v002 LB = ONLY result carrying the FastAPI hint caveat. Item 3: repeat metric added to plan 007 (Addendum). Priority unchanged.
-## Running jobs (05:15Z; lb-e4b waiter DONE): timing-31b-v007-wait-light (arm E kernel gemma-31b-timing v5, pushed 04:37:21Z; outputs -> runs/31b-v007-p5e-timing),
-  memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z).
+## Running jobs (05:27Z): review-p5e-light (codex review of report 014 + eval/plan005_armE_compare.py, aa192f6), memguard-light,
+  submit-window-31b-light (fires 11-07T00:00:30Z). Arm E DONE: verdict CAP-BOUND (V; empty 5/8 > 4; D-only/E-only non-empty 2/0, p2 0.5;
+  timeouts 2->5, all timeouts empty). dec 056 item 6 = binding blocker for 31B final at cap<=1.23. results/plan005_armE_vs_D.json.
+  New post-hoc finding: identical-tool-call loops (rich_3067 17x same failing edit_file in E despite no-repeat rule). Report 014 drafted,
+  NOT yet sent: send `Decision needed` after review CLEAN (fix any BLOCKING first). Recommends A (wait v002 LB) + B (anti-loop arm F next week).
 - DEC 059 (on report 013): B approved. ARM E = 31b-v007-p5e (bundles/31b/v007, dist/31b-v007.zip 3a62f41fa5417ee5b129e845296c5a8e44d496f1d22501d5b3a4b29667be3c6f,
   v006 + cap 1.23 only; light review-20261106T043550 no BLOCKING). Addendum E rule: not V -> INVALID; V & E empty<=4/8 & E-empty-only(vs D)<=2
   -> USABLE; else CAP-BOUND (+1 line: dec 056 item 6 = binding blocker for 31B final at cap<=1.23). Descriptive: timeouts, tasks w/ first ok
@@ -50,7 +53,7 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   carry an inherited FastAPI/docs_src hint; their LB scores may be tilted toward FastAPI-like tasks (paper + finals evidence say so).
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
-- Kaggle GPU this week: 13.09/30 h per `kaggle quota` 04:37Z before arm E (arm D +1.66). Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
+- Kaggle GPU this week: 14.49/30 h per `kaggle quota` 05:23Z after arm E (+1.40). Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
 ## Live caveats
 - Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014).
 - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
@@ -74,6 +77,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - Forum question (dec 035): Aniket posts report 009 s6; Builder posts NOTHING; summarize any answer (no task data) in next report.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. Dec 055 at 2026-11-07T00:00Z FIRST: (2)(3) hold; re-check (2) live, do (4) commit, (5) journal T=5.007 h <= 6.0 PASS, then submit. Arm E never blocks it.
-2. Arm E done -> analysis per Addendum E + report 014 (verdict, item 4 checks, dec 060 item 1 a-c byte-diff list, review result).
-3. Dec 038 paper evidence by Nov 9 23:59Z; plan 007 pre-reg (thinking on/off paired arm); ops/patches cleanup.
+1. review-p5e-light done -> fix BLOCKING (if any) -> NEEDS_DECISION report 014 + bin/send director.
+2. Dec 055 at 2026-11-07T00:00Z FIRST: (2)(3) hold; re-check (2) live, do (4) commit, (5) journal T=5.007 h <= 6.0 PASS, then submit.
+3. Pre-register arm F (anti-loop, generic) for after reset; Dec 038 paper evidence by Nov 9 23:59Z; plan 007 pre-reg.

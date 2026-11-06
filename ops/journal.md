@@ -265,3 +265,7 @@
 2026-11-06T04:40:19Z | dec 060 read: v004 deviation accepted provisionally (report-014 conditions a-c), dec 059 last line superseded, repeat metric added to plan 007 Addendum | ops/decisions/060-20261106T043853-1647-from-builder.md, eval/plans/007.md
 2026-11-06T04:50Z | codex-review v004 CPU draft: BLOCKING none; NB2 pipefail in system.md:33 example deferred to report 014 (no repack) | ops/codex/review-20261106T043840.md
 2026-11-06T05:13:09Z | e4b-v002 ref 58039259 SCORED public 0.05; first final poll 05:11:49Z, dec 055 T=5.007 h (<=6.0, conds 2+3 hold); Director FYI | results/lb_e4b_v002.json
+2026-11-06T05:21Z | arm E kernel (gemma-31b-timing v5) COMPLETE, outputs downloaded; quota 13.09 -> 14.49 h (+1.40) | ops/budget/kaggle.md
+2026-11-06T05:25Z | PLAN 005 ARM E: V (gates PASS, add-on 8/8), empty 5/8 (D 3/8), D-only/E-only non-empty 2/0 (p2 0.5), timeouts 2->5 -> verdict CAP-BOUND; dec 056 item 6 binding for 31B final at cap<=1.23 | results/plan005_armE_vs_D.json results/kaggle_timing_31b_v007.json
+2026-11-06T05:25Z | post-hoc: identical-tool-call loops 15-72 s in 2-3/8 tasks per arm (E rich_3067 17x same failing edit_file despite no-repeat rule) | results/plan005_armE_vs_D.json
+2026-11-06T05:25Z | report 014 drafted (dec 060 item 1 a-c byte-diff table; quoting line UNSCREENED); review-p5e-light started before sending | ops/reports/014-plan005-armE-result.md
