@@ -32,8 +32,7 @@
   DONE eval/plans/009.md (1b0054a; base = v011 iff plan-008 SHIP-ELIGIBLE else v009; arm-3 = base + thinking 0->4096 only;
   smoke = first 2 registered ids, needs >=1 root thinking block/row and >=5 total, else INVALID) - review running; (b) Nov 8 inputs
   DONE ops/drafts/nov8-slot-inputs.md (matrix on U1 v002 LB x U2 arm-2 verdict; e4b-v003 NOT packed); (c) B3 codex-build running.
-- DEC 077/076 (closed by 078): arm 2 = v011 (D73.6 fired), NO smoke, ONE session, D73.7 chunk rule; exit-4 guard 9486a3b CLEAN.
-  Launch = eval/kaggle/timing_push.sh per 008.md l.42 w/ bundles/31b/v011 (dist sha verified == MANIFEST 14:40Z).
+- DEC 077/076: arm 2 = v011, NO smoke, ONE session, D73.7 chunk rule; exit-4 guard 9486a3b CLEAN. Launch = timing_push.sh per 008.md l.42 w/ bundles/31b/v011.
 - DEC 074 D73: D73.5 submit_unverifiable counts AGAINST arm 2 (metrics arm2 mode implements); D73.6 fired (cycle 151).
 - DEC 072/073: D72 = governing pre-data metric defs (gate arms; v010 gate moot for arm 2); metrics assert mech2 17/empty 12 else STOP+report.
 - DEC 071 (gate approved w/ conditions): items 1-3 DONE 787b465. Plan 008 Addendum D71: wiring (a) YES same Context (gate alive),
@@ -43,9 +42,7 @@
   sha256=4f5b078a367e964ffb7d7426f4d42e13451d0c9dde79322c7fee5bd3a88f4938 (agent.yaml==v009, PROMPT-LEVEL), pack+load PASS.
 - DEC 069 (rep 018, A w/ conditions): arm 1 VALID by POST-HOC ruling = plan 007 Addendum C (7ceb059). PRIMARY 4/33 FINAL
   (codex 132715 BLOCKING = missing descriptive lines -> fixed; re-review 133120 CLEAN). results/plan007_arm1_summary.json v2
-  (script sha 349b1bda...): a 4/33 (W 4.8-27.3), c 4/26, d 4/27 (literal), d' 4/33, empty 12/33 (2 to/10 non), unscreened 3/25,
-  thinking blocks 0, dec060 identical runs: 17/33 tasks max run >=5, max 38, 366 repeated; 11/12 empty rows have run >=5.
-  ENV CONTROL caveat l.152 on every arm-1 citation. Chunk 2 not needed (main covered all 30) -> journal before arm 2.
+  (script sha 349b1bda...): a 4/33 (W 4.8-27.3), c 4/26, d 4/27 (literal), d' 4/33, empty 12/33 (2 to/10 non), unscreened 3/25, ENV CONTROL caveat l.152 on every arm-1 citation.
 - PLAN 008 / 31b-v010-p8 (dec 069 item 3 + DEC 070): pre-reg eval/plans/008.md (1169579). Feasibility: bundle callbacks silently dropped
   (no registry passed), so repeat guard = PROMPT-LEVEL (Option A text verbatim + edit 2-fail -> shorter anchor or /tmp script, NOT write_file);
   empty guard = dec 070 1(b) prompt rule + IN-BUNDLE agent_tool gate named submit_patch (shares Context; <=2 bounces). Both deviations
@@ -60,8 +57,8 @@
   Item 4: plan 007 pre-reg (33-dev pass rate; H1 env; thinking off vs on paired arm) DUE 2026-11-07T18:00Z (may use leftover quota pre-reset).
   Item 5: Nov 8 slot candidate + 1-para justification DUE 2026-11-07T12:00Z (e4b-v002 repeat / e4b-v003 if packed+reviewed+smoke / 31b-v002 repeat).
   Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
-- 31b-v004 CPU DRAFT dist/31b-v004.zip 50537e1d... (v007 + quoting line), no slot (dec 061 ii); NB3 timeout empty patch unguaranteed (dec 056 item 6).
 - DEC 057: no new bundle carries a repo-named hint; v000-v002 (both tracks) carry the FastAPI hint -> reports must say so; LB may tilt FastAPI-ward. e4b-v003 = e4b-v002 + generic fixes minus that line (CPU draft).
+  31b-v004 CPU DRAFT dist/31b-v004.zip 50537e1d... (v007 + quoting line), no slot (dec 061 ii); NB3 timeout empty patch unguaranteed (dec 056 item 6).
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU this week: 27.66/30 h per `kaggle quota` 13:26Z after main (+10.41); 2.34 h left. Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
 ## Live caveats (dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035)
 - Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
@@ -69,7 +66,6 @@
   results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
 - Director reminder 2026-11-06T23:02Z: GCP quota re-request line to Aniket (keep until a decision marks it done). Kaggle GPU kernels pin starter docker_image (py3.12, cp312). Hosted-LLM-API data Q OPEN; no new 3rd-party svc. One pending submission; no partial credit on timeout. Quota log before/after smoke+main (dec 063/064).
 ## Timing facts (results/kaggle_timing_e4b_v000_setup.json) setup ~210 s/task, outside max_time_minutes (clock starts after setup); flat across repos. vLLM startup 5.39 min; verification ~410 s (excluded from the 12 h). Agent clock p90 144 s at cap 5.
-## Dec 034 (option C, gated step-up) in force
 - 31b-v001-t4 (dec 036 item 2 name; dir bundles/31b/v001) = TIMING bundle (cap 4.0, max_output_tokens 8192 x2): dist/31b-v001.zip sha256=3c3a264652ab1d72ff6b9c5609c482c34a2ab7af37eb600689e5cfa0bf810f6a,
   pack PASS, load check results/bundle_load_check_31b_v001.json (8192/8192, 240 s). NOT a submission candidate.
 - Timing kernel (plan 006 DONE, G1 held -> dec 055): stack main 2db5f51 per Addendum A (gate fix from 92a74c7, worktree
