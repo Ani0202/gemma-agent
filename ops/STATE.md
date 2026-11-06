@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 08:20Z (cycle 137, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 11:18Z (cycle 138, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -29,7 +29,7 @@
   sha a5c58a1d..., 50 tests; re-review 081435 CLEAN (0 BLOCKING); NB1 fixed (smoke test asserts equal id sets, no silent skips), 50 pass. Report script MUST call assert_paired before predicate. Report layout
   (a) primary all rows Wilson+per-repo (b) d4cdf0f0 counts (c) sens excl all H (d) sens excl H except empty-patch (e) a208a023; footnote l.239 once.
   HEADLINE empty-patch rate (vpb==0) Wilson, split timeout/non-timeout; per row llm_turns + tool mix only.
-## Running jobs (08:20Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z),
+## Running jobs (11:18Z check: all running, main RUNNING @11:13Z, memguard 0 KILL): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z),
   passrate-31b-v009-main-wait-light (MAIN kernel gemma-31b-passrate v2 pushed 08:08:22Z, ids 4..33 eval/plans/007-main-ids.txt,
   seed-max 803, KERNEL_BUDGET 21000 s, from worktree ../gemma-wt/plan007-main-078f4ea @078f4ea; ETA ~14:10Z; downloads to
   runs/31b-v009-p7a1-main + SEAL.sha256). Smoke DONE: sealed (SEAL 85fb5648..), gate HOLD, UNBLINDED 08:08:43Z: 0/3 resolved;
