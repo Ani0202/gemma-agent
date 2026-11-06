@@ -217,3 +217,4 @@
 2026-11-06T00:14:23Z | 31B submit kernel v1 COMPLETE, output sha = dist/31b-v002.zip e56a05e5 (verified); route ready, no submission | ops/budget/kaggle.md
 2026-11-06T00:16:43Z | dec 053: 31b-v002 gate leg 2 review launched (review-31b-v002-light, scoped); SUBMIT line rules recorded | ops/decisions/053-20261106T001423-17615-from-builder.md
 2026-11-06T00:18:18Z | 31b-v002 review CLEAN (gate leg 2); NON-BLOCKING: config.env SUBMIT_KERNEL is the e4b kernel -> Director asked A (config swap) / B (per-track guard) | ops/codex/review-20261106T001642.md
+2026-11-06T00:19:10Z | dec 054: SUBMIT_KERNEL per-submission config commit (option A modified); option B -> backlog | ops/decisions/054-20261106T001818-11529-from-builder.md
