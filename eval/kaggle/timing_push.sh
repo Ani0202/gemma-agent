@@ -3,10 +3,12 @@
 set -euo pipefail
 dry_run=false
 skip_verification=1
-while [[ ${1:-} == --dry-run || ${1:-} == --with-verification ]]; do
+stock_probe=1
+while [[ ${1:-} == --dry-run || ${1:-} == --with-verification || ${1:-} == --no-stock-probe ]]; do
   case $1 in
     --dry-run) dry_run=true ;;
     --with-verification) skip_verification=0 ;;
+    --no-stock-probe) stock_probe=0 ;;
   esac
   shift
 done
@@ -17,11 +19,11 @@ if [[ ${1:-} == --setup-only ]]; then
   setup_fix=${2:?SETUP_FIX required}
   [[ $setup_fix == 0 || $setup_fix == 1 ]] || { echo 'SETUP_FIX must be 0 or 1' >&2; exit 2; }
   shift 2
-  [[ $# -ge 2 && $# -le 3 ]] || { echo 'Usage: timing_push.sh [--dry-run] [--with-verification] --setup-only SETUP_FIX USER/SLUG IDS_FILE [BUDGET_SECONDS]' >&2; exit 2; }
+  [[ $# -ge 2 && $# -le 3 ]] || { echo 'Usage: timing_push.sh [--dry-run] [--with-verification] [--no-stock-probe] --setup-only SETUP_FIX USER/SLUG IDS_FILE [BUDGET_SECONDS]' >&2; exit 2; }
   set -- "$1" - "$2" "${3:-1800}"
 fi
 if [[ $# -lt 3 || $# -gt 4 || ! $1 =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]]; then
-  echo "Usage: $0 [--dry-run] [--with-verification] KAGGLE_USER/SLUG BUNDLE_DIR IDS_FILE [BUDGET_SECONDS]" >&2
+  echo "Usage: $0 [--dry-run] [--with-verification] [--no-stock-probe] KAGGLE_USER/SLUG BUNDLE_DIR IDS_FILE [BUDGET_SECONDS]" >&2
   exit 2
 fi
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -29,7 +31,7 @@ stage_dir=$(mktemp -d /tmp/timing-kernel-push.XXXXXX)
 # Dry runs retain the generated artifact for inspection.
 if ! $dry_run; then trap 'rm -rf -- "$stage_dir"' EXIT; fi
 budget=${4:-10800}
-python3 - "$script_dir" "$stage_dir" "$1" "$2" "$3" "$budget" "$setup_only" "$setup_fix" "$skip_verification" <<'PY'
+python3 - "$script_dir" "$stage_dir" "$1" "$2" "$3" "$budget" "$setup_only" "$setup_fix" "$skip_verification" "$stock_probe" <<'PY'
 import ast
 import base64
 import gzip
@@ -43,7 +45,7 @@ import sys
 import tarfile
 
 source, stage = map(Path, sys.argv[1:3])
-kernel_id, bundle_arg, ids_arg, budget_arg, setup_only_arg, setup_fix_arg, skip_verification_arg = sys.argv[3:]
+kernel_id, bundle_arg, ids_arg, budget_arg, setup_only_arg, setup_fix_arg, skip_verification_arg, stock_probe_arg = sys.argv[3:]
 setup_only = setup_only_arg == "1"
 bundle, ids_file = Path(bundle_arg).resolve(), Path(ids_arg)
 budget = int(budget_arg)
@@ -86,7 +88,8 @@ if 'pytest_timeout-2.1.0-py3-none-any.whl' not in extra_wheels:
 constants = dict(BUNDLE_B64=base64.b64encode(buf.getvalue()).decode(), TASK_IDS=ids, EXTRA_WHEELS=extra_wheels,
                  GIT_SHA=subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip(),
                  KERNEL_BUDGET_SECONDS=budget, SETUP_ONLY=setup_only, SETUP_FIX=int(setup_fix_arg),
-                 SKIP_VERIFICATION=skip_verification_arg == "1")
+                 SKIP_VERIFICATION=skip_verification_arg == "1",
+                 STOCK_PROBE=stock_probe_arg == "1")
 text = (source / 'agent_timing.py').read_text()
 lines = text.splitlines(keepends=True)
 for node in reversed(ast.parse(text).body):
