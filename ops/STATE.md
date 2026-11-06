@@ -3,13 +3,10 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v001 (cap 1.4): dist/e4b-v001.zip f2ced9c9...62d277e9, review clean; superseded by v002.
-- e4b-v002 (dec 032 item 1: v001 + cap 1.0 + max_output_tokens 8192 at both occurrences): dist/e4b-v002.zip
-  sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad, bin/pack PASS, load check OK
-  (results/bundle_load_check_e4b_v002.json: 8192/8192, 60 s). Dec 032 item 3 conditions (i)-(iv) all hold (23:11Z).
-  Dec 040 AUTHORIZED (unused; Nov 5 slot lost, submit Nov 6). Route: kernel aniket0202/gemma-submit-e4b v1 (CPU, output sha = 60c0...4dad).
-  bin/ edit DENIED by classifier -> Aniket applies guard patch (v1-v4 NEVER apply). Guard tests ONLY eval/tests/guard_mock_test.sh <cand> <zip>.
-  After apply+commit: dry checks (unauthorized sha -> exit 3; wrong kernel version -> sha REFUSED) in commit msg; then
-  bin/kaggle-submit dist/e4b-v002.zip e4b '<msg>' 1 -> mail Director the Submission ref; ops/budget/kaggle.md; results/lb_e4b_v002.json.
+- e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
+  SUBMITTED 2026-11-06T00:11:23Z ref 58039259 (kernel aniket0202/gemma-submit-e4b v1, auth dec 040); PENDING. Waiter lb-e4b-v002-wait-light
+  -> results/lb_e4b_v002.polls.csv; on score fill results/lb_e4b_v002.json (score, completed_utc, runtime fields) + ops/budget/kaggle.md.
+  Next e4b submit: earliest after this scores AND next UTC day (one pending at a time). Guard v6 applied b9caae4 (dry checks rc=3 x2).
 - CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 E4B/12B/E2B validator
   acceptance (first e4b submit settles E4B); l.55 submit_patch/get_status vs call limits; l.63 private-LB multiple runs; l.72 wheels arch
   (x86 assumed, unrecorded); 12h overrun ruling. VERIFIED: l.42 submit method = kernel output (dec 041); l.76 superseded by l.112.
@@ -67,14 +64,9 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - OPEN eval-design question (dec 034 item 6): under H1, test deps come from the scorer's own site-packages, not setup.py. Before local
   pass-rate evals start, pre-register which environment the local sandbox models and why. Don't act on it before then.
 ## Next 3
-1. Guard v6 REVIEW CLEAN (ops/codex/review-20261105T234411.md); Aniket told to apply ONLY ops/patches/kaggle-submit-kernel-v6.diff (23:47Z).
-   When `git diff --stat bin/kaggle-submit config.env` shows it: commit (dec 041-048 + review), dry checks (unauthorized sha -> 3; wrong
-   kernel version -> REFUSED) in the commit msg, then bin/kaggle-submit dist/e4b-v002.zip e4b '<msg>' 1 -> mail Director the ref.
-   Commit msg must also list upload-mode callers: NONE (grep 23:50Z: only bin/session disallow rules, eval/tests harness) (dec 049 item 4).
-   DEC 049: failed submit w/o ref -> run `kaggle competitions submissions`, report row count/status for our sha + UTC time; remove pending
-   ONLY on a decision "clear pending marker for sha=<...>". BLOCKING scope from now = no-auth submit / wrong sha / 2nd same day / retry after
-   ambiguous; rest -> ops/backlog-guard.md. If not applied by Nov 6 18:00Z: status line to Director, nothing else (item 5).
-   DEC 050: on waiter: `kaggle quota` -> ops/budget/kaggle.md; no other heavy jobs until v002 submit + plan 006 done (plan 005/007 prep OK).
+1. Guard v6 LIVE (b9caae4). Failed submit w/o ref -> dec 049 item 2 reconcile (pending cleared only by decision). BLOCKING scope = no-auth /
+   wrong sha / 2nd same day / retry after ambiguous; rest -> ops/backlog-guard.md (ordering, repeat path, dup keys). Patches v1-v5 in
+   ops/patches/superseded/. DEC 050: on waiter `kaggle quota` -> budget log; no other heavy jobs until plan 006 done (plan 005/007 prep OK).
 2. Plan 006 PUSHED (stack merged 2db5f51, tests 712p). On completion: timing_summary --gate-mode stock-path --gate-vllm-seconds 600 ->
    schema-headed results file -> report 010 (G1 legs; lead with h1_composite; dec 047). Gate (b) formula kept (dec 047).
 3. After report 010: plan 005 (dec 022 item 4) + plan 007 (dec 039) = first quality levers; ops/patches cleanup (dec 045 item 4).

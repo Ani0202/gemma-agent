@@ -210,3 +210,6 @@
 2026-11-05T23:47:38Z | PLAN 006 PUSHED: aniket0202/gemma-31b-timing v1 (31b-v001-t4 cap 4.0, budget 6000); waiter timing-31b-wait-light | ops/budget/kaggle.md
 2026-11-05T23:47:38Z | guard v6 review CLEAN -> bin/send aniket "apply ops/patches/kaggle-submit-kernel-v6.diff"; Director mailed | ops/codex/review-20261105T234411.md
 2026-11-05T23:49:51Z | dec 049/050: guard convergence scope, pending reconcile rule, Nov 6 18:00Z status line; plan 006 budget accepted; upload-mode callers none | ops/decisions/049-20261105T234424-2660-from-builder.md ops/decisions/050-20261105T234725-6433-from-builder.md
+2026-11-06T00:12:02Z | guard v6 committed b9caae4 (owner-applied; dry checks: unauthorized sha rc=3, wrong version 2 rc=3 at download) | bin/kaggle-submit
+2026-11-06T00:12:02Z | SUBMITTED e4b-v002 ref 58039259 at 00:11:23Z (dec 040, kernel aniket0202/gemma-submit-e4b v1); waiter lb-e4b-v002-wait-light; results/lb_e4b_v002.json started | ops/submissions.jsonl results/lb_e4b_v002.json
+2026-11-06T00:12:02Z | ops/patches v1-v5 guard diffs moved to ops/patches/superseded/ (dec 045 item 4) | ops/patches/superseded/
