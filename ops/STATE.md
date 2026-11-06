@@ -26,8 +26,7 @@
 ## Running jobs (14:53Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-plan009r2-light (plan 009
   rev 2 d8b4c43: CONTENT excludes only root MANIFEST.md, fixes review 144758 BLOCKING 1 = 144907 NB1), codex-review-identity-light
   (eval/plan009_identity.py f5cb353; results/plan009_bundle_identity.json pack-check v012/v013 PASS; agent.yaml de80dff5 same in v009/v011/v012/v013).
-  v012/v013 review 144907 CLEAN (noted in MANIFESTs). Arm-3 candidates packed e5196a4:
-  31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096);
+  v012/v013 review 144907 CLEAN (in MANIFESTs). Arm-3 packed e5196a4: 31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096);
   31b-v013-p9b dist/31b-v013.zip sha256=06eff226d661c0528105a14d4fe0b69f67a8fb84fc52e654a0d54b6bc59a5dbb (v011+think 4096); load checks PASS.
 - DEC 078: approve; nothing changes. No FYIs for routine clean reviews (fold into next report/STATE). Idle order: (a) arm-3 addendum
   DONE eval/plans/009.md (1b0054a; base = v011 iff plan-008 SHIP-ELIGIBLE else v009; arm-3 = base + thinking 0->4096 only;
