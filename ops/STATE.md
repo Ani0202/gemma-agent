@@ -32,10 +32,7 @@
   malformed setup_calls/rc=False) all fixed: verify:resolved_with_verify_failure, r10-r13, setup_shape_ok, dup-id CLI reject; tests 933/4skip;
   arm F unchanged. Director FYI'd 07:13Z. ON r5: fold EVERY listed item -> ONE re-freeze -> Director note -> smoke (if before 15:30Z).
   If r5 not clean/foldable: NO rev 6; report residuals + arm-F exposure to Director (dec 064 item 3).
-- REV 4 a208a023 (0d49b1c) frozen + DEC 064 approved, now superseded-pending by rev 5. DEC 064 item 4: quota log before/after smoke; week <= 29.5 h.
-- DEC 063 (approve): freeze 18afdbbd approved. Classifier code SHA = b6e120f (cite in results header + smoke/main kernel manifest; line
-  added plan 007). Smoke ONLY if review r3 has 0 BLOCKING; new BLOCKING -> no patch+launch same cycle; miss 15:30Z -> after reset.
-  Log Kaggle quota before/after smoke + main. Dec 055 submit at 11-07T00:00Z has priority; plan-007 must not hold the Kaggle session then.
+- DEC 063/064: classifier freezes need Director note; quota log before/after smoke+main; week <= 29.5 h; dec 055 window has priority.
 - DEC 062 (report 015 approved, A): T stays 0.2 everywhere; no T 0.6 arm in plan 007; repeat guard = design note only (DONE draft
   eval/plans/007-repeat-guard.md); item 4: plan-007 arm 1 may use expiring quota IF pre-reg reviewed + pushed by 11-06T15:30Z, else after reset.
 - PLAN 007 PRE-REG written 06:29Z (eval/plans/007.md, commit e547980): arm 1 = 31b-v009-p7a1 (bundles/31b/v009 = v006 + cap 3.5;
