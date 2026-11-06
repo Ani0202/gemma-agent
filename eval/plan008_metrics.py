@@ -189,6 +189,23 @@ def submitted_without_test(entries, gate_mode=None):
                    for c in root_tool_calls(entries)[:index])
 
 
+def d735_counts(r):
+    """D73.5 (dec 074 item 2): a submit_unverifiable row counts as submitted_without_test
+    unless a root test run precedes the earliest candidate boundary. The observed value
+    already tests root calls before the enclosing root submit call (the earlier of the
+    two candidates), so False is kept; no candidate (None) = worst case = counted. If
+    patch_submitted is False it ALSO counts in no_successful_submit. Verifiable rows keep
+    the observed D73.3 values. Mutates and returns the row."""
+    obs = r['submitted_without_test']
+    if r['submit_unverifiable']:
+        r['swt_d735'] = obs is not False
+        r['no_submit_d735'] = r['patch_submitted'] is not True
+    else:
+        r['swt_d735'] = obs is True
+        r['no_submit_d735'] = obs is None
+    return r
+
+
 def _command(c):
     args = c.get('args', c.get('arguments'))
     return args.get('command', '') if isinstance(args, dict) and isinstance(args.get('command', ''), str) else ''
@@ -502,10 +519,15 @@ def arm2_metrics(run_dir):
                          mechanism1_empty=row.get('verified_patch_bytes') == 0,
                          submitted_without_test=submitted_without_test(entries, has_gate),
                          **submit_evidence(row, entries, has_gate, (artifacts / 'trace.json').is_file()), **desc))
+    for r in rows:
+        d735_counts(r)
     totals = dict(mechanism2=sum(r['mechanism2'] for r in rows),
                   mechanism1_empty=sum(r['mechanism1_empty'] for r in rows),
-                  submitted_without_test=sum(r['submitted_without_test'] is True for r in rows),
-                  count_no_successful_submit=sum(r['submitted_without_test'] is None for r in rows),
+                  # D73.5 (ship-rule numbers): unverifiable rows count against arm 2.
+                  submitted_without_test=sum(r['swt_d735'] for r in rows),
+                  count_no_successful_submit=sum(r['no_submit_d735'] for r in rows),
+                  submitted_without_test_observed=sum(r['submitted_without_test'] is True for r in rows),
+                  count_no_successful_submit_observed=sum(r['submitted_without_test'] is None for r in rows),
                   max_run=max((r['max_run'] for r in rows), default=0),
                   runs_ge3=sum(r['runs_ge3'] for r in rows), runs_ge5=sum(r['runs_ge5'] for r in rows),
                   repeated_calls=sum(r['repeated_calls'] for r in rows),
@@ -514,7 +536,9 @@ def arm2_metrics(run_dir):
         totals[key] = (sum(r[key] for r in rows if r[key] is not None) if has_gate else 'n/a (no gate)')
     totals['untracked_only_unverifiable'] = sum(r.get('untracked_only_submits') is None for r in rows) if has_gate else 'n/a (no gate)'
     return dict(_schema=_schema('arm2', paths), n_rows=len(rows), totals=totals,
-                submit_unverifiable_rows=[r['instance_id'] for r in rows if r['submit_unverifiable']], rows=rows)
+                submit_unverifiable_rows=[r['instance_id'] for r in rows if r['submit_unverifiable']],
+                d735_rule='submit_unverifiable rows: submitted_without_test unless root test before earliest candidate boundary (none = counted); patch_submitted not True -> also no_successful_submit',
+                rows=rows)
 
 
 def main(argv=None):

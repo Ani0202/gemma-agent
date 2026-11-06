@@ -400,6 +400,9 @@ def test_arm2_mismatch_and_derived_flag(tmp_path, monkeypatch):
     assert out['totals']['submitted_without_test'] == 1
     assert out['totals']['submit_unverifiable'] == 1
     assert out['submit_unverifiable_rows'] == ['synthetic']
+    # D73.5: patch_submitted False on an unverifiable row ALSO counts as no-submit.
+    assert out['totals']['count_no_successful_submit'] == 1
+    assert out['totals']['count_no_successful_submit_observed'] == 0
     r = json.loads((run / 'timing.jsonl').read_text())
     del r['patch_submitted']
     (run / 'timing.jsonl').write_text(json.dumps(r) + '\n')
@@ -408,6 +411,9 @@ def test_arm2_mismatch_and_derived_flag(tmp_path, monkeypatch):
     out = m.arm2_metrics(run)
     assert out['n_rows'] == 1
     assert out['totals']['submit_unverifiable'] == 1
+    # Missing trace: no candidate boundary, derived flag False -> counted in both (worst case).
+    assert out['totals']['submitted_without_test'] == 1
+    assert out['totals']['count_no_successful_submit'] == 1
 
 
 def test_builtin_and_gate_response_authority():
@@ -485,8 +491,12 @@ def test_arm2_multirow_totals(tmp_path, monkeypatch):
     t = out['totals']
     assert out['n_rows'] == 3
     assert t['mechanism2'] == t['mechanism1_empty'] == 1
-    assert t['submitted_without_test'] == 0
-    assert t['count_no_successful_submit'] == 2
+    # D73.5: synthetic2 is submit_unverifiable with no candidate boundary -> worst case,
+    # counted as submitted_without_test; patch_submitted=True so not also no-submit.
+    assert t['submitted_without_test'] == 1
+    assert t['count_no_successful_submit'] == 1
+    assert t['submitted_without_test_observed'] == 0
+    assert t['count_no_successful_submit_observed'] == 2
     assert t['repeated_calls'] == 4
     assert t['bounces'] == t['bounce_no_followup'] == t['unacknowledged_inner_submits'] == t['gate_llm_limit'] == 1
     assert out['submit_unverifiable_rows'] == ['synthetic2']
@@ -503,3 +513,15 @@ def test_real_base_cli(tmp_path):
     assert out['totals']['mechanism1_empty'] == 12
     assert out['totals']['submitted_without_test'] == 23
     assert out['totals']['count_no_successful_submit'] == 7
+
+
+@pytest.mark.parametrize('unverifiable,observed,flag,swt,nosub', [
+    (False, True, True, True, False), (False, False, True, False, False), (False, None, False, False, True),
+    # D73.5: unverifiable rows count against arm 2.
+    (True, True, True, True, False), (True, True, False, True, True),
+    (True, False, True, False, False), (True, False, False, False, True),  # test before boundary
+    (True, None, True, True, False), (True, None, False, True, True),  # no candidate boundary
+])
+def test_d735_counts(unverifiable, observed, flag, swt, nosub):
+    r = m.d735_counts(dict(submit_unverifiable=unverifiable, submitted_without_test=observed, patch_submitted=flag))
+    assert (r['swt_d735'], r['no_submit_d735']) == (swt, nosub)
