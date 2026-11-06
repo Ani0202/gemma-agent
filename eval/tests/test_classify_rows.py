@@ -15,18 +15,24 @@ timing = import_module('eval.kaggle.agent_timing')
 def row(**updates):
     return dict(dict(instance_id='task-1', repo='example/repo', result_error=None,
                      agent_error_text=None, verified_patch_bytes=10, setup_calls=[],
-                     exit_code=0, resolved=False, error=None, setup_failed=False), **updates)
+                     exit_code=0, resolved=False, error=None, setup_failed=False, missing_tool_deps=[]), **updates)
+
+
+def step(**updates):
+    return dict(dict(step='setup.py', rc=0, duration_s=1.0, stdout='', stderr=''), **updates)
 
 
 def editable(offline=True, record=True, rc=1):
-    return dict(argv=['pip', 'install', '-e', '/workspace'] + (['--no-index'] if offline else []),
+    root = '/tmp/swegemma_sandbox_synthetic'
+    return dict(argv=[root + '/venv/bin/python3', '-m', 'pip', 'install']
+                + (['--no-index', '--find-links=/wheels', '--no-build-isolation'] if offline else [])
+                + ['--no-deps', '-e', root + '/workspace'],
                 rc=rc, stdout='' if offline else 'subprocess-exited-with-error',
                 stderr=classifier.RECORD if record else 'other failure')
 
 
 def chain():
-    return dict(step='setup.py', rc=0,
-                subprocesses=[editable(), editable(offline=False, record=False)])
+    return step(subprocesses=[editable(), editable(offline=False, record=False)])
 
 
 def test_agent_patterns_are_stock():
@@ -47,25 +53,25 @@ def test_record_chain_all_passes(passes):
     [editable(offline=False, record=False), editable()],
 ])
 def test_unexpected_editable_failure(subprocesses):
-    result = classifier.classify(row(setup_calls=[dict(step='setup.py', rc=0, subprocesses=subprocesses)]))
+    result = classifier.classify(row(setup_calls=[step(step='setup.py', rc=0, subprocesses=subprocesses)]))
     assert result['h'] == 'H-SETUP'
     assert result['known_diag'] is False
     assert 's5:unexpected_editable_failure' in result['reasons']
 
 
 def test_later_pass_failure_is_retained():
-    calls = [chain(), dict(step='setup.py', rc=0, subprocesses=[editable(record=False)])]
+    calls = [chain(), step(step='setup.py', rc=0, subprocesses=[editable(record=False)])]
     result = classifier.classify(row(setup_calls=calls))
     assert result['h'] == 'H-SETUP'
     assert result['known_diag'] is False
 
 
 @pytest.mark.parametrize('updates,reason', [
-    (dict(setup_calls=[dict(step='tool_deps', rc=-1)]), 's2:setup_step_failed'),
+    (dict(setup_calls=[step(step='tool_deps', rc=-1)]), 's2:setup_step_failed'),
     (dict(missing_tool_deps=['x']), 's1:missing_tool_deps'),
     (dict(setup_failed=True), 's6:setup_failed_unexplained'),
-    (dict(setup_calls=[dict(step='setup.py', rc=1)]), 's3:setup_py_failed'),
-    (dict(setup_calls=[dict(step='workspace_editable', rc=1)]), 's4:workspace_editable_failed'),
+    (dict(setup_calls=[step(step='setup.py', rc=1)]), 's3:setup_py_failed'),
+    (dict(setup_calls=[step(step='workspace_editable', rc=1)]), 's4:workspace_editable_failed'),
 ])
 def test_setup_failures(updates, reason):
     result = classifier.classify(row(**updates))
@@ -76,14 +82,14 @@ def test_setup_failures(updates, reason):
 
 @pytest.mark.parametrize('duration,stderr,expected', [(0, '', None), (1, '', 'H-SETUP'), (0, 'failure', 'H-SETUP')])
 def test_not_run_step(duration, stderr, expected):
-    result = classifier.classify(row(setup_calls=[dict(step='tool_deps', rc=None, duration_s=duration, stderr=stderr)]))
+    result = classifier.classify(row(setup_calls=[step(step='tool_deps', rc=None, duration_s=duration, stderr=stderr)]))
     assert result['h'] == expected
 
 
 def test_workspace_record_and_pip_check():
     result = classifier.classify(row(setup_failed=True, setup_calls=[
-        dict(step='workspace_editable', rc=1, stdout=classifier.RECORD),
-        dict(step='pip_check', rc=1), dict(step='setup.py', rc=0)]))
+        step(step='workspace_editable', rc=1, stdout=classifier.RECORD),
+        step(step='pip_check', rc=1), step(step='setup.py', rc=0)]))
     assert result['h'] is None and result['known_diag'] is True
 
 
@@ -91,7 +97,7 @@ def test_workspace_record_and_pip_check():
     ('Failed to apply agent patch: xyz', 1, 'PATCH_APPLY'),
     ('Failed to apply agent patch: xyz', None, 'PATCH_APPLY'),
     ('Required test node did not pass: a::b', 0, 'EXIT0_UNRESOLVED'),
-    ('Test failures/errors recorded in JUnit XML (failures=1, errors=0)', 1, 'PYTEST_1'),
+    ('Test failures/errors recorded in JUnit XML (failures=1, errors=0)', 0, 'EXIT0_UNRESOLVED'),
 ])
 def test_verification_agent_errors(message, code, expected):
     result = classifier.classify(row(error='Harness task failure', result_error=message,
@@ -101,7 +107,8 @@ def test_verification_agent_errors(message, code, expected):
 
 @pytest.mark.parametrize('prefix', classifier.VERIFY_AGENT_PREFIXES)
 def test_all_verification_agent_prefixes(prefix):
-    result = classifier.classify(row(error='Harness task failure', result_error=prefix + ' synthetic'))
+    result = classifier.classify(row(error='Harness task failure', result_error=prefix + ' synthetic',
+                                     exit_code=None if prefix == classifier.VERIFY_AGENT_PREFIXES[0] else 0))
     assert result['h'] is None
 
 
@@ -194,8 +201,8 @@ def test_unexplained_harness_failure_is_h(texts):
 
 @pytest.mark.parametrize('message', ['Agent exceeded tool call budget', 'Required test node did not pass: t::x'])
 def test_explained_harness_failure_not_h(message):
-    result = classifier.classify(row(error='Harness task failure', result_error=message, exit_code=1))
-    assert result['h'] is None and result['agent'] == 'PYTEST_1'
+    result = classifier.classify(row(error='Harness task failure', result_error=message, exit_code=0))
+    assert result['h'] is None and result['agent'] == 'EXIT0_UNRESOLVED'
 
 
 def test_zero_patch_without_exit_code_is_no_patch():
@@ -212,17 +219,16 @@ def test_precedence_and_orthogonal_diagnostic():
 
 
 def test_meta_rejected():
-    with pytest.raises(ValueError):
-        classifier.classify({'_schema': 'example'})
+    assert classifier.classify({'_schema': 'kaggle_timing_v1'})['h'] == 'H-ROW'
 
 
 def test_cli(tmp_path):
     source, output = tmp_path / 'timing.jsonl', tmp_path / 'classes.json'
     source.write_text('\n'.join(json.dumps(r) for r in [
-        {'_schema': 'example'}, {'_vllm': {}}, row(resolved=True),
+        {'_schema': 'kaggle_timing_v1'}, {'_vllm': {'startup_seconds': 1}}, row(resolved=True),
         row(instance_id='bad', error='Harness task failure', result_error='Evaluation error: boom'),
         row(instance_id='diag', setup_calls=[chain()], setup_failed=True),
-        {'_stopped': 'example'}, {'_done': {'n': 3}},
+        {'_stopped': 'insufficient remaining budget for next task'}, {'_done': {'n': 3}},
     ]) + '\n')
     proc = subprocess.run([sys.executable, classifier.__file__, str(source), '--out', str(output)],
                           check=True, capture_output=True, text=True)
@@ -380,3 +386,191 @@ def test_cli_rejects_duplicate_ids(tmp_path):
     proc = subprocess.run([sys.executable, str(Path(classifier.__file__)), str(source)],
                           capture_output=True, text=True)
     assert proc.returncode != 0 and 'Duplicate instance_id' in proc.stderr
+
+
+# Exhaustive rev-5 regressions. The requested review file is empty in this checkout;
+# row() is the complete synthetic baseline and each override follows the user spec.
+@pytest.mark.parametrize('message', ['Agent exceeded turns budget', 'arbitrary error', ' '])
+@pytest.mark.parametrize('error', [None, 'Harness task failure'])
+def test_rev5_01_resolved_result_error(message, error):
+    assert classifier.classify(row(resolved=True, result_error=message, error=error))['h'] == 'H-VERIFY'
+    assert classifier.classify(row(resolved=True, agent_error_text='Agent exceeded turns budget'))['agent'] == 'PASS'
+
+
+@pytest.mark.parametrize('messages', [
+    ('Agent exceeded turns budget', 'Agent exceeded session timeout (300s)'),
+    ('Missing or empty JUnit XML report', 'Required test node did not pass: t::x'),
+])
+def test_rev5_02_conflicting_messages(messages):
+    assert classifier.classify(row(result_error=messages[0], agent_error_text=messages[1]))['h'] == 'H-ROW'
+
+
+@pytest.mark.parametrize('field', ['result_error', 'agent_error_text'])
+@pytest.mark.parametrize('code', [1, 2, 3, 4, 5, 124, None, -1])
+@pytest.mark.parametrize('prefix', classifier.VERIFY_AGENT_PREFIXES[1:])
+def test_rev5_03_junit_requires_exit_zero(field, code, prefix):
+    assert classifier.classify(row(exit_code=code, **{field: prefix + ' synthetic'}))['h'] == 'H-VERIFY'
+
+
+@pytest.mark.parametrize('patch,code', [(10, 0), (0, None), (0, -1), (0, 1)])
+def test_rev5_04_apply_requires_patch_and_failure_exit(patch, code):
+    assert classifier.classify(row(verified_patch_bytes=patch, exit_code=code,
+                                  result_error='Failed to apply agent patch: x'))['h'] == 'H-VERIFY'
+
+
+@pytest.mark.parametrize('code', [0, 1, 2, 3, 4, 5, 124, -2])
+def test_rev5_05_no_patch_exit(code):
+    assert classifier.classify(row(verified_patch_bytes=0, exit_code=code))['h'] == 'H-VERIFY'
+
+
+@pytest.mark.parametrize('key', ['error', 'setup_failed', 'missing_tool_deps'])
+def test_rev5_06_missing_vs_null(key):
+    source = row(**{key: None})
+    assert classifier.classify(source)['h'] is None
+    del source[key]
+    assert classifier.classify(source)['h'] == 'H-ROW'
+
+
+@pytest.mark.parametrize('key', classifier.STEP_REQUIRED)
+def test_rev5_07_missing_step_key(key):
+    entry = step()
+    del entry[key]
+    assert classifier.classify(row(setup_calls=[entry]))['h'] == 'H-ROW'
+
+
+def test_rev5_07_missing_subprocess_rc():
+    entry = editable()
+    del entry['rc']
+    result = classifier.classify(row(setup_calls=[step(subprocesses=[entry])]))
+    assert result['h'] == 'H-ROW' and not result['known_diag']
+
+
+@pytest.mark.parametrize('entry', [step(step=' '), step(step='unknown'),
+    step(step='pip_check', subprocesses=[]),
+    step(subprocesses=[dict(editable(), argv=[])]),
+    step(subprocesses=[dict(editable(), argv=['pip', ' '])])])
+def test_rev5_08_step_and_argv(entry):
+    assert classifier.classify(row(setup_calls=[entry]))['h'] == 'H-ROW'
+
+
+def run_cli(tmp_path, records=None, raw=None):
+    source = tmp_path / 'timing.jsonl'
+    source.write_text(raw if raw is not None else '\n'.join(map(json.dumps, records)) + '\n')
+    return subprocess.run([sys.executable, classifier.__file__, str(source)], capture_output=True, text=True)
+
+
+@pytest.mark.parametrize('key', ['instance_id', 'repo'])
+@pytest.mark.parametrize('value', ['', '  ', None, 1, []])
+def test_rev5_09_identity_direct_and_cli(tmp_path, key, value):
+    source = row(**{key: value})
+    assert classifier.classify(source)['h'] == 'H-ROW'
+    assert run_cli(tmp_path, [source]).returncode != 0
+
+
+@pytest.mark.parametrize('updates', [dict(stdout='failure'), dict(stderr='failure'),
+    dict(duration_s=1), dict(duration_s=None)])
+def test_rev5_10_not_run_requires_empty_evidence(updates):
+    entry = step(step='tool_deps', rc=None, duration_s=0, **updates) if 'duration_s' not in updates else step(step='tool_deps', rc=None, **updates)
+    assert classifier.classify(row(setup_calls=[entry]))['h'] == 'H-SETUP'
+
+
+@pytest.mark.parametrize('workspace', [False, True])
+def test_rev5_11_diagnostic_requires_executed_rc(workspace):
+    entry = (step(step='workspace_editable', rc=None, stderr=classifier.RECORD) if workspace
+             else step(subprocesses=[editable(rc=None)]))
+    result = classifier.classify(row(setup_calls=[entry]))
+    assert result['h'] == 'H-SETUP' and not result['known_diag']
+
+
+@pytest.mark.parametrize('workspace', [False, True])
+def test_rev5_12_marker_per_stream(workspace):
+    entry = dict(editable(), stdout='uninstall-no-', stderr='record-file')
+    call = step(step='workspace_editable', rc=1, stdout=entry['stdout'], stderr=entry['stderr']) if workspace else step(subprocesses=[entry])
+    result = classifier.classify(row(setup_calls=[call]))
+    assert result['h'] == 'H-SETUP' and not result['known_diag']
+
+
+@pytest.mark.parametrize('argv', [
+    ['pip', 'install', '-e', '/workspace', '--no-index'],
+    ['echo', '-e', '--no-index'],
+    editable()['argv'] + ['--extra'],
+    editable()['argv'][:-1] + ['/tmp/other/workspace'],
+])
+def test_rev5_13_exact_offline_command(argv):
+    result = classifier.classify(row(setup_calls=[step(subprocesses=[dict(editable(), argv=argv)])]))
+    assert result['h'] == 'H-SETUP' and not result['known_diag']
+
+
+@pytest.mark.parametrize('subs', [
+    [editable(), editable(offline=False), editable(offline=False)],
+    [editable(), dict(argv=['echo', 'intervening'], rc=0, stdout='', stderr=''), editable(offline=False)],
+    [editable(), dict(editable(offline=False), argv=[a.replace('synthetic', 'other') for a in editable(offline=False)['argv']])],
+])
+def test_rev5_14_fallback_immediate_same_identity_consumed(subs):
+    result = classifier.classify(row(setup_calls=[step(subprocesses=subs)]))
+    assert result['h'] == 'H-SETUP' and not result['known_diag']
+
+
+@pytest.mark.parametrize('value', [[], None, 42, 'text', {}, {'repo': 'x'}, {'_schema': 'unknown'}, {'_vllm': 'bad'}, {'_vllm': {}}, {'_stopped': 'unknown'}])
+def test_rev5_15_cli_rejects_unrecognized_records(tmp_path, value):
+    proc = run_cli(tmp_path, [value])
+    assert proc.returncode != 0 and 'Invalid task record' in proc.stderr
+
+
+@pytest.mark.parametrize('raw', [
+    '{"instance_id":"a","instance_id":"b"}',
+    '{"_schema":"kaggle_timing_v1","fields":{"a":1,"a":2}}',
+])
+def test_rev5_16_duplicate_json_keys(tmp_path, raw):
+    proc = run_cli(tmp_path, raw=raw)
+    assert proc.returncode != 0 and 'Duplicate JSON key' in proc.stderr
+
+
+@pytest.mark.parametrize('records', [
+    [{'_schema': 'kaggle_timing_v1', 'task_ids': ['a', 'task-1']}, row()],
+    [{'_schema': 'kaggle_timing_v1', 'task_ids': ['a']}, row()],
+    [row(), {'_done': {'n': 2}}], [row(), {'_done': {'n': True}}],
+])
+def test_rev5_17_journal_accounting(tmp_path, records):
+    assert run_cli(tmp_path, records).returncode != 0
+
+
+def test_rev5_17_completed_prefix_without_done(tmp_path):
+    proc = run_cli(tmp_path, [{'_schema': 'kaggle_timing_v1', 'task_ids': ['task-1', 'unrun']}, row()])
+    assert proc.returncode == 0 and json.loads(proc.stdout)['n_rows'] == 1
+
+
+@pytest.mark.parametrize('updates,reason', [(dict(vllm_startup_seconds=None), 'vllm_not_up'),
+                                          (dict(mcp_import_ok=False), 'mcp_import_failed')])
+def test_rev5_18_kernel_void(tmp_path, updates, reason):
+    proc = run_cli(tmp_path, [dict(_schema='kaggle_timing_v1', **updates), row(resolved=True)])
+    assert proc.returncode == 0
+    result = json.loads(proc.stdout)
+    assert result['kernel_void'] and reason in result['kernel_void_reasons']
+    assert result['counts']['agent'] == {} and result['counts']['h'] == {'H-ROW': 1}
+    assert 'kernel:void' in result['rows'][0]['reasons']
+
+
+@pytest.mark.parametrize('number', [10**400, float('nan'), float('inf'), -float('inf')])
+def test_rev5_19_numeric_overflow(number):
+    assert classifier.classify(row(setup_calls=[step(duration_s=number)]))['h'] == 'H-ROW'
+
+
+def test_rev5_false_h_01_setup_py_not_run():
+    result = classifier.classify(row(setup_calls=[step(rc=None, duration_s=0)]))
+    assert result['h'] is None and result['agent'] == 'EXIT0_UNRESOLVED'
+
+
+def test_rev5_false_h_02_workspace_not_run():
+    result = classifier.classify(row(setup_calls=[step(step='workspace_editable', rc=None, duration_s=0)]))
+    assert result['h'] is None and result['agent'] == 'EXIT0_UNRESOLVED'
+
+
+@pytest.mark.parametrize('message', [
+    'Agent exceeded session timeout (300s)', 'Agent exceeded turns budget',
+    'Agent exceeded tool call budget', 'Agent completed execution without calling submit_patch',
+])
+@pytest.mark.parametrize('field', ['result_error', 'agent_error_text'])
+def test_rev5_no_false_h_recognized_agent_end_under_harness_failure(message, field):
+    result = classifier.classify(row(error='Harness task failure', **{field: message}))
+    assert result['h'] is None and result['agent'] == 'EXIT0_UNRESOLVED'
