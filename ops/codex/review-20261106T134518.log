@@ -3990,3 +3990,722 @@ exec
    564	            return DisplaySnapshot(
    565	                task_id=self.task_id
 
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/agent_tool.py | sed -n '130,340p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/events/event.py | sed -n '275,320p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/flows/llm_flows/base_llm_flow.py | sed -n '270,325p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/plugins/display_plugin.py | sed -n '65,110p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   130	    ``load_artifacts_tool`` directly to the sub-agent's ``tools`` list.
+   131	
+   132	    Direct usage of ``AgentTool`` is discouraged. See the single-turn
+   133	    mode guide for details.
+   134	
+   135	  Attributes:
+   136	    agent: The agent to wrap.
+   137	    skip_summarization: Whether to skip summarization of the agent output.
+   138	    include_plugins: Whether to propagate plugins from the parent runner context
+   139	      to the agent's runner. When True (default), the agent will inherit all
+   140	      plugins from its parent. Set to False to run the agent with an isolated
+   141	      plugin environment.
+   142	  """
+   143	
+   144	  def __init__(
+   145	      self,
+   146	      agent: BaseAgent,
+   147	      skip_summarization: bool = False,
+   148	      *,
+   149	      include_plugins: bool = True,
+   150	      propagate_grounding_metadata: bool = False,
+   151	  ):
+   152	    self.agent = agent
+   153	    self.skip_summarization: bool = skip_summarization
+   154	    self.include_plugins = include_plugins
+   155	    self.propagate_grounding_metadata = propagate_grounding_metadata
+   156	
+   157	    super().__init__(name=agent.name, description=agent.description)
+   158	
+   159	  @model_validator(mode='before')
+   160	  @classmethod
+   161	  def populate_name(cls, data: Any) -> Any:
+   162	    data['name'] = data['agent'].name
+   163	    return data
+   164	
+   165	  @override
+   166	  def _get_declaration(self) -> types.FunctionDeclaration:
+   167	    from ..utils.variant_utils import GoogleLLMVariant
+   168	
+   169	    input_schema = _get_input_schema(self.agent)
+   170	    output_schema = _get_output_schema(self.agent)
+   171	
+   172	    if input_schema:
+   173	      result = _automatic_function_calling_util.build_function_declaration(
+   174	          func=input_schema, variant=self._api_variant
+   175	      )
+   176	      # Override the description with the agent's description
+   177	      result.description = self.agent.description
+   178	    else:
+   179	      if is_feature_enabled(FeatureName.JSON_SCHEMA_FOR_FUNC_DECL):
+   180	        result = types.FunctionDeclaration(
+   181	            name=self.name,
+   182	            description=self.agent.description,
+   183	            parameters_json_schema={
+   184	                'type': 'object',
+   185	                'properties': {
+   186	                    'request': {'type': 'string'},
+   187	                },
+   188	                'required': ['request'],
+   189	            },
+   190	        )
+   191	      else:
+   192	        result = types.FunctionDeclaration(
+   193	            parameters=types.Schema(
+   194	                type=types.Type.OBJECT,
+   195	                properties={
+   196	                    'request': types.Schema(
+   197	                        type=types.Type.STRING,
+   198	                    ),
+   199	                },
+   200	                required=['request'],
+   201	            ),
+   202	            description=self.agent.description,
+   203	            name=self.name,
+   204	        )
+   205	
+   206	    # Set response schema for non-GEMINI_API variants
+   207	    if self._api_variant != GoogleLLMVariant.GEMINI_API:
+   208	      # Determine response type based on agent's output schema
+   209	      if output_schema:
+   210	        # Agent has structured output schema - response is an object
+   211	        if is_feature_enabled(FeatureName.JSON_SCHEMA_FOR_FUNC_DECL):
+   212	          result.response_json_schema = {'type': 'object'}
+   213	        else:
+   214	          result.response = types.Schema(type=types.Type.OBJECT)
+   215	      else:
+   216	        # Agent returns text - response is a string
+   217	        if is_feature_enabled(FeatureName.JSON_SCHEMA_FOR_FUNC_DECL):
+   218	          result.response_json_schema = {'type': 'string'}
+   219	        else:
+   220	          result.response = types.Schema(type=types.Type.STRING)
+   221	
+   222	    result.name = self.name
+   223	    return result
+   224	
+   225	  @override
+   226	  async def run_async(
+   227	      self,
+   228	      *,
+   229	      args: dict[str, Any],
+   230	      tool_context: ToolContext,
+   231	  ) -> Any:
+   232	    from ..runners import Runner
+   233	    from ..sessions.in_memory_session_service import InMemorySessionService
+   234	
+   235	    if self.skip_summarization:
+   236	      tool_context.actions.skip_summarization = True
+   237	
+   238	    input_schema = _get_input_schema(self.agent)
+   239	    if input_schema:
+   240	      input_value = input_schema.model_validate(args)
+   241	      # The text must stay a bare JSON document: the node runtime re-validates
+   242	      # it against this same schema, so any prose here fails that parse.
+   243	      content = types.Content(
+   244	          role='user',
+   245	          parts=[
+   246	              types.Part.from_text(
+   247	                  text=input_value.model_dump_json(exclude_none=True)
+   248	              )
+   249	          ],
+   250	      )
+   251	    else:
+   252	      if 'request' in args:
+   253	        request_text = args['request']
+   254	      else:
+   255	        request_text = json.dumps(args, ensure_ascii=False, sort_keys=True)
+   256	      content = types.Content(
+   257	          role='user',
+   258	          parts=[types.Part.from_text(text=request_text)],
+   259	      )
+   260	    invocation_context = tool_context._invocation_context
+   261	    parent_app_name = (
+   262	        invocation_context.app_name if invocation_context else None
+   263	    )
+   264	    child_app_name = parent_app_name or self.agent.name
+   265	    plugins = (
+   266	        tool_context._invocation_context.plugin_manager.plugins
+   267	        if self.include_plugins
+   268	        else None
+   269	    )
+   270	    runner = Runner(
+   271	        app_name=child_app_name,
+   272	        agent=self.agent,
+   273	        artifact_service=ForwardingArtifactService(tool_context),
+   274	        session_service=InMemorySessionService(),
+   275	        memory_service=InMemoryMemoryService(),
+   276	        credential_service=tool_context._invocation_context.credential_service,
+   277	        plugins=plugins,
+   278	    )
+   279	    # When plugins are inherited from the parent runner, the parent still owns
+   280	    # them; tell the sub-Runner's plugin manager to skip closing them on exit
+   281	    # so shared plugins (e.g. observability exporters) are not torn down while
+   282	    # the parent is still using them.
+   283	    if self.include_plugins:
+   284	      runner.plugin_manager.set_skip_closing_plugins(True)
+   285	    # Each call runs the child in an empty session: Gemini creates an explicit
+   286	    # cache only from call 2 within one run and never reuses it across calls
+   287	    # (so the 300s cap bounds how long per-run caches linger), whereas
+   288	    # prefix-marking models (Anthropic, LiteLLM) mark breakpoints from call 1
+   289	    # (using the 5m tier even under a ttl_seconds >= 3600 parent, as composite
+   290	    # child trees may mix model families). Assigning this attribute after
+   291	    # Runner.__init__ leaves context_cache_config as None during init, so
+   292	    # _warn_uncached_agent_transfer logs once per app if the wrapped agent can
+   293	    # transfer between sub-agents.
+   294	    parent_cache_config = (
+   295	        invocation_context.context_cache_config
+   296	        if invocation_context is not None
+   297	        else None
+   298	    )
+   299	    if parent_cache_config is not None:
+   300	      runner.context_cache_config = parent_cache_config.model_copy(
+   301	          update={
+   302	              'ttl_seconds': min(
+   303	                  parent_cache_config.ttl_seconds,
+   304	                  _MAX_CHILD_AGENT_CACHE_TTL_S,
+   305	              )
+   306	          }
+   307	      )
+   308	
+   309	    state_dict = {
+   310	        k: v
+   311	        for k, v in tool_context.state.to_dict().items()
+   312	        if not k.startswith('_adk')  # Filter out adk internal states
+   313	    }
+   314	    session = await runner.session_service.create_session(
+   315	        app_name=child_app_name,
+   316	        user_id=tool_context._invocation_context.user_id,
+   317	        state=state_dict,
+   318	    )
+   319	
+   320	    # The wrapped agent runs as part of the caller's invocation, so it should
+   321	    # obey the caller's run settings. Without this the nested run falls back to
+   322	    # RunConfig's defaults, which means a max_llm_calls ceiling of 500 whatever
+   323	    # the caller asked for and no custom_metadata, labels or HTTP options at
+   324	    # all. The count itself is still per-invocation, so the ceiling bounds the
+   325	    # nested run rather than being shared with the caller's.
+   326	    nested_run_config = invocation_context.run_config
+   327	    if nested_run_config is not None and nested_run_config.support_cfc:
+   328	      # CFC describes how the caller's own model executes. Handing it to
+   329	      # another agent replaces that agent's code executor and refuses to run it
+   330	      # at all unless its model is a Gemini model with live-API support.
+   331	      nested_run_config = nested_run_config.model_copy(
+   332	          update={'support_cfc': False}
+   333	      )
+   334	    if (
+   335	        nested_run_config is not None
+   336	        and nested_run_config.streaming_mode != StreamingMode.NONE
+   337	    ):
+   338	      # The nested run's events are not forwarded to the caller; only the last
+   339	      # event's content becomes the response. That is complete in unary mode and
+   340	      # in aggregated streaming, but a caller streaming without aggregation
+   275	    """The name of the node that generated the event."""
+   276	    if self.actions.agent_state or self.actions.end_of_agent:
+   277	      return ''
+   278	    return self.node_info.name
+   279	
+   280	  def model_post_init(self, __context: Any) -> None:
+   281	    """Post initialization logic for the event."""
+   282	    # Generates a random ID for the event.
+   283	    if not self.id:
+   284	      self.id = Event.new_id()
+   285	
+   286	  def is_final_response(self) -> bool:
+   287	    """Returns whether the event is the final response of an agent.
+   288	
+   289	    Application and UI layers can rely on this helper to detect a complete,
+   290	    user-facing response instead of replicating its logic.
+   291	
+   292	    Note that when multiple agents participate in one invocation, there could be
+   293	    one event has `is_final_response()` as True for each participating agent.
+   294	    """
+   295	    if self.actions.skip_summarization or self.long_running_tool_ids:
+   296	      return True
+   297	    if (
+   298	        bool(self.error_code)
+   299	        and not self.partial
+   300	        and not self.get_function_calls()
+   301	    ):
+   302	      return True
+   303	    return (
+   304	        not self.get_function_calls()
+   305	        and not self.get_function_responses()
+   306	        and not self.partial
+   307	        and not self.has_trailing_code_execution_result()
+   308	    )
+   309	
+   310	  def has_trailing_code_execution_result(
+   311	      self,
+   312	  ) -> bool:
+   313	    """Returns whether the event has a trailing code execution result."""
+   314	    if self.content:
+   315	      if self.content.parts:
+   316	        return self.content.parts[-1].code_execution_result is not None
+   317	    return False
+   318	
+   319	  @staticmethod
+   320	  def new_id() -> str:
+   270	      ValueError: If no processor has that name, or if more than one does.
+   271	    """
+   272	    processors, index = self._locate_request_processor(name)
+   273	    return processors.pop(index)
+   274	
+   275	  async def run_live(
+   276	      self,
+   277	      invocation_context: InvocationContext,
+   278	  ) -> AsyncGenerator[Event, None]:
+   279	    """Runs the flow using live api."""
+   280	    from ...live import _live_llm_flow
+   281	
+   282	    async with Aclosing(
+   283	        _live_llm_flow.run_live_flow(self, invocation_context)
+   284	    ) as agen:
+   285	      async for event in agen:
+   286	        yield event
+   287	
+   288	  async def run_async(
+   289	      self, invocation_context: InvocationContext
+   290	  ) -> AsyncGenerator[Event, None]:
+   291	    """Runs the flow."""
+   292	    while True:
+   293	      # `is True` rather than truthiness: tests drive agents with mocked
+   294	      # contexts, whose is_aborted is a truthy Mock rather than False.
+   295	      if invocation_context.is_aborted is True:
+   296	        break
+   297	      last_event = None
+   298	      async with Aclosing(self._run_one_step_async(invocation_context)) as agen:
+   299	        async for event in agen:
+   300	          last_event = event
+   301	          yield event
+   302	          if invocation_context.is_aborted is True:
+   303	            break
+   304	      if invocation_context.is_aborted is True:
+   305	        break
+   306	      if not last_event or last_event.is_final_response() or last_event.partial:
+   307	        if last_event and last_event.partial:
+   308	          logger.warning('The last event is partial, which is not expected.')
+   309	        break
+   310	
+   311	  async def _replay_function_calls(
+   312	      self,
+   313	      invocation_context: InvocationContext,
+   314	      model_response_event: Event,
+   315	      llm_request: LlmRequest,
+   316	  ) -> AsyncGenerator[Event, None]:
+   317	    """Runs `model_response_event`'s function calls, re-issuing event ids.
+   318	
+   319	    A node that interrupts mid-call raises `NodeInterruptedError`, which is a
+   320	    `BaseException` specifically so intermediate handlers do not swallow it.
+   321	    It is left to propagate: `NodeRunner` catches it and reads the interrupt
+   322	    ids off the context, which `ctx.run_node` populated before raising.
+   323	    """
+   324	    async with Aclosing(
+   325	        self._postprocess_handle_function_calls_async(
+    65	            and not hasattr(eff_display, "on_event")
+    66	            and not hasattr(eff_display, "log")
+    67	        ):
+    68	            self._on_event = eff_display
+    69	            self.display = None
+    70	        else:
+    71	            self._on_event = None
+    72	            self.display = eff_display
+    73	
+    74	        self.display_manager = self.display
+    75	        self.trace_callback = self._on_event
+    76	
+    77	        if formatter_registry is not None:
+    78	            self.formatter_registry = formatter_registry
+    79	        elif self.display and hasattr(self.display, "formatter_registry"):
+    80	            self.formatter_registry = self.display.formatter_registry
+    81	        else:
+    82	            self.formatter_registry = get_default_formatter_registry()
+    83	
+    84	    async def on_event_callback(
+    85	        self,
+    86	        *,
+    87	        invocation_context: InvocationContext,
+    88	        event: Event,
+    89	    ) -> Event | None:
+    90	        """Called when an ADK event occurs during agent execution."""
+    91	        if self.display is not None and hasattr(self.display, "on_event"):
+    92	            self.display.on_event(event)
+    93	
+    94	        if self._on_event is not None and self._on_event != getattr(self.display, "on_event", None):
+    95	            self._on_event(event)
+    96	
+    97	        if self.display is not None and hasattr(self.display, "log") and not hasattr(self.display, "on_event"):
+    98	            from rich.markup import escape
+    99	
+   100	            event_type = getattr(event, "type", "event")
+   101	            content = getattr(event, "content", "")
+   102	
+   103	            if event_type == "call":
+   104	                tool_name = getattr(event, "tool_name", "tool") or "tool"
+   105	                args = getattr(event, "tool_args", {}) or {}
+   106	                fmt = self.formatter_registry.get(tool_name)
+   107	                call_disp = fmt.format_call(tool_name, args)
+   108	                preview_str = f" [dim]{escape(str(call_disp.preview))}[/dim]" if call_disp.preview else ""
+   109	                self.display.log(
+   110	                    f"{call_disp.icon} [bold cyan]{escape(str(call_disp.title))}[/bold cyan]{preview_str}"
+
+codex
+The v011 diff matches the requested fallback: its tool graph is byte-identical to v009’s, and the three required prompt changes remain. I’m checking the gate’s turn accounting and smoke observability next; those depend on how the harness handles child-agent events.
+exec
+/bin/bash -lc "nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py | sed -n '595,680p;825,985p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/tools/agent_tool.py | sed -n '334,425p'; rg -n 'max_llm_calls|run_config|ToolErrorPlugin|EventDisplayPlugin' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   595	
+   596	        # Capture workspace layout for prompt injection
+   597	        tree_cmd = build_workspace_tree_command()
+   598	        tree_res = await sandbox_exec(docker, sandbox_id, tree_cmd)
+   599	        workspace_tree = tree_res.stdout.strip() if tree_res.exit_code == 0 else ''
+   600	
+   601	        tools = context.create_tools()
+   602	
+   603	        # Compile agent submission
+   604	        script_timeout = (
+   605	            config.harness.command_timeout_seconds
+   606	            if config.harness.command_timeout_seconds is not None
+   607	            else 300
+   608	        )
+   609	        code_executor = AdkSandboxCodeExecutor(
+   610	            sandbox=context.sandbox,
+   611	            timeout_seconds=script_timeout,
+   612	            start_time=context.task_start_time,
+   613	            max_time_minutes=config.budget.time_minutes,
+   614	            budget_check_fn=context.check_budget,
+   615	        )
+   616	        agent: BaseAgent = compile_submission(
+   617	            submission_dir=config.submission_dir,
+   618	            tool_registry=tools,
+   619	            model_registry=config.models,
+   620	            code_executor=code_executor,
+   621	            script_timeout=script_timeout,
+   622	            limits=config.limits,
+   623	            generation_constraints=config.generation_constraints,
+   624	            adapter_manifest=config.adapter_manifest,
+   625	            adapter_resolver_fn=lambda base, info: resolve_swegemma_adapter(
+   626	                base, info, config.models
+   627	            ),
+   628	        )
+   629	        _wrap_skill_toolset_tools(agent)
+   630	
+   631	        display_mode = getattr(config, 'display_mode', 'auto')
+   632	        if dashboard is not None or display_mode == 'quiet':
+   633	            display_mgr = EventDisplayManager(
+   634	                ctx=context,
+   635	                instance_id=task.instance_id,
+   636	                repo=task.repo,
+   637	                task_index=task_index,
+   638	                total_tasks=total_tasks,
+   639	                console=file_console,
+   640	                enable_live=False,
+   641	            )
+   642	        else:
+   643	            display_mgr = EventDisplayManager(
+   644	                ctx=context,
+   645	                instance_id=task.instance_id,
+   646	                repo=task.repo,
+   647	                task_index=task_index,
+   648	                total_tasks=total_tasks,
+   649	                enable_live=True,
+   650	            )
+   651	            file_display_mgr = EventDisplayManager(
+   652	                ctx=context,
+   653	                instance_id=task.instance_id,
+   654	                repo=task.repo,
+   655	                task_index=task_index,
+   656	                total_tasks=total_tasks,
+   657	                console=file_console,
+   658	                enable_live=False,
+   659	            )
+   660	
+   661	        def _on_event(event: Any) -> None:
+   662	            trace.record_event(event)
+   663	            if file_display_mgr is not None:
+   664	                file_display_mgr.on_event(event)
+   665	            context.handle_adk_event(event, agent_name=agent.name)
+   666	
+   667	        display_plugin = EventDisplayPlugin(
+   668	            trace_callback=_on_event,
+   669	            display_manager=display_mgr,
+   670	        )
+   671	        retry_plugin = ModelRetryPlugin()
+   672	        tool_error_plugin = ToolErrorPlugin()
+   673	
+   674	        # Setup ADK Runner and App
+   675	        session_service = InMemorySessionService()
+   676	        session_state = {
+   677	            'problem_description': task.problem_statement,
+   678	        }
+   679	        hints = getattr(task, 'hints_text', '') or ''
+   680	        if isinstance(hints, str) and hints.strip():
+   825	                            if event_author not in {'user', 'harness', 'system', 'tool'}:
+   826	                                for p in parts:
+   827	                                    if getattr(p, 'text', None) and not getattr(
+   828	                                        p, 'thought', False
+   829	                                    ):
+   830	                                        last_assistant_text += str(p.text)
+   831	
+   832	                            has_function_call = any(
+   833	                                getattr(p, 'function_call', None) for p in parts
+   834	                            )
+   835	                            if has_function_call and (
+   836	                                context.budget.tool_calls is None
+   837	                                or context.tool_calls_used < context.budget.tool_calls
+   838	                            ):
+   839	                                turn_has_tool_call = True
+   840	
+   841	                            if (
+   842	                                hasattr(_event, 'is_final_response')
+   843	                                and _event.is_final_response()
+   844	                            ):
+   845	                                has_text = any(
+   846	                                    getattr(p, 'text', None)
+   847	                                    and not getattr(p, 'thought', False)
+   848	                                    for p in parts
+   849	                                )
+   850	                                has_function_response = any(
+   851	                                    getattr(p, 'function_response', None) for p in parts
+   852	                                )
+   853	
+   854	                                if (
+   855	                                    event_author not in {'user', 'harness', 'system', 'tool'}
+   856	                                    and has_text
+   857	                                    and not has_function_response
+   858	                                    and not has_function_call
+   859	                                    and context.patch_submitted
+   860	                                ):
+   861	                                    logger.debug(
+   862	                                        'Agent submitted patch and returned final completion message; terminating.'
+   863	                                    )
+   864	                                    break
+   865	
+   866	                            if (
+   867	                                timeout_sec is not None
+   868	                                and context.elapsed_seconds > timeout_sec
+   869	                            ):
+   870	                                agent_error = f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+   871	                                logger.warning(
+   872	                                    'Task %s agent timed out.', task.instance_id
+   873	                                )
+   874	                                break
+   875	
+   876	                        # Count at least 1 call if mock runner yielded no events
+   877	                        if context.llm_calls_used == prev_calls:
+   878	                            context.record_llm_call()
+   879	
+   880	                        try:
+   881	                            s = await session_service.get_session(
+   882	                                app_name='swegemma_eval',
+   883	                                user_id='eval_user',
+   884	                                session_id=session.id,
+   885	                            )
+   886	                            if s:
+   887	                                sess_calls = 0
+   888	                                for e in s.events:
+   889	                                    if getattr(e, 'partial', False):
+   890	                                        continue
+   891	                                    if getattr(e, 'author', None) in {
+   892	                                        None,
+   893	                                        'user',
+   894	                                        'harness',
+   895	                                        'system',
+   896	                                        'tool',
+   897	                                    }:
+   898	                                        continue
+   899	                                    e_content = getattr(e, 'content', None)
+   900	                                    if getattr(e_content, 'role', None) in (
+   901	                                        'user',
+   902	                                        'tool',
+   903	                                    ):
+   904	                                        continue
+   905	                                    e_parts = getattr(e_content, 'parts', []) if e_content else []
+   906	                                    if e_parts and all(
+   907	                                        getattr(p, 'function_response', None)
+   908	                                        for p in e_parts
+   909	                                    ):
+   910	                                        continue
+   911	                                    sess_calls += 1
+   912	                                context.llm_calls_used = max(
+   913	                                    context.llm_calls_used, sess_calls
+   914	                                )
+   915	                        except Exception as sess_err:
+   916	                            logger.debug(
+   917	                                'Failed to inspect session events: %s', sess_err
+   918	                            )
+   919	
+   920	                        if context.patch_submitted:
+   921	                            context.set_activity('Patch submitted')
+   922	                            break
+   923	
+   924	                        if (
+   925	                            timeout_sec is not None
+   926	                            and context.elapsed_seconds > timeout_sec
+   927	                        ):
+   928	                            if not agent_error:
+   929	                                agent_error = f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+   930	                            break
+   931	
+   932	                        if (
+   933	                            context.budget.tool_calls is not None
+   934	                            and context.tool_calls_used >= context.budget.tool_calls
+   935	                        ):
+   936	                            if not agent_error:
+   937	                                agent_error = (
+   938	                                    f'Agent exceeded tool call budget ({context.budget.tool_calls} calls)'
+   939	                                )
+   940	                            logger.warning(
+   941	                                'Task %s: Tool call budget (%d) exhausted; terminating agent loop.',
+   942	                                task.instance_id,
+   943	                                context.budget.tool_calls,
+   944	                            )
+   945	                            break
+   946	
+   947	                        if context.llm_calls_used >= max_llm_calls:
+   948	                            if not agent_error:
+   949	                                agent_error = (
+   950	                                    f'Agent exceeded turns budget ({config.budget.turns} turns)'
+   951	                                    if config.budget.turns is not None
+   952	                                    else 'Agent exceeded maximum allowed LLM turns'
+   953	                                )
+   954	                            logger.warning(
+   955	                                'Task %s: LLM turn budget exhausted.', task.instance_id
+   956	                            )
+   957	                            break
+   958	
+   959	                        if agent_error:
+   960	                            break
+   961	
+   962	                        if turn_has_tool_call:
+   963	                            consecutive_nudges = 0
+   964	
+   965	                        if consecutive_nudges >= max_nudges:
+   966	                            logger.warning(
+   967	                                'Task %s: Reached maximum continuation nudges (%d) without patch submission.',
+   968	                                task.instance_id,
+   969	                                max_nudges,
+   970	                            )
+   971	                            break
+   972	
+   973	                        consecutive_nudges += 1
+   974	                        is_length_truncation = False
+   975	                        if last_event_finish_reason is not None:
+   976	                            fr_str = str(last_event_finish_reason).upper()
+   977	                            if 'MAX_TOKENS' in fr_str or 'LENGTH' in fr_str:
+   978	                                is_length_truncation = True
+   979	
+   980	                        has_truncated_tool_call = '<|tool_call>' in last_assistant_text
+   981	
+   982	                        if has_truncated_tool_call:
+   983	                            nudge_prompt = (
+   984	                                'Your previous response reached the token limit before the tool call finished closing '
+   985	                                '(<|tool_call|> was cut off). Do NOT repeat your prior reasoning in thought—emit your '
+   334	    if (
+   335	        nested_run_config is not None
+   336	        and nested_run_config.streaming_mode != StreamingMode.NONE
+   337	    ):
+   338	      # The nested run's events are not forwarded to the caller; only the last
+   339	      # event's content becomes the response. That is complete in unary mode and
+   340	      # in aggregated streaming, but a caller streaming without aggregation
+   341	      # would leave only a partial chunk in the last event, so always run unary.
+   342	      nested_run_config = nested_run_config.model_copy(
+   343	          update={'streaming_mode': StreamingMode.NONE}
+   344	      )
+   345	
+   346	    # Aborting the caller also aborts the wrapped agent. The isinstance check
+   347	    # is intentional: tests may hand in a mocked caller context whose signal is
+   348	    # a Mock, and the nested runner would read that as already aborted.
+   349	    # Read the caller's loop first: reading _abort_signal records the current
+   350	    # loop when none is set yet. getattr keeps a mocked caller context (which
+   351	    # has no _abort_state) on the abort_signal = None path below.
+   352	    caller_loop = getattr(
+   353	        getattr(invocation_context, '_abort_state', None), 'loop', None
+   354	    )
+   355	    abort_signal: Optional[asyncio.Event] = (
+   356	        invocation_context._abort_signal  # pylint: disable=protected-access
+   357	    )
+   358	    if not isinstance(abort_signal, asyncio.Event):
+   359	      abort_signal = None
+   360	    elif (
+   361	        isinstance(caller_loop, asyncio.AbstractEventLoop)
+   362	        and caller_loop is not asyncio.get_running_loop()
+   363	    ):
+   364	      # The tool runs in another event loop (e.g. RunConfig's tool thread
+   365	      # pool). An asyncio.Event can only be awaited from one loop, so the
+   366	      # nested runner's wait would fail and be taken as an abort. Run the
+   367	      # wrapped agent without the caller's signal instead.
+   368	      abort_signal = None
+   369	
+   370	    last_content = None
+   371	    last_error_message = None
+   372	    last_grounding_metadata = None
+   373	    # Long-running tool calls (adk_request_confirmation, adk_request_input, a
+   374	    # remote agent's input_required, or an ordinary LongRunningFunctionTool)
+   375	    # all set long_running_tool_ids on the event carrying the call. An ordinary
+   376	    # LongRunningFunctionTool that returns a truthy value resolves in the very
+   377	    # same run via an auto-built function response, whereas HITL or remote
+   378	    # input_required pauses do not, so only a call id that is *never* answered
+   379	    # by a function response before the run ends is actually still pending.
+   380	    pending_tool_ids: set[str] = set()
+   381	    async with Aclosing(
+   382	        runner.run_async(
+   383	            user_id=session.user_id,
+   384	            session_id=session.id,
+   385	            new_message=content,
+   386	            run_config=nested_run_config,
+   387	            abort_signal=abort_signal,
+   388	        )
+   389	    ) as agen:
+   390	      async for event in agen:
+   391	        # Forward state delta to parent session.
+   392	        if event.actions.state_delta:
+   393	          tool_context.state.update(event.actions.state_delta)
+   394	        if event.error_message:
+   395	          last_error_message = event.error_message
+   396	        if event.long_running_tool_ids:
+   397	          pending_tool_ids |= event.long_running_tool_ids
+   398	        if event.content:
+   399	          last_content = event.content
+   400	          last_grounding_metadata = event.grounding_metadata
+   401	          pending_tool_ids -= {
+   402	              fr.id for fr in event.get_function_responses() if fr.id
+   403	          }
+   404	
+   405	    # Clean up runner resources (especially MCP sessions)
+   406	    # to avoid "Attempted to exit cancel scope in a different task" errors
+   407	    await runner.close()
+   408	
+   409	    if pending_tool_ids:
+   410	      tool_context.actions.skip_summarization = False
+   411	      sorted_ids = sorted(pending_tool_ids)
+   412	      logger.warning(
+   413	          'Agent %r paused with unresolved long-running tool call(s) %s, which'
+   414	          ' AgentTool cannot resume because its nested session is discarded.'
+   415	          ' Configure the agent under sub_agents (e.g. with'
+   416	          " mode='single_turn' for LlmAgent) if it needs to pause and"
+   417	          ' resume.',
+   418	          self.agent.name,
+   419	          sorted_ids,
+   420	      )
+   421	      return (
+   422	          f'Error: agent {self.agent.name!r} stopped waiting on unresolved'
+   423	          f' long-running tool call(s) (pending call ids: {sorted_ids}),'
+   424	          ' which AgentTool cannot resume.'
+   425	      )
+17:from google.adk.agents.run_config import RunConfig
+30:    EventDisplayPlugin,
+55:    'ToolErrorPlugin',
+244:class ToolErrorPlugin(BasePlugin):
+667:        display_plugin = EventDisplayPlugin(
+672:        tool_error_plugin = ToolErrorPlugin()
+714:        max_llm_calls = (
+789:                        remaining_turns = max_llm_calls - context.llm_calls_used
+801:                        run_config = RunConfig(max_llm_calls=remaining_turns)
+810:                            run_config=run_config,
+947:                        if context.llm_calls_used >= max_llm_calls:
+
