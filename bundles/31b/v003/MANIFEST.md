@@ -9,5 +9,8 @@
   `diff -r bundles/31b/v001 bundles/31b/v003` shows only prompts/system.md (+ this MANIFEST).
 - If the screen passes, the submission candidate is a SEPARATE 31b-v004 = 31b-v002 (cap 3.5) + this prompts/system.md.
 - status: UNVALIDATED.
-- packed 2026-11-06T00:59Z with bin/pack (PASS). zip sha256: 3fa08f768ab7052b9c225c8ec92dcd62743d760cdf32c5dd14e8ab139b18081a
-zip sha256: 3fa08f768ab7052b9c225c8ec92dcd62743d760cdf32c5dd14e8ab139b18081a
+- packed 2026-11-06T00:59Z with bin/pack (PASS). zip sha256: 3fa08f768ab7052b9c225c8ec92dcd62743d760cdf32c5dd14e8ab139b18081a (SUPERSEDED, never run)
+- re-packed 2026-11-06T01:04Z with bin/pack (PASS, 9094 unpacked bytes, zip 5352 bytes) after review-20261106T005952 BLOCKING 2 + NB4/NB5:
+  prompt-text-only edits (generic example-code line replaces the FastAPI/docs_src line; `set -o pipefail;` in the pytest example;
+  final checks allowed after an environment-only test failure; config-only rule exception). See eval/plans/005.md Addendum A correction.
+zip sha256: e9e603ab7decd589f5ea040579a5facf9c88858986039690ae8053df3e1f4d2f

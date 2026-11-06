@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Count tool-call errors per task in a timing run's traces (plan 005 mechanism metrics).
 
-Usage: trace_tool_errors.py <run_dir> <bundle_label> <out.json>
+Usage: trace_tool_errors.py <run_dir> <bundle_label> <out.json> [<ids_file>]
+With <ids_file> (one instance id per line), the run must contain EXACTLY those ids, each with trace.json and
+agent.patch, else exit 2 (no output written). Responses are classified by their own tool name (fallback: the
+earliest unanswered call), and paired to calls FIFO per tool for call indices.
 Reads <run_dir>/runs/<task>/{trace.json,agent.patch}. Writes counts only (no task text).
 Error classes (matched on the tool response, never on task content):
   write_outside_ws   write_file rejected: "escapes workspace root"
   edit_missing_param edit_file rejected: mandatory input parameters not present (mangled tool-call args)
   edit_other_error   any other edit_file error
-  cmd_error_empty    run_command CommandError with empty message (e.g. grep no-match exit 1)
-  cmd_error_shell    run_command CommandError containing "syntax error" (shell quoting)
-  cmd_error_other    other run_command CommandError
+  cmd_error_empty    unsuccessful run_command response with empty message (e.g. grep no-match exit 1)
+  cmd_error_shell    unsuccessful run_command response containing "syntax error" (shell quoting)
+  cmd_error_other    any other unsuccessful run_command response (any error_type except BudgetExceeded,
+                     e.g. CommandError, TimeoutExceeded)
   budget_exceeded    BudgetExceeded responses
   sitecustomize_warn responses whose text mentions "Error in sitecustomize" (stderr noise, may be non-fatal)
 """
@@ -57,10 +61,19 @@ def classify(tool, r):
     return cls, False
 
 
-def main(run_dir, label, out):
+def main(run_dir, label, out, ids_file=None):
     base = os.path.join(run_dir, "runs")
     tasks = sorted(t for t in os.listdir(base)
                    if os.path.isfile(os.path.join(base, t, "trace.json")))
+    if ids_file:
+        want = sorted(l.strip() for l in open(ids_file) if l.strip() and not l.startswith("#"))
+        bad = [t for t in want if not (os.path.isfile(os.path.join(base, t, "trace.json"))
+                                       and os.path.isfile(os.path.join(base, t, "agent.patch")))]
+        extra = sorted(set(tasks) - set(want))
+        if bad or extra:
+            print(json.dumps({"error": "incomplete or unexpected artifacts", "missing": bad, "extra": extra}))
+            sys.exit(2)
+        tasks = want
     rows, tot = [], {}
     for t in tasks:
         d = json.load(open(os.path.join(base, t, "trace.json")))
@@ -68,13 +81,18 @@ def main(run_dir, label, out):
         row = {"instance_id": t, "patch_bytes": os.path.getsize(pp) if os.path.exists(pp) else None,
                "tool_calls": 0, "tool_errors": 0, "calls_by_tool": {}, "errors": {},
                "first_ok_edit_elapsed_s": None, "first_ok_edit_call_index": None}
-        tool = None
+        pending = []  # [(call_index, tool)] unanswered calls, in order
         for e in d["entries"]:
             if e["type"] == "tool_call":
                 tool = e.get("tool")
                 row["tool_calls"] += 1
                 row["calls_by_tool"][tool] = row["calls_by_tool"].get(tool, 0) + 1
+                pending.append((row["tool_calls"], tool))
             elif e["type"] == "tool_response":
+                tool = e.get("tool")
+                j = next((i for i, (_, t) in enumerate(pending) if t == tool), 0 if pending else None)
+                idx, ctool = pending.pop(j) if j is not None else (None, None)
+                tool = tool or ctool
                 cls, ok = classify(tool, _load(e.get("result", "")))
                 for c in cls:
                     row["errors"][c] = row["errors"].get(c, 0) + 1
@@ -83,7 +101,7 @@ def main(run_dir, label, out):
                     row["tool_errors"] += 1
                 if ok and tool == "edit_file" and row["first_ok_edit_elapsed_s"] is None:
                     row["first_ok_edit_elapsed_s"] = float(e["elapsed_s"])
-                    row["first_ok_edit_call_index"] = row["tool_calls"]
+                    row["first_ok_edit_call_index"] = idx
         rows.append(row)
     res = {
         "_schema": "trace_tool_errors_v1",
@@ -103,4 +121,4 @@ def main(run_dir, label, out):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    main(*sys.argv[1:5])

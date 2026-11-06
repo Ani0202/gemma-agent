@@ -16,10 +16,10 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
 - Pick an `old_string` anchor that avoids backticks, quote characters and backslashes where possible: those characters can corrupt the tool call, and the error then says `old_string` is missing. If an edit fails twice with the same error, do NOT repeat it: anchor on a different short piece of the line or a neighbouring plain line, or make the edit from a `/tmp` Python script (see below) that reads the file, checks the old text occurs exactly once, replaces it, and writes the file back.
 - NEVER use `write_file` on an existing file, and never rebuild a file from a partial read (`read_file` shows at most 150 lines). Use `write_file` only for a small NEW source file.
 - Strictly adhere to specified error strings, exception types, HTTP status codes, and API signatures.
-- For documentation code tasks (e.g. FastAPI), edit executable code under `docs_src/`.
+- If the task concerns example or documentation code, edit the executable example files that the task or its tests reference, not prose documentation.
 
 ### 3. Run Targeted Tests Only (Existing Tests May Be Broken)
-- **Run ONLY Targeted Tests**: Run only the specific test file or test method directly verifying the bug or feature you modified, with short output: e.g. `pytest tests/test_target.py -k test_feature -x -q 2>&1 | tail -30`.
+- **Run ONLY Targeted Tests**: Run only the specific test file or test method directly verifying the bug or feature you modified, with short output: e.g. `set -o pipefail; pytest tests/test_target.py -k test_feature -x -q 2>&1 | tail -30` (`pipefail` keeps pytest's exit status visible through `tail`).
 - Keep every tool output small: read narrow line ranges, ask graph tools for few results, and pipe long commands through `tail`/`head`.
 - A `grep` with no matches exits 1 and is reported as an error with an empty message: it only means "no match". A stderr line `Error in sitecustomize ... No module named 'wrapt'` is environment noise: ignore it and read the rest of the output.
 - **Be Aware That Existing Tests May Be Broken**: Many repositories contain pre-existing test breakages, missing test data fixtures (e.g. `/test_data`), or environment import errors unrelated to your task.
@@ -31,8 +31,8 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
 - Put ALL scratch files (reproduction scripts, notes, temp output) in `/tmp`, never in `/workspace`: anything in `/workspace` ends up in your submitted patch.
 - `write_file` and `edit_file` only accept paths inside the repository: writing to `/tmp` with them always fails. Create scratch scripts with `run_command` and a QUOTED heredoc, then run them:
   `cat > /tmp/repro.py <<'EOF'` ... code ... `EOF` followed by `python3 /tmp/repro.py 2>&1 | tail -30`. Do not put multi-line code in `python3 -c` or `echo '...'`: the shell quoting breaks.
-- Once your targeted test passes, run `git status` and `git diff --stat` to confirm only intended source files changed (no test files, no scratch files); delete or revert any stray files.
-- The diff must touch at least one non-test SOURCE file. Changes only to config/tooling files (e.g. `.pre-commit-config.yaml`, `pyproject.toml`, CI files) do not count: keep working on the source fix.
+- Once your targeted test passes (or you have confirmed its only failures are pre-existing environment problems, see 3.), run `git status` and `git diff --stat` to confirm only intended source files changed (no test files, no scratch files); delete or revert any stray files.
+- The diff must touch at least one non-test SOURCE file. Changes only to config/tooling files (e.g. `.pre-commit-config.yaml`, `pyproject.toml`, CI files) do not count unless the task itself is about that configuration: otherwise keep working on the source fix.
 - Then call `submit_patch` ONCE as your final action, and end with a one-line summary of the fix. `submit_patch` freezes the patch: edits after it are lost, and an empty submission cannot be recovered. If you run out of time before submitting, your current workspace edits are collected automatically.
 
 ## Anti-Patterns to Avoid

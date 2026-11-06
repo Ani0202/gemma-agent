@@ -1,0 +1,16 @@
+DECISION: approve-with-changes
+SUBMIT: none
+GPU_ALLOWANCE: none
+ESCALATE: none
+DIGEST: Approved one cheap Kaggle screen of a prompt fix for the 31B agent's empty-diff failures; Nov 7 31B submission plan unchanged.
+---
+Option A approved: one Kaggle L4x4 run (~2.1 h of quota) of plan 005 Addendum A arm B, bundle 31b-v003-p5t4, dist/31b-v003.zip sha256=3fa08f768ab7052b9c225c8ec92dcd62743d760cdf32c5dd14e8ab139b18081a. It uses Kaggle quota only, so $0 GCP and no allowance change.
+
+1. Precondition: review-plan005-light comes back with no unresolved BLOCKING items. If a fix changes any bundle byte, re-pack, record the new sha in eval/plans/005.md Addendum A (as a dated correction line, written before the run) and in MANIFEST, and push that. Anything beyond a prompt-text or tool-script fix needs a new decision.
+2. Push as soon as item 1 clears. This week's quota is 7.28/30 h and resets 2026-11-07T00:00Z, so unused hours are lost and the screen costs nothing against next week. Use the exact plan-006 stack: same kernel, --gate-mode stock-path, the same 8 ids (eval/plans/004-gpu-retime-ids.txt), conc 1, cap 4.0, 40 calls/50 turns, KERNEL_BUDGET 6000 s. Log the quota in ops/budget/kaggle.md before and after.
+3. Priority: the dec 055 checklist at 2026-11-07T00:00Z takes precedence over this screen. A running arm-B kernel doesn't block the 31B submit, since scoring runs Kaggle-side and the submit kernel is CPU. Don't let arm-B analysis delay the checklist.
+4. When it finishes, run eval/trace_tool_errors.py on arm B to make results/trace_tool_errors_31b_v003.json, plus the timing summary to make results/kaggle_timing_31b_v003.json. Report a paired per-id table: empty A/B, discordant A-empty-only and B-empty-only, exact sign test, the mechanism totals, first-ok-edit call index, timeouts, and gates a/b/d/e. Apply the pre-registered rule exactly. No post-hoc re-thresholding.
+5. If PASS: build 31b-v004 = 31b-v002 + the prompt only, with byte diff vs v002 limited to prompts/system.md + MANIFEST. Pack it, codex-review it, and send a report. Don't assume a submit. A non-empty diff is not a pass. I'll weigh any v004 slot request against repeating v002 and the e4b line after the v002 LB result exists. Also port the generic fixes to an e4b draft (CPU only) as a separate screen request.
+6. If MECHANISM-ONLY or FAIL, follow the pre-registered branch (trace-analyst, or one revision then stop). Dec 055 item 6's original scope still stands, and the prompt fix doesn't replace it: a truncation-safe / early-edit mechanism so that a timeout never yields an empty source diff. Pre-register it as Addendum B regardless of the arm-B outcome.
+
+Reasoning: I spot-checked results/trace_tool_errors_31b_v001.json. empty_patch_count 4, write_outside_ws 6 tasks / 8 calls, edit_missing_param 19, budget_exceeded 1 all match report 011. The draft prompt fixes the /tmp contradiction correctly: it says scratch goes in /tmp via a run_command quoted heredoc, and write_file only inside the repo. That contradiction is a real bug in a lineage we're about to submit, so it's worth fixing whatever the screen shows. The screen costs only quota that would otherwise expire, is paired against an existing arm, and re-checks timing with the longer prompt (639 -> 1013 words). n=8/k=1 is only a screen, and the plan says so honestly.
