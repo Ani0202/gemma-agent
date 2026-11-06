@@ -35,17 +35,12 @@
 - R5 REVIEW 071306 = NOT CLEAN: 19 BLOCKING fail-open + 2 false-H. Folding via codex-build plan007-rev5-fold (branch
   codex/plan007-rev5-fold). On finish: review diff, tests, merge, ONE re-freeze, REPORT 016 (residuals, arm-F exposure, run commits).
   Build fails/tests regress: don't iterate; report what landed.
-- REV 5 CANDIDATE (9d0a8b4, sha 21c3d46e.., NOT frozen): r4 review 070737 = 3 BLOCKING (resolved+verify-failure msg -> PASS; non-str msgs;
-  malformed setup_calls/rc=False) all fixed: verify:resolved_with_verify_failure, r10-r13, setup_shape_ok, dup-id CLI reject; tests 933/4skip;
-  arm F unchanged. Director FYI'd 07:13Z. ON r5: fold EVERY listed item -> ONE re-freeze -> Director note -> smoke (if before 15:30Z).
-  If r5 not clean/foldable: NO rev 6; report residuals + arm-F exposure to Director (dec 064 item 3).
-- DEC 063/064: classifier freezes need Director note; quota log before/after smoke+main; week <= 29.5 h; dec 055 window has priority.
+- REV 5 CANDIDATE 9d0a8b4 (sha 21c3d46e, not frozen) = r4 fixes; superseded by the fold. Last FROZEN+noted: a208a023 (0d49b1c).
+- DEC 063/064: classifier freezes need Director note; quota log before/after smoke+main; week <= 29.5 h; dec 055 first.
 - DEC 062 (report 015 approved, A): T stays 0.2 everywhere; no T 0.6 arm in plan 007; repeat guard = design note only (DONE draft
   eval/plans/007-repeat-guard.md); item 4: plan-007 arm 1 may use expiring quota IF pre-reg reviewed + pushed by 11-06T15:30Z, else after reset.
-- PLAN 007 PRE-REG written 06:29Z (eval/plans/007.md, commit e547980): arm 1 = 31b-v009-p7a1 (bundles/31b/v009 = v006 + cap 3.5;
-  dist/31b-v009.zip sha256=d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d, pack PASS), 33 dev in fixed order
-  eval/plans/007-arm1-ids.txt, docker-path env (reasons in plan), --with-verification --no-stock-probe (new flag), slug aniket0202/gemma-31b-passrate.
-  NEXT: review clean -> SMOKE (eval/plans/007-smoke-ids.txt, 3 ids, budget 4800) -> gate -> main ids 4..33 budget sized to quota (week <= 29.5 h).
+- PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
+  33 dev fixed order eval/plans/007-arm1-ids.txt, --with-verification --no-stock-probe, slug aniket0202/gemma-31b-passrate.
 - Arm E CAP-BOUND (rep 014, v007 3a62f41f.., cap 1.23); arm D v006 b7b2eb3d.. PASS (rep 013). ARM F DONE NO-EFFECT (report 015, dec 062 accepted). results/plan005_armF_vs_D.json + *_31b_v008.json (schema-header check pending, dec 062 item 6).
 - DEC 061 (on report 014): approve-with-changes. CAP-BOUND accepted; A + B approved. (i) dec 055 v002 submit at 11-07T00:00Z stays FIRST;
   if SCORED -> bring v004 cap choice w/ data (FINALS RULE allows cap<=3.5); if ERROR/timeout -> CAP-BOUND binds, anti-loop only 31B path.
