@@ -1,4 +1,4 @@
-# 31b-v010-p8 (PLAN 008 ARM-2 candidate, dec 069 item 3). CPU DRAFT, UNVALIDATED, not packed yet.
+# 31b-v010-p8 (PLAN 008 ARM-2 candidate, dec 069 item 3). CPU DRAFT, UNVALIDATED, packed: dist/31b-v010.zip sha256=c7a86295a023db971bcc9d149c4e6c68674d5ea052ecdfb3c11655b535772cd8 (bin/pack PASS).
 - parent: 31b-v009-p7a1 (dist/31b-v009.zip sha256=d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d).
 - WHY a gate sub-agent: the harness submit_patch cannot be wrapped from a bundle (swegemma 0.2.11 registers no callbacks:
   CallbackRegistry unused), and agent_runner breaks the session as soon as context.patch_submitted is set, even for an
@@ -10,7 +10,9 @@
 - changes vs v009: (1) agent.yaml: harness submit_patch removed from root tools, agent_tool submit_gate added;
   (2) sub_agents/submit_gate.yaml NEW; (3) prompts/system.md: l.33 `set -o pipefail;` before the repro pipe (codex NB2 of
   review 043840, folded per dec 061 ii / dec 069 item 3, UNSCREENED); submit paragraph rewritten for gate semantics
-  (NOT SUBMITTED -> edit, then call again); new anti-pattern line "NEVER repeat an identical tool call" + edit_file
-  2-failure -> /tmp script fallback (dec 069 item 3 (ii), prompt-level: no tool-level hook exists).
+  (NOT SUBMITTED -> edit, then call again) + dec 070 1(b) rule (git diff --stat must show a non-test source file, else edit first);
+  anti-pattern line = design-note Option A text verbatim (dec 070 item 2) + "edit_file fails twice on the same file -> shorter
+  anchor or /tmp Python script" (PROMPT-LEVEL: no tool-level hook exists, feasibility in eval/plans/008.md).
 - unchanged: eval_config.yaml (cap 3.5, 40 calls / 50 turns), sampling, analyzer sub-agent. No repo-named content (dec 057).
 - bundle_load_check (real adk_submission compiler, stub tools): PASS; root tools end with code_analyzer_agent, submit_patch (AgentTool).
+zip sha256: c7a86295a023db971bcc9d149c4e6c68674d5ea052ecdfb3c11655b535772cd8
