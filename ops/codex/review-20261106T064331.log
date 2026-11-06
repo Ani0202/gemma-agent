@@ -3642,3 +3642,1891 @@ exec
   1367	    main()
 785947e0b91ce9eb0085e1339a22dab51b7105bf
 
+codex
+The setup reserve and arm-2 branches appear to address the earlier findings. I’m checking whether the new classifier can recognize the known install diagnostic and whether stock verification reports agent failures through `error`.
+
+The shared checkout’s HEAD advanced during the review; I’m pinning the review to `c6f0b66`.
+exec
+/bin/bash -lc "git show c6f0b66:eval/kaggle/agent_timing.py | sed -n '838,861p;1010,1124p' | cat; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py | sed -n '400,500p;630,720p'; rg --files /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma | rg agent_runner" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+# Normal agent end states that swegemma reports through agent_error (agent_runner.py 0.2.11).
+AGENT_OUTCOMES = (('timeout', re.compile(r'Agent exceeded session timeout\b')),
+                  ('turns', re.compile(r'Agent exceeded (turns budget|maximum allowed LLM turns)\b')),
+                  ('tool_calls', re.compile(r'Agent exceeded tool call budget\b')),
+                  ('no_submit', re.compile(r'Agent completed execution without calling submit_patch\b')))
+IMAGE_EMULATION_STEPS = ('venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'tool_sources',
+                         'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check')
+
+
+def agent_outcome(message):
+    """Name of a known normal agent end state, else None (including for empty messages)."""
+    text = (message or '').strip()
+    return next((name for name, pattern in AGENT_OUTCOMES if pattern.match(text)), None)
+
+
+def harness_error(result, agent_error):
+    """Fail closed: any error that is not a known normal agent end state is a harness failure."""
+    messages = [m for m in ((result.error if result is not None else None), agent_error) if m]
+    return 'Harness task failure' if any(agent_outcome(m) is None for m in messages) else None
+
+
+def platform_probe(host='pypi.org', port=443, timeout=10.0):
+    """P2 (plan 006 addendum): docker presence, DNS, and one TCP connect. Sends no payload."""
+    out = dict(docker_which=shutil.which('docker'), docker_sock=os.path.exists('/var/run/docker.sock'),
+    from swegemma.evaluate import Evaluator
+    from swegemma.models import load_tasks
+    from swegemma.harness.verification import _is_protected_test_or_config_path
+    import swegemma.evaluate as ev
+    import swegemma.harness.verification as vf
+    import swegemma.harness.agent_runner as ar
+    state = ContextVar('timing')
+    original_asyncio = ar.asyncio
+    original_sandbox = {name: getattr(ar, name) for name in ('sandbox_start', 'sandbox_stop', 'sandbox_exec')}
+    ar.asyncio = AsyncioTimingProxy(original_asyncio, state)
+    for name, original in original_sandbox.items():
+        setattr(ar, name, observe_sandbox(original, state, name))
+    original_verify, original_strip = ev.verify_task, vf.strip_protected_files_from_patch
+    vf.strip_protected_files_from_patch = observe_patch_strip(original_strip, state)
+    async def verify(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return await (skip_verification if SKIP_VERIFICATION else original_verify)(*args, **kwargs)
+        finally:
+            state.get()['verification'] = time.perf_counter() - start
+    ev.verify_task = verify
+    class TimingEvaluator(Evaluator):
+        agent_seconds, patch, trace, agent_error = 0.0, '', None, ''
+        def _hydrate_task_from_secret(self, task):
+            return task
+        def _get_secret_bundle_data(self):
+            return {}, {}, None
+        async def _run_agent_sandbox(self, task, *args, **kwargs):
+            safe = dataclasses.replace(task, patch='', test_patch='', FAIL_TO_PASS=(), PASS_TO_PASS=())
+            self.context = kwargs['context']
+            self.context.task = safe
+            start = time.perf_counter()
+            state.get()['agent_active'] = True
+            try:
+                self.patch, self.agent_error, self.trace = await super()._run_agent_sandbox(safe, *args, **kwargs)
+                return self.patch, self.agent_error, self.trace
+            finally:
+                self.agent_seconds = time.perf_counter() - start
+                state.get()['agent_active'] = False
+    try:
+        inventory = {t.instance_id: t for t in load_tasks(config.tasks_path)}
+        if len(set(TASK_IDS)) != len(TASK_IDS) or set(TASK_IDS) - inventory.keys():
+            raise ValueError('Duplicate or missing task IDs')
+        patch_subprocess_deps(DATA, state)
+        for iid in TASK_IDS:
+            if should_stop(time.monotonic()-started + (P1_DEADLINE_SECONDS + 30 if STOCK_PROBE else 0), caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+                break
+            task = dataclasses.replace(inventory[iid], patch='')
+            stock = stock_setup_probe(config, iid, task.repo) if STOCK_PROBE else None
+            if STOCK_PROBE and should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+                break
+            times = dict(instance_id=task.instance_id, verification=0.0, started=time.perf_counter(), setup_calls=[], setup_failed=False)
+            state.set(times)
+            evaluator, result, error = TimingEvaluator(config), None, None
+            original_start = evaluator.docker.start
+            evaluator.docker.start = lambda: setup_step(times, 'venv', original_start)
+            start = time.perf_counter()
+            try:
+                result = await evaluator.evaluate_task(task)
+                error = harness_error(result, evaluator.agent_error)
+            except Exception as exc:
+                error = 'Evaluation exception (' + type(exc).__name__ + ')'
+            finally:
+                try:
+                    evaluator.docker.cleanup_all()
+                except Exception as exc:
+                    error = 'Cleanup exception (' + type(exc).__name__ + ')'
+            total = time.perf_counter() - start
+            totals.append(total)
+            patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch) or ''
+            try:
+                counts, tokens, seconds = trace_counts(evaluator.trace)
+            except Exception as exc:  # never lose the run over trace parsing
+                counts, tokens, seconds = {}, dict(prompt_tokens=None, completion_tokens=None), {}
+                error = (error or '') + ' trace parse (' + type(exc).__name__ + ')'
+            code = result.test_exit_code if result else None
+            raw_error = (result.error or '') if result else error or ''
+            phase = phase1_fields(times, evaluator.agent_seconds, total,
+                                  getattr(evaluator, 'context', None),
+                                  result.agent_patch if result else evaluator.patch)
+            phase.update(agent_outcome=agent_outcome(evaluator.agent_error or raw_error),
+                         image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
+            try:
+              append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+                **phase,
+                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                editable_failed=times.get('editable_failed', False),
+                setup_output_artifact=times.get('setup_output_artifact'),
+                missing_tool_deps=times.get('missing_tool_deps', []),
+                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
+                llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
+                tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
+                completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
+                stock_setup=stock, llm_calls=llm_calls(evaluator.trace),
+                **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+                timed_out=bool(re.search(r'timeout|timed out', raw_error + ' ' + (evaluator.agent_error or ''), re.I)) or code == 124))
+            except Exception as exc:
+                append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved),
+                                     **phase,
+                                     wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total),
+                                     setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+                editable_failed=times.get('editable_failed', False),
+                setup_output_artifact=times.get('setup_output_artifact'),
+                missing_tool_deps=times.get('missing_tool_deps', []),
+                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+                stock_setup=stock,
+                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0), error='Row build exception (' + type(exc).__name__ + ')'))
+            # Raw artifacts are diagnostics written after the row; never lose the remaining tasks over them.
+            try:
+                raw = WORK / 'runs' / iid
+                raw.mkdir(parents=True, exist_ok=True)
+   400	        await asyncio.to_thread(setup_synthetic_hardware, docker, eval_id)
+   401	
+   402	        # Configure git exclude to ignore bytecode and test cache artifacts
+   403	        await asyncio.to_thread(setup_git_exclude, docker, eval_id)
+   404	
+   405	        # Install editable package
+   406	        await asyncio.to_thread(install_editable_package, docker, eval_id)
+   407	
+   408	        # Install test dependencies (fast-path by default)
+   409	        await asyncio.to_thread(
+   410	            install_test_dependencies,
+   411	            docker,
+   412	            eval_id,
+   413	            task.repo,
+   414	            fast_path=fast_path,
+   415	            config=config,
+   416	        )
+   417	
+   418	        # Configure pytest.ini and conftest.py for hermetic test discovery
+   419	        await asyncio.to_thread(
+   420	            setup_workspace_test_config,
+   421	            docker,
+   422	            eval_id,
+   423	            repo=task.repo,
+   424	        )
+   425	
+   426	        # Create clean baseline commit so git checkout has a reliable HEAD
+   427	        await asyncio.to_thread(setup_baseline_commit, docker, eval_id, 'eval_baseline')
+   428	
+   429	        target_test_files = (
+   430	            list(task.test_files)
+   431	            if task.test_files
+   432	            else extract_test_files_from_patch(task.test_patch)
+   433	        )
+   434	
+   435	        effective_agent_patch = (
+   436	            strip_protected_files_from_patch(
+   437	                agent_patch, extra_protected_paths=target_test_files
+   438	            )
+   439	            if not is_synthetic_mock_repo
+   440	            else agent_patch
+   441	        )
+   442	
+   443	        # Apply agent patch if present
+   444	        if effective_agent_patch.strip():
+   445	            with tempfile.NamedTemporaryFile('w', suffix='.patch', delete=False) as f:
+   446	                f.write(
+   447	                    effective_agent_patch
+   448	                    if effective_agent_patch.endswith('\n')
+   449	                    else effective_agent_patch + '\n'
+   450	                )
+   451	                patch_host_path = Path(f.name)
+   452	
+   453	            try:
+   454	                await asyncio.to_thread(
+   455	                    docker.copy_to, eval_id, patch_host_path, '/tmp/'
+   456	                )
+   457	                exit_code, stdout, stderr = await asyncio.to_thread(
+   458	                    apply_patch_in_container,
+   459	                    docker,
+   460	                    eval_id,
+   461	                    f'/tmp/{patch_host_path.name}',
+   462	                )
+   463	                if exit_code != 0:
+   464	                    err_detail = stderr or stdout
+   465	                    if 'Patch file not found:' in err_detail:
+   466	                        raise ContainerSetupError(
+   467	                            f'Agent patch file missing in container on task {task.instance_id}: {err_detail}'
+   468	                        )
+   469	                    logger.error(
+   470	                        'Failed to apply agent patch on task %s: %s',
+   471	                        task.instance_id,
+   472	                        err_detail,
+   473	                    )
+   474	                    agent_error = f'Failed to apply agent patch: {err_detail}'
+   475	                    json_path = save_trace_artifact(
+   476	                        trace, config.results_dir, task.instance_id
+   477	                    )
+   478	                    return TaskResult(
+   479	                        instance_id=task.instance_id,
+   480	                        repo=task.repo,
+   481	                        resolved=False,
+   482	                        agent_patch=agent_patch,
+   483	                        test_output=err_detail,
+   484	                        test_exit_code=exit_code,
+   485	                        duration_seconds=time.perf_counter() - start_time,
+   486	                        error=agent_error,
+   487	                        trace=trace,
+   488	                        trace_json_path=json_path,
+   489	                    )
+   490	            finally:
+   491	                patch_host_path.unlink(missing_ok=True)
+   492	
+   493	        # Collect any test files, conftest.py, or runner config files touched by agent_patch (including deleted/renamed sources)
+   494	        agent_touched_files = extract_test_files_from_patch(agent_patch)
+   495	        if agent_patch.strip():
+   496	            for raw_line in agent_patch.splitlines():
+   497	                if raw_line.startswith('diff --git '):
+   498	                    m_git = re.match(r'^diff --git "?a/(.*?)"? "?b/(.*?)"?$', raw_line)
+   499	                    if m_git:
+   500	                        for grp in (m_git.group(1), m_git.group(2)):
+   630	            f'--junitxml={junit_xml_path} '
+   631	            '-p no:anyio -o timeout=0 '
+   632	            '-o python_classes="Test* *Test" -q'
+   633	        )
+   634	        verification_timeout = getattr(
+   635	            config.harness, 'verification_timeout_seconds', None
+   636	        )
+   637	        if verification_timeout is None:
+   638	            verification_timeout = config.harness.command_timeout_seconds
+   639	        test_res = await sandbox_exec(
+   640	            docker,
+   641	            eval_id,
+   642	            pytest_cmd,
+   643	            timeout=verification_timeout,
+   644	        )
+   645	
+   646	        resolved = test_res.exit_code == 0
+   647	        junit_error: str | None = None
+   648	        if resolved:
+   649	            xml_res = await sandbox_exec(
+   650	                docker,
+   651	                eval_id,
+   652	                f'cat {junit_xml_path} 2>/dev/null || true',
+   653	            )
+   654	            xml_content = xml_res.stdout or ''
+   655	            is_real_sandbox = type(docker).__name__ in {
+   656	                'ContainerManager',
+   657	                'SubprocessManager',
+   658	                'DockerSandbox',
+   659	                'SubprocessSandbox',
+   660	            }
+   661	            stdout_text = (test_res.stdout or '').lower()
+   662	            stdout_invalid = (
+   663	                bool(re.search(r'\b0 passed\b', stdout_text))
+   664	                or 'no tests ran' in stdout_text
+   665	                or 'collected 0 items' in stdout_text
+   666	                or (stdout_text.strip() != '' and 'passed' not in stdout_text)
+   667	            )
+   668	            if xml_content.strip():
+   669	                junit_ok, junit_reason = _validate_junit_xml(
+   670	                    xml_content,
+   671	                    fail_to_pass=getattr(task, 'FAIL_TO_PASS', ()),
+   672	                    pass_to_pass=getattr(task, 'PASS_TO_PASS', ()),
+   673	                    test_patch=getattr(task, 'test_patch', ''),
+   674	                )
+   675	                if not junit_ok:
+   676	                    resolved = False
+   677	                    junit_error = junit_reason
+   678	                elif stdout_invalid:
+   679	                    resolved = False
+   680	                    junit_error = 'Pytest stdout summary indicates zero or no passing tests'
+   681	            elif is_real_sandbox or stdout_invalid or not stdout_text.strip():
+   682	                resolved = False
+   683	                junit_error = 'Missing JUnit XML report (possible premature os._exit(0))'
+   684	
+   685	        duration = time.perf_counter() - start_time
+   686	
+   687	        json_path = save_trace_artifact(trace, config.results_dir, task.instance_id)
+   688	
+   689	        return TaskResult(
+   690	            instance_id=task.instance_id,
+   691	            repo=task.repo,
+   692	            resolved=resolved,
+   693	            agent_patch=agent_patch,
+   694	            test_output=f'STDOUT:\n{test_res.stdout}\nSTDERR:\n{test_res.stderr}',
+   695	            test_exit_code=test_res.exit_code,
+   696	            duration_seconds=duration,
+   697	            error=(junit_error or agent_error) if not resolved else None,
+   698	            trace=trace,
+   699	            trace_json_path=json_path,
+   700	        )
+   701	    except ContainerSetupError:
+   702	        raise
+   703	    except Exception as e:
+   704	        logger.exception(
+   705	            'Error during evaluation container run for task %s', task.instance_id
+   706	        )
+   707	        return TaskResult(
+   708	            instance_id=task.instance_id,
+   709	            repo=task.repo,
+   710	            resolved=False,
+   711	            agent_patch=agent_patch,
+   712	            test_output='',
+   713	            test_exit_code=-1,
+   714	            duration_seconds=time.perf_counter() - start_time,
+   715	            error=f'Evaluation error: {e}',
+   716	            trace=trace,
+   717	        )
+   718	    finally:
+   719	        await sandbox_stop(docker, eval_id)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/__pycache__/agent_runner.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py
+
+exec
+/bin/bash -lc "git show c6f0b66:eval/kaggle/timing_push.sh | nl -ba | head -n 125; python3 - <<'PY'
+import json
+r=json.load(open('results/kaggle_timing_31b_v008.json'))
+print('TOP KEYS',list(r))
+for k,v in r.items():
+ if isinstance(v,list): print(k,len(v),list(v[0]) if v and isinstance(v[0],dict) else '')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	#!/usr/bin/env bash
+     2	# Stage a self-contained private GPU timing or CPU setup kernel. --dry-run never invokes Kaggle.
+     3	set -euo pipefail
+     4	dry_run=false
+     5	skip_verification=1
+     6	stock_probe=1
+     7	seed_max=0
+     8	while [[ ${1:-} == --dry-run || ${1:-} == --with-verification || ${1:-} == --no-stock-probe || ${1:-} == --seed-max ]]; do
+     9	  case $1 in
+    10	    --dry-run) dry_run=true ;;
+    11	    --with-verification) skip_verification=0 ;;
+    12	    --no-stock-probe) stock_probe=0 ;;
+    13	    --seed-max) seed_max=${2:?--seed-max SECONDS}; [[ $seed_max =~ ^[0-9]+$ ]] || { echo '--seed-max takes whole seconds' >&2; exit 2; }; shift ;;
+    14	  esac
+    15	  shift
+    16	done
+    17	setup_only=0
+    18	setup_fix=1
+    19	if [[ ${1:-} == --setup-only ]]; then
+    20	  setup_only=1
+    21	  setup_fix=${2:?SETUP_FIX required}
+    22	  [[ $setup_fix == 0 || $setup_fix == 1 ]] || { echo 'SETUP_FIX must be 0 or 1' >&2; exit 2; }
+    23	  shift 2
+    24	  [[ $# -ge 2 && $# -le 3 ]] || { echo 'Usage: timing_push.sh [--dry-run] [--with-verification] [--no-stock-probe] --setup-only SETUP_FIX USER/SLUG IDS_FILE [BUDGET_SECONDS]' >&2; exit 2; }
+    25	  set -- "$1" - "$2" "${3:-1800}"
+    26	fi
+    27	if [[ $# -lt 3 || $# -gt 4 || ! $1 =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$ ]]; then
+    28	  echo "Usage: $0 [--dry-run] [--with-verification] [--no-stock-probe] [--seed-max SECONDS] KAGGLE_USER/SLUG BUNDLE_DIR IDS_FILE [BUDGET_SECONDS]" >&2
+    29	  exit 2
+    30	fi
+    31	script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+    32	stage_dir=$(mktemp -d /tmp/timing-kernel-push.XXXXXX)
+    33	# Dry runs retain the generated artifact for inspection.
+    34	if ! $dry_run; then trap 'rm -rf -- "$stage_dir"' EXIT; fi
+    35	budget=${4:-10800}
+    36	python3 - "$script_dir" "$stage_dir" "$1" "$2" "$3" "$budget" "$setup_only" "$setup_fix" "$skip_verification" "$stock_probe" "$seed_max" <<'PY'
+    37	import ast
+    38	import base64
+    39	import gzip
+    40	import hashlib
+    41	import io
+    42	import json
+    43	from pathlib import Path
+    44	import re
+    45	import subprocess
+    46	import sys
+    47	import tarfile
+    48	
+    49	source, stage = map(Path, sys.argv[1:3])
+    50	kernel_id, bundle_arg, ids_arg, budget_arg, setup_only_arg, setup_fix_arg, skip_verification_arg, stock_probe_arg, seed_max_arg = sys.argv[3:]
+    51	setup_only = setup_only_arg == "1"
+    52	bundle, ids_file = Path(bundle_arg).resolve(), Path(ids_arg)
+    53	budget = int(budget_arg)
+    54	if budget <= 0:
+    55	    raise ValueError('Budget must be positive')
+    56	ids = [s.strip() for s in ids_file.read_text().splitlines() if s.strip() and not s.lstrip().startswith('#')]
+    57	if not ids or len(ids) != len(set(ids)) or any(not re.fullmatch(r'[A-Za-z0-9_.-]+', s) for s in ids):
+    58	    raise ValueError('Nonempty unique safe task IDs required')
+    59	# PyYAML is not required on the push host. agent.yaml uses a scalar model declaration.
+    60	buf = io.BytesIO()
+    61	model = None
+    62	if not setup_only:
+    63	    models = set()
+    64	    for path in [bundle / 'agent.yaml', *sorted((bundle / 'sub_agents').rglob('*.yaml')), *sorted((bundle / 'sub_agents').rglob('*.yml'))]:
+    65	        for line in path.read_text().splitlines():
+    66	            match = re.fullmatch(r'\s*model:\s*[\'"]?(gemma-4-(?:31b|12b|e4b|e2b)-it-qat-w4a16-ct)[\'"]?\s*(?:#.*)?', line)
+    67	            if match:
+    68	                models.add(match[1])
+    69	    if len(models) != 1:
+    70	        raise ValueError('Expected one allowed scalar model declaration')
+    71	    model = models.pop()
+    72	    buf = io.BytesIO()
+    73	    with gzip.GzipFile(fileobj=buf, mode='wb', mtime=0) as gz:
+    74	        with tarfile.open(fileobj=gz, mode='w') as tf:
+    75	            for path in sorted(bundle.rglob('*')):
+    76	                if path.is_symlink() or not (path.is_file() or path.is_dir()):
+    77	                    raise ValueError('Bundle contains symlink or special file')
+    78	                tf.add(path, arcname=path.relative_to(bundle).as_posix(), recursive=False)
+    79	# Official PyPI wheels the scorer image pip-installs online (Dockerfile.public line 9 and runtime deps)
+    80	# but the offline wheelhouse lacks; pinned by vendor/SHA256SUMS, provenance in docs/ATTRIBUTION.md.
+    81	extra_wheels = {}
+    82	for line in (source / 'vendor' / 'SHA256SUMS').read_text().splitlines():
+    83	    digest, name = line.split()
+    84	    data = (source / 'vendor' / name).read_bytes()
+    85	    if hashlib.sha256(data).hexdigest() != digest:
+    86	        raise ValueError('Vendored wheel sha256 mismatch: ' + name)
+    87	    extra_wheels[name] = [digest, base64.b64encode(data).decode()]
+    88	if 'pytest_timeout-2.1.0-py3-none-any.whl' not in extra_wheels:
+    89	    raise ValueError('Vendored pytest-timeout 2.1.0 wheel missing')
+    90	constants = dict(BUNDLE_B64=base64.b64encode(buf.getvalue()).decode(), TASK_IDS=ids, EXTRA_WHEELS=extra_wheels,
+    91	                 GIT_SHA=subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip(),
+    92	                 KERNEL_BUDGET_SECONDS=budget, SETUP_ONLY=setup_only, SETUP_FIX=int(setup_fix_arg),
+    93	                 SKIP_VERIFICATION=skip_verification_arg == "1",
+    94	                 STOCK_PROBE=stock_probe_arg == "1",
+    95	                 OBSERVED_MAX_SEED_SECONDS=float(seed_max_arg))
+    96	text = (source / 'agent_timing.py').read_text()
+    97	lines = text.splitlines(keepends=True)
+    98	for node in reversed(ast.parse(text).body):
+    99	    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id in constants:
+   100	        key = node.targets[0].id
+   101	        lines[node.lineno-1:node.end_lineno] = [f'{key} = {constants.pop(key)!r}\n']
+   102	if constants:
+   103	    raise ValueError('Missing template constants')
+   104	generated = ''.join(lines)
+   105	compile(generated, 'agent_timing.py', 'exec')
+   106	(stage / 'agent_timing.py').write_text(generated)
+   107	# No network per task constraint. Assumption: Kaggle model_sources accepts versioned model handles.
+   108	metadata = dict(id=kernel_id, title=kernel_id.split('/')[1], code_file='agent_timing.py', language='python',
+   109	                kernel_type='script', is_private=True, enable_gpu=not setup_only, enable_internet=False,
+   110	                dataset_sources=['metric/gemma-4-developer-agent-wheelhouse'],
+   111	                competition_sources=['gemma-4-developer-agent'], model_sources=[] if setup_only else [f'google/gemma-4/Other/{model}/2'], kernel_sources=[],
+   112	                # Pin the starter notebook's image (Python 3.12; wheelhouse binaries are cp312).
+   113	                # Source: kaggle kernels pull ryanholbrook/getting-started-gemma-4-developer-agent -m (2026-11-05).
+   114	                docker_image='gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461')
+   115	(stage / 'kernel-metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
+   116	print(json.dumps(metadata, indent=2))
+   117	print(f'Generated script: {len(generated.encode())} bytes; stage: {stage}')
+   118	print('CPU setup check; no model; starter image pinned' if setup_only else
+   119	      'Metadata assumption (offline): model_sources uses google/gemma-4/Other/<model>/2 (starter casing); docker_image pinned to starter')
+   120	PY
+   121	if $dry_run; then
+   122	  echo "Dry run: no push. Staged: $stage_dir"
+   123	elif [[ $setup_only == 1 ]]; then
+   124	  kaggle kernels push -p "$stage_dir" -t "$((budget + 1800))"
+   125	else
+nl: write error: Broken pipe
+TOP KEYS ['_schema', 'fields', 'tasks', 'gate', 'probes', 'n_complete_no_error', 'decision_note', 'provenance', 'agent_outcome_counts', 'setup_failed_count', 'editable_failed_count', 'image_emulation_seconds', 'phase1_minus_image_seconds', 'setup_py_emulation_seconds', 'stockpath_phase1_seconds', 'h1_composite_seconds', 'fallback_invocations', 'retrying_lines_total', 'phase1_seconds', 'setup_seconds', 'finalization_max_seconds', 'fallback_count', 'tasks_with_retrying_lines', 'fallback_patch_count', 'timeout_fired_count', 'n', 'vllm_startup_seconds', 'total_seconds', 'test_run_share', 'test_runs_per_task', 'empty_patch_count', 'test_files_edited_count', 'stray_files_count', 'test_files_edited_files', 'stray_files_files', 'legacy_projection_decision', 'projected_minutes', 'cap_worst_case_minutes', 'cap_minutes', 'missing_task_ids', 'done_present', 'stopped', 'artifact_errors']
+tasks 8 ['instance_id', 'repo', 'setup_calls', 'sandbox_setup_seconds', 'agent_clock_seconds', 'agent_timeout_fired', 'finalization_seconds', 'teardown_seconds', 'phase1_wall_seconds', 'phase1_source', 'error', 'agent_outcome', 'fallback_patch_used', 'image_emulation_seconds', 'setup_failed', 'editable_failed', 'phase1_minus_image_seconds', 'setup_py_emulation_seconds', 'stockpath_retained_emulation_seconds', 'stockpath_phase1_seconds', 'stock_setup_seconds', 'h1_composite_seconds', 'finalization_failed', 'total', 'nonempty_source_diff']
+missing_task_ids 0 
+stopped 0 
+artifact_errors 0 
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+import json, subprocess, ast, types
+r=json.loads(subprocess.check_output(['git','show','c6f0b66:results/kaggle_timing_31b_v008.json']))
+for t in r['tasks']:
+ print('\\nTASK',t['instance_id'],'flags',t['setup_failed'],t['editable_failed'])
+ for c in t['setup_calls']:
+  if c['rc']"'!=0: print('"'STEP',c['step'],'rc',c['rc'],'out', (c.get('stdout','')+'\\n'+c.get('stderr',''))[-1500:])
+  for s in c.get('subprocesses',[]):
+   if s['rc']"'!=0: print('"'SUB',s['argv'],'rc',s['rc'],'RECORD?', 'uninstall-no-record-file' in s['stdout']+s['stderr'],'out', (s['stdout']+'\\n'+s['stderr'])[-1500:])
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+
+TASK rich_3063 flags False False
+
+TASK rich_3067 flags True True
+
+TASK rich_3454 flags True True
+
+TASK rich_3535 flags True True
+
+TASK rich_3930 flags True True
+
+TASK rich_3953 flags True True
+
+TASK fastapi_14258 flags True True
+
+TASK fastapi_14851 flags True True
+
+exec
+/bin/bash -lc "rg -n 'agent_error|error =|error=' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py; git show c6f0b66:eval/kaggle/agent_timing.py | nl -ba | sed -n '640,670p;798,816p'; rg -n 'def observe_patch_strip|raw_patch' eval/kaggle/agent_timing.py; git show c6f0b66:eval/plans/007.md | head -n 4; git log -3 --oneline" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+495:    agent_error: str | None = None
+791:                            agent_error = (
+870:                                agent_error = f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+928:                            if not agent_error:
+929:                                agent_error = f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+936:                            if not agent_error:
+937:                                agent_error = (
+948:                            if not agent_error:
+949:                                agent_error = (
+959:                        if agent_error:
+1028:                agent_error = (
+1033:                agent_error = (
+1043:            agent_error = f'Sandbox execution error: {e}'
+1080:                    if not agent_error:
+1081:                        agent_error = (
+1094:                if not agent_error:
+1095:                    agent_error = (
+1109:        agent_error = f'Sandbox execution error: {e}'
+1120:    return agent_patch, agent_error, trace
+   640	def classify_patch(patch, repo, protected=None, test_targets=()):
+   641	    """Parse file headers outside hunks, including quoted paths and renames."""
+   642	    files, new = set(), set()
+   643	    current, added, in_hunk = set(), False, False
+   644	    def path_value(raw):
+   645	        raw = raw.split('\t', 1)[0]
+   646	        value = json.loads(raw) if raw.startswith('"') else raw
+   647	        return value[2:] if value.startswith(('a/', 'b/')) else value
+   648	    for line in patch.splitlines() + ['diff --git ']:
+   649	        if line.startswith('diff --git '):
+   650	            files.update(current)
+   651	            if added:
+   652	                new.update(current)
+   653	            current, added, in_hunk = set(), False, False
+   654	            match = re.match(r'^diff --git ("a/.*?"|a/.*?) ("b/.*?"|b/.*)$', line)
+   655	            if match:
+   656	                current.update(path_value(p) for p in match.groups())
+   657	        elif line.startswith('@@'):
+   658	            in_hunk = True
+   659	        elif not in_hunk:
+   660	            if line.startswith(('--- ', '+++ ')):
+   661	                p = path_value(line[4:])
+   662	                if p != '/dev/null':
+   663	                    current.add(p)
+   664	                elif line.startswith('--- '):
+   665	                    added = True
+   666	            elif line.startswith('new file mode '):
+   667	                added = True
+   668	            elif line.startswith(('rename from ', 'rename to ')):
+   669	                current.add(path_value(line.split(' ', 2)[2]))
+   670	    if protected is None:
+   798	                if name in ('sandbox_start', 'sandbox_stop'):
+   799	                    current[name + '_end'] = end
+   800	                    current[name + '_duration'] = end - start
+   801	                if row is not None:
+   802	                    row['duration_s'] = end - start
+   803	    return observed
+   804	
+   805	
+   806	async def skip_verification(docker, config, task, snapshot_path, *, agent_patch='',
+   807	                            agent_error=None, trace=None, start_time=0.0, **kwargs):
+   808	    """Return the harness result type without starting Container B or running tests."""
+   809	    from swegemma.models import TaskResult
+   810	    result = TaskResult(instance_id=task.instance_id, repo=task.repo, resolved=False,
+   811	        agent_patch=agent_patch, test_output='', test_exit_code=0,
+   812	        duration_seconds=time.perf_counter() - start_time, error=agent_error, trace=trace)
+   813	    # swegemma 0.2.11 annotates this field int, with assignment validation disabled.
+   814	    result.test_exit_code = None
+   815	    return result
+   816	
+703:def observe_patch_strip(original, state):
+710:                current['raw_patch'] = patch
+1081:            patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch) or ''
+# Plan 007: 33-dev pass rate (pre-registered 2026-11-06T06:29Z, BEFORE any plan-007 run; dec 058 item 7, dec 061 item 4, dec 062 items 4-5)
+Revision 1 (2026-11-06T07:05Z, still BEFORE any plan-007 run): fixes codex review ops/codex/review-20261106T063014.md BLOCKING 1-4 and
+non-blocking notes. Original text: git show e547980:eval/plans/007.md.
+Supersedes the earlier "time-aware budget lever" draft (kept verbatim as Appendix Z, not scheduled).
+a989604 STATE 80 lines
+785947e STATE <=80 lines
+3e647b1 cycle 121: plan 007 rev 1 (codex BLOCKING 1-4 addressed), re-review running
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+import json,subprocess
+r=json.loads(subprocess.check_output(['git','show','c6f0b66:results/kaggle_timing_31b_v008.json']))
+for t in r['tasks'][:2]:
+ print(t['instance_id']);print(json.dumps(t['setup_calls'],indent=2)[:7500])
+PY
+rg --files runs -g timing.jsonl -g setup_subprocesses.json -g '*setup*jsonl' | head -n 50
+nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py | sed -n '1020,1050p;1072,1115p'
+git show c6f0b66:eval/kaggle/agent_timing.py | nl -ba | sed -n '670,717p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+rich_3063
+[
+  {
+    "step": "venv",
+    "duration_s": 0.372549,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "venv_fidelity",
+    "duration_s": 0.000368,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "pip_bootstrap",
+    "duration_s": 1.06056,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "interpreter_probe",
+    "duration_s": 0.089446,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "tool_sources",
+    "duration_s": 2e-05,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "pytest_timeout_source",
+    "duration_s": 7e-06,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "tool_install",
+    "duration_s": 3.234487,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "tool_deps",
+    "duration_s": 7.547549,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "pip_check",
+    "duration_s": 0.306873,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "workspace_editable",
+    "duration_s": 1.186813,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "base_tar_extraction",
+    "duration_s": 0.984517,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "setup.py",
+    "duration_s": 1.494306,
+    "rc": 0,
+    "retrying_lines": 0
+  }
+]
+rich_3067
+[
+  {
+    "step": "venv",
+    "duration_s": 0.373081,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "venv_fidelity",
+    "duration_s": 0.000285,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "pip_bootstrap",
+    "duration_s": 0.525322,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "interpreter_probe",
+    "duration_s": 0.086941,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "tool_sources",
+    "duration_s": 1.9e-05,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "pytest_timeout_source",
+    "duration_s": 7e-06,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "tool_install",
+    "duration_s": 2.7568,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "tool_deps",
+    "duration_s": 7.485568,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "pip_check",
+    "duration_s": 0.307584,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "workspace_editable",
+    "duration_s": 1.190775,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "base_tar_extraction",
+    "duration_s": 0.49439,
+    "rc": 0,
+    "retrying_lines": 0
+  },
+  {
+    "step": "setup.py",
+    "duration_s": 202.11926,
+    "rc": 0,
+    "retrying_lines": 0
+  }
+]
+runs/31b-v006-p5d-timing/timing.jsonl
+runs/e4b-v001-timing-v4-failed/timing.jsonl
+runs/e4b-timing/timing.jsonl
+runs/e4b-v001-timing-v5/timing.jsonl
+runs/31b-v005-p5c-timing/timing.jsonl
+runs/31b-v003-p5t4-timing/timing.jsonl
+runs/e4b-timing-v2-failed/timing.jsonl
+runs/31b-v007-p5e-timing/timing.jsonl
+runs/e4b-timing-v1-failed/timing.jsonl
+runs/31b-v008-p5f-timing/timing.jsonl
+runs/31b-v001-t4-timing/timing.jsonl
+  1020	
+  1021	                        current_message = genai_types.Content(
+  1022	                            role='user',
+  1023	                            parts=[genai_types.Part(text=nudge_prompt)],
+  1024	                        )
+  1025	
+  1026	        except (TimeoutError, LlmCallsLimitExceededError) as e:
+  1027	            if isinstance(e, TimeoutError):
+  1028	                agent_error = (
+  1029	                    f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+  1030	                )
+  1031	                logger.warning('Task %s agent timed out.', task.instance_id)
+  1032	            else:
+  1033	                agent_error = (
+  1034	                    f'Agent exceeded turns budget ({config.budget.turns} turns)'
+  1035	                    if config.budget.turns is not None
+  1036	                    else 'Agent exceeded maximum allowed LLM turns'
+  1037	                )
+  1038	                logger.warning('Task %s agent exceeded turns budget.', task.instance_id)
+  1039	        except Exception as e:
+  1040	            logger.exception(
+  1041	                'Error during sandbox execution for task %s', task.instance_id
+  1042	            )
+  1043	            agent_error = f'Sandbox execution error: {e}'
+  1044	
+  1045	        if context is not None and hasattr(context, 'stop_agent_session'):
+  1046	            context.stop_agent_session()
+  1047	
+  1048	        agent_patch = (context.submitted_patch if context is not None else '') or ''
+  1049	        is_synthetic_mock_repo = (
+  1050	            task.repo.startswith('test/mock_repo') and task.base_commit == '123456'
+  1072	                if unsubmitted_diff.strip():
+  1073	                    logger.info(
+  1074	                        'Task %s: Captured unsubmitted working tree modifications as fallback patch (%d bytes)',
+  1075	                        task.instance_id,
+  1076	                        len(unsubmitted_diff),
+  1077	                    )
+  1078	                    agent_patch = unsubmitted_diff
+  1079	                else:
+  1080	                    if not agent_error:
+  1081	                        agent_error = (
+  1082	                            'Agent completed execution without calling submit_patch.'
+  1083	                        )
+  1084	                    logger.warning(
+  1085	                        'Task %s completed without explicit submit_patch call and no working tree modifications.',
+  1086	                        task.instance_id,
+  1087	                    )
+  1088	            except Exception as fallback_err:
+  1089	                logger.warning(
+  1090	                    'Failed to check fallback working tree diff for task %s: %s',
+  1091	                    task.instance_id,
+  1092	                    fallback_err,
+  1093	                )
+  1094	                if not agent_error:
+  1095	                    agent_error = (
+  1096	                        'Agent completed execution without calling submit_patch.'
+  1097	                    )
+  1098	        elif not is_synthetic_mock_repo and agent_patch.strip():
+  1099	            from swegemma.harness.verification import strip_protected_files_from_patch
+  1100	
+  1101	            agent_patch = strip_protected_files_from_patch(
+  1102	                agent_patch, extra_protected_paths=extra_protected
+  1103	            )
+  1104	
+  1105	    except ContainerSetupError:
+  1106	        raise
+  1107	    except Exception as e:
+  1108	        logger.exception('Error during sandbox execution for task %s', task.instance_id)
+  1109	        agent_error = f'Sandbox execution error: {e}'
+  1110	    finally:
+  1111	        if context is not None and hasattr(context, 'stop_agent_session'):
+  1112	            context.stop_agent_session()
+  1113	        if file_display_mgr is not None:
+  1114	            file_display_mgr.stop()
+  1115	        if log_file is not None:
+   670	    if protected is None:
+   671	        protected = lambda p: bool(re.search(r'(^|/)(tests?/|test_[^/]*\.py$|conftest\.py$)|_test\.py$', p))
+   672	    tests = sorted(p for p in files if protected(p) or p in test_targets)
+   673	    package = repo.split('/')[-1].replace('-', '_').lower()
+   674	    source_roots = (package + '/', 'src/' + package + '/')
+   675	    stray = sorted(p for p in new if not (p.endswith('.py') and p.lower().startswith(source_roots)
+   676	                                         and p not in tests))
+   677	    return dict(patch_bytes=len(patch.encode()), patch_files=sorted(files),
+   678	                test_files_edited=tests, stray_files=stray, empty_patch=not patch.strip())
+   679	
+   680	def trace_counts(trace):
+   681	    entries = trace.entries if trace else []
+   682	    counts = Counter(e.tool_name for e in entries if e.event_type == 'tool_call')
+   683	    tokens = {}
+   684	    for key in ('prompt_tokens', 'completion_tokens'):
+   685	        values = [e.usage[key] for e in entries if e.usage and isinstance(e.usage.get(key), (int, float))]
+   686	        tokens[key] = sum(values) if values else None
+   687	    return dict(counts), tokens, tool_seconds(entries)
+   688	
+   689	def tool_seconds(entries):
+   690	    """Per tool name: wall seconds from each tool_call to its tool_response (FIFO per name)."""
+   691	    pending, out = {}, {}
+   692	    for e in entries:
+   693	        if e.event_type == 'tool_call':
+   694	            pending.setdefault(e.tool_name, []).append(e.timestamp)
+   695	        elif e.event_type == 'tool_response' and pending.get(e.tool_name):
+   696	            stat = out.setdefault(e.tool_name, dict(n=0, total=0.0, max=0.0))
+   697	            dt = max(0.0, e.timestamp - pending[e.tool_name].pop(0))
+   698	            stat['n'] += 1
+   699	            stat['total'] = round(stat['total'] + dt, 3)
+   700	            stat['max'] = round(max(stat['max'], dt), 3)
+   701	    return out
+   702	
+   703	def observe_patch_strip(original, state):
+   704	    """Retain the agent's diff before the harness removes protected edits."""
+   705	    def strip(patch, *pos, **kw):
+   706	        current = state.get(None)
+   707	        filtered = original(patch, *pos, **kw)
+   708	        if current is not None and current.get('agent_active'):
+   709	            if patch != current.get('filtered_patch'):
+   710	                current['raw_patch'] = patch
+   711	            current['filtered_patch'] = filtered
+   712	        return filtered
+   713	    return strip
+   714	
+   715	def test_run_stats(trace, agent_seconds):
+   716	    pending, n, total = {}, 0, 0.0
+   717	    for e in trace.entries if trace else []:
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+import json
+for l in open('runs/31b-v008-p5f-timing/timing.jsonl'):
+ t=json.loads(l)
+ if 'instance_id' not in t: continue
+ print('\\n',t['instance_id'],'flags',t['setup_failed'],t['editable_failed'],'error',t['error'],'clock',t.get('agent_clock_seconds'),'final',t.get('finalization_seconds'))
+ for c in t['setup_calls']:
+  if c['rc']"'!=0: print('"'STEP',c['step'],'rc',c['rc'],'RECORD?', 'uninstall-no-record-file' in c.get('stdout','')+c.get('stderr',''))
+ for s in t.get('setup_subprocesses',[]):
+  if isinstance(s.get('argv'),list) and '-e' in s['argv']:
+   print('EDITABLE',s['argv'],'rc',s['rc'],'RECORD?', 'uninstall-no-record-file' in s.get('stdout','')+s.get('stderr',''),'output', (s.get('stdout','')+'\\n'+s.get('stderr',''))[-1800:])
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+
+ rich_3063 flags False False error None clock 109.40492674699999 final 0.14154503100007787
+EDITABLE ['/tmp/swegemma_sandbox_3466e81c-b5a_14x2lmrw/venv/bin/python3', '-m', 'pip', 'install', '--no-index', '--find-links=/wheels', '--no-build-isolation', '--no-deps', '-e', '/tmp/swegemma_sandbox_3466e81c-b5a_14x2lmrw/workspace'] rc 0 RECORD? False output Looking in links: /wheels
+Obtaining file:///tmp/swegemma_sandbox_3466e81c-b5a_14x2lmrw/workspace
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: rich
+  Building editable for rich (pyproject.toml): started
+  Building editable for rich (pyproject.toml): finished with status 'done'
+  Created wheel for rich: filename=rich-13.4.2-py3-none-any.whl size=7885 sha256=705739acb4f66c88356f8047988202ce11d720a04bec4721e4bfd8ae288df5d4
+  Stored in directory: /tmp/swegemma_sandbox_3466e81c-b5a_14x2lmrw/tmp/pip-ephem-wheel-cache-n_jrrp5f/wheels/35/d6/f5/b57be34bd3f88a20d4bc2777e8c4e0339529adc22215c2ef3c
+Successfully built rich
+Installing collected packages: rich
+  Attempting uninstall: rich
+    Found existing installation: rich 13.4.2
+    Uninstalling rich-13.4.2:
+      Successfully uninstalled rich-13.4.2
+Successfully installed rich-13.4.2
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+
+
+ rich_3067 flags True True error None clock 45.691308128999935 final 0.14490825300003962
+EDITABLE ['/tmp/swegemma_sandbox_290c8738-6f4_02v2q_0y/venv/bin/python3', '-m', 'pip', 'install', '--no-index', '--find-links=/wheels', '--no-build-isolation', '--no-deps', '-e', '/tmp/swegemma_sandbox_290c8738-6f4_02v2q_0y/workspace'] rc 1 RECORD? True output Looking in links: /wheels
+Obtaining file:///tmp/swegemma_sandbox_290c8738-6f4_02v2q_0y/workspace
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: rich
+  Building editable for rich (pyproject.toml): started
+  Building editable for rich (pyproject.toml): finished with status 'done'
+  Created wheel for rich: filename=rich-13.5.0-py3-none-any.whl size=7882 sha256=c361d913e4efb9cba2196b617a4f0a00aa38c57dcb788ae5017b26dd9cd4f722
+  Stored in directory: /tmp/swegemma_sandbox_290c8738-6f4_02v2q_0y/tmp/pip-ephem-wheel-cache-kr3ybr93/wheels/7b/32/7f/12acc8e801b703e2458abfbcca4d2c232011c4b8ac25470c38
+Successfully built rich
+Installing collected packages: rich
+  Attempting uninstall: rich
+    Found existing installation: rich 15.0.0
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+error: uninstall-no-record-file
+
+× Cannot uninstall rich 15.0.0
+╰─> The package's contents are unknown: no RECORD file was found for rich.
+
+hint: You might be able to recover from this via: pip install --force-reinstall --no-deps rich==15.0.0
+
+EDITABLE ['/tmp/swegemma_sandbox_290c8738-6f4_02v2q_0y/venv/bin/python3', '-m', 'pip', 'install', '--no-deps', '-e', '/tmp/swegemma_sandbox_290c8738-6f4_02v2q_0y/workspace'] rc 1 RECORD? False output Obtaining file:///tmp/swegemma_sandbox_290c8738-6f4_02v2q_0y/workspace
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'error'
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+  error: subprocess-exited-with-error
+  
+  × pip subprocess to install build dependencies did not run successfully.
+  │ exit code: 1
+  ╰─> See above for output.
+  
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+error: subprocess-exited-with-error
+
+× pip subprocess to install build dependencies did not run successfully.
+│ exit code: 1
+╰─> See above for output.
+
+note: This error originates from a subprocess, and is likely not a problem with pip.
+
+
+ rich_3454 flags True True error None clock 168.81321037399994 final 0.1474898880001092
+EDITABLE ['/tmp/swegemma_sandbox_2726223e-50d_i5k7ob0f/venv/bin/python3', '-m', 'pip', 'install', '--no-index', '--find-links=/wheels', '--no-build-isolation', '--no-deps', '-e', '/tmp/swegemma_sandbox_2726223e-50d_i5k7ob0f/workspace'] rc 1 RECORD? True output Looking in links: /wheels
+Obtaining file:///tmp/swegemma_sandbox_2726223e-50d_i5k7ob0f/workspace
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: rich
+  Building editable for rich (pyproject.toml): started
+  Building editable for rich (pyproject.toml): finished with status 'done'
+  Created wheel for rich: filename=rich-13.7.1-py3-none-any.whl size=7754 sha256=b5724810fc877995f63c22dba589ae9458d4ba2473d61be07044e322b888e33d
+  Stored in directory: /tmp/swegemma_sandbox_2726223e-50d_i5k7ob0f/tmp/pip-ephem-wheel-cache-2ogtu0qf/wheels/8f/88/da/001548c9263978d601a02f3233e4913296bc30975ed700ba53
+Successfully built rich
+Installing collected packages: rich
+  Attempting uninstall: rich
+    Found existing installation: rich 15.0.0
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+error: uninstall-no-record-file
+
+× Cannot uninstall rich 15.0.0
+╰─> The package's contents are unknown: no RECORD file was found for rich.
+
+hint: You might be able to recover from this via: pip install --force-reinstall --no-deps rich==15.0.0
+
+EDITABLE ['/tmp/swegemma_sandbox_2726223e-50d_i5k7ob0f/venv/bin/python3', '-m', 'pip', 'install', '--no-deps', '-e', '/tmp/swegemma_sandbox_2726223e-50d_i5k7ob0f/workspace'] rc 1 RECORD? False output Obtaining file:///tmp/swegemma_sandbox_2726223e-50d_i5k7ob0f/workspace
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'error'
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+  error: subprocess-exited-with-error
+  
+  × pip subprocess to install build dependencies did not run successfully.
+  │ exit code: 1
+  ╰─> See above for output.
+  
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+error: subprocess-exited-with-error
+
+× pip subprocess to install build dependencies did not run successfully.
+│ exit code: 1
+╰─> See above for output.
+
+note: This error originates from a subprocess, and is likely not a problem with pip.
+
+
+ rich_3535 flags True True error None clock 79.25969324200014 final 0.14768624099997396
+EDITABLE ['/tmp/swegemma_sandbox_f25a28a3-e9c_51l8gehw/venv/bin/python3', '-m', 'pip', 'install', '--no-index', '--find-links=/wheels', '--no-build-isolation', '--no-deps', '-e', '/tmp/swegemma_sandbox_f25a28a3-e9c_51l8gehw/workspace'] rc 1 RECORD? True output Looking in links: /wheels
+Obtaining file:///tmp/swegemma_sandbox_f25a28a3-e9c_51l8gehw/workspace
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: rich
+  Building editable for rich (pyproject.toml): started
+  Building editable for rich (pyproject.toml): finished with status 'done'
+  Created wheel for rich: filename=rich-13.9.2-py3-none-any.whl size=7750 sha256=b2267a8a8e80023cdfc972d3a4a8424760a9ac1926ac8fa97a0e771e17802031
+  Stored in directory: /tmp/swegemma_sandbox_f25a28a3-e9c_51l8gehw/tmp/pip-ephem-wheel-cache-ahmn9ugk/wheels/a3/f1/7d/bd6de94afe10cbd993e231eeafa23af82a8af1b293887a7045
+Successfully built rich
+Installing collected packages: rich
+  Attempting uninstall: rich
+    Found existing installation: rich 15.0.0
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+error: uninstall-no-record-file
+
+× Cannot uninstall rich 15.0.0
+╰─> The package's contents are unknown: no RECORD file was found for rich.
+
+hint: You might be able to recover from this via: pip install --force-reinstall --no-deps rich==15.0.0
+
+EDITABLE ['/tmp/swegemma_sandbox_f25a28a3-e9c_51l8gehw/venv/bin/python3', '-m', 'pip', 'install', '--no-deps', '-e', '/tmp/swegemma_sandbox_f25a28a3-e9c_51l8gehw/workspace'] rc 1 RECORD? False output Obtaining file:///tmp/swegemma_sandbox_f25a28a3-e9c_51l8gehw/workspace
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'error'
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+  error: subprocess-exited-with-error
+  
+  × pip subprocess to install build dependencies did not run successfully.
+  │ exit code: 1
+  ╰─> See above for output.
+  
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+error: subprocess-exited-with-error
+
+× pip subprocess to install build dependencies did not run successfully.
+│ exit code: 1
+╰─> See above for output.
+
+note: This error originates from a subprocess, and is likely not a problem with pip.
+
+
+ rich_3930 flags True True error None clock 106.96494802000007 final 0.14798332500004108
+EDITABLE ['/tmp/swegemma_sandbox_710ecad2-743_f_es181f/venv/bin/python3', '-m', 'pip', 'install', '--no-index', '--find-links=/wheels', '--no-build-isolation', '--no-deps', '-e', '/tmp/swegemma_sandbox_710ecad2-743_f_es181f/workspace'] rc 1 RECORD? True output Looking in links: /wheels
+Obtaining file:///tmp/swegemma_sandbox_710ecad2-743_f_es181f/workspace
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: rich
+  Building editable for rich (pyproject.toml): started
+  Building editable for rich (pyproject.toml): finished with status 'done'
+  Created wheel for rich: filename=rich-14.2.0-py3-none-any.whl size=7850 sha256=1588901647e43bb3b390fbf5f34af31dc3c113b3fa7cef819b6d4760111f9fc5
+  Stored in directory: /tmp/swegemma_sandbox_710ecad2-743_f_es181f/tmp/pip-ephem-wheel-cache-prty2rrd/wheels/84/06/ae/bdf858c93ce5f2a783f6b548001a1ab84d9b11ed10303d753f
+Successfully built rich
+Installing collected packages: rich
+  Attempting uninstall: rich
+    Found existing installation: rich 15.0.0
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+error: uninstall-no-record-file
+
+× Cannot uninstall rich 15.0.0
+╰─> The package's contents are unknown: no RECORD file was found for rich.
+
+hint: You might be able to recover from this via: pip install --force-reinstall --no-deps rich==15.0.0
+
+EDITABLE ['/tmp/swegemma_sandbox_710ecad2-743_f_es181f/venv/bin/python3', '-m', 'pip', 'install', '--no-deps', '-e', '/tmp/swegemma_sandbox_710ecad2-743_f_es181f/workspace'] rc 1 RECORD? False output Obtaining file:///tmp/swegemma_sandbox_710ecad2-743_f_es181f/workspace
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'error'
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+  error: subprocess-exited-with-error
+  
+  × pip subprocess to install build dependencies did not run successfully.
+  │ exit code: 1
+  ╰─> See above for output.
+  
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+error: subprocess-exited-with-error
+
+× pip subprocess to install build dependencies did not run successfully.
+│ exit code: 1
+╰─> See above for output.
+
+note: This error originates from a subprocess, and is likely not a problem with pip.
+
+
+ rich_3953 flags True True error None clock 21.876157606000106 final 0.15634694599975774
+EDITABLE ['/tmp/swegemma_sandbox_38cf531d-92a_nt32jkbo/venv/bin/python3', '-m', 'pip', 'install', '--no-index', '--find-links=/wheels', '--no-build-isolation', '--no-deps', '-e', '/tmp/swegemma_sandbox_38cf531d-92a_nt32jkbo/workspace'] rc 1 RECORD? True output Looking in links: /wheels
+Obtaining file:///tmp/swegemma_sandbox_38cf531d-92a_nt32jkbo/workspace
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: rich
+  Building editable for rich (pyproject.toml): started
+  Building editable for rich (pyproject.toml): finished with status 'done'
+  Created wheel for rich: filename=rich-14.3.1-py3-none-any.whl size=7853 sha256=014dce8f8c1c24acfb102d7e9652fc8133924487bc436a4a55471ef45209fda8
+  Stored in directory: /tmp/swegemma_sandbox_38cf531d-92a_nt32jkbo/tmp/pip-ephem-wheel-cache-oi2b47xn/wheels/2b/7b/b6/cc3d77302556d57544092f3e25fece36ae85c1052fd7ca808b
+Successfully built rich
+Installing collected packages: rich
+  Attempting uninstall: rich
+    Found existing installation: rich 15.0.0
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+error: uninstall-no-record-file
+
+× Cannot uninstall rich 15.0.0
+╰─> The package's contents are unknown: no RECORD file was found for rich.
+
+hint: You might be able to recover from this via: pip install --force-reinstall --no-deps rich==15.0.0
+
+EDITABLE ['/tmp/swegemma_sandbox_38cf531d-92a_nt32jkbo/venv/bin/python3', '-m', 'pip', 'install', '--no-deps', '-e', '/tmp/swegemma_sandbox_38cf531d-92a_nt32jkbo/workspace'] rc 1 RECORD? False output Obtaining file:///tmp/swegemma_sandbox_38cf531d-92a_nt32jkbo/workspace
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'error'
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+  error: subprocess-exited-with-error
+  
+  × pip subprocess to install build dependencies did not run successfully.
+  │ exit code: 1
+  ╰─> See above for output.
+  
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+error: subprocess-exited-with-error
+
+× pip subprocess to install build dependencies did not run successfully.
+│ exit code: 1
+╰─> See above for output.
+
+note: This error originates from a subprocess, and is likely not a problem with pip.
+
+
+ fastapi_14258 flags True True error None clock 37.35991624600001 final 0.21858428199993796
+EDITABLE ['/tmp/swegemma_sandbox_04a98430-4ca_pl19p6q_/venv/bin/python3', '-m', 'pip', 'install', '--no-index', '--find-links=/wheels', '--no-build-isolation', '--no-deps', '-e', '/tmp/swegemma_sandbox_04a98430-4ca_pl19p6q_/workspace'] rc 1 RECORD? True output Looking in links: /wheels
+Obtaining file:///tmp/swegemma_sandbox_04a98430-4ca_pl19p6q_/workspace
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: fastapi
+  Building editable for fastapi (pyproject.toml): started
+  Building editable for fastapi (pyproject.toml): finished with status 'done'
+  Created wheel for fastapi: filename=fastapi-0.128.6-py3-none-any.whl size=11490 sha256=5e896ee8c6aed10900e60e24263ed933f68410e54611c00b1715615fad8a85ba
+  Stored in directory: /tmp/swegemma_sandbox_04a98430-4ca_pl19p6q_/tmp/pip-ephem-wheel-cache-j068nl8d/wheels/7d/93/67/216e1e3588c2bd0541fdd52348970600dc4a111007c9cbf033
+Successfully built fastapi
+Installing collected packages: fastapi
+  Attempting uninstall: fastapi
+    Found existing installation: fastapi 0.141.1
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+error: uninstall-no-record-file
+
+× Cannot uninstall fastapi 0.141.1
+╰─> The package's contents are unknown: no RECORD file was found for fastapi.
+
+hint: You might be able to recover from this via: pip install --force-reinstall --no-deps fastapi==0.141.1
+
+EDITABLE ['/tmp/swegemma_sandbox_04a98430-4ca_pl19p6q_/venv/bin/python3', '-m', 'pip', 'install', '--no-deps', '-e', '/tmp/swegemma_sandbox_04a98430-4ca_pl19p6q_/workspace'] rc 1 RECORD? False output Obtaining file:///tmp/swegemma_sandbox_04a98430-4ca_pl19p6q_/workspace
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'error'
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+  error: subprocess-exited-with-error
+  
+  × pip subprocess to install build dependencies did not run successfully.
+  │ exit code: 1
+  ╰─> See above for output.
+  
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+error: subprocess-exited-with-error
+
+× pip subprocess to install build dependencies did not run successfully.
+│ exit code: 1
+╰─> See above for output.
+
+note: This error originates from a subprocess, and is likely not a problem with pip.
+
+
+ fastapi_14851 flags True True error None clock 102.3617075469997 final 0.2204644210000879
+EDITABLE ['/tmp/swegemma_sandbox_0b17042a-111_eqbgxvs1/venv/bin/python3', '-m', 'pip', 'install', '--no-index', '--find-links=/wheels', '--no-build-isolation', '--no-deps', '-e', '/tmp/swegemma_sandbox_0b17042a-111_eqbgxvs1/workspace'] rc 1 RECORD? True output Looking in links: /wheels
+Obtaining file:///tmp/swegemma_sandbox_0b17042a-111_eqbgxvs1/workspace
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: fastapi
+  Building editable for fastapi (pyproject.toml): started
+  Building editable for fastapi (pyproject.toml): finished with status 'done'
+  Created wheel for fastapi: filename=fastapi-0.128.2-py3-none-any.whl size=11494 sha256=b91b23805f9d46bf81a301209070dfa8811f034f3d0d4b4ed57fce3dd8ba9c2e
+  Stored in directory: /tmp/swegemma_sandbox_0b17042a-111_eqbgxvs1/tmp/pip-ephem-wheel-cache-usdszfos/wheels/0e/2c/ec/55ec1e39f727639ab60f331f3ed8ede9b8631d6fd27c777d55
+Successfully built fastapi
+Installing collected packages: fastapi
+  Attempting uninstall: fastapi
+    Found existing installation: fastapi 0.141.1
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+error: uninstall-no-record-file
+
+× Cannot uninstall fastapi 0.141.1
+╰─> The package's contents are unknown: no RECORD file was found for fastapi.
+
+hint: You might be able to recover from this via: pip install --force-reinstall --no-deps fastapi==0.141.1
+
+EDITABLE ['/tmp/swegemma_sandbox_0b17042a-111_eqbgxvs1/venv/bin/python3', '-m', 'pip', 'install', '--no-deps', '-e', '/tmp/swegemma_sandbox_0b17042a-111_eqbgxvs1/workspace'] rc 1 RECORD? False output Obtaining file:///tmp/swegemma_sandbox_0b17042a-111_eqbgxvs1/workspace
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'error'
+
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ModuleNotFoundError: No module named 'wrapt'
+  error: subprocess-exited-with-error
+  
+  × pip subprocess to install build dependencies did not run successfully.
+  │ exit code: 1
+  ╰─> See above for output.
+  
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+error: subprocess-exited-with-error
+
+× pip subprocess to install build dependencies did not run successfully.
+│ exit code: 1
+╰─> See above for output.
+
+note: This error originates from a subprocess, and is likely not a problem with pip.
+
+
+exec
+/bin/bash -lc "git show c6f0b66:eval/tests/test_agent_timing.py | sed -n '1,38p;85,100p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py | sed -n '320,350p'; rg -n 'def _validate_junit_xml|return False|Missing|missing' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py | head -n 40; git show c6f0b66:results/kaggle_timing_31b_v008.json | nl -ba | sed -n '625,645p;1120,1136p'; nl -ba runs/31b-v008-p5f-timing/timing.jsonl | cut -c 1-150 | head -n 12; cat eval/plans/007-smoke-ids.txt" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+"""Offline timing-kernel generation, instrumentation and runtime-gate checks."""
+import ast
+import base64
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import py_compile
+import subprocess
+from types import SimpleNamespace as Entry
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def load(name):
+    spec = importlib.util.spec_from_file_location(name, ROOT / 'eval/kaggle' / f'{name}.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+timing = load('agent_timing')
+summary = load('timing_summary')
+
+
+def test_generated_script_and_bundle(tmp_path):
+    bundle = tmp_path / 'bundle'
+    bundle.mkdir()
+    (bundle / 'agent.yaml').write_text('model: gemma-4-e4b-it-qat-w4a16-ct\n')
+    (bundle / 'prompt.md').write_text('example prompt')
+    ids = tmp_path / 'ids'
+    ids.write_text('task-1\ntask-2\n')
+    proc = subprocess.run(['bash', str(ROOT / 'eval/kaggle/timing_push.sh'), '--dry-run',
+                           'example/timing-test', str(bundle), str(ids), '1000'], check=True, capture_output=True, text=True)
+    stage = Path(proc.stdout.split('Dry run: no push. Staged: ')[1].strip())
+    try:
+    assert timing.test_run_stats(trace, 10) == dict(n=2, total_seconds=5, share_of_agent_seconds=.5)
+
+
+def test_timebox_boundary():
+    assert not timing.should_stop(100, 5, 300, 0, 1000)
+    assert timing.should_stop(100.01, 5, 300, 0, 1000)
+    assert timing.should_stop(100, 5, 300, 601, 1000)
+    # plan 007: explicit setup reserve (3 passes with verification) and smoke-seeded observed max
+    assert timing.setup_reserve_seconds(True) == timing.SETUP_PASS_SECONDS
+    assert timing.setup_reserve_seconds(False) == 3 * timing.SETUP_PASS_SECONDS
+    assert not timing.should_stop(0, 3.5, 300, 0, 1.5 * (210 + 300 + 720))
+    assert timing.should_stop(0.01, 3.5, 300, 0, 1.5 * (210 + 300 + 720), 720)
+    assert not timing.should_stop(0.01, 3.5, 300, 0, 1.5 * (210 + 300 + 720))
+
+
+@pytest.fixture(autouse=True)
+   320	                total_tasks,
+   321	                **run_kwargs,
+   322	            )
+   323	
+   324	        if agent_error and not agent_patch:
+   325	            json_path = save_trace_artifact(
+   326	                trace, self.config.results_dir, task.instance_id
+   327	            )
+   328	            duration = time.perf_counter() - start_time
+   329	            llm_calls = context.llm_calls_used
+   330	            if dashboard is not None and slot_id is not None:
+   331	                dashboard.task_completed(
+   332	                    slot_id,
+   333	                    False,
+   334	                    duration,
+   335	                    agent_error,
+   336	                    agent_duration=context.agent_elapsed_seconds if context else None,
+   337	                )
+   338	            return TaskResult(
+   339	                instance_id=task.instance_id,
+   340	                repo=task.repo,
+   341	                resolved=False,
+   342	                agent_patch='',
+   343	                test_output='',
+   344	                test_exit_code=-1,
+   345	                duration_seconds=duration,
+   346	                error=agent_error,
+   347	                trace_json_path=json_path,
+   348	                total_llm_calls=llm_calls,
+   349	                tool_calls=context.tool_calls_used,
+   350	                task_index=task_index,
+100:            return False
+266:def _validate_junit_xml(
+276:        return False, 'Missing or empty JUnit XML report (possible premature exit)'
+280:        return False, f'Malformed JUnit XML report: {e}'
+284:        return False, 'No <testsuite> elements found in JUnit XML'
+340:                return False, f'Required test node did not pass: {req}'
+379:            error='Missing test specification (empty test_patch and FAIL_TO_PASS; secret hydration failed or unavailable)',
+467:                            f'Agent patch file missing in container on task {task.instance_id}: {err_detail}'
+491:                patch_host_path.unlink(missing_ok=True)
+577:                            f'Test patch file missing in container on task {task.instance_id}: {err_detail}'
+599:                test_patch_host_path.unlink(missing_ok=True)
+683:                junit_error = 'Missing JUnit XML report (possible premature os._exit(0))'
+   625	      ],
+   626	      "sandbox_setup_seconds": 215.13678399999998,
+   627	      "agent_clock_seconds": 21.876157606000106,
+   628	      "agent_timeout_fired": false,
+   629	      "finalization_seconds": 0.15634694599975774,
+   630	      "teardown_seconds": 0.15126415399981852,
+   631	      "phase1_wall_seconds": 237.927132454,
+   632	      "phase1_source": "sandbox_wrappers",
+   633	      "error": null,
+   634	      "agent_outcome": null,
+   635	      "fallback_patch_used": false,
+   636	      "image_emulation_seconds": 11.192419000000001,
+   637	      "setup_failed": true,
+   638	      "editable_failed": true,
+   639	      "phase1_minus_image_seconds": 226.734713454,
+   640	      "setup_py_emulation_seconds": 201.965288,
+   641	      "stockpath_retained_emulation_seconds": 1.604012,
+   642	      "stockpath_phase1_seconds": 24.769425454000014,
+   643	      "stock_setup_seconds": 3.681,
+   644	      "h1_composite_seconds": 25.713504551999865,
+   645	      "finalization_failed": [],
+  1120	      "max_turns": 50
+  1121	    },
+  1122	    "created_utc": "2026-11-06T05:35:03.504451+00:00",
+  1123	    "concurrency": 1,
+  1124	    "mcp_import_ok": true
+  1125	  },
+  1126	  "agent_outcome_counts": {
+  1127	    "None": 8
+  1128	  },
+  1129	  "setup_failed_count": 7,
+  1130	  "editable_failed_count": 7,
+  1131	  "image_emulation_seconds": {
+  1132	    "mean": 11.31649125,
+  1133	    "p50": 11.183697,
+  1134	    "p90": 11.5236097,
+  1135	    "max": 12.23931
+  1136	  },
+     1	{"_schema": "kaggle_timing_v1", "git_sha": "b4d9f595227656ffa19d002164f66cb07a6ce77c", "task_ids": ["rich_3063", "rich_3067", "rich_3454", "ric
+     2	{"_vllm": {"startup_seconds": 388.47565791400007}}
+     3	{"instance_id": "rich_3063", "repo": "Textualize/rich", "resolved": false, "exit_code": null, "error": null, "agent_timeout_seconds": 240.0, "a
+     4	{"instance_id": "rich_3067", "repo": "Textualize/rich", "resolved": false, "exit_code": null, "error": null, "agent_timeout_seconds": 240.0, "a
+     5	{"instance_id": "rich_3454", "repo": "Textualize/rich", "resolved": false, "exit_code": null, "error": null, "agent_timeout_seconds": 240.0, "a
+     6	{"instance_id": "rich_3535", "repo": "Textualize/rich", "resolved": false, "exit_code": null, "error": null, "agent_timeout_seconds": 240.0, "a
+     7	{"instance_id": "rich_3930", "repo": "Textualize/rich", "resolved": false, "exit_code": null, "error": null, "agent_timeout_seconds": 240.0, "a
+     8	{"instance_id": "rich_3953", "repo": "Textualize/rich", "resolved": false, "exit_code": null, "error": null, "agent_timeout_seconds": 240.0, "a
+     9	{"instance_id": "fastapi_14258", "repo": "fastapi/fastapi", "resolved": false, "exit_code": null, "error": null, "agent_timeout_seconds": 240.0
+    10	{"instance_id": "fastapi_14851", "repo": "fastapi/fastapi", "resolved": false, "exit_code": null, "error": null, "agent_timeout_seconds": 240.0
+    11	{"_done": {"n": 8, "total_seconds": {"mean": 275.29432635125, "p50": 278.73985807450003, "p90": 341.6024791647, "max": 385.0732385869999}, "sta
+# plan 007 arm-1 smoke: first 3 ids of eval/plans/007-arm1-ids.txt
+rich_3063
+rich_3953
+fastapi_14372
+
+exec
+/bin/bash -lc "rg -n '124|TimeoutExpired|timed out' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/subprocess* /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/sandbox*; git show c6f0b66:eval/kaggle/agent_timing.py | head -n 60; git show c6f0b66:eval/kaggle/timing_push.sh | tail -n 8; git show c6f0b66:eval/plans/007-arm1-ids.txt | sha256sum; git show c6f0b66:eval/splits/dev.txt | sha256sum" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/subprocess*: No such file or directory (os error 2)
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/sandbox*: No such file or directory (os error 2)
+"""Self-contained Kaggle timing script; starter notebook cells 2/8/10, swegemma 0.2.11.
+Trace/patch classification copied from codex/eval-runner; no repository imports.
+Build using timing_push.sh. Raw task artifacts stay in /kaggle/working/runs.
+"""
+import asyncio
+import base64
+from collections import Counter
+import dataclasses
+from datetime import datetime, timezone
+import glob
+import hashlib
+import importlib
+import io
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import shutil
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import tarfile
+import threading
+import time
+
+BUNDLE_B64 = ""  # embedded by timing_push.sh
+TASK_IDS = []
+# {wheel filename: [sha256, base64]}: public wheels the scorer image pip-installs online but the offline
+# Kaggle wheelhouse lacks (pytest-timeout==2.1.0, Dockerfile.public line 9). Embedded by timing_push.sh.
+EXTRA_WHEELS = {}
+SETUP_ONLY = False
+SKIP_VERIFICATION = True
+SETUP_FIX = 1
+GIT_SHA = ""
+KERNEL_BUDGET_SECONDS = 3 * 3600
+P1_DEADLINE_SECONDS = 180
+STOCK_PROBE = True  # P1 (plan 006 addendum): time the stock subprocess setup per task
+# Plan 007 (codex review 063014 item 4): should_stop reserves sandbox setup passes explicitly, and a
+# prior chunk's (smoke) max per-task total seeds observed_max because each kernel restarts `totals`.
+SETUP_PASS_SECONDS = 240  # per sandbox dependency-setup pass; 1 pass (agent) + 2 (Container B) with verification
+OBSERVED_MAX_SEED_SECONDS = 0.0
+DATA = Path('/kaggle/input/competitions/gemma-4-developer-agent')
+WORK = Path('/kaggle/working')
+BUNDLE = WORK / 'bundle'
+WHEELHOUSE = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')
+
+def install():
+    print('python', sys.version.split()[0], 'executable', sys.executable, flush=True)
+    env = dict(TRANSFORMERS_NO_TF='1', TRANSFORMERS_NO_FLAX='1', TRANSFORMERS_OFFLINE='1',
+               VLLM_NO_USAGE_STATS='1', VLLM_WORKER_MULTIPROC_METHOD='spawn',
+               VLLM_ENGINE_READY_TIMEOUT_S='1200', VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS='1',
+               NCCL_DEBUG='WARN', LITELLM_LOCAL_MODEL_COST_MAP='True', LITELLM_TELEMETRY='False',
+               LITELLM_LOG='WARNING', PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True',
+               OTEL_SDK_DISABLED='true', OTEL_PYTHON_DISABLED='true')
+    os.environ.update(env)
+    for key in ('OPENAI_API_KEY', 'LOCAL_API_KEY'):
+        os.environ.setdefault(key, 'EMPTY')
+  kaggle kernels push -p "$stage_dir" --accelerator NvidiaL4 -t "$((budget + 1800))"
+  shape_dir=$(mktemp -d /tmp/timing-kernel-shape.XXXXXX)
+  kaggle kernels pull "$1" -p "$shape_dir" -m >/dev/null
+  shape=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["machine_shape"])' "$shape_dir/kernel-metadata.json")
+  rm -rf -- "$shape_dir"
+  echo "Server machine_shape: $shape"
+  if [[ $shape != NvidiaL4 ]]; then echo "WARNING: accelerator is $shape, not NvidiaL4; kernel will abort at the GPU check" >&2; fi
+fi
+127d32f9440116822569a5395a77d356cb9a83a71d2c78ed15944a9a05da49e9  -
+bff0841a64e07b7ea5a3e38edbca59d64f92ab4ac61dfb1635f57affc040d2d7  -
+
+codex
+Two blocking mismatches remain: the KNOWN-DIAG rule rejects the documented offline fallback failure, and `harness_error` classifies failed agent-patch application and JUnit failures as H-ROW. Pytest timeouts also fall outside H-VERIFY’s allowed codes. These quality outcomes can still fail the smoke gate and authorize reruns.
+
+The 5,400-second budget admits three tasks at the requested 1,170-second estimate, including roughly 330 seconds for vLLM startup. I’m finishing the read-only checks of seed plumbing and row fields.
+exec
+/bin/bash -lc "rg --files /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma | rg 'subprocess|sandbox'; rg -n '124|TimeoutExpired' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma | head -n 35; python3 - <<'PY'
+import ast,subprocess,re,types,json
+src=subprocess.check_output(['git','show','c6f0b66:eval/kaggle/agent_timing.py'],text=True)
+tree=ast.parse(src)
+names={'AGENT_OUTCOMES','SETUP_PASS_SECONDS','OBSERVED_MAX_SEED_SECONDS'}
+functions={'agent_outcome','harness_error','should_stop','setup_reserve_seconds','phase1_fields','classify_patch','observe_patch_strip'}
+selected=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in functions or isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name) and n.targets[0].id in names]
+ns={'re':re,'SKIP_VERIFICATION':False,'json':json}
+exec(compile(ast.Module(selected,type_ignores=[]),'c6f0b66','exec'),ns)
+for error in ['Agent exceeded session timeout (3.5 min)','Agent completed execution without calling submit_patch.','Failed to apply agent patch: patch does not apply','Required test node did not pass: test_example','Missing JUnit XML report (possible premature os._exit(0))']:
+ print('error classification:',error,'=>',ns['harness_error'](types.SimpleNamespace(error=error),None))
+f=ns['should_stop']; reserve=ns['setup_reserve_seconds'](False)
+assert reserve==720 and ns['setup_reserve_seconds'](True)==240
+assert not f(0,3.5,300,0,1845,reserve) and f(.01,3.5,300,0,1845,reserve)
+assert f(0,3.5,300,2000,2999,reserve) and not f(0,3.5,300,2000,3000,reserve)
+for i in range(3):
+ elapsed=330+1170*i
+ print('smoke admission',i+1,{'elapsed':elapsed,'reserve':1845,'stop':f(elapsed,3.5,300,0,5400,reserve)})
+ assert not f(elapsed,3.5,300,0,5400,reserve)
+print('estimated finish',330+3*1170)
+raw=[json.loads(l) for l in open('runs/31b-v008-p5f-timing/timing.jsonl')]
+known=0
+for row in raw:
+ if 'instance_id' not in row:continue
+ failures=[s for s in row.get('setup_subprocesses',[]) if isinstance(s.get('argv'),list) and '-e' in s['argv'] and s['rc']"'!=0]
+ match=bool(row['"'editable_failed'] and failures and all('uninstall-no-record-file' in s.get('stdout','')+s.get('stderr','') for s in failures))
+ known+=match
+print('literal KNOWN-DIAG matches',known,'of',sum('instance_id' in r for r in raw),'including 7 flagged rows')
+assert known==0
+print('PASS: boundary, seed dominance, smoke arithmetic; reproduced classification defects')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/__pycache__/docker.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/__pycache__/base.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/__pycache__/__init__.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/__pycache__/subprocess.cpython-313.pyc
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/__init__.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/base.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/docker.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/docker.py:715:            timed_out = (res.exit_code == 124) and (duration >= max(0.0, timeout - 1.0))
+error classification: Agent exceeded session timeout (3.5 min) => None
+error classification: Agent completed execution without calling submit_patch. => None
+error classification: Failed to apply agent patch: patch does not apply => Harness task failure
+error classification: Required test node did not pass: test_example => Harness task failure
+error classification: Missing JUnit XML report (possible premature os._exit(0)) => Harness task failure
+smoke admission 1 {'elapsed': 330, 'reserve': 1845, 'stop': False}
+smoke admission 2 {'elapsed': 1500, 'reserve': 1845, 'stop': False}
+smoke admission 3 {'elapsed': 2670, 'reserve': 1845, 'stop': False}
+estimated finish 3840
+literal KNOWN-DIAG matches 0 of 8 including 7 flagged rows
+PASS: boundary, seed dominance, smoke arithmetic; reproduced classification defects
+
+exec
+/bin/bash -lc "rg -n 'timeout|exit_code|returncode|kill|return Sandbox' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py | tail -n 40; rg -n 'timeout|124|exit_code' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/operations.py | tail -n 30; git show c6f0b66:eval/plans/007.md | nl -ba | sed -n '42,76p'; git status --short" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+35:        timeout_seconds: int = 300,
+39:        self.timeout_seconds = timeout_seconds
+75:        timeout: float | None = 300,
+82:        int_timeout = int(timeout) if timeout is not None else self.timeout_seconds
+84:        return self.exec(self._default_sandbox_id, cmd, timeout=int_timeout)
+378:                        timeout=30,
+419:        self, sandbox_id: str, command: str, *, timeout: int | None = None
+430:        timeout = timeout if timeout is not None else self.timeout_seconds
+499:            timeout=timeout,
+504:        self, sandbox_id: str, command: str, *, timeout: int | None = None
+507:        return await asyncio.to_thread(self.exec, sandbox_id, command, timeout=timeout)
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/operations.py: IO error for operation on /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/operations.py: No such file or directory (os error 2)
+    42	### Row classification (frozen before any run; mechanical, from the raw timing.jsonl row)
+    43	- KNOWN-DIAG (not an error): editable_failed=True where every failing editable subprocess output contains `uninstall-no-record-file`.
+    44	  This is the documented scorer-harness RECORD strip (docs/GOLD_CALIBRATION.md v2, report 005-prelim): flat-layout rich/fastapi
+    45	  import from /workspace via cwd, and the 48-clean gold/null calibration was done in the same docker-path where it occurs. It was
+    46	  on 7/8 rows of every plan-005/006 kernel (results/kaggle_timing_31b_v00{1,3,5,6,7,8}.json). Counted and listed, never gating.
+    47	- HARNESS error (H), exactly these: H-ROW = row missing, or the row's `error` field non-null (agent_timing.py sets it only for the
+    48	  fail-closed harness_error, an evaluation/cleanup exception, or a trace-parse failure; normal agent end states such as
+    49	  timeout/turns/tool_calls/no_submit leave it null); H-SETUP = setup_failed for any reason other than KNOWN-DIAG (a fatal setup step rc != 0,
+    50	  missing_tool_deps, or an editable failure without `uninstall-no-record-file`); H-VERIFY = the row's filtered patch is non-empty
+    51	  but exit_code is not an integer in 0..5 (verification never returned a pytest exit code). vLLM not up = the
+    52	  whole kernel is void.
+    53	- Everything else is an AGENT outcome and is a quality result, never a validity question: PASS = stock resolved=True;
+    54	  FAIL sub-labels: no/empty patch (stock evaluate_task returns resolved=False, exit -1, verification not run, evaluate.py:324),
+    55	  timeout, pytest exit 1, pytest exit 2-5 (e.g. the patch breaks collection), exit 0 but resolved=False (JUnit/required nodes).
+    56	
+    57	### Smoke, chunks, reruns
+    58	- SMOKE first: the first 3 ids (eval/plans/007-smoke-ids.txt: 2 rich + 1 fastapi), budget 5400 s (rev 1: was 4800; fits the larger stop-guard reserve). The gate checks mechanics
+    59	  only; agent quality (0/3 included) never fails it. Gate holds iff: vLLM up, 3 rows present, 0 H rows. On hold the smoke rows
+    60	  COUNT as the first 3 arm-1 rows, and the main kernel runs ids 4..33 with --seed-max = ceil(max smoke per-task total).
+    61	  Gate FAIL: no main run today; diagnose; the run moves after the reset (dec 062 item 4: no rushing).
+    62	- Budget: KERNEL_BUDGET for main sized from the smoke per-task wall and the quota left before the reset (target: week
+    63	  usage <= 29.5/30 h). Unrun ids (a suffix of the fixed order) run as chunk 2 after the reset, identical bundle and code SHA,
+    64	  with --seed-max from all earlier rows.
+    65	- First attempts are always retained and reported. A code change during arm 1 is allowed ONLY to fix a defect behind an H row,
+    66	  documented first (journal line naming the row + the H category + the cause, then a commit, then a codex review). If the fix
+    67	  touches no file on the agent or verification path, only the H rows rerun (appended at the end of the order). If it does
+    68	  touch either path, every row already run reruns under the fixed code so all primary rows share one code SHA, and the
+    69	  first-attempt rows are reported as a sensitivity line. Any bundle byte change = a different arm: arm 1 restarts with a new addendum.
+    70	  No rerun for any AGENT outcome, ever.
+    71	- Quota logged before/after every kernel in ops/budget/kaggle.md. No GCP spend. Never delays the dec 055 checklist at 2026-11-07T00:00Z.
+    72	
+    73	## Metrics
+    74	- PRIMARY: count of stock resolved=True / 33, Wilson 95% CI. No override of the stock verdict by setup flags: H rows are
+    75	  resolved=False in the stock verdict and count as FAIL in the primary. Sensitivity line: pass rate over the non-H rows (n stated).
+    76	  KNOWN-DIAG count listed.
+ M ops/codex/review-20261106T064331.log
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+import ast,subprocess,sys,json
+from pathlib import Path
+from unittest.mock import patch
+commit='c6f0b66'
+get=lambda p:subprocess.check_output(['git','show',f'{commit}:{p}'],text=True)
+shell=get('eval/kaggle/timing_push.sh')
+subprocess.run(['bash','-n'],input=shell,text=True,check=True)
+# Exercise the real shell option parser without its staging/push commands.
+parser=shell.split('script_dir=')[0]+'\\nprintf \"%s\\\\n\" \""'$seed_max" "$skip_verification" "$stock_probe" "$budget"'"\\n'
+# budget is assigned later; inspect positional budget directly.
+parser=parser.replace('\""'$budget"'"','\""'${4:-10800}"'"')
+r=subprocess.run(['bash','-s','--','--dry-run','--with-verification','--no-stock-probe','--seed-max','1301','example/smoke','bundles/31b/v009','eval/plans/007-smoke-ids.txt','5400'],input=parser,text=True,capture_output=True,check=True)
+assert r.stdout.splitlines()==['1301','0','0','5400'],r.stdout
+body=shell.split(\"<<'PY'\\n\",1)[1].split('\\nPY\\n',1)[0]
+original_read=Path.read_text
+src=get('eval/kaggle/agent_timing.py')
+writes={}
+def read(path,*args,**kwargs):
+ return src if str(path).endswith('/agent_timing.py') else original_read(path,*args,**kwargs)
+def write(path,text,*args,**kwargs):
+ writes[path.name]=text
+ return len(text)
+argv=['-',str(Path('eval/kaggle').resolve()),'/tmp/review-in-memory','example/smoke','bundles/31b/v009','eval/plans/007-smoke-ids.txt','5400','0','1','0','0','1301']
+with patch.object(sys,'argv',argv),patch.object(Path,'write_text',write),patch.object(Path,'read_text',read),patch.object(subprocess,'check_output',return_value=commit+'\\n'),patch('builtins.print'):
+ exec(compile(body,'timing_push.sh:Python','exec'),{})
+generated=writes['agent_timing.py']
+names={'OBSERVED_MAX_SEED_SECONDS','SKIP_VERIFICATION','STOCK_PROBE','KERNEL_BUDGET_SECONDS','TASK_IDS'}
+values={n.targets[0].id:ast.literal_eval(n.value) for n in ast.parse(generated).body if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name) and n.targets[0].id in names}
+assert values['OBSERVED_MAX_SEED_SECONDS']==1301.0 and values['SKIP_VERIFICATION'] is False and values['STOCK_PROBE'] is False and values['KERNEL_BUDGET_SECONDS']==5400
+assert len(values['TASK_IDS'])==3
+print('PASS shell syntax, option parsing, exact Python generator, compile, AST substitution:',json.dumps(values,sort_keys=True))
+PY
+sed -n '470,502p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py
+rg -n 'def run|124|TimeoutExpired|timed out' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/utils/commands.py" in /home/ubuntu/work/gemma
+ exited 2 in 3ms:
+PASS shell syntax, option parsing, exact Python generator, compile, AST substitution: {"KERNEL_BUDGET_SECONDS": 5400, "OBSERVED_MAX_SEED_SECONDS": 1301.0, "SKIP_VERIFICATION": false, "STOCK_PROBE": false, "TASK_IDS": ["rich_3063", "rich_3953", "fastapi_14372"]}
+                if wh_cand.exists() and any(wh_cand.glob('*.whl')):
+                    active_wheels = wh_cand.resolve()
+                    break
+
+        if active_wheels:
+            translated_cmd = re.sub(
+                r'(?<![\w.-])/wheels(?![\w.-])',
+                str(active_wheels),
+                translated_cmd,
+            )
+
+        translated_cmd = translated_cmd.replace(sentinel, root_dir_str)
+
+        venv_bin = venv_dir / 'bin'
+        host_bin = str(Path(sys.executable).parent)
+        extra_env = {
+            'VIRTUAL_ENV': str(venv_dir),
+            'PATH': f'{venv_bin}:{host_bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+            'PYTHONPATH': str(workspace_dir),
+        }
+        env = build_sanitized_env(
+            work_dir=workspace_dir,
+            tmp_dir=tmp_dir,
+            extra_env=extra_env,
+        )
+        return execute_subprocess_command(
+            command=['/bin/bash', '-c', translated_cmd],
+            cwd=workspace_dir,
+            env=env,
+            timeout=timeout,
+            shell=False,
+        )
+
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/utils/commands.py: IO error for operation on /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/utils/commands.py: No such file or directory (os error 2)
+
+exec
+/bin/bash -lc "rg -n 'def execute_subprocess_command|124|TimeoutExpired' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma --glob '*.py' | head -n 30; git show c6f0b66:eval/kaggle/agent_timing.py | nl -ba | sed -n '725,735p;838,857p;1080,1107p'; nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py | sed -n '590,613p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/docker.py:715:            timed_out = (res.exit_code == 124) and (duration >= max(0.0, timeout - 1.0))
+   725	            if is_test:
+   726	                total += max(0.0, e.timestamp - start)
+   727	    return dict(n=n, total_seconds=total, share_of_agent_seconds=total / agent_seconds if agent_seconds else None)
+   728	
+   729	def should_stop(elapsed, cap_minutes, verification_timeout, observed_max, budget, setup_reserve=0):
+   730	    return elapsed + 1.5 * max(cap_minutes * 60 + verification_timeout + setup_reserve, observed_max) > budget
+   731	
+   732	
+   733	def setup_reserve_seconds(skip_verification):
+   734	    return SETUP_PASS_SECONDS * (1 if skip_verification else 3)
+   735	
+   838	# Normal agent end states that swegemma reports through agent_error (agent_runner.py 0.2.11).
+   839	AGENT_OUTCOMES = (('timeout', re.compile(r'Agent exceeded session timeout\b')),
+   840	                  ('turns', re.compile(r'Agent exceeded (turns budget|maximum allowed LLM turns)\b')),
+   841	                  ('tool_calls', re.compile(r'Agent exceeded tool call budget\b')),
+   842	                  ('no_submit', re.compile(r'Agent completed execution without calling submit_patch\b')))
+   843	IMAGE_EMULATION_STEPS = ('venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'tool_sources',
+   844	                         'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check')
+   845	
+   846	
+   847	def agent_outcome(message):
+   848	    """Name of a known normal agent end state, else None (including for empty messages)."""
+   849	    text = (message or '').strip()
+   850	    return next((name for name, pattern in AGENT_OUTCOMES if pattern.match(text)), None)
+   851	
+   852	
+   853	def harness_error(result, agent_error):
+   854	    """Fail closed: any error that is not a known normal agent end state is a harness failure."""
+   855	    messages = [m for m in ((result.error if result is not None else None), agent_error) if m]
+   856	    return 'Harness task failure' if any(agent_outcome(m) is None for m in messages) else None
+   857	
+  1080	            totals.append(total)
+  1081	            patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch) or ''
+  1082	            try:
+  1083	                counts, tokens, seconds = trace_counts(evaluator.trace)
+  1084	            except Exception as exc:  # never lose the run over trace parsing
+  1085	                counts, tokens, seconds = {}, dict(prompt_tokens=None, completion_tokens=None), {}
+  1086	                error = (error or '') + ' trace parse (' + type(exc).__name__ + ')'
+  1087	            code = result.test_exit_code if result else None
+  1088	            raw_error = (result.error or '') if result else error or ''
+  1089	            phase = phase1_fields(times, evaluator.agent_seconds, total,
+  1090	                                  getattr(evaluator, 'context', None),
+  1091	                                  result.agent_patch if result else evaluator.patch)
+  1092	            phase.update(agent_outcome=agent_outcome(evaluator.agent_error or raw_error),
+  1093	                         image_emulation_seconds=image_emulation_seconds(times['setup_calls']))
+  1094	            try:
+  1095	              append(journal, dict(instance_id=iid, repo=task.repo, resolved=bool(result and result.resolved), exit_code=code, error=error,
+  1096	                **phase,
+  1097	                wall_seconds=dict(agent=evaluator.agent_seconds, verification=times['verification'], total=total), sandbox_setup_seconds=sum(c['duration_s'] for c in times['setup_calls']),
+  1098	                setup_calls=times['setup_calls'], setup_failed=times['setup_failed'],
+  1099	                editable_failed=times.get('editable_failed', False),
+  1100	                setup_output_artifact=times.get('setup_output_artifact'),
+  1101	                missing_tool_deps=times.get('missing_tool_deps', []),
+  1102	                setup_fix=times.get('setup_fix'), setup_subprocesses=times.get('setup_subprocesses', []),
+  1103	                editable_rc=times.get('editable_rc'), retrying_lines=times.get('retrying_lines', 0),
+  1104	                llm_turns=evaluator.context.llm_calls_used if hasattr(evaluator, 'context') else None, tool_calls=dict(total=sum(counts.values()) if evaluator.trace else (result.tool_calls if result else None), per_tool=counts),
+  1105	                tool_seconds=seconds, test_run=test_run_stats(evaluator.trace, evaluator.agent_seconds), **tokens,
+  1106	                completion_tokens_per_second=tokens['completion_tokens']/evaluator.agent_seconds if tokens['completion_tokens'] is not None and evaluator.agent_seconds else None,
+  1107	                stock_setup=stock, llm_calls=llm_calls(evaluator.trace),
+   590	                        resolved=False,
+   591	                        agent_patch=agent_patch,
+   592	                        test_output='',
+   593	                        test_exit_code=-1,
+   594	                        duration_seconds=time.perf_counter() - start_time,
+   595	                        error=f'Failed to apply test_patch: {err_detail}',
+   596	                        trace_json_path=json_path,
+   597	                    )
+   598	            finally:
+   599	                test_patch_host_path.unlink(missing_ok=True)
+   600	
+   601	        # Refresh workspace paths, stubs, and pytest config after patches add new files/imports
+   602	        await asyncio.to_thread(
+   603	            install_test_dependencies,
+   604	            docker,
+   605	            eval_id,
+   606	            task.repo,
+   607	            fast_path=fast_path,
+   608	            config=config,
+   609	        )
+   610	        await asyncio.to_thread(
+   611	            setup_workspace_test_config,
+   612	            docker,
+   613	            eval_id,
+
+exec
+/bin/bash -lc "head -n 55 /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/subprocess.py; rg -n 'def execute_subprocess_command|124|TimeoutExpired' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swe* --glob '*.py' | head -n 35; python3 - <<'PY'
+import ast,subprocess,hashlib
+get=lambda p:subprocess.check_output(['git','show','c6f0b66:'+p],text=True)
+dev=[s for s in get('eval/splits/dev.txt').splitlines() if s and not s.startswith('#')]
+order=[s for s in get('eval/plans/007-arm1-ids.txt').splitlines() if s and not s.startswith('#')]
+smoke=[s for s in get('eval/plans/007-smoke-ids.txt').splitlines() if s and not s.startswith('#')]
+assert len(set(order))==len(order)==33 and set(dev)==set(order)
+assert order==sorted(dev,key=lambda s:hashlib.sha256(('plan007:'+s).encode()).hexdigest())
+assert smoke==order[:3]
+print('PASS frozen 33 dev ids, order/hash, smoke prefix; no holdout/data accessed')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+"""Process and filesystem-based sandbox lifecycle management with per-task venv isolation."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import posixpath
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import uuid
+import venv
+from pathlib import Path
+
+from adk_eval_core.sandbox import (
+    BaseSandbox,
+    ExecutionResult,
+    build_sanitized_env,
+    execute_subprocess_command,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class SubprocessManager(BaseSandbox):
+    """Manages isolated local working directories and virtual environments directly conforming to BaseSandbox."""
+
+    def __init__(
+        self,
+        timeout_seconds: int = 300,
+        base_dir: Path | None = None,
+        system_site_packages: bool = True,
+    ):
+        self.timeout_seconds = timeout_seconds
+        self.base_dir = base_dir
+        self.system_site_packages = system_site_packages
+        self._sandboxes: dict[str, dict[str, Path]] = {}
+        self._default_sandbox_id: str | None = None
+        self._initial_files: dict[str, str | bytes] = {}
+        self._lock = threading.RLock()
+
+    @property
+    def sandboxes(self) -> dict[str, dict[str, Path]]:
+        with self._lock:
+            return {k: dict(v) for k, v in self._sandboxes.items()}
+
+    @property
+    def work_dir(self) -> str:
+        with self._lock:
+            if self._default_sandbox_id and self._default_sandbox_id in self._sandboxes:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/sandbox/docker.py:715:            timed_out = (res.exit_code == 124) and (duration >= max(0.0, timeout - 1.0))
+PASS frozen 33 dev ids, order/hash, smoke prefix; no holdout/data accessed
+
+exec
+/bin/bash -lc "rg -n 'def execute_subprocess_command|124|TimeoutExpired' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox --glob '*.py' | head -n 24" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/docker_sandbox.py:117:                exit_code=124,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:57:def execute_subprocess_command(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:110:    except subprocess.TimeoutExpired:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:117:        except (subprocess.TimeoutExpired, Exception):  # noqa: BLE001
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:124:            exit_code=124,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/containers.py:269:        if exit_code in (124, 137) and timeout is not None and timeout > 0:
+
+codex
+Reviewed **`c6f0b66`**, pinned despite the shared checkout advancing. **BLOCKING: fix the classification before pushing the smoke.**
+
+**BLOCKING**
+
+1. **KNOWN-DIAG still rejects the documented failure chain.** [007.md:43](/home/ubuntu/work/gemma/eval/plans/007.md:43) requires *every* failed editable subprocess to contain `uninstall-no-record-file`. The actual chain is:
+   - Offline editable install fails with that diagnostic.
+   - Online fallback fails with `subprocess-exited-with-error`, without that diagnostic.
+
+   This is consistent with [GOLD_CALIBRATION.md:119](/home/ubuntu/work/gemma/docs/GOLD_CALIBRATION.md:119), but fails the new predicate. Applying it to arm F’s raw rows yields **zero KNOWN-DIAG matches**, including all seven flagged rows. Smoke task `rich_3953` exhibits this chain ([raw row:8](/home/ubuntu/work/gemma/runs/31b-v008-p5f-timing/timing.jsonl:8)); the committed summary confirms its flags ([result:637](/home/ubuntu/work/gemma/results/kaggle_timing_31b_v008.json:637)).
+
+   Freeze recognition of the specific primary-failure-plus-fallback chain. Do not require the RECORD diagnostic in the fallback output.
+
+2. **Agent-quality outcomes still become H rows, so validity and reruns remain outcome-dependent.** [007.md:47](/home/ubuntu/work/gemma/eval/plans/007.md:47) treats any non-null row `error` as H-ROW, but [harness_error:853](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:853) recognizes only four normal agent messages. Stock verification also returns:
+   - `Failed to apply agent patch: …` for an unusable agent patch ([verification.py:474](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:474)).
+   - JUnit/required-node errors, including with pytest exit 0 ([verification.py:675](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:675), [697](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/verification.py:697)).
+
+   In-memory checks confirm all these become `Harness task failure`, contradicting the AGENT categories at [007.md:53](/home/ubuntu/work/gemma/eval/plans/007.md:53). Separately, an agent patch causing pytest to hang produces exit **124** ([subprocess_sandbox.py:124](/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/sandbox/subprocess_sandbox.py:124)), which H-VERIFY rejects.
+
+   These outcomes can fail smoke, trigger INVALID, and authorize replacement runs under [007.md:65](/home/ubuntu/work/gemma/eval/plans/007.md:65). The retry restrictions are substantially improved, but **not closed until H classification excludes these quality failures**.
+
+3. **The promised classification cannot be implemented mechanically from each raw row.** H-VERIFY depends on whether the **filtered patch** is non-empty ([007.md:50](/home/ubuntu/work/gemma/eval/plans/007.md:50)). The wrapper stores `filtered_patch` internally ([agent_timing.py:703](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:703)), but emits patch metrics from the **raw** patch ([1081](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:1081), [1107](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:1107)). No filtered-patch marker is written. Thus `empty_patch=False` cannot establish H-VERIFY’s predicate; protected-only edits are a concrete counterexample.
+
+   Also, `setup_subprocesses` and `editable_failed` are overwritten on each installation pass while `setup_failed` accumulates ([617](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:617), [625](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:625)). Classification must inspect all retained per-pass records under `setup_calls`, with explicit precedence for fatal failures. Persist the required filtered-patch/verification-stage evidence and freeze that precedence before running.
+
+**Non-blocking**
+
+- **Arm 2’s statistical revision passes.** Fixed `k=1` removes the optional second look; ON-ADOPT, ON-BETTER-VETOED, KEEP-OFF and NO-DIFFERENCE cover the outcomes ([007.md:93](/home/ubuntu/work/gemma/eval/plans/007.md:93)). The timing thresholds are objective, and both named fields exist in emitted rows ([agent_timing.py:825](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:825)). This addresses prior BLOCKING 3.
+
+- **Setup-reserve arithmetic and seed plumbing pass.** Verification reserves `3 × 240 = 720` seconds; skipping verification reserves 240. At cap 3.5, the admission reserve is **`1.5 × (210 + 300 + 720) = 1,845 s`** ([agent_timing.py:729](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:729)). `--seed-max` reaches the generated constant and both stop checks ([timing_push.sh:13](/home/ubuntu/work/gemma/eval/kaggle/timing_push.sh:13), [95](/home/ubuntu/work/gemma/eval/kaggle/timing_push.sh:95), [agent_timing.py:1055](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:1055)).
+
+  With 330-second startup and 1,170-second tasks, the third admission checks **`330 + 2×1170 + 1845 = 4515 ≤ 5400`**; estimated completion is **3,840 seconds**. All three fit under those assumptions. This addresses prior BLOCKING 4.
+
+- **Primary-verdict wording remains inconsistent.** [007.md:74](/home/ubuntu/work/gemma/eval/plans/007.md:74) says H rows necessarily have `resolved=False`. Cleanup or trace-parsing errors can coexist with a successful stock result; the writer preserves `result.resolved` ([agent_timing.py:1078](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:1078), [1095](/home/ubuntu/work/gemma/eval/kaggle/agent_timing.py:1095)).
+
+**Questions**
+
+- Confirm that the primary numerator always preserves stock `resolved`, including an H row with `resolved=True`; H status then affects only the separately specified validity and sensitivity rules?
+
+Validation: read-only shell syntax, exact in-memory kernel generation, seed/budget boundary checks, frozen ID/order checks, and raw-row classification reproduction. No files changed or Kaggle actions performed.
+tokens used
+78,433
