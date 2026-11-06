@@ -2360,3 +2360,206 @@ SETUP_PASS_SECONDS = 240  # per sandbox dependency-setup pass; 1 pass (agent) + 
 OBSERVED_MAX_SEED_SECONDS = 0.0
 DATA = Path('/kaggle/input/competitions/gemma-4-developer-agent')
 
+codex
+The full offline suite passes: **1,142 passed, 5 skipped, 4 subtests passed**. The regenerated arm-F check is unchanged: **8 H-ROW, 7 known diagnostics, 0 H-SETUP**. I’m checking the final diff and metadata validation before recording the SHA.
+exec
+/bin/bash -lc "rg -n \"'_stopped'|'_vllm'\" eval/kaggle/agent_timing.py; git status --short; git diff -- eval/tests/test_classify_rows.py | head -140" in /home/ubuntu/work/gemma-wt/codex-plan007-rev5-fold
+ succeeded in 0ms:
+1056:                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+1061:                append(journal, {'_stopped': 'insufficient remaining budget for next task'})
+1359:            append(journal, {'_vllm': dict(startup_seconds=startup)})
+1371:            append(journal, {'_stopped': 'Kernel exception (' + type(exc).__name__ + ')'})
+ M eval/kaggle/classify_rows.py
+ M eval/tests/test_classify_rows.py
+ M results/plan007_classifier_armF_check.json
+diff --git a/eval/tests/test_classify_rows.py b/eval/tests/test_classify_rows.py
+index d30b412..bbd0587 100644
+--- a/eval/tests/test_classify_rows.py
++++ b/eval/tests/test_classify_rows.py
+@@ -15,18 +15,24 @@ timing = import_module('eval.kaggle.agent_timing')
+ def row(**updates):
+     return dict(dict(instance_id='task-1', repo='example/repo', result_error=None,
+                      agent_error_text=None, verified_patch_bytes=10, setup_calls=[],
+-                     exit_code=0, resolved=False, error=None, setup_failed=False), **updates)
++                     exit_code=0, resolved=False, error=None, setup_failed=False, missing_tool_deps=[]), **updates)
++
++
++def step(**updates):
++    return dict(dict(step='setup.py', rc=0, duration_s=1.0, stdout='', stderr=''), **updates)
+ 
+ 
+ def editable(offline=True, record=True, rc=1):
+-    return dict(argv=['pip', 'install', '-e', '/workspace'] + (['--no-index'] if offline else []),
++    root = '/tmp/swegemma_sandbox_synthetic'
++    return dict(argv=[root + '/venv/bin/python3', '-m', 'pip', 'install']
++                + (['--no-index', '--find-links=/wheels', '--no-build-isolation'] if offline else [])
++                + ['--no-deps', '-e', root + '/workspace'],
+                 rc=rc, stdout='' if offline else 'subprocess-exited-with-error',
+                 stderr=classifier.RECORD if record else 'other failure')
+ 
+ 
+ def chain():
+-    return dict(step='setup.py', rc=0,
+-                subprocesses=[editable(), editable(offline=False, record=False)])
++    return step(subprocesses=[editable(), editable(offline=False, record=False)])
+ 
+ 
+ def test_agent_patterns_are_stock():
+@@ -47,25 +53,25 @@ def test_record_chain_all_passes(passes):
+     [editable(offline=False, record=False), editable()],
+ ])
+ def test_unexpected_editable_failure(subprocesses):
+-    result = classifier.classify(row(setup_calls=[dict(step='setup.py', rc=0, subprocesses=subprocesses)]))
++    result = classifier.classify(row(setup_calls=[step(step='setup.py', rc=0, subprocesses=subprocesses)]))
+     assert result['h'] == 'H-SETUP'
+     assert result['known_diag'] is False
+     assert 's5:unexpected_editable_failure' in result['reasons']
+ 
+ 
+ def test_later_pass_failure_is_retained():
+-    calls = [chain(), dict(step='setup.py', rc=0, subprocesses=[editable(record=False)])]
++    calls = [chain(), step(step='setup.py', rc=0, subprocesses=[editable(record=False)])]
+     result = classifier.classify(row(setup_calls=calls))
+     assert result['h'] == 'H-SETUP'
+     assert result['known_diag'] is False
+ 
+ 
+ @pytest.mark.parametrize('updates,reason', [
+-    (dict(setup_calls=[dict(step='tool_deps', rc=-1)]), 's2:setup_step_failed'),
++    (dict(setup_calls=[step(step='tool_deps', rc=-1)]), 's2:setup_step_failed'),
+     (dict(missing_tool_deps=['x']), 's1:missing_tool_deps'),
+     (dict(setup_failed=True), 's6:setup_failed_unexplained'),
+-    (dict(setup_calls=[dict(step='setup.py', rc=1)]), 's3:setup_py_failed'),
+-    (dict(setup_calls=[dict(step='workspace_editable', rc=1)]), 's4:workspace_editable_failed'),
++    (dict(setup_calls=[step(step='setup.py', rc=1)]), 's3:setup_py_failed'),
++    (dict(setup_calls=[step(step='workspace_editable', rc=1)]), 's4:workspace_editable_failed'),
+ ])
+ def test_setup_failures(updates, reason):
+     result = classifier.classify(row(**updates))
+@@ -76,14 +82,14 @@ def test_setup_failures(updates, reason):
+ 
+ @pytest.mark.parametrize('duration,stderr,expected', [(0, '', None), (1, '', 'H-SETUP'), (0, 'failure', 'H-SETUP')])
+ def test_not_run_step(duration, stderr, expected):
+-    result = classifier.classify(row(setup_calls=[dict(step='tool_deps', rc=None, duration_s=duration, stderr=stderr)]))
++    result = classifier.classify(row(setup_calls=[step(step='tool_deps', rc=None, duration_s=duration, stderr=stderr)]))
+     assert result['h'] == expected
+ 
+ 
+ def test_workspace_record_and_pip_check():
+     result = classifier.classify(row(setup_failed=True, setup_calls=[
+-        dict(step='workspace_editable', rc=1, stdout=classifier.RECORD),
+-        dict(step='pip_check', rc=1), dict(step='setup.py', rc=0)]))
++        step(step='workspace_editable', rc=1, stdout=classifier.RECORD),
++        step(step='pip_check', rc=1), step(step='setup.py', rc=0)]))
+     assert result['h'] is None and result['known_diag'] is True
+ 
+ 
+@@ -91,7 +97,7 @@ def test_workspace_record_and_pip_check():
+     ('Failed to apply agent patch: xyz', 1, 'PATCH_APPLY'),
+     ('Failed to apply agent patch: xyz', None, 'PATCH_APPLY'),
+     ('Required test node did not pass: a::b', 0, 'EXIT0_UNRESOLVED'),
+-    ('Test failures/errors recorded in JUnit XML (failures=1, errors=0)', 1, 'PYTEST_1'),
++    ('Test failures/errors recorded in JUnit XML (failures=1, errors=0)', 0, 'EXIT0_UNRESOLVED'),
+ ])
+ def test_verification_agent_errors(message, code, expected):
+     result = classifier.classify(row(error='Harness task failure', result_error=message,
+@@ -101,7 +107,8 @@ def test_verification_agent_errors(message, code, expected):
+ 
+ @pytest.mark.parametrize('prefix', classifier.VERIFY_AGENT_PREFIXES)
+ def test_all_verification_agent_prefixes(prefix):
+-    result = classifier.classify(row(error='Harness task failure', result_error=prefix + ' synthetic'))
++    result = classifier.classify(row(error='Harness task failure', result_error=prefix + ' synthetic',
++                                     exit_code=None if prefix == classifier.VERIFY_AGENT_PREFIXES[0] else 0))
+     assert result['h'] is None
+ 
+ 
+@@ -194,8 +201,8 @@ def test_unexplained_harness_failure_is_h(texts):
+ 
+ @pytest.mark.parametrize('message', ['Agent exceeded tool call budget', 'Required test node did not pass: t::x'])
+ def test_explained_harness_failure_not_h(message):
+-    result = classifier.classify(row(error='Harness task failure', result_error=message, exit_code=1))
+-    assert result['h'] is None and result['agent'] == 'PYTEST_1'
++    result = classifier.classify(row(error='Harness task failure', result_error=message, exit_code=0))
++    assert result['h'] is None and result['agent'] == 'EXIT0_UNRESOLVED'
+ 
+ 
+ def test_zero_patch_without_exit_code_is_no_patch():
+@@ -212,14 +219,13 @@ def test_precedence_and_orthogonal_diagnostic():
+ 
+ 
+ def test_meta_rejected():
+-    with pytest.raises(ValueError):
+-        classifier.classify({'_schema': 'example'})
++    assert classifier.classify({'_schema': 'kaggle_timing_v1'})['h'] == 'H-ROW'
+ 
+ 
+ def test_cli(tmp_path):
+     source, output = tmp_path / 'timing.jsonl', tmp_path / 'classes.json'
+     source.write_text('\n'.join(json.dumps(r) for r in [
+-        {'_schema': 'example'}, {'_vllm': {}}, row(resolved=True),
++        {'_schema': 'kaggle_timing_v1'}, {'_vllm': {}}, row(resolved=True),
+         row(instance_id='bad', error='Harness task failure', result_error='Evaluation error: boom'),
+         row(instance_id='diag', setup_calls=[chain()], setup_failed=True),
+         {'_stopped': 'example'}, {'_done': {'n': 3}},
+@@ -380,3 +386,180 @@ def test_cli_rejects_duplicate_ids(tmp_path):
+     proc = subprocess.run([sys.executable, str(Path(classifier.__file__)), str(source)],
+                           capture_output=True, text=True)
+     assert proc.returncode != 0 and 'Duplicate instance_id' in proc.stderr
++
++
++# Exhaustive rev-5 regressions. The requested review file is empty in this checkout;
++# row() is the complete synthetic baseline and each override follows the user spec.
++@pytest.mark.parametrize('message', ['Agent exceeded turns budget', 'arbitrary error', ' '])
++def test_rev5_01_resolved_result_error(message):
++    assert classifier.classify(row(resolved=True, result_error=message))['h'] == 'H-VERIFY'
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/kaggle/classify_rows.py'); s=p.read_text()
+s=s.replace(\"        if isinstance(row, dict) and (set(row) == {'_vllm'} and isinstance(row['_vllm'], dict)\\n                or set(row) == {'_stopped'} and isinstance(row['_stopped'], str)):\\n            continue\", \"        if isinstance(row, dict) and set(row) == {'_vllm'}:\\n            meta = row['_vllm']\\n            if isinstance(meta, dict) and set(meta) == {'startup_seconds'} and finite_nonnegative(meta['startup_seconds']):\\n                continue\\n        if isinstance(row, dict) and set(row) == {'_stopped'} and isinstance(row['_stopped'], str):\\n            if (row['_stopped'] == 'insufficient remaining budget for next task'\\n                    or re.fullmatch(r'Kernel exception \\\\([A-Za-z_][A-Za-z_0-9]*\\\\)', row['_stopped'])):\\n                continue\")
+p.write_text(s)
+p=Path('eval/tests/test_classify_rows.py'); s=p.read_text().replace(\"{'_vllm': {}}\", \"{'_vllm': {'startup_seconds': 1}}\",1).replace(\"{'_stopped': 'example'}\", \"{'_stopped': 'insufficient remaining budget for next task'}\",1)
+s=s.replace(\"{'_vllm': 'bad'}])\", \"{'_vllm': 'bad'}, {'_vllm': {}}, {'_stopped': 'unknown'}])\")
+s += '''\\n\\n@pytest.mark.parametrize('message', [\\n    'Agent exceeded session timeout (300s)', 'Agent exceeded turns budget',\\n    'Agent exceeded tool call budget', 'Agent completed execution without calling submit_patch',\\n])\\n@pytest.mark.parametrize('field', ['result_error', 'agent_error_text'])\\ndef test_rev5_no_false_h_recognized_agent_end_under_harness_failure(message, field):\\n    result = classifier.classify(row(error='Harness task failure', **{field: message}))\\n    assert result['h'] is None and result['agent'] == 'EXIT0_UNRESOLVED'\\n'''
+p.write_text(s)
+PY
+PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/python3 -m pytest -q eval/tests" in /home/ubuntu/work/gemma-wt/codex-plan007-rev5-fold
+exec
+/bin/bash -lc 'python3 eval/kaggle/classify_rows.py runs/31b-v008-p5f-timing/timing.jsonl --out results/plan007_classifier_armF_check.json > /tmp/plan007-armF-classes.json
+sha256sum eval/kaggle/classify_rows.py
+git diff --check' in /home/ubuntu/work/gemma-wt/codex-plan007-rev5-fold
+ succeeded in 0ms:
+0a25a18992ba89a412dbe4adcca0091162781c5c2ee2f985bee328d655af496a  eval/kaggle/classify_rows.py
+
+ succeeded in 20611ms:
+........................................................................ [  6%]
+........................................................................ [ 12%]
+........................................................................ [ 18%]
+........................................................................ [ 24%]
+........................................................................ [ 31%]
+........................................................................ [ 37%]
+........................................................................ [ 43%]
+..................................................s..................... [ 49%]
+.................................................................... [ 55%]
+...............................s........................................ [ 61%]
+........................................................................ [ 68%]
+........................................................................ [ 74%]
+........................................................................ [ 80%]
+........................................................................ [ 86%]
+........................................................................ [ 92%]
+..s.........................ss.......................................... [ 99%]
+.........                                                                [100%]
+1152 passed, 5 skipped, 4 subtests passed in 18.92s
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+p=Path('eval/kaggle/classify_rows.py'); s=p.read_text().replace(\"        if error and not any(isinstance(m, str) and m.strip() for m in messages):\", \"        if (error and not any(isinstance(m, str) and m.strip() for m in messages)\\n                and not (row.get('resolved') is True and isinstance(messages[0], str) and messages[0])):\")
+p.write_text(s)
+p=Path('eval/tests/test_classify_rows.py'); s=p.read_text().replace(\"@pytest.mark.parametrize('message', ['Agent exceeded turns budget', 'arbitrary error', ' '])\\ndef test_rev5_01_resolved_result_error(message):\\n    assert classifier.classify(row(resolved=True, result_error=message))\", \"@pytest.mark.parametrize('message', ['Agent exceeded turns budget', 'arbitrary error', ' '])\\n@pytest.mark.parametrize('error', [None, 'Harness task failure'])\\ndef test_rev5_01_resolved_result_error(message, error):\\n    assert classifier.classify(row(resolved=True, result_error=message, error=error))\")
+p.write_text(s)
+PY" in /home/ubuntu/work/gemma-wt/codex-plan007-rev5-fold
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages /home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/bin/python3 -m pytest -q eval/tests' in /home/ubuntu/work/gemma-wt/codex-plan007-rev5-fold

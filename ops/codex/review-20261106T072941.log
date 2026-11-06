@@ -2375,3 +2375,195 @@ if __name__ == '__main__':
 ops/jobs/codex-review-blindgate-light.cmd:1:bin/codex-review eval/plan007_blind_gate.py\ at\ commit\ cd18ea1\ \(new\).\ Purpose\ \(ops/decisions/065-\*.md\ items\ 2-3\):\ on\ the\ plan-007\ smoke\ kernel\'s\ timing.jsonl\,\ print\ ONLY\ vLLM\ up\,\ row\ count\,\ parse\ ok\,\ per-task\ wall\ seconds\,\ and\ the\ COUNT\ of\ H\ rows\ under\ the\ pinned\ rev-4\ classifier\ eval/plan007_pinned/classify_rows_a208a023.py\ \(sha\ a208a023...\,\ byte-identical\ to\ git\ 0d49b1c:eval/kaggle/classify_rows.py\).\ It\ must\ NEVER\ print\ PASS/FAIL/resolved\,\ agent\ outcome\ classes\,\ H\ ids\,\ error\ text\,\ or\ patches\ \(blindness\)\,\ and\ must\ fail\ closed\ \(gate\ FAIL\)\ on\ missing\ vLLM\ record\,\ parse\ errors\,\ wrong\ row\ count\,\ duplicate\ ids\,\ or\ classifier\ exceptions.\ Check:\ blindness\ leaks\ \(incl.\ via\ exceptions/tracebacks\ printing\ row\ content\)\,\ fail-open\ paths\ in\ mechanical_gate\,\ whether\ importing\ agent_timing\ from\ eval/kaggle\ at\ HEAD\ could\ alter\ a208a023\ behaviour\ \(agent_timing\ unchanged\ since\ 0d49b1c\)\,\ and\ whether\ vllm_up\ detection\ matches\ how\ eval/kaggle/agent_timing.py\ writes\ the\ _vllm\ record\ \(incl.\ vLLM-failed\ kernels\).\ Sanity:\ on\ runs/31b-v008-p5f-timing/timing.jsonl\ expect\ vllm_up\ y\,\ rows\ 8\,\ h_count\ 8\ \(schema-guard\ r1\ only\,\ arm\ F\ predates\ fields\).\ Write\ nothing\ to\ results/.\ Report\ BLOCKING\ /\ NON-BLOCKING. 
 ops/jobs/codex-review-plan007r4-light.cmd:1:bin/codex-review Plan\ 007\ rev\ 4\ re-review\ at\ commit\ fcb6d6f\ \(diff\ 2fc49b5..fcb6d6f\;\ ignore\ ops/\ files\).\ Prior\ review\ ops/codex/review-20261106T070228.md\ raised\ one\ BLOCKING:\ invalid\ or\ contradictory\ verdict\ evidence\ \(resolved\ non-bool/None\,\ exit_code\ non-int\,\ resolved=True\ with\ nonzero/None\ exit\ code\,\ patch-apply\ error\ or\ zero\ patch\)\ avoided\ H.\ Check\ eval/kaggle/classify_rows.py\ \(new\ r8:invalid_resolved\,\ r9:invalid_exit_code\ -\>\ H-ROW\;\ verify:contradictory_resolved\ -\>\ H-VERIFY\;\ PASS\ requires\ resolved\ is\ True\;\ stock\ resolved\ reported\ uncoerced\)\,\ eval/tests/test_classify_rows.py\ \(new\ regression\ tests\ incl.\ every\ combination\ in\ the\ prior\ table\;\ test_invalid_verification_codes\ split\ because\ non-int\ codes\ now\ hit\ r9\ H-ROW\ first\)\,\ the\ rev-4\ RE-FROZEN\ line\ in\ eval/plans/007.md\ \(sha\ a208a023...\)\,\ and\ results/plan007_classifier_armF_check.json\ \(must\ differ\ from\ predecessor\ only\ in\ classifier_sha256\).\ Specifically:\ \(a\)\ are\ all\ cases\ in\ the\ prior\ table\ closed\;\ \(b\)\ any\ remaining\ fail-open\ path\ where\ a\ row\ with\ missing/invalid/inconsistent\ evidence\ reaches\ an\ agent\ outcome\ \(consider\ non-str\ result_error/agent_error_text\,\ error\ field\ types\,\ setup_calls\ shape\)\;\ \(c\)\ any\ new\ false\ H\ on\ legitimate\ rows\ \(NO_PATCH\ or\ PATCH_APPLY\ with\ exit_code\ None\ or\ -1\;\ EXIT0_UNRESOLVED\;\ VERIFY_TIMEOUT_124\;\ recognized\ agent_end\ messages\ under\ \'Harness\ task\ failure\'\)\;\ \(d\)\ is\ the\ pre-registration\ complete\ enough\ to\ run\ the\ 3-task\ smoke.\ Tests:\ PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages\ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1\ /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3\ -m\ pytest\ eval/tests\ -q.\ Output\ BLOCKING\ /\ NON-BLOCKING\ list. 
 
+codex
+The pinned classifier matches `a208a023…`, and `agent_timing.py` is unchanged since `0d49b1c`. The vLLM check also matches the writer: it emits `_vllm.startup_seconds` only after startup succeeds. I’m now checking malformed inputs and gate failures, especially whether row values can reach stdout or stderr.
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import contextlib, copy, hashlib, importlib.util, io, json, sys
+from pathlib import Path
+from unittest.mock import patch
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location('blind_gate', 'eval/plan007_blind_gate.py')
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+classifier_path = 'eval/plan007_pinned/classify_rows_a208a023.py'
+sha = hashlib.sha256(Path(classifier_path).read_bytes()).hexdigest()
+classify, _ = gate.load_classifier(classifier_path, sha)
+valid = dict(instance_id='synthetic-1', result_error=None, agent_error_text=None, verified_patch_bytes=1, setup_calls=[], exit_code=0, resolved=False, wall_seconds=dict(agent=1, verification=2, total=3))
+vllm = {'_vllm': {'startup_seconds': 12.5}}
+def invoke(payload, count='1', reader_error=None):
+    argv = ['blind_gate', '/synthetic/timing.jsonl', classifier_path, sha] + ([] if count is None else [str(count)])
+    stdout, stderr = io.StringIO(), io.StringIO()
+    original_open = open
+    def fake_open(path, *args, **kwargs):
+        if path == '/synthetic/timing.jsonl':
+            return io.StringIO(payload)
+        return original_open(path, *args, **kwargs)
+    with patch.object(sys, 'argv', argv), patch('builtins.open', fake_open), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        try:
+            gate.main()
+            status = 'returned normally (CLI exit 0)'
+        except BaseException as exc:
+            status = type(exc).__name__
+    return stdout.getvalue(), stderr.getvalue(), status
+
+def payload(*rows):
+    return ''.join(json.dumps(r) + '\\n' for r in rows)
+
+cases = [
+    ('valid', payload(vllm, valid), '1'),
+    ('missing_vllm', payload(valid), '1'),
+    ('startup_failed_kernel', payload({'_schema':'kaggle_timing_v1', 'vllm_startup_seconds':None}, {'_stopped':'Kernel exception (RuntimeError)'}, {'_done':{'n':0, 'startup_seconds':None}}), '3'),
+    ('wrong_count', payload(vllm, valid), '3'),
+    ('duplicate', payload(vllm, valid, valid), '2'),
+    ('parse_error', payload(vllm, valid) + '{\\n', '1'),
+    ('classifier_exception', payload(vllm, dict(valid, setup_calls=None)), '1'),
+    ('no_count_no_tasks', payload(vllm), None),
+    ('no_count_one_task', payload(vllm, valid), None),
+    ('nan_wall', payload(vllm, dict(valid, wall_seconds={'total':float('nan')})), '1'),
+    ('list_id', payload(vllm, dict(valid, instance_id=['synthetic-1'])), '1'),
+    ('unexpected_record', payload(vllm, valid, {'result_error':'synthetic hidden message'}), '1'),
+    ('injected_id', payload(vllm, dict(valid, instance_id='synthetic-1\\nSYNTHETIC_OUTCOME_OR_ERROR')), '1'),
+]
+for name, content, count in cases:
+    out, err, status = invoke(content, count)
+    relevant = [line for line in out.splitlines() if line.startswith(('vllm_up ', 'rows ', 'rows_parse ', 'h_count ', 'mechanical_gate '))]
+    print(name, ':', status, ';', ' | '.join(relevant), '; injected_text_printed=', 'SYNTHETIC_OUTCOME_OR_ERROR' in out + err)
+real = Path('runs/31b-v008-p5f-timing/timing.jsonl').read_text()
+out, err, status = invoke(real, '8')
+print('armF_sanity:', status, ';', ' | '.join(line for line in out.splitlines() if line.startswith(('vllm_up ', 'rows ', 'rows_parse ', 'h_count ', 'mechanical_gate '))))
+print('armF_only_r1:', all(classify(json.loads(line))['reasons'] == ['r1:missing_schema'] for line in real.splitlines() if line.strip() and 'instance_id' in json.loads(line)))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+valid : returned normally (CLI exit 0) ; vllm_up y | rows 1 (expected 1) | rows_parse y | h_count 0 (classifier exceptions counted as H: 0) | mechanical_gate HOLD ; injected_text_printed= False
+missing_vllm : returned normally (CLI exit 0) ; vllm_up n | rows 1 (expected 1) | rows_parse y | h_count 0 (classifier exceptions counted as H: 0) | mechanical_gate FAIL ; injected_text_printed= False
+startup_failed_kernel : returned normally (CLI exit 0) ; vllm_up n | rows 0 (expected 3) | rows_parse y | h_count 0 (classifier exceptions counted as H: 0) | mechanical_gate FAIL ; injected_text_printed= False
+wrong_count : returned normally (CLI exit 0) ; vllm_up y | rows 1 (expected 3) | rows_parse y | h_count 0 (classifier exceptions counted as H: 0) | mechanical_gate FAIL ; injected_text_printed= False
+duplicate : returned normally (CLI exit 0) ; vllm_up y | rows 2 (expected 2) | rows_parse y | h_count 0 (classifier exceptions counted as H: 0) | mechanical_gate FAIL ; injected_text_printed= False
+parse_error : returned normally (CLI exit 0) ; vllm_up y | rows 1 (expected 1) | rows_parse n | h_count 0 (classifier exceptions counted as H: 0) | mechanical_gate FAIL ; injected_text_printed= False
+classifier_exception : returned normally (CLI exit 0) ; vllm_up y | rows 1 (expected 1) | rows_parse y | h_count 1 (classifier exceptions counted as H: 1) | mechanical_gate FAIL ; injected_text_printed= False
+no_count_no_tasks : returned normally (CLI exit 0) ; vllm_up y | rows 0 | rows_parse y | h_count 0 (classifier exceptions counted as H: 0) | mechanical_gate HOLD ; injected_text_printed= False
+no_count_one_task : returned normally (CLI exit 0) ; vllm_up y | rows 1 | rows_parse y | h_count 0 (classifier exceptions counted as H: 0) | mechanical_gate HOLD ; injected_text_printed= False
+nan_wall : ValueError ; vllm_up y | rows 1 (expected 1) | rows_parse y ; injected_text_printed= False
+list_id : TypeError ; vllm_up y | rows 1 (expected 1) | rows_parse y ; injected_text_printed= False
+unexpected_record : returned normally (CLI exit 0) ; vllm_up y | rows 1 (expected 1) | rows_parse y | h_count 0 (classifier exceptions counted as H: 0) | mechanical_gate HOLD ; injected_text_printed= False
+injected_id : returned normally (CLI exit 0) ; vllm_up y | rows 1 (expected 1) | rows_parse y | h_count 0 (classifier exceptions counted as H: 0) | mechanical_gate HOLD ; injected_text_printed= True
+armF_sanity: returned normally (CLI exit 0) ; vllm_up y | rows 8 (expected 8) | rows_parse y | h_count 8 (classifier exceptions counted as H: 0) | mechanical_gate FAIL
+armF_only_r1: False
+
+exec
+/bin/bash -lc "nl -ba eval/kaggle/agent_timing.py | sed -n '835,850p;1150,1188p;1353,1379p' && git diff --exit-code cd18ea1 -- eval/plan007_blind_gate.py eval/plan007_pinned/classify_rows_a208a023.py eval/kaggle/agent_timing.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   835	        verification_skipped=SKIP_VERIFICATION)
+   836	
+   837	
+   838	# Normal agent end states that swegemma reports through agent_error (agent_runner.py 0.2.11).
+   839	AGENT_OUTCOMES = (('timeout', re.compile(r'Agent exceeded session timeout\b')),
+   840	                  ('turns', re.compile(r'Agent exceeded (turns budget|maximum allowed LLM turns)\b')),
+   841	                  ('tool_calls', re.compile(r'Agent exceeded tool call budget\b')),
+   842	                  ('no_submit', re.compile(r'Agent completed execution without calling submit_patch\b')))
+   843	IMAGE_EMULATION_STEPS = ('venv_fidelity', 'pip_bootstrap', 'interpreter_probe', 'tool_sources',
+   844	                         'pytest_timeout_source', 'tool_install', 'tool_deps', 'pip_check')
+   845	
+   846	
+   847	def agent_outcome(message):
+   848	    """Name of a known normal agent end state, else None (including for empty messages)."""
+   849	    text = (message or '').strip()
+   850	    return next((name for name, pattern in AGENT_OUTCOMES if pattern.match(text)), None)
+  1150	def start_server(holder):
+  1151	    import torch
+  1152	    from adk_submission import VllmConfig, VllmServer, discover_adapters
+  1153	    from adk_submission.discovery import discover_declared_models
+  1154	    from swegemma.config import ALLOWED_ADAPTER_EXTENSIONS
+  1155	    MODEL_VLLM_EXTRA_ARGS = {'gemma-4-12b-it-qat-w4a16-ct': (
+  1156	        '--hf-overrides', '{"architectures": ["Gemma4ForCausalLM"], "model_type": "gemma4"}')}
+  1157	    _SAFE_PATH_COMPONENT = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
+  1158	    declared_models = discover_declared_models(BUNDLE)
+  1159	    assert len(declared_models) == 1, f'Expected exactly 1 declared model, got: {sorted(declared_models)}'
+  1160	    declared_model = next(iter(declared_models))
+  1161	    assert declared_model in {'gemma-4-' + x + '-it-qat-w4a16-ct' for x in ('31b', '12b', 'e4b', 'e2b')}, 'Unsupported declared model'
+  1162	    MODEL_PATH = Path(f'/kaggle/input/models/google/gemma-4/other/{declared_model}/2')
+  1163	    assert MODEL_PATH.exists(), f'Model weights not found at {MODEL_PATH}. Ensure the model input is attached.'
+  1164	    adapters = discover_adapters(str(BUNDLE), adapter_extensions=ALLOWED_ADAPTER_EXTENSIONS)
+  1165	    adapter_map = getattr(adapters, 'adapters', None) or {}
+  1166	    for adapter_name in adapter_map:
+  1167	        assert _SAFE_PATH_COMPONENT.fullmatch(adapter_name), 'Unsafe adapter name'
+  1168	    detected_ranks = [r for info in adapter_map.values() if (r := getattr(info, 'rank', None)) is not None and r > 0]
+  1169	    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+  1170	    tp_size = 4 if gpu_count >= 4 else (2 if gpu_count >= 2 else 1)
+  1171	    vllm_cfg = VllmConfig(
+  1172	        model=str(MODEL_PATH), port=8000, host='127.0.0.1',
+  1173	        tool_call_parser='gemma4', reasoning_parser='gemma4', max_model_len=32768,
+  1174	        dtype='bfloat16' if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else 'auto',
+  1175	        gpu_memory_utilization=0.90, enable_auto_tool_choice=True,
+  1176	        enable_lora=bool(adapter_map), max_loras=max(1, len(adapter_map)),
+  1177	        max_lora_rank=max(detected_ranks) if detected_ranks else 128,
+  1178	        scheduler_reserve_full_isl=False, tensor_parallel_size=tp_size, startup_timeout=60 * 20,
+  1179	        extra_args=MODEL_VLLM_EXTRA_ARGS.get(declared_model, ()),
+  1180	    )
+  1181	    server_instance = VllmServer(vllm_cfg, adapter_manifest=adapters)
+  1182	    holder.append(server_instance)
+  1183	    start = time.perf_counter()
+  1184	    server_instance.start()
+  1185	    startup = time.perf_counter() - start
+  1186	    return server_instance, adapters, declared_model, startup
+  1187	
+  1188	class WrongAccelerator(RuntimeError):
+  1353	            caps = dict(timeout_seconds=int(section.get('timeout_seconds', 300)), verification_timeout_seconds=int(section.get('verification_timeout_seconds', 300)),
+  1354	                        max_tool_calls=int(section.get('max_tool_calls', 100)), max_time_minutes=float(section.get('max_time_minutes', 60.0)), max_turns=int(turns) if turns is not None else None)
+  1355	            header['caps'] = caps
+  1356	            server, adapters, model, startup = start_server(servers)
+  1357	            header['vllm_startup_seconds'] = startup
+  1358	            append(journal, header)
+  1359	            append(journal, {'_vllm': dict(startup_seconds=startup)})
+  1360	            models = server.create_model_registry(aliases=[model], model_prefix='openai/', api_key=os.environ.get('LOCAL_API_KEY', 'EMPTY'))
+  1361	            limits, constraints = build_submission_limits()
+  1362	            config = EvalConfig(tasks_path=DATA / 'tasks.jsonl', snapshots_dir=DATA / 'snapshots', results_dir=WORK / 'runs', submission_dir=BUNDLE,
+  1363	                models=models, sandbox='subprocess', **caps, limits=limits, generation_constraints=constraints, adapter_manifest=adapters,
+  1364	                context_cache_config=ContextCacheConfig(min_tokens=2048, ttl_seconds=1800, cache_intervals=10),
+  1365	                events_compaction_config=EventsCompactionConfig(compaction_interval=15, overlap_size=2, token_threshold=14336, event_retention_size=5),
+  1366	                graph_dir=str(DATA / 'graphs'), embeddings_dir=str(DATA / 'embeddings'), wheels_dir=DATA / 'wheels', verbose=False)
+  1367	            asyncio.run(evaluate(config, journal, started, caps, totals))
+  1368	        except BaseException as exc:
+  1369	            if journal.tell() == 0:
+  1370	                append(journal, header)
+  1371	            append(journal, {'_stopped': 'Kernel exception (' + type(exc).__name__ + ')'})
+  1372	            raise
+  1373	        finally:
+  1374	            try:
+  1375	                for server in servers:
+  1376	                    server.stop()
+  1377	            finally:
+  1378	                append(journal, {'_done': dict(n=len(totals), total_seconds=distribution(totals), startup_seconds=startup)})
+  1379	
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import contextlib, hashlib, importlib.util, io, json, sys, traceback
+from pathlib import Path
+from unittest.mock import patch
+sys.dont_write_bytecode=True
+spec=importlib.util.spec_from_file_location('blind_gate','eval/plan007_blind_gate.py'); g=importlib.util.module_from_spec(spec);spec.loader.exec_module(g)
+p='eval/plan007_pinned/classify_rows_a208a023.py';sha=hashlib.sha256(Path(p).read_bytes()).hexdigest(); classify,_=g.load_classifier(p,sha)
+rows=[json.loads(s) for s in Path('runs/31b-v008-p5f-timing/timing.jsonl').read_text().splitlines() if s.strip()]
+classes=[classify(r) for r in rows if 'instance_id' in r]
+print('armF_only_row_reason_r1:',all([x for x in c['reasons'] if x.startswith('r')] == ['r1:missing_schema'] for c in classes))
+print('armF_all_H_from_row_schema:',all(c['h']=='H-ROW' for c in classes))
+# Fault-inject classifier error messages; only booleans and count are exposed.
+valid=dict(instance_id='synthetic-1',result_error=None,agent_error_text=None,verified_patch_bytes=1,setup_calls=[],exit_code=0,resolved=False,wall_seconds=dict(total=3))
+content='\\n'.join(map(json.dumps,[{'_vllm':{'startup_seconds':1}},valid]))
+realopen=open
+for name, cls in [('ordinary',lambda row: (_ for _ in ()).throw(ValueError('SYNTHETIC_PRIVATE_ROW'))),('system_exit',lambda row: (_ for _ in ()).throw(SystemExit('SYNTHETIC_PRIVATE_ROW')))]:
+    out,err=io.StringIO(),io.StringIO()
+    def fake_open(path,*a,**kw):return io.StringIO(content) if path=='/synthetic' else realopen(path,*a,**kw)
+    with patch.object(sys,'argv',['gate','/synthetic',p,sha,'1']),patch('builtins.open',fake_open),patch.object(g,'load_classifier',return_value=(cls,sha)),contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
+        try:g.main()
+        except BaseException:traceback.print_exc()
+    print('classifier_'+name, 'private_marker_leaked=', 'SYNTHETIC_PRIVATE_ROW' in out.getvalue()+err.getvalue(),'gate_fail=', 'mechanical_gate FAIL' in out.getvalue())
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+armF_only_row_reason_r1: True
+armF_all_H_from_row_schema: True
+classifier_ordinary private_marker_leaked= False gate_fail= True
+classifier_system_exit private_marker_leaked= True gate_fail= False
+

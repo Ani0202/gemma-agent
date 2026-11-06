@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 07:31Z (cycle 130, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 07:32Z (cycle 131, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -32,10 +32,13 @@
   NO pass/fail/resolved/patch viewing until re-frozen classifier has a Director note. HOLD (vLLM up, 3 rows, 0 H) -> main ids 4..33
   (--seed-max ceil max total), KERNEL_BUDGET so week <= 29.5 h AND kernel ends by 23:30Z, else after reset. Fold diff touching
   agent_timing.py/kernel path -> main uses pre-fold 078f4ea too. Plan-007 header deviation note added. Report 016 names run commits.
+- DEC 066: blind-gate review = ONE codex pass; fold only BLOCKING that leak pass/fail/resolved/patch or miscount H/mechanics under
+  a208a023, run its tests, use it, NO 2nd review; other findings -> report 016 residuals. Smoke lands first -> seal+journal+kaggle.md, wait,
+  no hand-inspection of timing.jsonl. Main push deadline = 23:30Z - KERNEL_BUDGET - 45 min, else after reset AND after dec 055 submit.
+  Log quota after smoke in kaggle.md BEFORE sizing main.
 - R5 REVIEW 071306 = NOT CLEAN: 19 BLOCKING fail-open + 2 false-H. Folding via codex-build plan007-rev5-fold (branch
   codex/plan007-rev5-fold). On finish: review diff, tests, merge, ONE re-freeze, REPORT 016 (residuals, arm-F exposure, run commits).
   Build fails/tests regress: don't iterate; report what landed.
-- REV 5 CANDIDATE 9d0a8b4 (sha 21c3d46e, not frozen) = r4 fixes; superseded by the fold. Last FROZEN+noted: a208a023 (0d49b1c).
 - DEC 063/064: classifier freezes need Director note; quota log before/after smoke+main; week <= 29.5 h; dec 055 first.
 - DEC 062 (report 015 approved, A): T stays 0.2 everywhere; no T 0.6 arm in plan 007; repeat guard = design note only (DONE draft
   eval/plans/007-repeat-guard.md); item 4: plan-007 arm 1 may use expiring quota IF pre-reg reviewed + pushed by 11-06T15:30Z, else after reset.
@@ -56,7 +59,7 @@
   minus the FastAPI line (CPU draft). Reports MUST state v000-v002 (both tracks) carry the hint; LB scores may tilt FastAPI-ward.
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU this week: 16.02/30 h per `kaggle quota` ~06:27Z after arm F (+1.53). Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
-## Live caveats
+## Live caveats (dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035)
 - Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
   (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
   results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
@@ -64,14 +67,11 @@
 - Any Kaggle GPU kernel must pin the starter docker_image (py3.12, cp312 wheelhouse). Hosted-LLM-API data question OPEN; no new 3rd-party services. One pending Kaggle submission at a time; no partial credit on timeout (docs/RULES_FINDINGS.md).
 ## Timing facts (results/kaggle_timing_e4b_v000_setup.json) setup ~210 s/task, outside max_time_minutes (clock starts after setup); flat across repos. vLLM startup 5.39 min;
   verification ~410 s (excluded from the 12 h). Agent clock p90 144 s at cap 5.
-## Open decisions / instructions in force
-- Dec 022 interim timing rule (cap+S)x125+30<=660; item 4 (truncation-safe diff, hygiene, trimming) pending = dec 032 item 8. Forum (dec 035): Builder posts nothing.
 ## Dec 034 (report 009 ruled: option C with gated step-up) — in force
 - 31b-v001-t4 (dec 036 item 2 name; dir bundles/31b/v001) = TIMING bundle (cap 4.0, max_output_tokens 8192 x2): dist/31b-v001.zip sha256=3c3a264652ab1d72ff6b9c5609c482c34a2ab7af37eb600689e5cfa0bf810f6a,
   pack PASS, load check results/bundle_load_check_31b_v001.json (8192/8192, 240 s). NOT a submission candidate.
 - Timing kernel (plan 006 DONE, G1 held -> dec 055): stack main 2db5f51 per Addendum A (gate fix from 92a74c7, worktree
-  gemma-wt/codex-kernel-probes-gate). Summary: timing_summary.py --gate-mode stock-path --gate-vllm-seconds 600. Slug/push: ops/budget/kaggle.md.
-- Gates for that run: (a) 8/8 no harness error; (b) max(Phase-1 - emulation) <= 277 s; (d) vLLM <= 600 s; (e) >= 1 non-empty diff.
+  gemma-wt/codex-kernel-probes-gate). Last FROZEN+noted classifier: a208a023 (0d49b1c); r5 candidate 9d0a8b4 superseded by fold.
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
