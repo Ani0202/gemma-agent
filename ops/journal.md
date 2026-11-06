@@ -342,3 +342,7 @@
 2026-11-06T14:00Z | plan 008 Addendum D73 pre-data (smoke stricter, arm-2 boundary = inner harness response, gate rename/counter fix); fc24fcc3 VOID | eval/plans/008.md (f582942)
 2026-11-06T14:00Z | codex-build plan008-d73 started; Director FYI | ops/codex/build-plan008-d73.spec, ops/mail/director/20261106T140056-4962-from-builder.md
 2026-11-06T14:02:49Z | dec 074 APPROVE: D73.5 (submit_unverifiable counts against arm 2) + D73.6 (review-loop cap; v011 fallback by 11-07T06:00Z) appended pre-data | eval/plans/008.md, ops/decisions/074-20261106T140056-4962-from-builder.md
+2026-11-06T14:13Z | codex-build plan008-d73 done (a9cef73, 1463 tests pass per codex); reviewed gate (bash -c in both backends, name-status rename parse, counter) and merged d6174d8 | ops/codex/build-plan008-d73.md
+2026-11-06T14:15Z | D73.5 implemented in arm2 metrics (submit_unverifiable counts against arm 2) 6ee4f1f; eval/tests 1475 pass; arm-1 base re-run identical totals+rows (17/12/23/7) | eval/plan008_metrics.py results/plan008_arm1_base.json
+2026-11-06T14:16Z | 31b-v010 repacked D73.4: dist/31b-v010.zip sha256 b0785a30... (fc24fcc3 VOID), pack+load PASS, D73.4 sha line in 008.md; Director FYI'd | bundles/31b/v010/MANIFEST.md eval/plans/008.md
+2026-11-06T14:17Z | codex-review-d736-light started (D73.6 combined, LAST full round: gate+metrics+D73 text+v011 unchanged) | ops/codex/

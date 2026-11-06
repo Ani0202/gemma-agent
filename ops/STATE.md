@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 14:04Z (cycle 146, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 14:18Z (cycle 147, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -23,13 +23,12 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (14:01Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-plan008-d73 (build, effort high).
-- CYCLE 145: re-reviews NOT clean: v010b 3 BLOCKING (rename eligibility, unacked inner submit, (ii) units) + v011-d71 6 BLOCKING (+8 turns,
-  child turn cap, (i) exemption, event selectors, (ii) units, arg checks). Pre-data Addendum D73 (f582942) fixes all; Director FYI'd 140056.
-  Metrics merged (c689e76, script sha f09eb26e...); ARM-1 BASE results/plan008_arm1_base.json COMMITTED: mech2 17, empty 12 (asserts PASS),
-  submitted_without_test 23/33 -> arm-2 limit 26; no successful submit 7. Script not yet codex-reviewed (review after d73 build, same pass).
-  On d73 build: review diff, merge, re-run base (totals must be identical), bin/pack v010 -> NEW sha, load check, MANIFEST + D73.4 sha line,
-  then ONE codex-review (gate + metrics + D73 text + v011 unchanged). Smoke only if CLEAN by ~22:00Z, else post-reset AFTER dec 055 submit.
+## Running jobs (14:17Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-d736-light (D73.6 combined, LAST full round).
+- CYCLE 147: codex d73 build merged d6174d8 (a9cef73); D73.5 counting implemented 6ee4f1f (d735_counts; totals swt/no-submit = D73.5,
+  *_observed kept); eval/tests 1475 pass; arm-1 base re-run IDENTICAL (totals + all rows). v010 REPACKED 24b8a84:
+  dist/31b-v010.zip sha256=b0785a30e2ad3451f0bbb0fb574e6cde53412ca2381ab04394e66792886d33ce (fc24fcc3 VOID), pack+load PASS; D73.4 sha line in 008.md.
+  Director FYI'd. On review: CLEAN -> smoke (008-smoke-ids, quota log before/after) if by ~22:00Z and quota (2.34 h) allows; BLOCKING -> fix + ONE
+  targeted re-review of fix diff; not CLEAN after that or by 11-07T06:00Z -> arm 2 = v011 (no smoke).
 - DEC 074 APPROVE D73: D73.5 (submit_unverifiable counts AGAINST arm 2; metrics arm2 mode must implement - d73 build only REPORTS it, add after merge)
   + D73.6 (combined review = LAST full round; BLOCKING -> fix + 1 targeted re-review; not CLEAN after that or by 11-07T06:00Z -> arm 2 = v011, no smoke) written to 008.md.
 - DEC 073 APPROVE (D72 accepted as governing pre-data defs; metrics asserts mech2 17/empty 12 fail -> STOP+report, never adjust; arm-1 safety base committed BEFORE arm-2 rows; new gate-changing BLOCKING -> new sha + D72.x line + 1-line FYI; re-verify /tmp if reuse_containers ever set).
@@ -75,6 +74,6 @@
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. On codex-plan008-d73: merge, implement D73.5 counting in arm2 mode, base re-run identical, repack v010 (new sha), combined codex-review (LAST full round, D73.6); smoke (008-smoke-ids) if CLEAN by ~22:00Z, else post-reset AFTER dec 055 submit.
+1. On codex-review-d736-light: CLEAN -> smoke v010 (if by ~22:00Z) else post-reset AFTER dec 055 submit; BLOCKING -> fix + 1 targeted re-review (D73.6).
 2. Dec 055 31b-v002 submit 11-07T00:00Z FIRST (checklist in Best bundles).
 3. Nov 8 slot proposal (due 11-07T12:00Z); arm-3 thinking addendum (dec 070 item 5) due 11-07T18:00Z; dec 038 paper evidence by Nov 9.
