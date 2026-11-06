@@ -727,3 +727,172 @@ eval/plan009_identity.py:61:            "byte_mismatch": mism, "duplicate_member
 
 codex
 The diff addresses both blockers: duplicate file members now fail CONTENT, and appending keeps the current `_schema` after validating the records structure. I’ll verify those paths with in-memory cases, then check path, byte, hash, and root-MANIFEST behavior against the spec.
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import contextlib, io, json, os, subprocess, sys, types, warnings, zipfile
+from unittest.mock import patch
+
+root = os.getcwd()
+def load(rev):
+    m = types.ModuleType('identity_' + rev)
+    m.__file__ = os.path.join(root, 'eval/plan009_identity.py')
+    src = subprocess.check_output(['git', 'show', rev + ':eval/plan009_identity.py'], text=True)
+    exec(compile(src, m.__file__, 'exec'), m.__dict__)
+    return m
+m = load('1fd32d9')
+old = load('f5cb353')
+checks = 0
+
+def fixture(mod, members, sources=None, bad_manifest=False):
+    sources = {'agent.yaml': b'good'} if sources is None else sources
+    stream = io.BytesIO()
+    real_zip = zipfile.ZipFile
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', UserWarning)
+        with real_zip(stream, 'w') as z:
+            for name, data in members:
+                z.writestr(name, data)
+    zb = stream.getvalue()
+    base = '/virtual/bundles/31b/vtest'
+    fs = {os.path.join(base, name): data for name, data in sources.items()}
+    digest = '0' * 64 if bad_manifest else mod.sha(zb)
+    fs[base + '/MANIFEST.md'] = ('zip sha256: ' + digest).encode()
+    fs['/virtual/dist/31b-vtest.zip'] = zb
+    dirs = {}
+    for name in list(sources) + ['MANIFEST.md']:
+        full = os.path.join(base, name)
+        dirs.setdefault(os.path.dirname(full), []).append(os.path.basename(full))
+    def vopen(path, mode='r', *args, **kwargs):
+        data = fs[os.fspath(path)]
+        return io.BytesIO(data) if 'b' in mode else io.StringIO(data.decode())
+    with patch.object(mod, 'ROOT', '/virtual'), patch.dict(mod.__dict__, {'open': vopen}), patch.object(mod.os, 'walk', return_value=[(d, [], f) for d, f in dirs.items()]), patch.object(mod.zipfile, 'ZipFile', side_effect=lambda path: real_zip(io.BytesIO(zb))):
+        return mod.check('vtest')
+
+def expect(condition, name):
+    global checks
+    assert condition, name
+    checks += 1
+    print('PASS:', name)
+
+for members in [ [('agent.yaml', b'BAD'), ('agent.yaml', b'good')], [('agent.yaml', b'good'), ('agent.yaml', b'BAD')], [('agent.yaml', b'good')] * 3 ]:
+    r = fixture(m, members)
+    expect(r['zip_ok'] and not r['content_ok'] and not r['pass'] and r['duplicate_members'] == ['agent.yaml'], 'duplicate member rejected and reported: ' + repr([b for _, b in members]))
+expect(fixture(old, [('agent.yaml', b'BAD'), ('agent.yaml', b'good')])['pass'], 'original duplicate-overwrite defect reproduced at f5cb353')
+
+cases = [
+    ('matching files', [('agent.yaml', b'good')], None, False, True),
+    ('byte mismatch', [('agent.yaml', b'BAD')], None, False, False),
+    ('ZIP hash mismatch', [('agent.yaml', b'good')], None, True, False),
+    ('extra ZIP file', [('agent.yaml', b'good'), ('extra.txt', b'x')], None, False, False),
+    ('missing ZIP file', [('agent.yaml', b'good')], {'agent.yaml': b'good', 'extra.txt': b'x'}, False, False),
+    ('nested MANIFEST is required', [('agent.yaml', b'good')], {'agent.yaml': b'good', 'sub/MANIFEST.md': b'nested'}, False, False),
+    ('nested MANIFEST matches', [('agent.yaml', b'good'), ('sub/MANIFEST.md', b'nested')], {'agent.yaml': b'good', 'sub/MANIFEST.md': b'nested'}, False, True),
+    ('root ZIP MANIFEST not excluded', [('agent.yaml', b'good'), ('MANIFEST.md', b'x')], None, False, False),
+    ('literal ./ prefix', [('./agent.yaml', b'good')], None, False, False),
+    ('missing root agent.yaml', [('other.yaml', b'good')], {'other.yaml': b'good'}, False, False),
+    ('directory entries ignored', [('empty/', b''), ('agent.yaml', b'good')], None, False, True),
+]
+for name, members, sources, bad_hash, expected in cases:
+    r = fixture(m, members, sources, bad_hash)
+    prior = fixture(old, members, sources, bad_hash)
+    expect(r['pass'] == expected and {k:v for k,v in r.items() if k "'!= '"'duplicate_members'} == prior, name + ': expected verdict and no baseline regression')
+    expect(r['excluded'] == ['MANIFEST.md'] and r['agent_yaml_sha256'] == (m.sha(b'BAD') if name == 'byte mismatch' else m.sha(b'good') if name not in ('literal ./ prefix', 'missing root agent.yaml') else None), name + ': exclusions and agent hash')
+
+class HeldString(io.StringIO):
+    def close(self):
+        pass
+
+def run_main(existing, passes=True):
+    output = HeldString()
+    writes = []
+    def vopen(path, mode='r', *args, **kwargs):
+        if 'w' in mode:
+            writes.append(path)
+            return output
+        return io.StringIO(existing)
+    bundle = {'pass': passes, 'zip_ok': passes, 'content_ok': passes, 'agent_yaml_sha256': 'agent-hash'}
+    with patch.dict(m.__dict__, {'open': vopen}), patch.object(m.os.path, 'exists', return_value=existing is not None), patch.object(m, 'check', side_effect=lambda v: dict(bundle)), patch.object(m.subprocess, 'run', return_value=types.SimpleNamespace(stdout='1fd32d9\\n')), patch.object(sys, 'argv', ['identity', 'vtest', '--out', '/virtual/out.json', '--event', 'smoke']), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            m.main()
+        except SystemExit as e:
+            return e.code, output.getvalue(), writes
+        except json.JSONDecodeError:
+            return 'invalid-json', output.getvalue(), writes
+
+for existing in [None, {'records': []}, {'_schema': 'stale', 'records': []}, {'_schema': None, 'records': [{'event': 'historical'}]}]:
+    code, out, writes = run_main(None if existing is None else json.dumps(existing))
+    actual = json.loads(out)
+    expected_records = [] if existing is None else existing['records']
+    expect(code == 0 and len(writes) == 1 and actual['_schema'] == m.SCHEMA and actual['records'][:-1] == expected_records and actual['records'][-1]['event'] == 'smoke', 'append preserves records and rewrites schema: ' + repr(existing))
+for existing in [{}, [], None, 'unrelated', {'records': None}, {'records': {}}, {'records': 'wrong'}, {'records': 0}]:
+    code, out, writes = run_main(json.dumps(existing))
+    expect(isinstance(code, str) and 'not a records file' in code and not writes and not out, 'non-records JSON refused without write: ' + repr(existing))
+code, out, writes = run_main('{malformed')
+expect(code == 'invalid-json' and not writes, 'invalid JSON refused without write')
+code, out, writes = run_main(json.dumps({'records': []}), passes=False)
+expect(code == 1 and json.loads(out)['_schema'] == m.SCHEMA and not json.loads(out)['records'][-1]['bundles']['vtest']['pass'], 'failed identity recorded with exit 1 and current schema')
+for v in ['v012', 'v013']:
+    r = m.check(v)
+    expect(r['pass'] and r['duplicate_members'] == [] and r['excluded'] == ['MANIFEST.md'], 'actual ' + v + ' ZIP + CONTENT pass (read only)')
+print('TOTAL:', checks, 'checks passed; no filesystem writes')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+PASS: duplicate member rejected and reported: [b'BAD', b'good']
+PASS: duplicate member rejected and reported: [b'good', b'BAD']
+PASS: duplicate member rejected and reported: [b'good', b'good', b'good']
+PASS: original duplicate-overwrite defect reproduced at f5cb353
+PASS: matching files: expected verdict and no baseline regression
+PASS: matching files: exclusions and agent hash
+PASS: byte mismatch: expected verdict and no baseline regression
+PASS: byte mismatch: exclusions and agent hash
+PASS: ZIP hash mismatch: expected verdict and no baseline regression
+PASS: ZIP hash mismatch: exclusions and agent hash
+PASS: extra ZIP file: expected verdict and no baseline regression
+PASS: extra ZIP file: exclusions and agent hash
+PASS: missing ZIP file: expected verdict and no baseline regression
+PASS: missing ZIP file: exclusions and agent hash
+PASS: nested MANIFEST is required: expected verdict and no baseline regression
+PASS: nested MANIFEST is required: exclusions and agent hash
+PASS: nested MANIFEST matches: expected verdict and no baseline regression
+PASS: nested MANIFEST matches: exclusions and agent hash
+PASS: root ZIP MANIFEST not excluded: expected verdict and no baseline regression
+PASS: root ZIP MANIFEST not excluded: exclusions and agent hash
+PASS: literal ./ prefix: expected verdict and no baseline regression
+PASS: literal ./ prefix: exclusions and agent hash
+PASS: missing root agent.yaml: expected verdict and no baseline regression
+PASS: missing root agent.yaml: exclusions and agent hash
+PASS: directory entries ignored: expected verdict and no baseline regression
+PASS: directory entries ignored: exclusions and agent hash
+PASS: append preserves records and rewrites schema: None
+PASS: append preserves records and rewrites schema: {'records': []}
+PASS: append preserves records and rewrites schema: {'_schema': 'stale', 'records': []}
+PASS: append preserves records and rewrites schema: {'_schema': None, 'records': [{'event': 'historical'}]}
+PASS: non-records JSON refused without write: {}
+PASS: non-records JSON refused without write: []
+PASS: non-records JSON refused without write: None
+PASS: non-records JSON refused without write: 'unrelated'
+PASS: non-records JSON refused without write: {'records': None}
+PASS: non-records JSON refused without write: {'records': {}}
+PASS: non-records JSON refused without write: {'records': 'wrong'}
+PASS: non-records JSON refused without write: {'records': 0}
+PASS: invalid JSON refused without write
+PASS: failed identity recorded with exit 1 and current schema
+PASS: actual v012 ZIP + CONTENT pass (read only)
+PASS: actual v013 ZIP + CONTENT pass (read only)
+TOTAL: 42 checks passed; no filesystem writes
+
+codex
+**Verdict: CLEAN** — commit `1fd32d9`, diff `f5cb353..1fd32d9`.
+
+Blocking issues: None. Both prior blockers are fixed:
+
+1. Duplicate file members are detected, deduplicated into `duplicate_members`, and force `content_ok=False` and `pass=False`. Verified mismatched duplicates in both orders and identical duplicates. [eval/plan009_identity.py:39](/home/ubuntu/work/gemma/eval/plan009_identity.py:39), [line 58](/home/ubuntu/work/gemma/eval/plan009_identity.py:58).
+2. Every successful write uses the current `_schema`, preserving existing records. Existing JSON without a dictionary containing a `records` list is refused before opening the output for writing. Verified missing/stale schemas and invalid structures. [eval/plan009_identity.py:74](/home/ubuntu/work/gemma/eval/plan009_identity.py:74).
+
+Non-blocking issues: None. No regression found against the [IDENTITY block](/home/ubuntu/work/gemma/eval/plans/009.md:45): ZIP hashes, literal file paths, byte mismatches, root-only MANIFEST exclusion, and agent.yaml hashing retain their behavior.
+
+Validation: **42 checks passed**, including differential checks against `f5cb353`. Actual `v012` and `v013` ZIP + CONTENT checks both passed. No files modified.
+
+Questions: None.
+tokens used
+24,348
