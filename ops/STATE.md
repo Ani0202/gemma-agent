@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 05:40Z (cycle 117, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 05:43Z (cycle 118, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -25,8 +25,8 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (05:40Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), timing-31b-v008-wait-light (kernel v6, out -> runs/31b-v008-p5f-timing), codex-review-armF-compare2-light (05:39Z, re-review of 0c3c777).
-- armF compare review 053515: 2 BLOCKING (null patch_bytes; dup ids) FIXED 0c3c777 (integrity -> INVALID exit 3); E-as-F smoke = 3/5, F-only 2, HARM (matches). Use only if re-review clean.
+## Running jobs (05:43Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), timing-31b-v008-wait-light (kernel v6 RUNNING 05:39Z, out -> runs/31b-v008-p5f-timing).
+- armF compare script REVIEW CLEAN (review-20261106T053934 on 0c3c777: 0 BLOCKING; NB1 malformed schema raises, fails closed). E-as-F smoke 3/5, F-only 2, HARM. Cleared for use.
 - ARM F PUSHED 05:34:58Z: aniket0202/gemma-31b-timing v6 (machine_shape NvidiaL4), repo b4d9f59; review-20261106T053049 v008 no BLOCKING; quota 14.49 h BEFORE (05:34:48Z).
 - DEC 061 (on report 014): approve-with-changes. CAP-BOUND accepted; A + B approved. (i) dec 055 v002 submit at 11-07T00:00Z stays FIRST;
   if SCORED -> bring v004 cap choice w/ data (FINALS RULE allows cap<=3.5); if ERROR/timeout -> CAP-BOUND binds, anti-loop only 31B path.
@@ -39,8 +39,7 @@
   Push cmd after review clean: log `kaggle quota`, then eval/kaggle/timing_push.sh aniket0202/gemma-31b-timing bundles/31b/v008
   eval/plans/004-gpu-retime-ids.txt 6000 (expect kernel v6); waiter like ops/jobs/timing-31b-v007-wait-light.cmd -> runs/31b-v008-p5f-timing.
   Push by 20:00Z else after reset (no further decision). Then post-process like v007 (timing_summary, trace_tool_errors, thinking_bound
-  -> results/*_31b_v008.json) + eval/plan005_armF_compare.py results/plan005_armF_vs_D.json (script WRITTEN, UNREVIEWED: review before
-  relying). Report honest: T 0.2 stochastic, n=8/k=1 = mechanism screen.
+  -> results/*_31b_v008.json) + eval/plan005_armF_compare.py results/plan005_armF_vs_D.json (script REVIEWED CLEAN 0c3c777). Report honest: T 0.2 stochastic, n=8/k=1 = mechanism screen.
   Item 4: plan 007 pre-reg (33-dev pass rate; H1 env; thinking off vs on paired arm) DUE 2026-11-07T18:00Z (may use leftover quota pre-reset).
   Item 5: Nov 8 slot candidate + 1-para justification DUE 2026-11-07T12:00Z (e4b-v002 repeat / e4b-v003 if packed+reviewed+smoke / 31b-v002 repeat).
   Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
@@ -75,6 +74,6 @@
 - Forum question (dec 035): Aniket posts report 009 s6; Builder posts NOTHING; summarize any answer (no task data) in next report.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. On waiter done: quota AFTER -> kaggle.md row; post-process (timing_summary, trace_tool_errors, thinking_bound -> results/*_31b_v008.json); armF compare (only if review clean) -> report 015.
+1. On waiter done: quota AFTER -> kaggle.md row; post-process (timing_summary, trace_tool_errors, thinking_bound -> results/*_31b_v008.json); armF compare (review clean) -> report 015.
 2. Dec 055 at 2026-11-07T00:00Z FIRST: (2)(3) hold; re-check (2) live, do (4) commit, (5) journal T=5.007 h <= 6.0 PASS, then submit.
 3. Plan 007 pre-reg (due 11-07T18:00Z) + Nov 8 slot proposal (due 11-07T12:00Z); dec 038 paper evidence by Nov 9 23:59Z.

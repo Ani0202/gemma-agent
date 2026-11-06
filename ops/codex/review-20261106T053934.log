@@ -824,3 +824,468 @@ Date:   Fri Nov 6 05:39:34 2026 +0000
  eval/plan005_armF_compare.py | 25 +++++++++++++++++++++++--
  1 file changed, 23 insertions(+), 2 deletions(-)
 
+exec
+/bin/bash -lc "git diff 0c3c777 -- eval/plan005_armF_compare.py eval/plan005_armE_compare.py eval/trace_tool_errors.py eval/plans/005.md eval/plans/004-gpu-retime-ids.txt && git show 0c3c777:eval/plan005_armF_compare.py && sed -n '1,125p' eval/trace_tool_errors.py && cat docs/PLAN.md" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+#!/usr/bin/env python3
+"""Plan 005 Addendum F: arm F (31b-v008-p5f, temperature 0.6) vs arm D (31b-v006-p5d, temperature 0.2), same cap 4.0,
+paired on the same 8 ids, k=1. Reuses first_ok_edit() and max_identical_run() from plan005_armE_compare.py unchanged
+(the Addendum F metric is defined as that function).
+Usage: plan005_armF_compare.py <out.json>"""
+import json, sys
+from math import comb
+sys.path.insert(0, "eval")
+import plan005_armE_compare as E
+
+RUNS = {"D": "runs/31b-v006-p5d-timing", "F": "runs/31b-v008-p5f-timing"}
+VER = {"D": "v006", "F": "v008"}
+CAP_S = 240.0  # cap 4.0 min, both arms
+LOOP_MIN = 5
+
+def main(out):
+    ids = [l.strip() for l in open("eval/plans/004-gpu-retime-ids.txt") if l.strip() and not l.startswith("#")]
+    assert len(ids) == 8, ids
+    assert len(set(ids)) == 8, f"duplicate planned ids: {ids}"
+    problems = []  # integrity failures (codex review 20261106T053515 BLOCKING 1-2): any entry -> verdict INVALID
+    raw = {}
+    for k, v in VER.items():
+        for src in ("kaggle_timing", "trace_tool_errors"):
+            lst = [t["instance_id"] for t in json.load(open(f"results/{src}_31b_{v}.json"))["tasks"]]
+            dup = sorted({i for i in lst if lst.count(i) > 1})
+            if dup: problems.append(f"{src}_31b_{v}: duplicate ids {dup}")
+            if set(lst) != set(ids):
+                problems.append(f"{src}_31b_{v}: ids != planned 8 (missing {sorted(set(ids) - set(lst))}, extra {sorted(set(lst) - set(ids))})")
+            raw[(src, k)] = json.load(open(f"results/{src}_31b_{v}.json"))["tasks"]
+    tim = {k: {t["instance_id"]: t for t in raw[("kaggle_timing", k)]} for k in VER}
+    tte = {k: {t["instance_id"]: t for t in raw[("trace_tool_errors", k)]} for k in VER}
+    for k in VER:
+        for i in ids:
+            pb = tte[k].get(i, {}).get("patch_bytes")
+            if not (isinstance(pb, int) and not isinstance(pb, bool) and pb >= 0):
+                problems.append(f"arm {k} {i}: patch_bytes={pb!r} not a nonnegative int (missing/unknown patch)")
+    if problems:
+        res = {"_schema": "plan005_arm_compare_v1", "plan": "eval/plans/005.md Addendum F", "generator": "eval/plan005_armF_compare.py",
+               "verdict_armF": "INVALID", "integrity_problems": problems}
+        json.dump(res, open(out, "w"), indent=1); print(json.dumps(res, indent=1)); sys.exit(3)
+    rows = []
+    for i in ids:
+        r = {"id": i}
+        for k in ("D", "F"):
+            s, tool = E.first_ok_edit(RUNS[k], i)
+            r.update({f"{k}_patch_bytes": tte[k][i]["patch_bytes"], f"{k}_timeout": bool(tim[k][i]["agent_timeout_fired"]),
+                      f"{k}_agent_clock_s": round(tim[k][i]["agent_clock_seconds"], 3),
+                      f"{k}_first_ok_edit_s": s, f"{k}_first_ok_edit_tool": tool, f"{k}_tool_calls": tte[k][i]["tool_calls"],
+                      **dict(zip((f"{k}_max_identical_call_run", f"{k}_max_identical_run_start_s",
+                                  f"{k}_max_identical_run_end_s", f"{k}_max_identical_run_span_s"), E.max_identical_run(RUNS[k], i)))})
+        rows.append(r)
+    eD = sum(r["D_patch_bytes"] == 0 for r in rows); eF = sum(r["F_patch_bytes"] == 0 for r in rows)
+    d_only = sum(r["D_patch_bytes"] == 0 and r["F_patch_bytes"] > 0 for r in rows)
+    f_only = sum(r["F_patch_bytes"] == 0 and r["D_patch_bytes"] > 0 for r in rows)
+    n = d_only + f_only
+    p_one = sum(comb(n, j) for j in range(f_only, n + 1)) / 2 ** n if n else 1.0  # P(F-empty-only >= obs | p=.5)
+    p_two = min(1.0, 2 * min(p_one, sum(comb(n, j) for j in range(0, f_only + 1)) / 2 ** n)) if n else 1.0
+    loops = {k: sum(r[f"{k}_max_identical_call_run"] >= LOOP_MIN for r in rows) for k in ("D", "F")}
+    totals = {k: json.load(open(f"results/trace_tool_errors_31b_{VER[k]}.json"))["totals"] for k in ("D", "F")}
+    res = {"_schema": "plan005_arm_compare_v1", "plan": "eval/plans/005.md Addendum F",
+           "A": "arm D 31b-v006-p5d b7b2eb3d (cap 4.0, temperature 0.2)", "B": "arm F 31b-v008-p5f e1513aac (cap 4.0, temperature 0.6)",
+           "generator": "eval/plan005_armF_compare.py", "n": len(rows), "k": 1,
+           "empty": {"armD": eD, "armF": eF}, "discordant": {"armD_empty_only": d_only, "armF_empty_only": f_only},
+           "sign_test": {"n_discordant": n, "p_one_sided_F_more_empty": p_one, "p_two_sided": p_two},
+           "tasks_max_identical_run_ge_5": loops,
+           "timeouts": {"armD": sum(r["D_timeout"] for r in rows), "armF": sum(r["F_timeout"] for r in rows)},
+           "agent_clock_sum_s": {"armD": round(sum(r["D_agent_clock_s"] for r in rows), 1),
+                                  "armF": round(sum(r["F_agent_clock_s"] for r in rows), 1)},
+           "first_ok_edit_before_cap_240s": {k2: sum(r[f"{k}_first_ok_edit_s"] is not None and r[f"{k}_first_ok_edit_s"] < CAP_S for r in rows)
+                                             for k, k2 in (("D", "armD"), ("F", "armF"))},
+           "edit_missing_param": {"armD": totals["D"].get("edit_missing_param", 0), "armF": totals["F"].get("edit_missing_param", 0)},
+           "cmd_error_shell": {"armD": totals["D"].get("cmd_error_shell", 0), "armF": totals["F"].get("cmd_error_shell", 0)},
+           "tool_errors_totals": {"armD": totals["D"], "armF": totals["F"]},
+           "tasks": rows}
+    gate = json.load(open("results/kaggle_timing_31b_v008.json"))["gate"]
+    tb = json.load(open("results/thinking_bound_31b_v008.json"))
+    tbt = tb.get("tasks", tb)
+    tb_ids = set(tbt) if isinstance(tbt, dict) else {v["instance_id"] for v in tbt}
+    assert tb_ids == set(ids), f"thinking-bound ids != planned 8 ids: {sorted(tb_ids ^ set(ids))}"
+    addon = all(v.get("has_summary") and v.get("root_usage_turns", 0) >= 1 for v in (tbt.values() if isinstance(tbt, dict) else tbt))
+    res["integrity_problems"] = []
+    res["gates_armF"] = gate; res["V_gates"] = gate["status"] == "PASS"; res["V_addon"] = addon
+    V = res["V_gates"] and addon
+    if not V: verdict = "INVALID"
+    elif eF >= 5 or f_only >= 3: verdict = "HARM"
+    elif loops["F"] == 0 and eF <= 4 and f_only <= 2: verdict = "LOOP-REDUCED"
+    else: verdict = "NO-EFFECT"
+    res["verdict_armF"] = verdict
+    json.dump(res, open(out, "w"), indent=1)
+    print(json.dumps({k: v for k, v in res.items() if k not in ("tasks", "gates_armF", "tool_errors_totals")}, indent=1))
+    for r in rows: print(r)
+
+if __name__ == "__main__":
+    main(sys.argv[1])
+#!/usr/bin/env python3
+"""Count tool-call errors per task in a timing run's traces (plan 005 mechanism metrics).
+
+Usage: trace_tool_errors.py <run_dir> <bundle_label> <out.json> [<ids_file>]
+With <ids_file> (one instance id per line), the run must contain EXACTLY those ids, each with trace.json and
+agent.patch, else exit 2 (no output written). Responses are classified by their own tool name (fallback: the
+earliest unanswered call), and paired to calls FIFO per tool for call indices.
+Reads <run_dir>/runs/<task>/{trace.json,agent.patch}. Writes counts only (no task text).
+Error classes (matched on the tool response, never on task content):
+  write_outside_ws   write_file rejected: "escapes workspace root"
+  edit_missing_param edit_file rejected: mandatory input parameters not present (mangled tool-call args)
+  edit_other_error   any other edit_file error
+  cmd_error_empty    unsuccessful run_command response with empty message (e.g. grep no-match exit 1)
+  cmd_error_shell    unsuccessful run_command response containing "syntax error" (shell quoting)
+  cmd_error_other    any other unsuccessful run_command response (any error_type except BudgetExceeded,
+                     e.g. CommandError, TimeoutExceeded)
+  budget_exceeded    BudgetExceeded responses
+  sitecustomize_warn responses whose text mentions "Error in sitecustomize" (stderr noise, may be non-fatal)
+"""
+import ast, json, os, sys
+
+
+def _load(v):
+    if isinstance(v, dict):
+        return v
+    s = str(v)
+    try:
+        return json.loads(s)
+    except Exception:
+        try:
+            return ast.literal_eval(s)
+        except Exception:
+            return {"raw": s}
+
+
+def classify(tool, r):
+    raw = json.dumps(r)
+    cls = []
+    if "Error in sitecustomize" in raw:
+        cls.append("sitecustomize_warn")
+    if r.get("status") == "ok":
+        return cls, True
+    et = r.get("error_type") or ""
+    msg = str(r.get("error_message") or r.get("error") or "")
+    if et == "BudgetExceeded":
+        cls.append("budget_exceeded")
+    elif tool == "write_file" and "escapes workspace root" in msg:
+        cls.append("write_outside_ws")
+    elif tool == "edit_file" and "mandatory input parameters are not present" in msg:
+        cls.append("edit_missing_param")
+    elif tool == "edit_file":
+        cls.append("edit_other_error")
+    elif tool == "run_command" and not msg.strip():
+        cls.append("cmd_error_empty")
+    elif tool == "run_command" and "syntax error" in msg:
+        cls.append("cmd_error_shell")
+    elif tool == "run_command":
+        cls.append("cmd_error_other")
+    else:
+        cls.append(f"{tool}_error")
+    return cls, False
+
+
+def main(run_dir, label, out, ids_file=None):
+    base = os.path.join(run_dir, "runs")
+    tasks = sorted(t for t in os.listdir(base)
+                   if os.path.isfile(os.path.join(base, t, "trace.json")))
+    if ids_file:
+        want = sorted(l.strip() for l in open(ids_file) if l.strip() and not l.startswith("#"))
+        bad = [t for t in want if not (os.path.isfile(os.path.join(base, t, "trace.json"))
+                                       and os.path.isfile(os.path.join(base, t, "agent.patch")))]
+        extra = sorted(set(tasks) - set(want))
+        if bad or extra:
+            print(json.dumps({"error": "incomplete or unexpected artifacts", "missing": bad, "extra": extra}))
+            sys.exit(2)
+        tasks = want
+    rows, tot = [], {}
+    for t in tasks:
+        d = json.load(open(os.path.join(base, t, "trace.json")))
+        pp = os.path.join(base, t, "agent.patch")
+        row = {"instance_id": t, "patch_bytes": os.path.getsize(pp) if os.path.exists(pp) else None,
+               "tool_calls": 0, "tool_errors": 0, "calls_by_tool": {}, "errors": {},
+               "first_ok_edit_elapsed_s": None, "first_ok_edit_call_index": None}
+        pending = []  # [(call_index, tool)] unanswered calls, in order
+        for e in d["entries"]:
+            if e["type"] == "tool_call":
+                tool = e.get("tool")
+                row["tool_calls"] += 1
+                row["calls_by_tool"][tool] = row["calls_by_tool"].get(tool, 0) + 1
+                pending.append((row["tool_calls"], tool))
+            elif e["type"] == "tool_response":
+                tool = e.get("tool")
+                j = next((i for i, (_, t) in enumerate(pending) if t == tool), 0 if pending else None)
+                idx, ctool = pending.pop(j) if j is not None else (None, None)
+                tool = tool or ctool
+                cls, ok = classify(tool, _load(e.get("result", "")))
+                for c in cls:
+                    row["errors"][c] = row["errors"].get(c, 0) + 1
+                    tot[c] = tot.get(c, 0) + 1
+                if not ok:
+                    row["tool_errors"] += 1
+                if ok and tool == "edit_file" and row["first_ok_edit_elapsed_s"] is None:
+                    row["first_ok_edit_elapsed_s"] = float(e["elapsed_s"])
+                    row["first_ok_edit_call_index"] = idx
+        rows.append(row)
+    res = {
+        "_schema": "trace_tool_errors_v1",
+        "run": run_dir, "bundle": label, "n": len(rows),
+        "generator": "eval/trace_tool_errors.py",
+        "fields": {"patch_bytes": "size of agent.patch (0 = empty diff)",
+                   "errors": "per-class counts, see generator docstring",
+                   "first_ok_edit_*": "first edit_file with status ok (null = none; sed/shell edits not counted)"},
+        "empty_patch_count": sum(1 for r in rows if r["patch_bytes"] == 0),
+        "tasks_with_class": {c: sum(1 for r in rows if r["errors"].get(c)) for c in sorted(tot)},
+        "totals": dict(sorted(tot.items())),
+        "tasks": rows,
+    }
+    with open(out, "w") as f:
+        json.dump(res, f, indent=1)
+    print(json.dumps({k: res[k] for k in ("n", "empty_patch_count", "tasks_with_class", "totals")}))
+
+
+if __name__ == "__main__":
+    main(*sys.argv[1:5])
+# Plan (the Director may revise it; log revisions in the journal)
+
+Today is Nov 4. The final deadline is Dec 2, 23:59 UTC. Each phase ends in a gate report to the
+Director.
+
+## P0: Foundation and baselines (Nov 4–7)
+Follow `docs/KICKOFF.md`.
+
+**Gate 0:**
+- The harness is verified and the facts are corrected.
+- Gold calibration has produced the clean task list.
+- The splits are frozen.
+- `pack` and the eval runners work.
+- 31B and E4B baseline bundles exist.
+- The first baseline submission is authorized.
+
+## P1: Scaffold iteration, both tracks (Nov 7–18)
+- Use the E4B track as a cheap testbed: a 1×L4 runs about 4× cheaper than 4×L4. Port its wins to
+  31B and confirm them there.
+- Work on the failure taxonomy, harness-trap fixes, the prompt workflow, skills, the localizer
+  sub-agent and sampling.
+- Submit daily when there's an eligible candidate.
+
+**Gate 1:** each track's best bundle beats its baseline on paired dev, and the timing bound holds.
+
+## P2: Post-training (Nov 12–25)
+- Collect trajectories on dev tasks (never holdout).
+- Use rejection-sampling SFT, plus scripted trajectories built from the reference patches.
+- LoRA: no A100 on GCP (decision 003). Cost out E4B LoRA on Kaggle L4x4 or GCP l4x1 spot, and whether 31B LoRA is feasible at all, in a report before Phase 2.
+- Run 1–2 rounds of expert iteration.
+- Lever (unscheduled): open-weight teacher distillation (licence must permit training other models). Needs GPUs we lack or a paid API (Aniket approval); cost out only when LoRA work starts (decision 003 item 3).
+- Ship rule (decision 004-002-001): leave-one-repo-out is mandatory for every ship decision; repo-specific prompt content is rejected; weight the four public repos equally.
+- Ship only if it wins paired on dev **and** holdout, in the exact vLLM base.
+
+**Gate 2:** for each track, decide adapter vs no adapter.
+
+## P3: Hardening (Nov 24–29)
+- Freeze candidates.
+- Run leave-one-repo-out checks, variance runs, and a timing rehearsal on 4×L4.
+- Get the last scored submissions in by about Nov 29.
+
+## P4: Finals (Nov 30–Dec 2)
+- Run the Director's selection analysis.
+- Escalate to Aniket on Dec 1.
+- Lock the selection by Dec 2, 18:00 UTC.
+
+## Budget plan ($150 hard cap; the Director releases it in increments)
+| Use | Approx. |
+|---|---|
+| CPU x86 VM for gold calibration and Phase-2 checks | $5 |
+| E4B on 1×L4 (spot) | $30 |
+| 31B on 4×L4 (spot) | $65 |
+| LoRA training (no A100 on GCP for now; see decision 003) | TBD |
+| Reserve | $20 |
+
+Kaggle L4x4 gives about 15 h/week, reserved for exact-environment smoke tests and timing.
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import json
+from pathlib import Path
+for v in ('v006', 'v007', 'v008'):
+ for prefix in ('kaggle_timing', 'trace_tool_errors', 'thinking_bound'):
+  p=Path(f'results/{prefix}_31b_{v}.json')
+  if not p.exists():
+   print(str(p), 'ABSENT'); continue
+  d=json.loads(p.read_text())
+  tasks=d.get('tasks',d)
+  print(str(p), 'tasks_type', type(tasks).__name__, 'n', len(tasks), 'gate_status', d.get('gate',{}).get('status'))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+results/kaggle_timing_31b_v006.json tasks_type list n 8 gate_status PASS
+results/trace_tool_errors_31b_v006.json tasks_type list n 8 gate_status None
+results/thinking_bound_31b_v006.json tasks_type dict n 8 gate_status None
+results/kaggle_timing_31b_v007.json tasks_type list n 8 gate_status PASS
+results/trace_tool_errors_31b_v007.json tasks_type list n 8 gate_status None
+results/thinking_bound_31b_v007.json tasks_type dict n 8 gate_status None
+results/kaggle_timing_31b_v008.json ABSENT
+results/trace_tool_errors_31b_v008.json ABSENT
+results/thinking_bound_31b_v008.json ABSENT
+
+codex
+The new checks cover null patch sizes and duplicate, missing, or unexpected IDs in all four summaries. The decision branches are unchanged. I’ll now test those failure paths and run E-as-F against the existing traces. The sandbox is read-only, so I’m using an in-memory scratch copy and capturing its output.
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import ast, builtins, contextlib, copy, hashlib, io, itertools, json, pathlib, subprocess, sys
+from unittest.mock import patch
+
+root = pathlib.Path.cwd()
+before = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in root.joinpath('results').glob('*') if p.is_file()}
+original = subprocess.check_output(['git','show','0c3c777:eval/plan005_armF_compare.py'], text=True)
+old = subprocess.check_output(['git','show','a358590:eval/plan005_armF_compare.py'], text=True)
+# A scratch copy held entirely in memory; only the F input version/path is substituted.
+source = original.replace('v008', 'v007').replace('p5f', 'p5e')
+ns = {'__name__': 'review_scratch'}
+exec(compile(source, '/tmp/plan005_armF_compare_E_as_F.py', 'exec'), ns)
+ids = [s.strip() for s in pathlib.Path('eval/plans/004-gpu-retime-ids.txt').read_text().splitlines() if s.strip() and not s.startswith('#')]
+paths = [f'results/{src}_31b_{v}.json' for v in ('v006','v007') for src in ('kaggle_timing','trace_tool_errors')]
+base = {p: json.loads(pathlib.Path(p).read_text()) for p in paths}
+base['results/thinking_bound_31b_v007.json'] = json.loads(pathlib.Path('results/thinking_bound_31b_v007.json').read_text())
+real_open = builtins.open
+output_path = '/tmp/review_plan005_armF.json'
+
+def run(fixtures, prohibit_pairing=False):
+    output = io.StringIO()
+    def fake_open(path, mode='r', *a, **kw):
+        p = str(path)
+        if any(m in mode for m in 'wax+'):
+            assert p == output_path, ('unexpected write', p)
+            return output
+        if p in fixtures:
+            return io.StringIO(json.dumps(fixtures[p]))
+        return real_open(path, mode, *a, **kw)
+    code, err = 0, None
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch('builtins.open', fake_open))
+        stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        if prohibit_pairing:
+            stack.enter_context(patch.object(ns['E'], 'first_ok_edit', side_effect=AssertionError('pairing reached before integrity exit')))
+            stack.enter_context(patch.object(ns['E'], 'max_identical_run', side_effect=AssertionError('pairing reached before integrity exit')))
+        try:
+            ns['main'](output_path)
+        except SystemExit as e:
+            code = e.code
+        except Exception as e:
+            err = f'{type(e).__name__}: {e}'
+    result = json.loads(output.getvalue()) if output.getvalue() else None
+    return code, result, err
+
+code, smoke, err = run(base)
+assert code == 0 and err is None, (code, err)
+assert smoke['empty'] == {'armD':3, 'armF':5}, smoke['empty']
+assert smoke['discordant'] == {'armD_empty_only':0, 'armF_empty_only':2}
+assert smoke['verdict_armF'] == 'HARM' and smoke['integrity_problems'] == []
+ref = json.loads(pathlib.Path('results/plan005_armE_vs_D.json').read_text())
+expected = [{('F_' + k[2:] if k.startswith('E_') else k):v for k,v in row.items()} for row in ref['tasks']]
+assert smoke['tasks'] == expected
+print('E-as-F smoke: PASS; all 8 per-task rows match stored E; empty D/F=3/5; F-only=2; HARM; p2=', smoke['sign_test']['p_two_sided'])
+
+checks = 0
+
+def expect_invalid(fixtures, label):
+    global checks
+    code, res, err = run(fixtures, prohibit_pairing=True)
+    assert err is None and code == 3 and res['verdict_armF'] == 'INVALID' and res['integrity_problems'], (label, code, res, err)
+    checks += 1
+
+for path in paths:
+    for index in range(8):
+        for kind in ('duplicate','missing','replace-unexpected'):
+            f = copy.deepcopy(base)
+            rows = f[path]['tasks']
+            if kind == 'duplicate': rows.append(copy.deepcopy(rows[index]))
+            elif kind == 'missing': rows.pop(index)
+            else: rows[index]['instance_id'] = 'unexpected_id'
+            expect_invalid(f, (path,index,kind))
+    f = copy.deepcopy(base)
+    f[path]['tasks'].append(dict(f[path]['tasks'][0], instance_id='unexpected_id'))
+    expect_invalid(f, (path,'extra'))
+    # Reordering must preserve pairing.
+    f = copy.deepcopy(base)
+    f[path]['tasks'].reverse()
+    code, res, err = run(f)
+    assert err is None and code == 0 and res == smoke, (path,'reordering',err)
+
+bad_values = [None, -1, -100, 0.0, 1.5, True, False, '0', '', [], {}, float('nan'), float('inf')]
+for path in paths:
+    if 'trace_tool_errors' not in path: continue
+    for index in range(8):
+        for value in bad_values:
+            f = copy.deepcopy(base)
+            f[path]['tasks'][index]['patch_bytes'] = value
+            expect_invalid(f, (path,index,repr(value)))
+        f = copy.deepcopy(base)
+        del f[path]['tasks'][index]['patch_bytes']
+        expect_invalid(f, (path,index,'missing patch_bytes'))
+print('Integrity regressions: PASS;', checks, 'invalid fixtures wrote INVALID + integrity_problems, exit 3, without reaching pairing; 4 reordered fixtures preserve results')
+
+# Exact original decision AST and independent exhaustive feasible-count oracle.
+def decision(src):
+    main = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == 'main')
+    return next(n for n in main.body if isinstance(n, ast.If) and ast.unparse(n.test) == 'not V')
+a,b=decision(old),decision(original)
+assert ast.dump(a,include_attributes=False) == ast.dump(b,include_attributes=False)
+compiled = compile(ast.fix_missing_locations(ast.Module(body=[b], type_ignores=[])), '<decision>', 'exec')
+n_cases=0
+for shared in range(9):
+ for d_only in range(9-shared):
+  for f_only in range(9-shared-d_only):
+   eF=shared+f_only
+   for loops in range(9):
+    for V in (False, True):
+     loc={'V':V,'eF':eF,'f_only':f_only,'loops':{'F':loops}}
+     exec(compiled,loc)
+     expected='INVALID' if not V else ('LOOP-REDUCED' if loops==0 and eF<=4 and f_only<=2 else ('HARM' if eF>=5 or f_only>=3 else 'NO-EFFECT'))
+     assert loc['verdict']==expected,loc
+     n_cases+=1
+print('Decision rule: identical AST to a358590; PASS',n_cases,'feasible-count/loop/validity cases against Addendum F oracle')
+
+# Characterize malformed-schema diagnostics separately from the original two blockers.
+for label, mutate in (
+ ('missing instance_id', lambda r:r.pop('instance_id')),
+ ('unhashable instance_id',lambda r:r.__setitem__('instance_id',[])),
+):
+ f=copy.deepcopy(base);mutate(f[paths[0]]['tasks'][0])
+ code,res,err=run(f,prohibit_pairing=True)
+ print('Malformed-schema diagnostic:',label, '=>',err,'output=',bool(res))
+after = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in root.joinpath('results').glob('*') if p.is_file()}
+assert before == after
+print('No filesystem writes; results/ contents unchanged.')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 1083ms:
+E-as-F smoke: PASS; all 8 per-task rows match stored E; empty D/F=3/5; F-only=2; HARM; p2= 0.5
+Integrity regressions: PASS; 324 invalid fixtures wrote INVALID + integrity_problems, exit 3, without reaching pairing; 4 reordered fixtures preserve results
+Decision rule: identical AST to a358590; PASS 2970 feasible-count/loop/validity cases against Addendum F oracle
+Malformed-schema diagnostic: missing instance_id => KeyError: 'instance_id' output= False
+Malformed-schema diagnostic: unhashable instance_id => TypeError: unhashable type: 'list' output= False
+No filesystem writes; results/ contents unchanged.
+
+codex
+**BLOCKING**
+
+None. Both previous blockers are fixed at `0c3c777`:
+
+1. Missing, null, negative, or non-integer `patch_bytes` now produces `INVALID`, populated `integrity_problems`, and exit 3 before pairing. Booleans are also rejected. [eval/plan005_armF_compare.py:32](/home/ubuntu/work/gemma/eval/plan005_armF_compare.py:32)
+2. All four summary task lists are checked for duplicates and exact planned membership; duplicate, missing, and unexpected IDs produce the same invalidation. [eval/plan005_armF_compare.py:22](/home/ubuntu/work/gemma/eval/plan005_armF_compare.py:22)
+
+**NON-BLOCKING**
+
+1. Malformed schemas still fail through exceptions rather than structured diagnostics: deleting `instance_id` raises `KeyError`; using a list as an ID raises `TypeError`. Neither writes `INVALID`. This fails closed and does not reintroduce silent pairing errors. [eval/plan005_armF_compare.py:24](/home/ubuntu/work/gemma/eval/plan005_armF_compare.py:24)
+
+The Addendum F / decision 061 item 3 rule is unchanged: its decision AST is identical to `a358590`, and **2,970** feasible count/loop/validity cases matched the registered rule. [eval/plan005_armF_compare.py:84](/home/ubuntu/work/gemma/eval/plan005_armF_compare.py:84)
+
+Validation passed:
+
+- **324** invalid-input cases: `INVALID`, diagnostics, exit 3 before pairing.
+- Four summary reorderings preserved results.
+- E-as-F matched all eight stored per-task rows: empty D/F **3/5**, F-only **2**, **HARM**, two-sided p **0.5**.
+
+No valid-input regression found. Actual F artifacts remain absent. The read-only sandbox required an in-memory scratch copy; no files were written, and `results/` hashes remained unchanged.
+
+**Questions:** None.
+tokens used
+30,582
