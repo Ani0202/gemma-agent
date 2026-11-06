@@ -53,14 +53,13 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
 - Kaggle GPU this week: 13.09/30 h per `kaggle quota` 04:37Z before arm E (arm D +1.66). Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
 ## Live caveats
-- Standing: kernel = Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light suffix for waiters/asks/reviews only (dec 024); LORO 2-repo weak (dec 014).
+- Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014).
 - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
   (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
   results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
 - Director reminder 2026-11-06T23:02Z: GCP quota re-request line to Aniket (keep until a decision marks it done).
 - Any Kaggle GPU kernel must pin the starter docker_image (py3.12, cp312 wheelhouse). Hosted-LLM-API data question OPEN; no new 3rd-party services. One pending Kaggle submission at a time; no partial credit on timeout (docs/RULES_FINDINGS.md).
-## Timing facts (results/kaggle_timing_e4b_v000_setup.json)
-- Harness sandbox setup ~210 s/task, outside max_time_minutes (clock starts after setup); flat across repos. vLLM startup 5.39 min;
+## Timing facts (results/kaggle_timing_e4b_v000_setup.json) setup ~210 s/task, outside max_time_minutes (clock starts after setup); flat across repos. vLLM startup 5.39 min;
   verification ~410 s (excluded from the 12 h). Agent clock p90 144 s at cap 5.
 ## Open decisions / instructions in force
 - Dec 022: interim timing rule (cap + S) x125 + 30 <= 660 (S now per dec 034 hypotheses). Item 4 (truncation-safe diff, patch hygiene, tool-output trimming) pending = dec 032 item 8.
