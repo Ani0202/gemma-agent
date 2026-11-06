@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 07:09Z (cycle 126, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 07:09Z (cycle 127, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -27,7 +27,9 @@
 ## Running jobs (07:08Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z), codex-review-plan007r4-light (rev 4 re-review of 0d49b1c).
 - REV 4 (0d49b1c): review r3 070228 = 1 BLOCKING (invalid/contradictory verdict evidence avoided H). Fixed r8 (resolved non-bool) / r9 (exit_code non-int)
   -> H-ROW; verify:contradictory_resolved -> H-VERIFY; RE-FROZEN sha256=a208a023..4e6b; tests 819/4skip; arm F unchanged; Director FYI'd 07:08Z,
-  NEEDS Director note on a208a023 before smoke (dec 063 item 3). Classifier code SHA for manifests = 0d49b1c (not b6e120f any more).
+  DEC 064 APPROVED freeze a208a023 (note on file); classifier code SHA = 0d49b1c (replaces b6e120f). Smoke gate = dec 063 item 3.
+  DEC 064 item 3: STOP review loop. If r4 BLOCKING: fix, rev-5 review w/ 'enumerate ALL remaining paths... single list; do not stop at first',
+  fold all into ONE re-freeze; if rev 5 not clean -> NO rev 6, report residuals + arm-F exposure to Director. Item 4: quota log before/after smoke; week <= 29.5 h.
 - REV 3 (2fc49b5, superseded by rev 4): rev-2 review 065651 = 1 BLOCKING (fail-open on null/invalid patch evidence, 'Harness task failure' w/o messages).
   Fixed r6/r7 -> H-ROW; RE-FROZEN sha256=18afdbbd..af08 (plan 007 RE-FROZEN line); tests 794/4skip; arm F unchanged; Director noted 07:02Z.
 - DEC 063 (approve): freeze 18afdbbd approved. Classifier code SHA = b6e120f (cite in results header + smoke/main kernel manifest; line

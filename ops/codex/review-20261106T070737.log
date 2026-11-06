@@ -1984,3 +1984,374 @@ Traceback (most recent call last):
                             dirlist)
 FileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma']
 
+codex
+The new guards appear to close every case in the prior review table. I found a separate gap: some malformed message and setup fields can still reach agent outcomes without H. I’m reproducing those cases and checking the legitimate rows for false H results. The requested test command could not start because the read-only sandbox prevents pytest from creating temporary files.
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests/test_classify_rows.py -q -s -p no:cacheprovider -k 'not test_cli'" in /home/ubuntu/work/gemma
+ succeeded in 68ms:
+.........................................................................................................
+105 passed, 1 deselected in 0.06s
+
+exec
+/bin/bash -lc "nl -ba eval/plans/007.md | sed -n '94,139p' && sed -n '1,65p' eval/tests/test_classify_rows.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+    94	### Smoke, chunks, reruns
+    95	- SMOKE first: the first 3 ids (eval/plans/007-smoke-ids.txt: 2 rich + 1 fastapi), budget 5400 s (rev 1: was 4800; fits the larger stop-guard reserve). The gate checks mechanics
+    96	  only; agent quality (0/3 included) never fails it. Gate holds iff: vLLM up, 3 rows present, 0 H rows. On hold the smoke rows
+    97	  COUNT as the first 3 arm-1 rows, and the main kernel runs ids 4..33 with --seed-max = ceil(max smoke per-task total).
+    98	  Gate FAIL: no main run today; diagnose; the run moves after the reset (dec 062 item 4: no rushing).
+    99	- Budget: KERNEL_BUDGET for main sized from the smoke per-task wall and the quota left before the reset (target: week
+   100	  usage <= 29.5/30 h). Unrun ids (a suffix of the fixed order) run as chunk 2 after the reset, identical bundle and code SHA,
+   101	  with --seed-max from all earlier rows.
+   102	- First attempts are always retained and reported. A code change during arm 1 is allowed ONLY to fix a defect behind an H row,
+   103	  documented first (journal line naming the row + the H category + the cause, then a commit, then a codex review). If the fix
+   104	  touches no file on the agent or verification path, only the H rows rerun (appended at the end of the order). If it does
+   105	  touch either path, every row already run reruns under the fixed code so all primary rows share one code SHA, and the
+   106	  first-attempt rows are reported as a sensitivity line. Any bundle byte change = a different arm: arm 1 restarts with a new addendum.
+   107	  No rerun for any AGENT outcome, ever.
+   108	- Quota logged before/after every kernel in ops/budget/kaggle.md. No GCP spend. Never delays the dec 055 checklist at 2026-11-07T00:00Z.
+   109	
+   110	## Metrics
+   111	- PRIMARY: count of stock resolved=True / 33, Wilson 95% CI. No override of the stock verdict by any class: the primary numerator is
+   112	  stock resolved=True for every row, H rows included (an H row with resolved=True counts as PASS; review 064331 Q1). H status
+   113	  affects only validity (smoke gate, reruns of H rows) and the sensitivity line. Sensitivity line: pass rate over the non-H rows (n stated).
+   114	  KNOWN-DIAG count listed.
+   115	- Per repo (rich 27, fastapi 6), descriptive. Note: dev includes the 8 plan-005/006 screen ids (tuned-on); report pass rate on the 25
+   116	  never-screened ids separately as a descriptive line.
+   117	- Secondary (descriptive): AGENT FAIL sub-label counts, empty-patch count, timeouts, submit_patch called, test files edited, stray
+   118	  files, agent wall p50/p90, verification wall p50/p90, LLM calls/tool calls per task.
+   119	- Dec 060 Addendum metric (all arms): identical consecutive tool-call runs (same tool + byte-identical args): per-task max run,
+   120	  tasks with run >= 3 and >= 5, total repeated calls (code: eval/plan005_armF_compare.py logic).
+   121	- Dec 062 item 5: thinking blocks per task (count + total chars; eval/thinking_bound.py logic), descriptive; with thinking_budget 0
+   122	  one 17-char block was seen in arm F.
+   123	
+   124	## Decision rules
+   125	- ARM 1 alone is a measurement: no ship decision follows from it. It sets the baseline for arm 2 and is cited in the dec 061 (i)
+   126	  v004 cap discussion. Arm 1 is INVALID (env problem, not a quality result) iff H rows >= 5 of 33, whatever the pass count.
+   127	- ENV CONTROL (pre-registered follow-up, not gating the runs): a gold+null pass of the 33 dev ids through this exact kernel
+   128	  verification path (CPU kernel, no GPU quota; needs a small gold-patch mode, codex-reviewed first). Until it exists, arm 1 is
+   129	  reported with the caveat "env agreement with the local gold calibration unmeasured in the kernel path". When it exists:
+   130	  ids whose kernel-path gold fails or null passes are listed and a sensitivity pass rate excludes them; the primary is unchanged.
+   131	- ARM 2 vs ARM 1 (paired, same 33 ids, k=1 FIXED: no second sample under this plan, whatever arm 2 shows): per-task discordant
+   132	  counts on-only / off-only, exact two-sided sign test. Any later k>1 needs a new pre-registration with a fixed n and seeds, fixed
+   133	  before results, and a task-level analysis (per-task mean over samples, sign test on per-task differences).
+   134	  - ON-ADOPT: on-only > off-only, p < 0.2, AND ON timeouts <= OFF timeouts + 2, AND the cap-3.5 timing check passes.
+   135	  - ON-BETTER-VETOED: on-only > off-only with p < 0.2 but the timeout or timing condition fails: keep OFF for shipping; report
+   136	    to the Director with the timing data as a candidate for a cap/budget follow-up (no automatic further arm).
+   137	  - KEEP-OFF: off-only >= on-only.
+   138	  - NO-DIFFERENCE: on ahead with p >= 0.2: keep OFF (cheaper, faster). +-3 tasks on 33 is noise.
+   139	  - Cap-3.5 timing check (cap unchanged, so this checks that thinking does not break cap enforcement): every ON row has a non-null
+"""Offline synthetic tests for the frozen Plan 007 row classifier."""
+import hashlib
+from importlib import import_module
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
+classifier = import_module('eval.kaggle.classify_rows')
+timing = import_module('eval.kaggle.agent_timing')
+
+
+def row(**updates):
+    return dict(dict(instance_id='task-1', repo='example/repo', result_error=None,
+                     agent_error_text=None, verified_patch_bytes=10, setup_calls=[],
+                     exit_code=0, resolved=False, error=None, setup_failed=False), **updates)
+
+
+def editable(offline=True, record=True, rc=1):
+    return dict(argv=['pip', 'install', '-e', '/workspace'] + (['--no-index'] if offline else []),
+                rc=rc, stdout='' if offline else 'subprocess-exited-with-error',
+                stderr=classifier.RECORD if record else 'other failure')
+
+
+def chain():
+    return dict(step='setup.py', rc=0,
+                subprocesses=[editable(), editable(offline=False, record=False)])
+
+
+def test_agent_patterns_are_stock():
+    assert [(n, p.pattern, p.flags) for n, p in classifier.AGENT_END] == [
+        (n, p.pattern, p.flags) for n, p in timing.AGENT_OUTCOMES]
+
+
+@pytest.mark.parametrize('passes', [1, 3])
+def test_record_chain_all_passes(passes):
+    result = classifier.classify(row(setup_calls=[chain() for _ in range(passes)],
+                                     setup_failed=True, editable_failed=True))
+    assert result['h'] is None
+    assert result['known_diag'] is True
+
+
+@pytest.mark.parametrize('subprocesses', [
+    [editable(record=False)], [editable(offline=False, record=False)],
+    [editable(offline=False, record=False), editable()],
+])
+def test_unexpected_editable_failure(subprocesses):
+    result = classifier.classify(row(setup_calls=[dict(step='setup.py', rc=0, subprocesses=subprocesses)]))
+    assert result['h'] == 'H-SETUP'
+    assert result['known_diag'] is False
+    assert 's5:unexpected_editable_failure' in result['reasons']
+
+
+def test_later_pass_failure_is_retained():
+    calls = [chain(), dict(step='setup.py', rc=0, subprocesses=[editable(record=False)])]
+    result = classifier.classify(row(setup_calls=calls))
+    assert result['h'] == 'H-SETUP'
+    assert result['known_diag'] is False
+
+
+@pytest.mark.parametrize('updates,reason', [
+    (dict(setup_calls=[dict(step='tool_deps', rc=-1)]), 's2:setup_step_failed'),
+    (dict(missing_tool_deps=['x']), 's1:missing_tool_deps'),
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+import json, subprocess, hashlib
+from pathlib import Path
+from eval.kaggle.classify_rows import classify
+base = dict(instance_id='synthetic', repo='example/repo', result_error=None, agent_error_text=None, verified_patch_bytes=10, setup_calls=[], exit_code=0, resolved=False)
+cases = [
+ ('invalid result_error zero',dict(result_error=0)),
+ ('invalid result_error false',dict(result_error=False)),
+ ('invalid result_error empty list',dict(result_error=[])),
+ ('invalid agent_error_text zero',dict(agent_error_text=0)),
+ ('invalid result_error under harness failure',dict(error='Harness task failure', result_error={}, agent_error_text='Agent exceeded tool call budget')),
+ ('invalid error false',dict(error=False)),
+ ('invalid error list',dict(error=[])),
+ ('setup_calls empty object',dict(setup_calls={})),
+ ('setup_calls empty string',dict(setup_calls='')),
+ ('setup_calls empty entry',dict(setup_calls=[{}])),
+ ('setup rc boolean',dict(setup_calls=[dict(step='setup.py', rc=False)])),
+ ('setup calls null',dict(setup_calls=None)),
+ ('result_error object',dict(result_error={'message':'bad'})),
+ ('agent_error_text object',dict(error='unexpected',agent_error_text={'message':'bad'})),
+ ('resolved True verification failure',dict(resolved=True,result_error='Required test node did not pass: t::x')),
+ ('resolved True harness failure agent end',dict(resolved=True,error='Harness task failure',agent_error_text='Agent exceeded tool call budget')),
+]
+for label, updates in cases:
+ try:
+  r=classify(dict(base,**updates))
+  print(json.dumps(dict(case=label, updates=updates, result=r),sort_keys=True))
+ except Exception as e:
+  print(json.dumps(dict(case=label, updates=updates, exception=type(e).__name__)))
+p=Path('results/plan007_classifier_armF_check.json')
+old=json.loads(subprocess.check_output(['git','show','2fc49b5:'+str(p)]))
+new=json.loads(p.read_text())
+print('RESULT_CHANGED_KEYS', [k for k in old.keys()|new.keys() if old.get(k)"'!=new.get(k)])
+print('"'CLASSIFIER_SHA256',hashlib.sha256(Path('eval/kaggle/classify_rows.py').read_bytes()).hexdigest())
+check=subprocess.run(['/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3','eval/kaggle/classify_rows.py',new['input']],check=True,capture_output=True,text=True)
+print('CLI_EQUALS_COMMITTED',check.stdout==p.read_text())
+print('COUNTS',new['counts'])
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+{"case": "invalid result_error zero", "result": {"agent": "EXIT0_UNRESOLVED", "agent_end": null, "h": null, "known_diag": false, "reasons": [], "resolved": false}, "updates": {"result_error": 0}}
+{"case": "invalid result_error false", "result": {"agent": "EXIT0_UNRESOLVED", "agent_end": null, "h": null, "known_diag": false, "reasons": [], "resolved": false}, "updates": {"result_error": false}}
+{"case": "invalid result_error empty list", "result": {"agent": "EXIT0_UNRESOLVED", "agent_end": null, "h": null, "known_diag": false, "reasons": [], "resolved": false}, "updates": {"result_error": []}}
+{"case": "invalid agent_error_text zero", "result": {"agent": "EXIT0_UNRESOLVED", "agent_end": null, "h": null, "known_diag": false, "reasons": [], "resolved": false}, "updates": {"agent_error_text": 0}}
+{"case": "invalid result_error under harness failure", "result": {"agent": "EXIT0_UNRESOLVED", "agent_end": "tool_calls", "h": null, "known_diag": false, "reasons": [], "resolved": false}, "updates": {"agent_error_text": "Agent exceeded tool call budget", "error": "Harness task failure", "result_error": {}}}
+{"case": "invalid error false", "result": {"agent": null, "agent_end": null, "h": "H-ROW", "known_diag": false, "reasons": ["r3:unexpected_error"], "resolved": false}, "updates": {"error": false}}
+{"case": "invalid error list", "result": {"agent": null, "agent_end": null, "h": "H-ROW", "known_diag": false, "reasons": ["r3:unexpected_error"], "resolved": false}, "updates": {"error": []}}
+{"case": "setup_calls empty object", "result": {"agent": "EXIT0_UNRESOLVED", "agent_end": null, "h": null, "known_diag": false, "reasons": [], "resolved": false}, "updates": {"setup_calls": {}}}
+{"case": "setup_calls empty string", "result": {"agent": "EXIT0_UNRESOLVED", "agent_end": null, "h": null, "known_diag": false, "reasons": [], "resolved": false}, "updates": {"setup_calls": ""}}
+{"case": "setup_calls empty entry", "result": {"agent": "EXIT0_UNRESOLVED", "agent_end": null, "h": null, "known_diag": false, "reasons": [], "resolved": false}, "updates": {"setup_calls": [{}]}}
+{"case": "setup rc boolean", "result": {"agent": "EXIT0_UNRESOLVED", "agent_end": null, "h": null, "known_diag": false, "reasons": [], "resolved": false}, "updates": {"setup_calls": [{"rc": false, "step": "setup.py"}]}}
+{"case": "setup calls null", "updates": {"setup_calls": null}, "exception": "TypeError"}
+{"case": "result_error object", "updates": {"result_error": {"message": "bad"}}, "exception": "AttributeError"}
+{"case": "agent_error_text object", "updates": {"error": "unexpected", "agent_error_text": {"message": "bad"}}, "exception": "AttributeError"}
+{"case": "resolved True verification failure", "result": {"agent": "PASS", "agent_end": null, "h": null, "known_diag": false, "reasons": [], "resolved": true}, "updates": {"resolved": true, "result_error": "Required test node did not pass: t::x"}}
+{"case": "resolved True harness failure agent end", "result": {"agent": "PASS", "agent_end": "tool_calls", "h": null, "known_diag": false, "reasons": [], "resolved": true}, "updates": {"agent_error_text": "Agent exceeded tool call budget", "error": "Harness task failure", "resolved": true}}
+RESULT_CHANGED_KEYS ['classifier_sha256']
+CLASSIFIER_SHA256 a208a02343b43556e990271b8757044fdf51515f27ff9a067cd3af14c1fd4e6b
+CLI_EQUALS_COMMITTED True
+COUNTS {'h': {'H-ROW': 8}, 'agent': {}, 'known_diag': 7}
+
+exec
+/bin/bash -lc "rg -n 'def harness_error|AGENT_OUTCOMES' eval/kaggle/agent_timing.py && rg -n 'resolved=|Required test node did not pass|Missing or empty JUnit|test_exit_code=|error=' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/verification.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluator.py" in /home/ubuntu/work/gemma
+ exited 2 in 0ms:
+839:AGENT_OUTCOMES = (('timeout', re.compile(r'Agent exceeded session timeout\b')),
+850:    return next((name for name, pattern in AGENT_OUTCOMES if pattern.match(text)), None)
+853:def harness_error(result, agent_error):
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/verification.py: No such file or directory (os error 2)
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluator.py: No such file or directory (os error 2)
+
+exec
+/bin/bash -lc "git log -3 --oneline && nl -ba eval/tests/test_classify_rows.py | sed -n '239,300p' && nl -ba results/plan007_classifier_armF_check.json | sed -n '1,35p' && rg -n 'tmp_path|tmpdir|Temporary|pytestmark' eval/tests/conftest.py pyproject.toml pytest.ini setup.cfg" in /home/ubuntu/work/gemma
+ exited 2 in 0ms:
+f029d06 STATE <=80 lines
+c5cce89 cycle 126: rev-3 review BLOCKING fixed (classifier rev 4, sha a208a023), rev 4 review launched
+fcb6d6f plan 007: rev 4 freeze timestamp
+   239	
+   240	
+   241	# Rev 4 (codex review 20261106T070228 BLOCKING 1): invalid or contradictory verdict evidence fails closed.
+   242	@pytest.mark.parametrize('updates,reason', [
+   243	    (dict(resolved=None), 'r8:invalid_resolved'),
+   244	    (dict(resolved='false'), 'r8:invalid_resolved'),
+   245	    (dict(resolved='false', exit_code=0), 'r8:invalid_resolved'),
+   246	    (dict(resolved=1), 'r8:invalid_resolved'),
+   247	    (dict(result_error='Failed to apply agent patch: x', exit_code='garbage'), 'r9:invalid_exit_code'),
+   248	    (dict(verified_patch_bytes=0, exit_code='garbage'), 'r9:invalid_exit_code'),
+   249	    (dict(verified_patch_bytes=0, exit_code=True), 'r9:invalid_exit_code'),
+   250	    (dict(exit_code=1.0), 'r9:invalid_exit_code'),
+   251	])
+   252	def test_invalid_verdict_evidence_is_h_row(updates, reason):
+   253	    result = classifier.classify(row(**updates))
+   254	    assert result['h'] == 'H-ROW' and result['agent'] is None and reason in result['reasons']
+   255	
+   256	
+   257	@pytest.mark.parametrize('updates', [
+   258	    dict(resolved=True, exit_code=1), dict(resolved=True, exit_code=124), dict(resolved=True, exit_code=None),
+   259	    dict(resolved=True, exit_code=-1),
+   260	    dict(resolved=True, result_error='Failed to apply agent patch: x', exit_code=None),
+   261	    dict(resolved=True, result_error='Failed to apply agent patch: x', exit_code=0),
+   262	    dict(resolved=True, verified_patch_bytes=0, exit_code=0),
+   263	    dict(resolved=True, verified_patch_bytes=0, exit_code=None),
+   264	])
+   265	def test_contradictory_resolved_is_h(updates):
+   266	    result = classifier.classify(row(**updates))
+   267	    assert result['h'] is not None and result['agent'] is None
+   268	    assert result['resolved'] is True  # stock verdict preserved for reporting
+   269	
+   270	
+   271	def test_contradictory_resolved_reason():
+   272	    result = classifier.classify(row(resolved=True, exit_code=1))
+   273	    assert result['h'] == 'H-VERIFY' and 'verify:contradictory_resolved' in result['reasons']
+   274	
+   275	
+   276	def test_stock_resolved_preserved_on_h_row():
+   277	    assert classifier.classify(row(resolved='false'))['resolved'] == 'false'
+   278	
+   279	
+   280	@pytest.mark.parametrize('updates,agent', [
+   281	    (dict(verified_patch_bytes=0, exit_code=None), 'NO_PATCH'),
+   282	    (dict(verified_patch_bytes=0, exit_code=-1), 'NO_PATCH'),
+   283	    (dict(result_error='Failed to apply agent patch: x', exit_code=None), 'PATCH_APPLY'),
+   284	    (dict(result_error='Failed to apply agent patch: x', exit_code=-1), 'PATCH_APPLY'),
+   285	    (dict(exit_code=0), 'EXIT0_UNRESOLVED'),
+   286	    (dict(exit_code=124), 'VERIFY_TIMEOUT_124'),
+   287	    (dict(resolved=True, exit_code=0), 'PASS'),
+   288	])
+   289	def test_legitimate_verdicts_not_h(updates, agent):
+   290	    result = classifier.classify(row(**updates))
+   291	    assert result['h'] is None and result['agent'] == agent
+     1	{
+     2	  "_schema": "plan007_row_classes/v1",
+     3	  "classifier_sha256": "a208a02343b43556e990271b8757044fdf51515f27ff9a067cd3af14c1fd4e6b",
+     4	  "input": "runs/31b-v008-p5f-timing/timing.jsonl",
+     5	  "input_sha256": "37fad310aacf8e70860228cfbf25ba99f873f8283d8928a6e321f24097f16359",
+     6	  "n_rows": 8,
+     7	  "counts": {
+     8	    "h": {
+     9	      "H-ROW": 8
+    10	    },
+    11	    "agent": {},
+    12	    "known_diag": 7
+    13	  },
+    14	  "h_rows": [
+    15	    "rich_3063",
+    16	    "rich_3067",
+    17	    "rich_3454",
+    18	    "rich_3535",
+    19	    "rich_3930",
+    20	    "rich_3953",
+    21	    "fastapi_14258",
+    22	    "fastapi_14851"
+    23	  ],
+    24	  "rows": [
+    25	    {
+    26	      "instance_id": "rich_3063",
+    27	      "repo": "Textualize/rich",
+    28	      "h": "H-ROW",
+    29	      "known_diag": false,
+    30	      "agent": null,
+    31	      "agent_end": null,
+    32	      "resolved": false,
+    33	      "reasons": [
+    34	        "r1:missing_schema"
+    35	      ]
+rg: eval/tests/conftest.py: No such file or directory (os error 2)
+rg: pyproject.toml: No such file or directory (os error 2)
+rg: pytest.ini: No such file or directory (os error 2)
+rg: setup.cfg: No such file or directory (os error 2)
+
+exec
+/bin/bash -lc "PYTHONDONTWRITEBYTECODE=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+from eval.kaggle.classify_rows import classify, VERIFY_AGENT_PREFIXES
+b=dict(instance_id='synthetic',result_error=None,agent_error_text=None,verified_patch_bytes=10,setup_calls=[],exit_code=0,resolved=False,error=None)
+cases=[('resolved true nonzero',dict(resolved=True,exit_code=1)),('resolved true timeout',dict(resolved=True,exit_code=124)),('resolved true apply null',dict(resolved=True,result_error='Failed to apply agent patch: x',exit_code=None)),('apply nonint',dict(result_error='Failed to apply agent patch: x',exit_code='garbage')),('zero patch nonint',dict(verified_patch_bytes=0,exit_code='garbage')),('resolved string exit0',dict(resolved='false',exit_code=0)),('resolved null',dict(resolved=None))]
+for name,updates in cases:
+ r=classify(dict(b,**updates)); assert r['h'] and r['agent'] is None; print(name,r['h'],r['reasons'])
+for field in ('error','result_error','agent_error_text','setup_calls'):
+ print('FIELD',field)
+ for v in (False,0,0.0,[],{},True,1,1.0,[1],{'x':1}):
+  try:
+   r=classify(dict(b,**{field:v})); print(repr(v),'->',r['h'],r['agent'])
+  except Exception as e: print(repr(v),'->',type(e).__name__)
+for prefix in VERIFY_AGENT_PREFIXES[1:]:
+ r=classify(dict(b,resolved=True,error='Harness task failure',result_error=prefix+' synthetic'))
+ print('CONTRADICTION',prefix,r['h'],r['agent'])
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+resolved true nonzero H-VERIFY ['verify:contradictory_resolved']
+resolved true timeout H-VERIFY ['verify:contradictory_resolved']
+resolved true apply null H-VERIFY ['verify:contradictory_resolved']
+apply nonint H-ROW ['r9:invalid_exit_code']
+zero patch nonint H-ROW ['r9:invalid_exit_code']
+resolved string exit0 H-ROW ['r8:invalid_resolved']
+resolved null H-ROW ['r8:invalid_resolved']
+FIELD error
+False -> H-ROW None
+0 -> H-ROW None
+0.0 -> H-ROW None
+[] -> H-ROW None
+{} -> H-ROW None
+True -> H-ROW None
+1 -> H-ROW None
+1.0 -> H-ROW None
+[1] -> H-ROW None
+{'x': 1} -> H-ROW None
+FIELD result_error
+False -> None EXIT0_UNRESOLVED
+0 -> None EXIT0_UNRESOLVED
+0.0 -> None EXIT0_UNRESOLVED
+[] -> None EXIT0_UNRESOLVED
+{} -> None EXIT0_UNRESOLVED
+True -> AttributeError
+1 -> AttributeError
+1.0 -> AttributeError
+[1] -> AttributeError
+{'x': 1} -> AttributeError
+FIELD agent_error_text
+False -> None EXIT0_UNRESOLVED
+0 -> None EXIT0_UNRESOLVED
+0.0 -> None EXIT0_UNRESOLVED
+[] -> None EXIT0_UNRESOLVED
+{} -> None EXIT0_UNRESOLVED
+True -> AttributeError
+1 -> AttributeError
+1.0 -> AttributeError
+[1] -> AttributeError
+{'x': 1} -> AttributeError
+FIELD setup_calls
+False -> TypeError
+0 -> TypeError
+0.0 -> TypeError
+[] -> None EXIT0_UNRESOLVED
+{} -> None EXIT0_UNRESOLVED
+True -> TypeError
+1 -> TypeError
+1.0 -> TypeError
+[1] -> AttributeError
+{'x': 1} -> AttributeError
+CONTRADICTION Missing or empty JUnit XML report None PASS
+CONTRADICTION Malformed JUnit XML report: None PASS
+CONTRADICTION No <testsuite> elements found in JUnit XML None PASS
+CONTRADICTION No passing tests recorded in JUnit XML None PASS
+CONTRADICTION Test failures/errors recorded in JUnit XML None PASS
+CONTRADICTION Required test node did not pass: None PASS
+CONTRADICTION Pytest stdout summary indicates zero or no passing tests None PASS
+CONTRADICTION Missing JUnit XML report (possible premature os._exit(0)) None PASS
+
