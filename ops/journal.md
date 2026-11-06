@@ -369,3 +369,4 @@
 2026-11-06T14:55Z | codex review 145209 identity script BLOCKING (dup zip members; _schema lost on append) -> fixed 1fd32d9, tested, v012/v013 re-check PASS; re-review codex-review-identity2-light | eval/plan009_identity.py
 2026-11-06T14:56Z | codex-build plan009-arm3-metrics launched (arm3smoke + arm3 modes, plan 009 Metrics) | ops/codex/build-plan009-arm3-metrics.md
 2026-11-06T14:58Z | codex-review-identity2 (145500) CLEAN on plan009_identity 1fd32d9; 42 checks; v012/v013 PASS | ops/codex/review-20261106T145500.md
+2026-11-06T15:05Z | codex-build plan009-arm3-metrics done (071749c, 201 pass/2 skip rerun by Builder); spec acc.(b) KEEP-OFF conflicts w/ 009.md l.61/104 literal INVALID (7 H rows) -> 009.md governs; review launched codex-review-arm3metrics-light | ops/codex/review-20261106T150446.md
