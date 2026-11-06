@@ -313,3 +313,4 @@
 2026-11-06T08:08:43Z | smoke UNBLINDED (after main push, dec 067 item 3): d4cdf0f0 -> rich_3063 H-VERIFY (empty patch + exit 1, classifier l.239 assumption), rich_3953 PYTEST_1, fastapi_14372 PYTEST_2_5; 0/3 resolved; a208a023: NO_PATCH/PYTEST_1/PYTEST_2_5 | results/plan007_arm1_smoke_d4cdf0f0.json results/plan007_arm1_smoke_a208a023.json
 2026-11-06T08:10Z | report 017 NEEDS_DECISION (treat empty-patch H-VERIFY as footnote, no rerun; rec A) | ops/reports/017-plan007-smoke-unblind-hverify.md
 2026-11-06T08:12:14Z | dec 068 ack: plan 007 Addendum B pre-registered (H-VERIFY(empty-patch) sub-case = eval/plan007_report.py ea495048ba090012, 39 tests pass; report layout a-e; empty-patch headline metric) BEFORE main download (main ETA ~14:10Z, not downloaded) | eval/plans/007.md, ops/decisions/068-017-plan007-smoke-unblind-hverify.md
+2026-11-06T08:12Z | codex-review-p7report-light launched on 242859a (sub-case fn); waiting on main | ops/codex/

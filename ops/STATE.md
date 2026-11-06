@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-06 08:10Z (cycle 134, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-06 08:13Z (cycle 135, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -23,7 +23,11 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (08:10Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z),
+- DEC 068 (rep 017, A): no rerun/rev 6; d4cdf0f0 governs. Addendum B in plan 007 committed 242859a 08:12:14Z BEFORE main download:
+  H-VERIFY(empty-patch) = eval/plan007_report.py is_h_verify_empty_patch (39 tests pass; smoke hit = rich_3063 only). Report layout
+  (a) primary all rows Wilson+per-repo (b) d4cdf0f0 counts (c) sens excl all H (d) sens excl H except empty-patch (e) a208a023; footnote l.239 once.
+  HEADLINE empty-patch rate (vpb==0) Wilson, split timeout/non-timeout; per row llm_turns + tool mix only.
+## Running jobs (08:13Z): memguard-light, codex-review-p7report-light (review of 242859a), submit-window-31b-light (fires 11-07T00:00:30Z),
   passrate-31b-v009-main-wait-light (MAIN kernel gemma-31b-passrate v2 pushed 08:08:22Z, ids 4..33 eval/plans/007-main-ids.txt,
   seed-max 803, KERNEL_BUDGET 21000 s, from worktree ../gemma-wt/plan007-main-078f4ea @078f4ea; ETA ~14:10Z; downloads to
   runs/31b-v009-p7a1-main + SEAL.sha256). Smoke DONE: sealed (SEAL 85fb5648..), gate HOLD, UNBLINDED 08:08:43Z: 0/3 resolved;
@@ -68,6 +72,6 @@
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
 1. Main done -> seal+journal SEAL, quota after in kaggle.md; classify under d4cdf0f0 (+a208a023); results header: kernel 078f4ea,
-   classifier d4cdf0f0, agent_timing.py sha 0dc1c972; apply dec on report 017; plan-007 arm-1 report (33 rows, Wilson, per repo).
+   classifier d4cdf0f0, agent_timing.py sha 0dc1c972; arm-1 report per dec 068 layout (a-e) + empty-patch headline. Act on codex review first.
 2. Dec 055 31b-v002 submit 11-07T00:00Z FIRST (checklist in Best bundles). Chunk 2 of any unrun ids after reset AND after submit.
 3. Nov 8 slot proposal (due 11-07T12:00Z); dec 038 paper evidence by Nov 9.
