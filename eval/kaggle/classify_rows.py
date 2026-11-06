@@ -1,8 +1,9 @@
-"""Frozen Plan 007 rev 4 classifier for timing journal rows (stdlib only)."""
+"""Frozen Plan 007 rev 5 classifier for timing journal rows (stdlib only)."""
 import argparse
 from collections import Counter
 import hashlib
 import json
+import math
 from pathlib import Path
 
 if __package__:
@@ -25,7 +26,7 @@ REQUIRED = ('result_error', 'agent_error_text', 'verified_patch_bytes', 'setup_c
 
 
 def agent_end(message):
-    text = (message or '').strip()
+    text = message.strip() if isinstance(message, str) else ''
     return next((name for name, pattern in AGENT_END if pattern.match(text)), None)
 
 
@@ -33,8 +34,43 @@ def output_text(entry):
     return (entry.get('stdout') or '') + (entry.get('stderr') or '')
 
 
+def opt_str(value):
+    return value is None or isinstance(value, str)
+
+
+def opt_rc(value):
+    return value is None or type(value) is int
+
+
+def setup_shape_ok(calls):
+    """setup_calls must be a list of step dicts as written by agent_timing.setup_step (empty list allowed)."""
+    if not isinstance(calls, list):
+        return False
+    for entry in calls:
+        if not isinstance(entry, dict) or not isinstance(entry.get('step'), str) or not entry['step']:
+            return False
+        if not (opt_rc(entry.get('rc')) and opt_str(entry.get('stdout')) and opt_str(entry.get('stderr'))):
+            return False
+        duration = entry.get('duration_s')
+        if duration is not None and (type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0):
+            return False
+        subs = entry.get('subprocesses', [])
+        if not isinstance(subs, list):
+            return False
+        for sub in subs:
+            if not isinstance(sub, dict) or not isinstance(sub.get('argv'), list):
+                return False
+            if not all(isinstance(arg, str) for arg in sub['argv']):
+                return False
+            if not (opt_rc(sub.get('rc')) and opt_str(sub.get('stdout')) and opt_str(sub.get('stderr'))):
+                return False
+    return True
+
+
 def classify(row: dict) -> dict:
     """Classify one task row, preserving the stock verdict even for H rows."""
+    if not isinstance(row, dict):
+        raise TypeError('Row is not a JSON object')
     if 'instance_id' not in row:
         raise ValueError('Meta row has no instance_id')
     row_reasons = []
@@ -45,8 +81,10 @@ def classify(row: dict) -> dict:
         row_reasons.append('r2:wrapper_exception')
     elif error is not None and error != 'Harness task failure':
         row_reasons.append('r3:unexpected_error')
+    messages = (row.get('result_error'), row.get('agent_error_text'))
+    if not all(opt_str(m) for m in messages):
+        row_reasons.append('r10:invalid_message_type')
     elif error is None or error == 'Harness task failure':
-        messages = (row.get('result_error'), row.get('agent_error_text'))
         for message in messages:
             if message and agent_end(message) is None and not message.startswith(VERIFY_AGENT_PREFIXES):
                 row_reasons.append('r4:unrecognized_message' if error else 'r5:unrecognized_message')
@@ -63,11 +101,21 @@ def classify(row: dict) -> dict:
     if 'exit_code' in row and code is not None and type(code) is not int:
         row_reasons.append('r9:invalid_exit_code')
 
+    calls = row.get('setup_calls', [])
+    if not setup_shape_ok(calls):
+        row_reasons.append('r11:invalid_setup_evidence')
+        calls = []
+    deps = row.get('missing_tool_deps')
+    if not (deps is None or (isinstance(deps, list) and all(isinstance(d, str) for d in deps))):
+        row_reasons.append('r12:invalid_missing_tool_deps')
+    if row.get('setup_failed') is not None and type(row.get('setup_failed')) is not bool:
+        row_reasons.append('r13:invalid_setup_failed')
+
     setup_reasons = []
     diagnostic = False
-    if row.get('missing_tool_deps'):
+    if isinstance(deps, list) and deps:
         setup_reasons.append('s1:missing_tool_deps')
-    for entry in row.get('setup_calls', []):
+    for entry in calls:
         step, rc = entry.get('step'), entry.get('rc')
         if step not in ('pip_check', 'workspace_editable', 'setup.py'):
             if rc != 0 and (rc is not None or (entry.get('duration_s') or 0) > 0 or entry.get('stderr')):
@@ -110,6 +158,11 @@ def classify(row: dict) -> dict:
     if h is None and stock_resolved is True and not (patch_bytes > 0 and not patch_apply and code == 0):
         h = 'H-VERIFY'
         reasons.append('verify:contradictory_resolved')
+    # A stock PASS next to an explicit verification-failure message (either field) is contradictory.
+    if h is None and stock_resolved is True and any(
+            isinstance(m, str) and m.strip().startswith(VERIFY_AGENT_PREFIXES) for m in messages):
+        h = 'H-VERIFY'
+        reasons.append('verify:resolved_with_verify_failure')
     agent = None
     if h is None:
         if stock_resolved is True:
@@ -144,7 +197,9 @@ def main():
         if not line.strip():
             continue
         row = json.loads(line)
-        if 'instance_id' in row:
+        if isinstance(row, dict) and 'instance_id' in row:
+            if any(r['instance_id'] == row['instance_id'] for r in rows):
+                raise ValueError(f'Duplicate instance_id in one timing file: {row["instance_id"]!r}')
             rows.append(dict(instance_id=row['instance_id'], repo=row.get('repo'), **classify(row)))
     result = dict(_schema='plan007_row_classes/v1',
                   classifier_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),

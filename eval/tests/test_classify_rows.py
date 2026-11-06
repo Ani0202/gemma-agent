@@ -289,3 +289,94 @@ def test_stock_resolved_preserved_on_h_row():
 def test_legitimate_verdicts_not_h(updates, agent):
     result = classifier.classify(row(**updates))
     assert result['h'] is None and result['agent'] == agent
+
+
+# Rev 5 (codex review 20261106T070737 BLOCKING 1-3).
+@pytest.mark.parametrize('field', ['result_error', 'agent_error_text'])
+@pytest.mark.parametrize('error', [None, 'Harness task failure'])
+@pytest.mark.parametrize('prefix', [p for p in classifier.VERIFY_AGENT_PREFIXES
+                                    if not p.startswith('Failed to apply agent patch:')])
+def test_resolved_with_verify_failure_is_h_verify(field, error, prefix):
+    result = classifier.classify(row(resolved=True, exit_code=0, error=error, **{field: prefix + ' t::x'}))
+    assert result['h'] == 'H-VERIFY' and result['agent'] is None and result['resolved'] is True
+    assert 'verify:resolved_with_verify_failure' in result['reasons']
+
+
+@pytest.mark.parametrize('field', ['result_error', 'agent_error_text'])
+def test_unresolved_with_verify_failure_stays_agent(field):
+    result = classifier.classify(row(exit_code=0, **{field: 'Required test node did not pass: t::x'}))
+    assert result['h'] is None and result['agent'] == 'EXIT0_UNRESOLVED'
+
+
+@pytest.mark.parametrize('field', ['result_error', 'agent_error_text'])
+@pytest.mark.parametrize('value', [False, 0, [], {}, True, 1, ['x'], {'a': 1}, 1.5])
+@pytest.mark.parametrize('error', [None, 'Harness task failure'])
+def test_non_string_message_is_h_row(field, value, error):
+    result = classifier.classify(row(error=error, **{field: value}))
+    assert result['h'] == 'H-ROW' and result['agent'] is None
+    assert 'r10:invalid_message_type' in result['reasons']
+
+
+def test_non_string_message_with_recognized_companion_is_h_row():
+    result = classifier.classify(row(error='Harness task failure', result_error=False,
+                                     agent_error_text='Required test node did not pass: t::x'))
+    assert result['h'] == 'H-ROW' and 'r10:invalid_message_type' in result['reasons']
+
+
+@pytest.mark.parametrize('calls', [
+    {}, '', 'x', None, 0, [{}], [[]], ['setup.py'], [dict(step='')], [dict(step=1)],
+    [dict(step='setup.py', rc=False)], [dict(step='setup.py', rc=True)], [dict(step='pip_check', rc=0.0)],
+    [dict(step='setup.py', rc=0, stdout=1)], [dict(step='setup.py', rc=0, stderr=[])],
+    [dict(step='setup.py', rc=0, duration_s='1')], [dict(step='setup.py', rc=0, duration_s=-1.0)],
+    [dict(step='setup.py', rc=0, duration_s=float('nan'))],
+    [dict(step='setup.py', rc=0, subprocesses={})], [dict(step='setup.py', rc=0, subprocesses=[{}])],
+    [dict(step='setup.py', rc=0, subprocesses=[dict(argv='pip install -e .', rc=1)])],
+    [dict(step='setup.py', rc=0, subprocesses=[dict(argv=['pip', 1], rc=1)])],
+    [dict(step='setup.py', rc=0, subprocesses=[dict(argv=['pip'], rc=False)])],
+    [dict(step='setup.py', rc=0, subprocesses=[dict(argv=['pip'], rc=0, stderr=0)])],
+])
+def test_malformed_setup_evidence_is_h_row(calls):
+    result = classifier.classify(row(setup_calls=calls))
+    assert result['h'] == 'H-ROW' and result['agent'] is None
+    assert 'r11:invalid_setup_evidence' in result['reasons']
+
+
+@pytest.mark.parametrize('calls', [
+    [], [dict(step='pip_check', duration_s=0.0, rc=None, stdout='', stderr='', retrying_lines=0)],
+    [dict(step='setup.py', duration_s=1.5, rc=0, stdout='', stderr='', subprocesses=[])],
+    [dict(step='workspace_editable', duration_s=1, rc=0, stdout=None, stderr=None)],
+])
+def test_legitimate_setup_evidence_not_h(calls):
+    result = classifier.classify(row(setup_calls=calls))
+    assert result['h'] is None and result['agent'] == 'EXIT0_UNRESOLVED'
+
+
+@pytest.mark.parametrize('deps', ['x', 1, True, {}, {'a': 1}, [1], [None]])
+def test_invalid_missing_tool_deps_is_h_row(deps):
+    result = classifier.classify(row(missing_tool_deps=deps))
+    assert result['h'] == 'H-ROW' and 'r12:invalid_missing_tool_deps' in result['reasons']
+
+
+def test_missing_tool_deps_list():
+    assert classifier.classify(row(missing_tool_deps=[]))['h'] is None
+    assert classifier.classify(row(missing_tool_deps=None))['h'] is None
+    assert classifier.classify(row(missing_tool_deps=['pytest']))['h'] == 'H-SETUP'
+
+
+@pytest.mark.parametrize('flag', [0, 1, 'true', [], {}])
+def test_invalid_setup_failed_is_h_row(flag):
+    result = classifier.classify(row(setup_failed=flag))
+    assert result['h'] == 'H-ROW' and 'r13:invalid_setup_failed' in result['reasons']
+
+
+def test_non_dict_row_rejected():
+    with pytest.raises(TypeError):
+        classifier.classify(['instance_id'])
+
+
+def test_cli_rejects_duplicate_ids(tmp_path):
+    source = tmp_path / 'timing.jsonl'
+    source.write_text(json.dumps(row()) + '\n' + json.dumps(row()) + '\n')
+    proc = subprocess.run([sys.executable, str(Path(classifier.__file__)), str(source)],
+                          capture_output=True, text=True)
+    assert proc.returncode != 0 and 'Duplicate instance_id' in proc.stderr
