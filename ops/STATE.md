@@ -34,14 +34,8 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   ARM D analysis when waiter mails: same 3 scripts on runs/31b-v006-p5d-timing (timing_summary --gate-mode stock-path --gate-vllm-seconds
   600 --gate-max-phase1 277; trace_tool_errors.py <run> 31b-v006-p5d <out> eval/plans/004-gpu-retime-ids.txt; thinking_bound.py),
   Md = zero root thinking_blocks in >=7/8; verdict vs arm C (D empty <= 3 and D-empty-only <= 1 -> PASS). Then combined C+D report.
-- PLAN 005 ARM B DONE (c105): verdict MECHANISM-ONLY per pre-registered rule (V pass: gates a/b/d/e PASS, trace exit 0; M met:
-  write_outside_ws 8->0, edit_missing_param 19->6; E NOT met: empty 4/8 (A 4/8), discordant A-only 2 / B-only 2, sign p1=0.69).
-  Files: results/trace_tool_errors_31b_v003.json, results/kaggle_timing_31b_v003.json; quota 9.42 h after (+2.14).
-  Branch: NO ship, no v004 (dec 056 item 5 only on PASS). Taxonomy DONE results/taxonomy-31b-v003-p5t4.json: 4 empties = 0 edit calls;
-  tool exec <1 s/task, ~100% of 240 s is generation (~30 tok/s, 4.5-7.3k completion tok/task); classes: no-edit budget burn (3953),
-  long thinking 87+68 s turns (3063), repeat reads 22/40 after history drops (14851), broad exploration (3930). Test-runtime cap = no help.
-  Codex feasibility ops/codex/ask-20261106T021410.md: M1/M3 NOT FEASIBLE; M2 only model-invoked skill (chosen, dated line). Addendum C
-  (thinking_budget 4096->1024) pre-registered; screen bundle 31b-v005-p5c dist/31b-v005.zip e8fbcfdc...44f3 pack PASS. v004 reserved.
+- PLAN 005 ARM B DONE (c105): MECHANISM-ONLY (empty 4/8; write_outside_ws 8->0, edit_missing_param 19->6); taxonomy
+  results/taxonomy-31b-v003-p5t4.json (~100% of window = generation). M1/M3 infeasible, M2 declined. v004 reserved.
 - DEC 058: arm C APPROVED (push after review-p5c-light clean; any byte fix -> re-pack + dated sha line first). Push cmd (dry-run OK):
   eval/kaggle/timing_push.sh aniket0202/gemma-31b-timing bundles/31b/v005 eval/plans/004-gpu-retime-ids.txt 6000 (log quota before/after;
   waiter like timing-31b-v003-wait-light -> runs/31b-v005-p5c-timing, kernel version 3). Report B vs C per-turn max completion tokens.
@@ -53,7 +47,6 @@ History: ops/journal.md (pre-c51: ops/history/STATE-archive.md). Builder on Opus
   bundles/drafts/item4-system.md line REMOVED (c104). FINALS: no final with a repo-specific line -> e4b-v003 = e4b-v002 + generic
   prompt fixes minus the line, CPU draft folded into dec 056 item 5; slot request later. Next report MUST state: v000-v002 (both tracks)
   carry an inherited FastAPI/docs_src hint; their LB scores may be tilted toward FastAPI-like tasks (paper + finals evidence say so).
-- Dec 055 checklist at 2026-11-07T00:00Z has PRIORITY over arm-B analysis.
 - KERNEL v5 (e4b, 87001e4): GATE FAIL (ctx overflow 7/8, max 305.6>296), two-strike STOP; legacy 'decision' field in results/kaggle_timing_e4b_v001.json is not the gate.
 ## Quota / spend
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001).
