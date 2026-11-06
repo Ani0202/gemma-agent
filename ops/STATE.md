@@ -41,7 +41,6 @@
   blind gate under a208a023 HOLD -> main ids 4..33 on kernel commit 078f4ea (name it in kernel manifest + results header).
   Results header also: agent_timing.py sha256 0dc1c972...dc96 (same at 078f4ea/HEAD). UNBLIND smoke under d4cdf0f0 ONLY after main
   pushed (or main ruled out pre-reset); journal the time; nothing about main may change from smoke outcomes. Noted in eval/plans/007.md.
-- DEC 063/064: classifier freezes need Director note; quota log before/after smoke+main; week <= 29.5 h; dec 055 first.
 - DEC 062 (report 015 approved, A): T stays 0.2 everywhere; no T 0.6 arm in plan 007; repeat guard = design note only (DONE draft
   eval/plans/007-repeat-guard.md); item 4: plan-007 arm 1 may use expiring quota IF pre-reg reviewed + pushed by 11-06T15:30Z, else after reset.
 - PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
@@ -66,7 +65,7 @@
   (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
   results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
 - Director reminder 2026-11-06T23:02Z: GCP quota re-request line to Aniket (keep until a decision marks it done).
-- Any Kaggle GPU kernel must pin the starter docker_image (py3.12, cp312 wheelhouse). Hosted-LLM-API data question OPEN; no new 3rd-party services. One pending Kaggle submission at a time; no partial credit on timeout (docs/RULES_FINDINGS.md).
+- Kaggle GPU kernels pin starter docker_image (py3.12, cp312). Hosted-LLM-API data Q OPEN; no new 3rd-party svc. One pending submission; no partial credit on timeout. Quota log before/after smoke+main (dec 063/064).
 ## Timing facts (results/kaggle_timing_e4b_v000_setup.json) setup ~210 s/task, outside max_time_minutes (clock starts after setup); flat across repos. vLLM startup 5.39 min;
   verification ~410 s (excluded from the 12 h). Agent clock p90 144 s at cap 5.
 ## Dec 034 (report 009 ruled: option C with gated step-up) — in force
