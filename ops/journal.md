@@ -370,3 +370,5 @@
 2026-11-06T14:56Z | codex-build plan009-arm3-metrics launched (arm3smoke + arm3 modes, plan 009 Metrics) | ops/codex/build-plan009-arm3-metrics.md
 2026-11-06T14:58Z | codex-review-identity2 (145500) CLEAN on plan009_identity 1fd32d9; 42 checks; v012/v013 PASS | ops/codex/review-20261106T145500.md
 2026-11-06T15:05Z | codex-build plan009-arm3-metrics done (071749c, 201 pass/2 skip rerun by Builder); spec acc.(b) KEEP-OFF conflicts w/ 009.md l.61/104 literal INVALID (7 H rows) -> 009.md governs; review launched codex-review-arm3metrics-light | ops/codex/review-20261106T150446.md
+2026-11-06T15:09Z | codex-review arm3 metrics 150446 BLOCKING (1 voided pairing not INVALID; 2 smoke evidence unbound/optional; 3 identity/transport/vLLM not enforced) | ops/codex/review-20261106T150446.md
+2026-11-06T15:10Z | merged 071749c on main as WIP b92f8f4 (arm3 modes not cleared); codex-build plan009-arm3-fix launched | ops/codex/build-plan009-arm3-fix.spec
