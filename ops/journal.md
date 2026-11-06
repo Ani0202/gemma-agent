@@ -285,3 +285,6 @@
 2026-11-06T06:29Z | bundle 31b-v009-p7a1 packed (v006 + cap 3.5 only) sha256 d38c55c7...130d; timing_push.sh --no-stock-probe flag (dry run: STOCK_PROBE=False, SKIP_VERIFICATION=False) | bundles/31b/v009/MANIFEST.md
 2026-11-06T06:30Z | PLAN 007 pre-registered (33-dev pass rate, arm 1 thinking off cap 3.5, docker-path env, smoke gate, fixed sha256 order, arm-2 rule); codex review job started | eval/plans/007.md ops/jobs/codex-review-plan007-light.status
 2026-11-06T06:32Z | repeat-guard design note (dec 062 item 3; CPU only, not built) | eval/plans/007-repeat-guard.md
+2026-11-06T06:39Z | codex review of plan 007 (e547980): BLOCKING x4 (editable_failed gate vs known RECORD strip; error/rerun rules; arm-2 second look; should_stop omits setup) | ops/codex/review-20261106T063014.md
+2026-11-06T06:42Z | plan 007 rev 1 + kernel stop-guard fix (SETUP_PASS_SECONDS x3 reserve, --seed-max), 712 pass/4 skip; still before any plan-007 run | c6f0b66 eval/plans/007.md
+2026-11-06T06:43Z | codex re-review launched on c6f0b66 | ops/jobs/codex-review-plan007r1-light
