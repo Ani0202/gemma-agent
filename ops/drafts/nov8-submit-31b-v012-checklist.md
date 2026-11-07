@@ -5,7 +5,7 @@ a. 58072907 (31b-v002) FINAL COMPLETE, public 0.15. STATUS: MET (results/lb_31b_
    UTC date >= 2026-11-08, NO pending submission, ledger has no submit today, never stack.
 b. Gate 2: job review-31b-v012-submit-light (codex review 20261107T112341). NO BLOCKING except a finding equivalent to the v009
    "empty diff on timeout/cap" BLOCKING (review 063339), which dec 089 item 2b waives for sha 78a8fd30 only. Any OTHER BLOCKING -> NO v012 submit, item 4, mail Director.
-   STATUS: PENDING.
+   STATUS: MET 2026-11-07T11:28:58Z: review 112341 has exactly ONE BLOCKING = empty diff on timeout/cap before first edit (equivalent to 063339, waived dec 089 2b for 78a8fd30); all other findings non-blocking (identity/diff PASS, pack PASS, timing PASS). No FYI (dec 089 item 7).
 c. Gate 1/4: bin/pack bundles/31b/v012 PASS (2026-11-07T11:26Z, 9070 B; unzip == source minus MANIFEST). sha recorded in bundles/31b/v012/MANIFEST.md (yes).
    Timing bound: cap 3.5 -> 3.5x125+30 = 467.5 <= 660 (dec 089); H1/H2 (210+7+30)/60*125+30 = 544.6 <= 660 (eval_config comment).
    Gate-4 journal line BEFORE submit: "Gate 4 31b-v012: cap 3.5; 3.5x125+30=467.5<=660; H1/H2 544.6<=660; H3 waived by dec 086 (v002 COMPLETE at cap 3.5, thinking 4096 main+analyzer = v012 config, T=9.006 h); Gate-2 empty-diff waiver dec 089 2b."
