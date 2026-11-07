@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 12:02Z (cycle 194; arm4 fix b63d49d (F1-F4 of review 114429) Builder-reviewed, suite 1815 pass 7 skip, merged main 77cd97b; re-review job review-plan010-arm4-metrics-fix-light running (arm4 mode NOT cleared until CLEAN); DEC 089: Nov 8 = 31b-v012 78a8fd30 CONDITIONAL, checklist ops/drafts/nov8-submit-31b-v012-checklist.md (a)(b)(c)(d)(e) ALL MET (b: Gate-2 112341 only BLOCKING = waived empty-diff); remaining = Gate-4 journal line + submit at 00:00:30Z waiter; PLAN 010 review 112835 done (BLOCKING = v014 submit-cert only -> Addendum A), arm4 metrics codex-build DONE 57484e4, Builder review OK + suite 1742 pass, codex-review job running). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 12:15Z (cycle 195; arm4 metrics re-review 120155 CLEAN (BLOCKING none; non-blocking: F2 bool check also applies to arm1, real rows OK) -> PLAN 010 PRE-DATA GATE CLEARED (code 77cd97b); v014 load check PASS + finals pre-check ELIGIBLE; DEC 089: Nov 8 = 31b-v012 78a8fd30 CONDITIONAL, checklist ops/drafts/nov8-submit-31b-v012-checklist.md (a)(b)(c)(d)(e) ALL MET (b: Gate-2 112341 only BLOCKING = waived empty-diff); remaining = Gate-4 journal line + submit at 00:00:30Z waiter; PLAN 010 review 112835 done (BLOCKING = v014 submit-cert only -> Addendum A), arm4 metrics codex-build DONE 57484e4, Builder review OK + suite 1742 pass, codex-review job running). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -19,8 +19,8 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (12:02Z): memguard-light, submit-window-nov8-v012-light (fires 2026-11-08T00:00:30Z), review-plan010-arm4-metrics-fix-light (re-review of b63d49d: F1 kernel fp, F2 agent_timeout_fired required, F3 concurrency==1, F4 gold sha in input_shas).
-- v014 (plan 010 arm 4): dist/31b-v014.zip 7980846995e3acb38418427755676931fbfc7fa22998b1e9b2599da499135def = v012 + root thinking 2048; pre-check ELIGIBLE vs v012 (needs v012 COMPLETE).
+## Running jobs (12:15Z): memguard-light, submit-window-nov8-v012-light (fires 2026-11-08T00:00:30Z).
+- v014 (plan 010 arm 4): dist/31b-v014.zip 7980846995e3acb38418427755676931fbfc7fa22998b1e9b2599da499135def = v012 + root thinking 2048; load check PASS results/bundle_load_check_31b_v014.json; finals pre-check ELIGIBLE results/finals_eligibility_31b-v014_vs_31b-v012.json (needs v012 COMPLETE). READY for smoke+main week of 11-14.
 - ARM-3 DONE: kernel v5 COMPLETE ~11:19Z, SEAL runs/31b-v012-p9a-main/SEAL.sha256 (c0d01bb4..) OK; quota AFTER 21.59 h (+9.70; 8.41 h left to 11-14).
   Classifiers results/plan009_arm3_main_{d4cdf0f0,a208a023}.json (0 H); metrics results/plan009_arm3_vs_arm1.json; report 021.
 - CODEX S81: 060833 BLOCKING 1 fixed 71185a3; re-review s81b 061229 CLEAN -> arm-3 metrics allowed. Report lists amended arm-2 counts separately (S81.3).
@@ -75,5 +75,5 @@
   no other submit that day, AND (31b-v009 VOID or already submitted on an earlier day & not pending); reverse SUBMIT_KERNEL commit + kernel recheck first).
 ## Next 3
 1. 00:00:30Z waiter: run nov8-submit-31b-v012-checklist (re-check submissions list; Gate-4 journal line; kernel v3), then lb_31b_v012.json + waiter. ERROR/timeout -> VOID, mail Director. v009 auth lapses on v012 submit.
-2. review-plan010-arm4-metrics-fix-light lands: CLEAN (pre-data gate) -> v014 load check; BLOCKING -> fix spec + codex-build; run week of 11-14 (smoke+main same week).
+2. PLAN 010 arm 4: gate CLEARED, v014 load PASS. Run smoke+main week of 11-14 (after 00:00Z quota reset; quota BEFORE/AFTER log), then arm4 metrics + report.
 3. e4b-v002h Nov 9 (reverse SUBMIT_KERNEL commit + kernel recheck first). CPU: dec 081 item-5 tool-level empty-patch lever design on v012 (own score needed).

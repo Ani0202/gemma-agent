@@ -6,3 +6,6 @@ packed: dist/31b-v014.zip sha256=7980846995e3acb38418427755676931fbfc7fa22998b1e
 - dec 087 (b): knob-only <= diff vs v012 -> finals-eligible without its own slot IF v012 scores COMPLETE (confirm with eval/finals_eligibility.py).
 - git SHA: see the commit that adds this file. Light codex review: pending.
 zip sha256: 7980846995e3acb38418427755676931fbfc7fa22998b1e9b2599da499135def
+- load check PASS 2026-11-07T12:1xZ: results/bundle_load_check_31b_v014.json == v012 except root thinking_budget 2048 (analyzer 4096, max_out 8192, cap 3.5/40/50 unchanged).
+- finals pre-check: results/finals_eligibility_31b-v014_vs_31b-v012.json ELIGIBLE (0 violations), no --reference-lb yet (v012 not scored).
+- arm4 metrics mode pre-data gate: codex re-review ops/codex/review-20261107T120155.md CLEAN (code 77cd97b).
