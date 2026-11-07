@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 06:55Z (cycle 180; DEC 084: v009 Gate-2 item WAIVED -> Nov 8 = 31b-v009 CONDITIONAL (dec 083 a-f); e4b-v002h AUTHORIZED CONDITIONAL, slot after 31B). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 07:00Z (cycle 181; DEC 084+085: v009 Gate-2 item WAIVED (085 confirms, adds nothing, does NOT re-issue auth) -> Nov 8 = 31b-v009 CONDITIONAL (dec 083 a-f); e4b-v002h AUTHORIZED CONDITIONAL, slot after 31B). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -69,8 +69,8 @@
   (= e4b-v002 minus FastAPI/docs_src line; zip diff = 1 deleted line, same file set; load check == v002 results/bundle_load_check_e4b_v002h.json).
   Codex review job review-e4b-v002h-light. Kernel aniket0202/gemma-submit-e4b v2 output BYTE_IDENTICAL (same txt). Do NOT flip SUBMIT_KERNEL
   until authorized (Director: Nov 8 if v002 ERRORS, else Nov 9). Item 5: LB-noise repeat deferred.
-- GATE 2 DONE 06:36Z: v009 review 063339 BLOCKING 1 (empty diff on timeout/cap) WAIVED by DEC 084 item 1 for d38c55c7 -> journal the waiver
-  WITH the Gate-4 line before submit (checklist (c) annotated). Prompt nits -> ops/backlog-prompt.md (do NOT edit v009). MANIFEST nits done (no sha change).
+- GATE 2 DONE 06:36Z: v009 review 063339 BLOCKING 1 (empty diff on timeout/cap) WAIVED by DEC 084 item 1 / DEC 085 for d38c55c7 -> journal the waiver
+  WITH the Gate-4 line before submit (checklist (c) = PASS by waiver; dec 085 write-up line added to checklist (f)). Prompt nits -> ops/backlog-prompt.md (do NOT edit v009). MANIFEST nits done (no sha change).
 - DEC 084 item 3: e4b-v002h AUTHORIZED CONDITIONAL, checklist ops/drafts/submit-e4b-v002h-checklist.md (first UTC day: nothing pending,
   no other submit that day, AND (31b-v009 VOID or already submitted on an earlier day & not pending); reverse SUBMIT_KERNEL commit + kernel recheck first).
 ## Next 3
