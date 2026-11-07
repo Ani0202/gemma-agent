@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 06:10Z (cycle 173; dec 081 read: arm-3 SMOKE pushed; S81 stray amendment committed + codex-light running). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 06:13Z (cycle 174; codex S81 BLOCKING 1 fixed 71185a3, re-review codex-review-s81b-light running). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -22,7 +22,10 @@
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
 - DEC 079: approve, nothing changes. On v002 final mail Director T (first final poll - 00:06:31Z), exact status, public score; fill json.
   ERROR/timeout -> mail AT ONCE before any slot. Nov 8 default if PENDING at 12:00Z = e4b-v002 repeat. Dec 038 files rechecked OK 00:13Z.
-## Running jobs (06:10Z): memguard-light, lb-31b-v002-wait-light, passrate-31b-v012-smoke-wait-light (v4 -> runs/31b-v012-p9a-smoke, sealed), codex-review-s81-light.
+## Running jobs (06:13Z): memguard-light, lb-31b-v002-wait-light (PENDING 06:06Z), passrate-31b-v012-smoke-wait-light (v4 -> runs/31b-v012-p9a-smoke, sealed), codex-review-s81b-light.
+- CODEX S81: review 060833 BLOCKING 1 (base stray evidence missing could still ON-ADOPT) -> fixed 71185a3 (safety_checks(): both arms need
+  available stray evidence, zero governing for arm 3 only; +5 tests incl. unrounded wall-p90 gate; 1624 pass). Re-review s81b must be CLEAN before arm-3 metrics.
+  Non-blocking (report-side): arm-3 report must list amended arm-2 counts (governing+literal) separately per S81.3.
 - DEC 081 (on 020, approve A w/ changes): (1) arm-3 SMOKE PUSHED gemma-31b-passrate v4 06:05:14Z: 31b-v012-p9a, ids eval/plans/009-smoke-ids.txt (2),
   budget 5400, TRANSPORT 203e542bd5ea99b98a6c40821082804de6de6d6705b25b37f78caef3cda19507, identity smoke PASS (results/plan009_bundle_identity.json),
   quota BEFORE 11.26 h 06:05:05Z. On land: quota AFTER + budget row; arm3smoke check (criteria i-iii; no stray/p90 involved, so not gated by item 4);
@@ -73,6 +76,6 @@
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 - TOPICS (Director mail 01:47Z, owner req): docs/TOPICS.md saved; on any topic status change (used now | planned | adjacent, not used) update its line + repo ref in the same cycle as the journal entry.
 ## Next 3
-1. On smoke land: quota/budget row, arm3smoke check -> PASS: push MAIN (ids 3..33) at once; codex S81 verdict -> fix if BLOCKING.
+1. On smoke land: quota/budget row, arm3smoke check -> PASS: push MAIN (ids 3..33) at once; codex s81b verdict -> fix if BLOCKING.
 2. On 31b-v002 final: fill results/lb_31b_v002.json + budget row + Director FYI (ERROR -> CAP-BOUND binds per dec 061 i).
 3. Nov 8 slot proposal from ops/drafts/nov8-slot-inputs.md by 11-07T12:00Z (U2 = arm 2 NOT SHIP-ELIGIBLE; U1 pending unless scored).
