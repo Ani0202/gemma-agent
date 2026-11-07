@@ -553,3 +553,1600 @@ index 2b2cae7..d7cdbfe 100644
 +    assert m.safety_checks(_safety(ZERO, p90=110.0), _safety(ZERO, p90=100.0))['total_wall_p90'] is True
 +    assert m.safety_checks(_safety(ZERO, p90=50.0, complete=False), _safety(ZERO))['total_wall_p90'] is False
 
+exec
+/bin/bash -lc "nl -ba eval/plan008_metrics.py | sed -n '1,260p'; nl -ba eval/plan008_metrics.py | sed -n '930,1250p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	#!/usr/bin/env python3
+     2	"""Plan 008 D73 metrics. CPU/offline only; output contains counts, never task text.
+     3	
+     4	Usage: plan008_metrics.py base OUT_JSON | smoke RUN_DIR OUT_JSON | arm2 RUN_DIR OUT_JSON
+     5	       plan008_metrics.py arm3smoke RUN_DIR CLASSIFIER_D4_JSON OUT_JSON
+     6	       plan008_metrics.py arm3 {arm1,arm2} OUT_JSON --arm3 DIR [DIR ...]
+     7	           [--base-dirs DIR ...] --classifiers DIR=D4_JSON,A2_JSON [--classifiers ...]
+     8	           --smoke-json PATH [--base-verdict-json PATH]
+     9	       Dirs are supplied in push order: smoke, main, chunk1, chunk2, ...
+    10	       Both arm3 modes require --identity-json PATH --bundle v01N --transport DIR=SHA256 --push-event DIR=EVENT (each arm3 dir).
+    11	       --base-verdict-json (base arm2) = the journaled plan-008 ruling file, {"verdict": "<plan 008 verdict>"};
+    12	       the raw arm2-mode output carries no verdict and therefore fails closed. Only SHIP-ELIGIBLE is a valid arm2 base.
+    13	
+    14	Exit: 0 ok, 2 usage, 3 incomplete arm2/arm3 inventory, 4 builtin arm2 run holds a non-root
+    15	submit_patch response (dec 077 failure-safe; STOP and report). 3/4 write no results.
+    16	
+    17	Smoke loads task.test_files with swegemma.models.load_tasks, as both eval runners do.
+    18	Tasks default to data/raw/tasks.jsonl (local) or the Kaggle competition tasks.jsonl;
+    19	PLAN008_TASKS_PATH overrides that location for downloaded runs. Missing tasks fail smoke.
+    20	"""
+    21	import hashlib
+    22	import json
+    23	import math
+    24	import os
+    25	from pathlib import Path
+    26	import re
+    27	import sys
+    28	from collections import defaultdict, deque
+    29	
+    30	sys.path.insert(0, str(Path(__file__).resolve().parent))
+    31	import plan007_arm1_summary as base
+    32	
+    33	BUNDLES_ROOT = Path(__file__).resolve().parents[1] / 'bundles/31b'
+    34	PUSH_EVENT = re.compile(r'(smoke|main|chunk[1-9][0-9]*)')
+    35	
+    36	ROOT = 'swe_baseline_agent'
+    37	GATE_YAML = Path('bundles/31b/v010/sub_agents/submit_gate.yaml')
+    38	SMOKE_IDS = Path('eval/plans/008-smoke-ids.txt')
+    39	ARM2_IDS = Path('eval/plans/007-arm1-ids.txt')
+    40	# Authoritative bundle identity = kernel header agent_yaml_sha256 (agent_timing.extract_bundle).
+    41	# v011 agent.yaml is byte-identical to v009 (arm 1), so arm-1 runs identify as builtin.
+    42	BUNDLE_YAMLS = {'v010': Path('bundles/31b/v010/agent.yaml'), 'v011': Path('bundles/31b/v011/agent.yaml')}
+    43	TEST = re.compile(r'\bpytest\b|-m\s+unittest\b|\btox\b')
+    44	BOUNCE = ('NOT SUBMITTED: no non-test source file is changed. Make your source edit with '
+    45	          'edit_file (or a /tmp Python script), confirm it with git diff --stat, then call submit_patch again.')
+    46	DEFINITIONS = {
+    47	    'mechanism1_empty': 'verified_patch_bytes == 0 (plan007 empty definition)',
+    48	    'mechanism2': 'rows with max_run >= 5; root-author tool calls only; same tool and sort_keys JSON args; nested calls excluded before runs',
+    49	    'repeated_calls': 'sum(length - 1) over root identical runs',
+    50	    'submitted_without_test': 'PRIMARY total (ship rule, D73.5) = observed rows (successful root submit with no prior root run_command matching \\bpytest\\b|-m\\s+unittest\\b|\\btox\\b) PLUS every submit_unverifiable row without a root test run before its earliest candidate boundary; submitted_without_test_observed = observed rows only, no-success rows excluded there and counted in count_no_successful_submit_observed',
+    51	    'count_no_successful_submit': 'PRIMARY total (D73.5) = verifiable rows with no successful submit PLUS unverifiable rows whose patch_submitted is not True; *_observed = rows with no observed successful submit',
+    52	    'inventory': 'smoke requires exactly the ids in eval/plans/008-smoke-ids.txt (else overall FAIL); arm2 requires exactly the 33 ids in eval/plans/007-arm1-ids.txt (else no output, exit 3)',
+    53	    'selected_bundle': 'header agent_yaml_sha256 matched against bundles/31b/v010|v011/agent.yaml; only if absent/unrecognized, gate event evidence; free-text header/dir labels never used',
+    54	    'success': 'first root harness patch_size response (builtin), or gate-authored inner harness patch_size response attributed to its enclosing root submit; acknowledgement not required',
+    55	    'submit_unverifiable': 'inner/builtin success vs explicit patch_submitted mismatch, or flag unavailable; missing flag derived from harness response only, not acknowledgement; rows counted and listed',
+    56	    'smoke': '008.md D73.2 i-v; missing evidence UNVERIFIABLE; overall PASS requires every criterion PASS',
+    57	    'gate_descriptives': 'root submit calls; reply-prefix bounces/failures; gate run_command response forced/check_error counts; terminal bounces; internal visibility',
+    58	    'gate_llm_limit': 'gate-authored limit evidence, or an unacknowledged enclosing gate with the runner turns-budget error; inferred from saved evidence',
+    59	    'gate_detection': 'selected_bundle v010 = gate, v011 = builtin; unidentified -> gate request/reply/child events; otherwise builtin layout and gate counts n/a',
+    60	    'untracked_only': 'D72.2: canonical SUBMITTED reply and nonempty scored patch with all sections declaring new file mode; absent scored-patch evidence reported separately',
+    61	}
+    62	
+    63	
+    64	def _parsed(value):
+    65	    if isinstance(value, str):
+    66	        try:
+    67	            return json.loads(value)
+    68	        except (ValueError, TypeError):
+    69	            pass
+    70	    return value
+    71	
+    72	
+    73	def _reply(value):
+    74	    """Legacy AgentTool text is JSON {raw: text} (sometimes {result: text})."""
+    75	    value = _parsed(value)
+    76	    if isinstance(value, str):
+    77	        return value
+    78	    if isinstance(value, dict):
+    79	        for k in ('raw', 'result'):
+    80	            if k in value:
+    81	                return _reply(value[k])
+    82	    return ''
+    83	
+    84	
+    85	def _pairs(entries):
+    86	    # Legacy trace has no call IDs. FIFO by (author, tool) also isolates nested tools.
+    87	    pending, calls = defaultdict(deque), []
+    88	    for i, e in enumerate(entries):
+    89	        key = (e.get('author'), e.get('tool'))
+    90	        if e.get('type') == 'tool_call':
+    91	            c = dict(e, entry_index=i, response=None, response_index=None)
+    92	            calls.append(c)
+    93	            pending[key].append(c)
+    94	        elif e.get('type') in ('tool_response', 'tool_result') and pending[key]:
+    95	            c = pending[key].popleft()
+    96	            c.update(response=e.get('result', ''), response_index=i)
+    97	    return calls
+    98	
+    99	
+   100	def root_tool_calls(entries, root=ROOT):
+   101	    """Ordered call dictionaries, enriched with response text and entry/response indices."""
+   102	    return [c for c in _pairs(entries) if c.get('author') == root]
+   103	
+   104	
+   105	def identical_runs_root(entries):
+   106	    lens, cur, prev = [], 0, object()
+   107	    for c in root_tool_calls(entries):
+   108	        key = (c.get('tool'), json.dumps(c.get('args', c.get('arguments')), sort_keys=True))
+   109	        if key == prev:
+   110	            cur += 1
+   111	        else:
+   112	            if cur:
+   113	                lens.append(cur)
+   114	            cur = 1
+   115	        prev = key
+   116	    if cur:
+   117	        lens.append(cur)
+   118	    return dict(max_run=max(lens, default=0), runs_ge3=sum(n >= 3 for n in lens),
+   119	                runs_ge5=sum(n >= 5 for n in lens), repeated_calls=sum(n - 1 for n in lens))
+   120	
+   121	
+   122	def _has_error(value):
+   123	    value = _parsed(value)
+   124	    if isinstance(value, dict):
+   125	        if value.get('error') or str(value.get('status', '')).lower() in ('error', 'failed', 'failure'):
+   126	            return True
+   127	        return any(_has_error(v) for v in value.values())
+   128	    if isinstance(value, list):
+   129	        return any(_has_error(v) for v in value)
+   130	    return False
+   131	
+   132	
+   133	def _patch_size(value):
+   134	    value = _parsed(value)
+   135	    if isinstance(value, dict) and not _has_error(value):
+   136	        n = value.get('patch_size')
+   137	        if type(n) is int and n >= 0:
+   138	            return n
+   139	    return None
+   140	
+   141	
+   142	def gate_invocations(entries):
+   143	    """Legacy traces lack event IDs: enclose children by root call/reply interval.
+   144	
+   145	    A missing acknowledgement ends at the next root call or trace end. This retains
+   146	    inner captures interrupted by a deadline, without assigning them to a later call.
+   147	    Only the root tool_response is a canonical gate reply.
+   148	    """
+   149	    pairs = _pairs(entries)
+   150	    roots = [c for c in pairs if c.get('author') == ROOT]
+   151	    gates = []
+   152	    for i, c in enumerate(roots):
+   153	        if c.get('tool') != 'submit_patch':
+   154	            continue
+   155	        end = roots[i + 1]['entry_index'] if i + 1 < len(roots) else len(entries)
+   156	        reply_index = c['response_index']
+   157	        canonical = (reply_index is not None and reply_index < end
+   158	                     and entries[reply_index].get('type') == 'tool_response')
+   159	        if canonical:
+   160	            end = reply_index
+   161	        children = [dict(p, response=None, response_index=None)
+   162	                    if p['response_index'] is not None and p['response_index'] >= end else p
+   163	                    for p in pairs if p.get('author') == 'submit_patch'
+   164	                    and c['entry_index'] < p['entry_index'] < end]
+   165	        inner = [p for p in children if p.get('tool') == 'submit_patch'
+   166	                 and p['response_index'] is not None and p['response_index'] < end
+   167	                 and _patch_size(p['response']) is not None]
+   168	        gates.append(dict(c, root_index=i, children=children, inner_successes=inner,
+   169	                          canonical_reply=_reply(c['response']) if canonical else '',
+   170	                          canonical_index=reply_index if canonical else None))
+   171	    return gates
+   172	
+   173	
+   174	def successful_submit_index(entries, gate_mode=None):
+   175	    gates = {g['entry_index']: g for g in gate_invocations(entries)}
+   176	    for i, c in enumerate(root_tool_calls(entries)):
+   177	        if c.get('tool') != 'submit_patch':
+   178	            continue
+   179	        gate = gates[c['entry_index']]
+   180	        args = c.get('args', c.get('arguments'))
+   181	        is_gate = gate_mode if gate_mode is not None else bool(
+   182	            gate['children'] or isinstance(args, dict) and 'request' in args
+   183	            or gate['canonical_reply'] in ('SUBMITTED', BOUNCE)
+   184	            or gate['canonical_reply'].startswith('SUBMIT FAILED'))
+   185	        if (gate['inner_successes'] if is_gate else _patch_size(c['response']) is not None):
+   186	            return i
+   187	    return None
+   188	
+   189	
+   190	def _terminal_flag(row, entries):
+   191	    if type(row.get('patch_submitted')) is bool:
+   192	        return row['patch_submitted'], 'row'
+   193	    flags = [e['patch_submitted'] for e in entries if type(e.get('patch_submitted')) is bool]
+   194	    return (flags[-1], 'trace') if flags else (None, 'derived_from_harness_response')
+   195	
+   196	
+   197	def submit_evidence(row, entries, gate_mode=None, trace_loaded=True):
+   198	    observed = successful_submit_index(entries, gate_mode) is not None
+   199	    flag, source = _terminal_flag(row, entries)
+   200	    known = type(flag) is bool
+   201	    return dict(submit_unverifiable=not trace_loaded or not known or flag != observed,
+   202	                patch_submitted=flag if known else observed,
+   203	                patch_submitted_source=source,
+   204	                successful_submit=observed)
+   205	
+   206	
+   207	def submitted_without_test(entries, gate_mode=None):
+   208	    index = successful_submit_index(entries, gate_mode)
+   209	    if index is None:
+   210	        return None
+   211	    return not any(c.get('tool') == 'run_command' and TEST.search(_command(c))
+   212	                   for c in root_tool_calls(entries)[:index])
+   213	
+   214	
+   215	def earliest_candidate_index(entries):
+   216	    """D73.5 boundary, independent of successful-root attribution: the earliest of
+   217	    (a) any gate-authored inner submit_patch harness response carrying patch_size,
+   218	    (b) the root submit call enclosing such a response (gate_invocations interval),
+   219	    (c) any root submit_patch call whose own response carries patch_size (builtin).
+   220	    Extra candidates only move the boundary earlier (stricter). None = no candidate."""
+   221	    cands = [i for i in nonroot_submit_responses(entries)
+   222	             if _patch_size(entries[i].get('result', '')) is not None]
+   223	    cands += [p['response_index'] for p in _pairs(entries)
+   224	             if p.get('author') == 'submit_patch' and p.get('tool') == 'submit_patch'
+   225	             and p['response_index'] is not None and _patch_size(p['response']) is not None]
+   226	    cands += [g['entry_index'] for g in gate_invocations(entries) if g['inner_successes']]
+   227	    cands += [c['entry_index'] for c in root_tool_calls(entries)
+   228	              if c.get('tool') == 'submit_patch' and _patch_size(c['response']) is not None]
+   229	    return min(cands, default=None)
+   230	
+   231	
+   232	def tested_before(entries, index):
+   233	    return index is not None and any(
+   234	        c.get('tool') == 'run_command' and TEST.search(_command(c)) and c['entry_index'] < index
+   235	        for c in root_tool_calls(entries))
+   236	
+   237	
+   238	def d735_counts(r, entries):
+   239	    """D73.5 (dec 074 item 2): a submit_unverifiable row counts as submitted_without_test
+   240	    unless a root test run precedes the earliest candidate boundary (computed from the
+   241	    trace, not from the observed success; the observed success is itself a candidate, so
+   242	    the boundary is never later than it). No candidate = worst case = counted. If
+   243	    patch_submitted is not True it ALSO counts in no_successful_submit. Verifiable rows keep the observed D73.3 values.
+   244	    Mutates and returns the row."""
+   245	    obs = r['submitted_without_test']
+   246	    if r['submit_unverifiable']:
+   247	        boundary = earliest_candidate_index(entries)
+   248	        r['d735_boundary_entry'] = boundary
+   249	        r['swt_d735'] = not tested_before(entries, boundary)
+   250	        r['no_submit_d735'] = r['patch_submitted'] is not True
+   251	    else:
+   252	        r['swt_d735'] = obs is True
+   253	        r['no_submit_d735'] = obs is None
+   254	    return r
+   255	
+   256	
+   257	def registered_ids(path):
+   258	    return [l.strip() for l in Path(path).read_text().splitlines() if l.strip() and not l.lstrip().startswith('#')]
+   259	
+   260	
+   930	            current = value[2:] if value.startswith('b/') else value
+   931	        elif line.startswith('--- '):
+   932	            current = None
+   933	        elif line.startswith('@@ -0,0 ') and current and current != '/dev/null':
+   934	            out.add(current)
+   935	    return out
+   936	
+   937	
+   938	_GOLD_DIRS = {}
+   939	
+   940	
+   941	def gold_created_dirs(iid, tasks_path=None):
+   942	    """Parent dirs of gold-created files for one task; None if the gold patch cannot be loaded (S81.1: fails, never passes)."""
+   943	    path = Path(tasks_path) if tasks_path else _tasks_path()
+   944	    key = str(path)
+   945	    if key not in _GOLD_DIRS:
+   946	        table = {}
+   947	        try:
+   948	            with open(path) as fh:
+   949	                for line in fh:
+   950	                    if line.strip():
+   951	                        task = json.loads(line)
+   952	                        table[task['instance_id']] = task.get('patch')
+   953	        except (OSError, ValueError, KeyError):
+   954	            table = None
+   955	        _GOLD_DIRS[key] = table
+   956	    table = _GOLD_DIRS[key]
+   957	    if table is None or not isinstance(table.get(iid), str):
+   958	        return None
+   959	    return {os.path.dirname(f) for f in gold_created_files(table[iid])}
+   960	
+   961	
+   962	def amended_stray(literal, gold_dirs):
+   963	    """S81.1 exact parent-directory match only (no prefix/ancestor/extension/name matching)."""
+   964	    governing, exempted = [], []
+   965	    for f in literal:
+   966	        d = os.path.dirname(f)
+   967	        if gold_dirs is not None and d in gold_dirs:
+   968	            exempted.append(dict(path=f, gold_dir=d))
+   969	        else:
+   970	            governing.append(f)
+   971	    return governing, exempted
+   972	
+   973	
+   974	def stray_safety(rows, tasks_path=None):
+   975	    """S81: governing stray (gating) + literal stray (descriptive, paths only). Missing evidence -> 'not available'."""
+   976	    if not all('stray_files' in r and isinstance(r['stray_files'], list) for r in rows):
+   977	        return 'not available', 'not available', []
+   978	    governing_ids, literal_ids, per_row, missing = [], [], [], []
+   979	    for r in rows:
+   980	        literal = sorted(r['stray_files'])
+   981	        if not literal:
+   982	            continue
+   983	        dirs = gold_created_dirs(r['instance_id'], tasks_path)
+   984	        if dirs is None:
+   985	            missing.append(r['instance_id'])
+   986	        governing, exempted = amended_stray(literal, dirs)
+   987	        literal_ids.append(r['instance_id'])
+   988	        if governing or dirs is None:
+   989	            governing_ids.append(r['instance_id'])
+   990	        per_row.append(dict(instance_id=r['instance_id'], literal=literal, governing=governing, exempted=exempted,
+   991	                            gold_unavailable=dirs is None))
+   992	    if missing:
+   993	        return 'not available', _id_count(literal_ids), per_row
+   994	    return _id_count(governing_ids), _id_count(literal_ids), per_row
+   995	
+   996	
+   997	def pct_raw(vals, q):
+   998	    """S81.5: unrounded percentile (same interpolation as plan007_arm1_summary.pct, which rounds for display)."""
+   999	    vals = sorted(v for v in vals if v is not None)
+  1000	    if not vals:
+  1001	        return None
+  1002	    i = (len(vals) - 1) * q
+  1003	    lo, hi = math.floor(i), math.ceil(i)
+  1004	    return vals[lo] + (vals[hi] - vals[lo]) * (i - lo)
+  1005	
+  1006	
+  1007	def summarize_arm(records, arm1=False):
+  1008	    rows = [r for r, _, _, _ in records]
+  1009	    ids = lambda predicate: [r['instance_id'] for r in rows if predicate(r)]
+  1010	    hs = [r['instance_id'] for r, c, _, _ in records if c['h'] is not None]
+  1011	    non_h = [r for r in rows if r['instance_id'] not in hs]
+  1012	    rate = lambda rs: base.rate(sum(r.get('resolved') is True for r in rs), len(rs))
+  1013	    thinking, repeats, llm, tools, swt = [], [], [], [], []
+  1014	    for row, _, trace, entries in records:
+  1015	        iid = row['instance_id']
+  1016	        th = base.thinking_task(str(trace))
+  1017	        thinking.append(dict(instance_id=iid, thinking_blocks=th['thinking_blocks'], total_thinking_chars=sum(
+  1018	            len(e.get('content') or '') for e in entries if e.get('author') == ROOT and e.get('type') == 'thinking')))
+  1019	        repeats.append(dict(instance_id=iid, **identical_runs_root(entries)))
+  1020	        llm.append(row.get('llm_turns') if row.get('llm_turns') is not None else th['root_usage_turns'])
+  1021	        tc = row.get('tool_calls')
+  1022	        tools.append(tc['total'] if isinstance(tc, dict) and tc.get('total') is not None else len(root_tool_calls(entries)))
+  1023	        observed = submitted_without_test(entries, gate_mode=False)
+  1024	        count = observed is True
+  1025	        if not arm1:
+  1026	            evidence = dict(submitted_without_test=observed, **submit_evidence(row, entries, False))
+  1027	            count = d735_counts(evidence, entries)['swt_d735']
+  1028	        if count:
+  1029	            swt.append(iid)
+  1030	    safety = {}
+  1031	    key = 'test_files_edited'
+  1032	    safety[key] = (_id_count(ids(lambda r: bool(r.get(key)))) if all(key in r and r[key] is not None for r in rows)
+  1033	                   else 'not available')
+  1034	    # Plan 009 S81: stray_files = GOVERNING (gating); literal = old rule, DESCRIPTIVE.
+  1035	    safety['stray_files'], safety['stray_files_literal'], safety['stray_rows'] = stray_safety(rows)
+  1036	    walls = [(r.get('wall_seconds') or {}).get('total') for r in rows]
+  1037	    safety.update(total_wall_p90=base.pct(walls, .9), total_wall_p90_unrounded=pct_raw(walls, .9),
+  1038	                  total_wall_complete=all(_finite_number((r.get('wall_seconds') or {}).get('total')) for r in rows),
+  1039	                  empty_patch=_id_count(ids(lambda r: r.get('verified_patch_bytes') == 0)),
+  1040	                  empty_patch_complete=all(type(r.get('verified_patch_bytes')) is int for r in rows),
+  1041	                  submitted_without_test=_id_count(swt),
+  1042	                  submitted_without_test_definition='plan007 observed' if arm1 else 'plan008 D73.5 total')
+  1043	    screened = set(base.ids_file(base.SCREENED_IDS))
+  1044	    unseen = [r for r in rows if r['instance_id'] not in screened]
+  1045	    return dict(n_rows=len(rows), resolved=rate(rows), h_rows=_id_count(hs), sensitivity=rate(non_h),
+  1046	                known_diag=sum(bool(c['known_diag']) for _, c, _, _ in records) if all('known_diag' in c for _, c, _, _ in records) else None,
+  1047	                timeouts=_id_count(ids(lambda r: bool(r.get('timed_out')) or bool(r.get('agent_timeout_fired')))),
+  1048	                safety=safety, timing=arm3_timing(rows), descriptive=dict(
+  1049	                    thinking=dict(rows=thinking, tasks_with_blocks=sum(t['thinking_blocks'] > 0 for t in thinking),
+  1050	                                  total_blocks=sum(t['thinking_blocks'] for t in thinking),
+  1051	                                  total_chars=sum(t['total_thinking_chars'] for t in thinking)),
+  1052	                    context_overflow='not available',
+  1053	                    repeat=dict(rows=repeats, mechanism2=_id_count([r['instance_id'] for r in repeats if r['max_run'] >= 5]),
+  1054	                                max_run=max(r['max_run'] for r in repeats), repeated_calls=sum(r['repeated_calls'] for r in repeats)),
+  1055	                    llm_calls_p50_p90=_quantiles(llm), tool_calls_p50_p90=_quantiles(tools),
+  1056	                    per_repo={repo: rate([r for r in rows if (r.get('repo') or r['instance_id'].split('__')[0]) == repo])
+  1057	                              for repo in sorted({r.get('repo') or r['instance_id'].split('__')[0] for r in rows})},
+  1058	                    unscreened_25=dict(instance_ids=[r['instance_id'] for r in unseen], resolved=rate(unseen))))
+  1059	
+  1060	
+  1061	def environment_metrics(headers, records):
+  1062	    aliases = dict(docker_image_digest=('docker_image_digest', 'docker_image'),
+  1063	                   vllm_version=('vllm_version',), google_adk_version=('google_adk_version', 'google-adk'),
+  1064	                   swegemma_version=('swegemma_version',), model_id=('model_id', 'model'),
+  1065	                   gpu_names=('gpu_names',), gpu_count=('gpu_count',))
+  1066	    def values(keys):
+  1067	        vals = []
+  1068	        for h in headers:
+  1069	            val = next((h[k] for k in keys if k in h), None)
+  1070	            if val not in vals:
+  1071	                vals.append(val)
+  1072	        return vals[0] if len(vals) == 1 else vals or None
+  1073	    out = {key: values(keys) for key, keys in aliases.items()}
+  1074	    for package in ('vllm', 'google-adk', 'swegemma'):
+  1075	        key = package.replace('-', '_') + '_version'
+  1076	        if out[key] is None:
+  1077	            values_from_versions = []
+  1078	            for h in headers:
+  1079	                val = (h.get('versions') or {}).get(package)
+  1080	                if val not in values_from_versions:
+  1081	                    values_from_versions.append(val)
+  1082	            out[key] = values_from_versions[0] if len(values_from_versions) == 1 else values_from_versions or None
+  1083	    for field, wall in (('setup_wall_p50_p90', None), ('verification_wall_p50_p90', 'verification')):
+  1084	        out[field] = _quantiles([r.get('sandbox_setup_seconds') if wall is None else
+  1085	                                 (r.get('wall_seconds') or {}).get(wall) for r, _, _, _ in records])
+  1086	    kernel_keys = sorted({k for h in headers for k in h if k.startswith('kernel_code') or
+  1087	                          (('agent' in k or 'verification' in k) and ('sha' in k) and k != 'agent_yaml_sha256')})
+  1088	    out['kernel_code'] = {k: values((k,)) for k in kernel_keys} or None
+  1089	    return out
+  1090	
+  1091	
+  1092	def safety_checks(sa, sb):
+  1093	    """Plan 009 SAFETY gates. S81.1/S81.3 (codex 20261107T060833 BLOCKING 1): stray evidence must be AVAILABLE for
+  1094	    BOTH arms (missing evidence fails); zero governing stray rows is required of arm 3 only. S81.5: unrounded p90."""
+  1095	    checks = {key: isinstance(sa[key], dict) and sa[key]['count'] == 0 for key in ('test_files_edited', 'stray_files')}
+  1096	    checks['stray_files'] = checks['stray_files'] and isinstance(sb.get('stray_files'), dict)
+  1097	    checks.update(total_wall_p90=bool(sa['total_wall_complete'] and sb['total_wall_complete'] and
+  1098	                                      sa['total_wall_p90_unrounded'] <= 1.10 * sb['total_wall_p90_unrounded']),
+  1099	                  empty_patch=bool(sa['empty_patch_complete'] and sb['empty_patch_complete'] and
+  1100	                                   sa['empty_patch']['count'] <= sb['empty_patch']['count'] + 3),
+  1101	                  submitted_without_test=sa['submitted_without_test']['count'] <= sb['submitted_without_test']['count'] + 3)
+  1102	    return checks
+  1103	
+  1104	
+  1105	def arm3_decision(on, off, p, h_count, smoke_invalid, vetoes, *, pairing_void_reason=None,
+  1106	                  base_valid=True, identity_valid=True, smoke_bound=True, thinking_pass=True):
+  1107	    if pairing_void_reason:
+  1108	        return 'INVALID (pairing voided: ' + pairing_void_reason + ')'
+  1109	    if not base_valid:
+  1110	        return 'INVALID (base invalid/unruled)'
+  1111	    if not identity_valid:
+  1112	        return 'INVALID (identity mismatch)'
+  1113	    if not thinking_pass:
+  1114	        return 'INVALID (smoke i)'
+  1115	    if not smoke_bound:
+  1116	        return 'INVALID (smoke evidence not bound)'
+  1117	    if smoke_invalid or h_count >= 5:
+  1118	        return 'INVALID'
+  1119	    if off >= on:
+  1120	        return 'KEEP-OFF'
+  1121	    if p >= .2:
+  1122	        return 'NO-DIFFERENCE'
+  1123	    return 'ON-BETTER-VETOED' if vetoes else 'ON-ADOPT'
+  1124	
+  1125	
+  1126	def arm3_metrics(base_name, arm3_dirs, base_dirs, classifiers, smoke_json=None, *, base_verdict_json=None,
+  1127	                 identity_json=None, bundle=None, transports=None, push_events=None):
+  1128	    paths = [base.ARM_IDS, base.SCREENED_IDS, base.__file__, 'eval/plan007_report.py', 'eval/thinking_bound.py']
+  1129	    if base_name == 'arm1':
+  1130	        base_dirs = [str(Path(t).parent) for _, t, _, _ in base.PARTS]
+  1131	        classifiers = dict(classifiers, **{str(Path(t).parent): (d, a) for _, t, d, a in base.PARTS})
+  1132	    arms, envs, inventories = {}, {}, {}
+  1133	    all_records = {}
+  1134	    for name, dirs in (('arm3', arm3_dirs), ('base', base_dirs)):
+  1135	        rec, inv, inputs, headers = aggregate_arm(dirs, classifiers)
+  1136	        paths.extend(inputs)
+  1137	        all_records[name] = rec
+  1138	        inventories[name] = inv
+  1139	        arms[name] = summarize_arm(rec, arm1=name == 'base' and base_name == 'arm1')
+  1140	        envs[name] = environment_metrics(headers, rec)
+  1141	    a, b = arms['arm3'], arms['base']
+  1142	    on, off = [], []
+  1143	    for (r, _, _, _), (s, _, _, _) in zip(all_records['arm3'], all_records['base']):
+  1144	        base.assert_paired(r, s)
+  1145	        if r.get('resolved') is True and s.get('resolved') is not True:
+  1146	            on.append(r['instance_id'])
+  1147	        if s.get('resolved') is True and r.get('resolved') is not True:
+  1148	            off.append(r['instance_id'])
+  1149	    p = sign_test(len(on), len(off))
+  1150	    sa, sb = a['safety'], b['safety']
+  1151	    checks = safety_checks(sa, sb)
+  1152	    vetoes = [k for k, passed in checks.items() if not passed]
+  1153	    if a['timeouts']['count'] > b['timeouts']['count'] + 2:
+  1154	        vetoes.append('timeouts')
+  1155	    if not a['timing']['timing_pass']:
+  1156	        vetoes.append('timing')
+  1157	    smoke = _read_json(smoke_json)
+  1158	    smoke_invalid = smoke.get('overall') != 'PASS'
+  1159	    for path in (smoke_json, base_verdict_json, identity_json):
+  1160	        if path and _readable_file(path):
+  1161	            paths.append(path)
+  1162	    smoke_records = all_records['arm3'][:2]
+  1163	    traces = [r[2] for r in smoke_records]
+  1164	    smoke_dirs = {str(t.parent.parent.parent) for t in traces}
+  1165	    schema = smoke.get('_schema')
+  1166	    evidence = schema.get('input_shas', {}) if isinstance(schema, dict) else {}
+  1167	    if not isinstance(evidence, dict):
+  1168	        evidence = {}
+  1169	    required_evidence = [*(classifiers[d][0] for d in smoke_dirs), *traces, *(Path(d) / 'timing.jsonl' for d in smoke_dirs)]
+  1170	    smoke_bound = all(evidence.get(str(p)) == base.sha(p) for p in required_evidence)
+  1171	    # A smoke report must name exactly the timing files that supplied the counted rows.
+  1172	    smoke_bound = smoke_bound and {str(Path(p)) for p in evidence if Path(p).name == 'timing.jsonl'} == {
+  1173	        str(Path(d) / 'timing.jsonl') for d in smoke_dirs}
+  1174	    ci = thinking_criterion(traces)
+  1175	    identity = identity_check(arm3_dirs, identity_json, bundle, transports or {}, smoke_dirs, push_events)
+  1176	    recomputed = None
+  1177	    if len(smoke_dirs) == 1:
+  1178	        smoke_dir = next(iter(smoke_dirs))
+  1179	        recomputed = arm3smoke_metrics(smoke_dir, classifiers[smoke_dir][0], identity_json, bundle,
+  1180	                                      {smoke_dir: (transports or {}).get(smoke_dir)},
+  1181	                                      {smoke_dir: (push_events or {}).get(smoke_dir)})
+  1182	    failed_smoke = [k for k, c in recomputed['criteria'].items() if c['status'] != 'PASS'] if recomputed else ['iii']
+  1183	    manifest = _manifest_path(bundle)
+  1184	    if manifest and _readable_file(manifest):
+  1185	        paths.append(manifest)
+  1186	    base_verdict = _read_json(base_verdict_json)
+  1187	    verdicts = [base_verdict[k] for k in ('decision', 'verdict') if k in base_verdict]
+  1188	    # Plan 009 l.17-19: base = arm 2 iff plan 008 returned SHIP-ELIGIBLE; any other verdict means base = arm 1.
+  1189	    base_valid = base_name == 'arm1' or bool(verdicts) and all(v == 'SHIP-ELIGIBLE' for v in verdicts)
+  1190	    differences = [k for k in envs['arm3'] if envs['arm3'][k] != envs['base'][k]]
+  1191	    envs.update(differences=differences, pairing_void_candidate='kernel_code' in differences)
+  1192	    inputs = dict(arm3_timeouts=a['timeouts']['count'], base_timeouts=b['timeouts']['count'],
+  1193	                  on_only=len(on), off_only=len(off), p=p, arm3_h=a['h_rows']['count'],
+  1194	                  smoke_invalid=smoke_invalid, smoke_bound=smoke_bound, smoke_thinking=ci,
+  1195	                  base_valid=base_valid, identity=identity, timeouts_pass='timeouts' not in vetoes,
+  1196	                  timing_pass=a['timing']['timing_pass'], safety_checks=checks, vetoes=vetoes)
+  1197	    result = dict(_schema=_schema('arm3', paths), n_rows=a['n_rows'], base_arm=base_name, inventory=inventories,
+  1198	                base_validity=('VALID by dec069; ENV CONTROL: environment agreement with local gold calibration unmeasured'
+  1199	                               if base_name == 'arm1' else verdicts if base_valid else 'INVALID (base invalid/unruled)'),
+  1200	                primary=dict(on_only=_id_count(on), off_only=_id_count(off), p=p,
+  1201	                             arm3_resolved=a['resolved'], base_resolved=b['resolved']), arms=arms,
+  1202	                validity_literal='INVALID (H>=5)' if a['h_rows']['count'] >= 5 else 'VALID-pending-director',
+  1203	                env_drift=envs, decision=arm3_decision(len(on), len(off), p, a['h_rows']['count'], smoke_invalid, vetoes,
+  1204	                    pairing_void_reason='kernel agent/verification path differs' if envs['pairing_void_candidate'] else None,
+  1205	                    base_valid=base_valid, identity_valid=identity['checked'], smoke_bound=smoke_bound,
+  1206	                    thinking_pass=ci['status'] == 'PASS'),
+  1207	                decision_inputs=inputs, label='thinking ACTIVE != budget enforced')
+  1208	    if identity['checked'] and base_valid and not envs['pairing_void_candidate'] and failed_smoke:
+  1209	        result['decision'] = 'INVALID (smoke recomputed: ' + ','.join(failed_smoke) + ')'
+  1210	    inputs['smoke_recomputed'] = recomputed
+  1211	    if not identity['checked']:
+  1212	        # Rejected pushes are visible as first-attempt sensitivity, never counted.
+  1213	        excluded = set(identity['mismatching_dirs'])
+  1214	        counted = [r['instance_id'] for r, _, trace, _ in all_records['arm3']
+  1215	                   if str(trace.parent.parent.parent) not in excluded]
+  1216	        result['uncounted_sensitivity'] = dict(primary=result.pop('primary'), arms=result.pop('arms'))
+  1217	        result['n_rows'] = len(counted)
+  1218	        inventories['arm3'].update(complete=False, counted_instance_ids=counted,
+  1219	                                  identity_excluded_dirs=identity['mismatching_dirs'],
+  1220	                                  counted_missing=[i for i in base.ids_file(base.ARM_IDS) if i not in counted])
+  1221	    return result
+  1222	
+  1223	
+  1224	def arm3_cli(argv):
+  1225	    import argparse
+  1226	    parser = argparse.ArgumentParser(description='Plan 009 CPU/offline metrics')
+  1227	    parser.add_argument('mode', choices=['arm3', 'arm3smoke'])
+  1228	    parser.add_argument('--identity-json', required=True)
+  1229	    parser.add_argument('--bundle', required=True)
+  1230	    parser.add_argument('--transport', action='append', required=True)
+  1231	    parser.add_argument('--push-event', action='append', required=True)
+  1232	    def transports_for(args, dirs):
+  1233	        transports = {}
+  1234	        for value in args.transport:
+  1235	            if '=' not in value:
+  1236	                parser.error('--transport requires DIR=SHA256')
+  1237	            directory, sha = value.rsplit('=', 1)
+  1238	            if not re.fullmatch('[0-9a-f]{64}', sha):
+  1239	                parser.error('--transport requires a SHA256')
+  1240	            if str(Path(directory)) in transports:
+  1241	                parser.error('duplicate --transport dir')
+  1242	            transports[str(Path(directory))] = sha
+  1243	        if set(transports) != {str(Path(d)) for d in dirs}:
+  1244	            parser.error('--transport required for every arm3 dir')
+  1245	        if not re.fullmatch(r'v01[0-9]+', args.bundle):
+  1246	            parser.error('--bundle requires v01N')
+  1247	        return transports
+  1248	    def events_for(args, dirs):
+  1249	        events = {}
+  1250	        for value in args.push_event:
+
+exec
+/bin/bash -lc "rg -n '"'^(def |class |@pytest)|s81|missing|unavailable'"' eval/tests/test_plan009_metrics.py; rg -n 'temp|TMP|cache|capture' eval/tests/conftest.py; ls -ld /tmp /var/tmp /dev/shm /home/ubuntu/work/gemma" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+19:@pytest.fixture(autouse=True)
+20:def synthetic_manifest(tmp_path, monkeypatch):
+28:@pytest.fixture
+29:def legacy(tmp_path):
+39:@pytest.fixture
+40:def registered(monkeypatch, tmp_path):
+50:def make_run(tmp_path, name, ids, *, h=(), resolved=(), blocks=3):
+74:def evidence(tmp_path, directory, cs):
+93:def pair_evidence(tmp_path, smoke, main, cs):
+100:def smoke_options(tmp_path, directory, cs):
+105:def assert_no_text(value):
+117:@pytest.mark.parametrize('a,b,p', [(0,0,1.), (4,0,.125), (5,1,.21875), (6,0,.03125)])
+118:def test_sign(a, b, p):
+123:def test_first_attempt_and_inventory(tmp_path, registered):
+136:@pytest.mark.parametrize('duplicate', [False, True])
+137:def test_bad_inventory_exit_no_file(tmp_path, registered, duplicate, capsys):
+153:def test_smoke_positive_and_missing(tmp_path, registered):
+166:@pytest.mark.parametrize('field', ['agent_clock_seconds', 'finalization_seconds'])
+167:@pytest.mark.parametrize('value', [None, -1, float('nan'), float('inf'), '200', True, 221])
+168:def test_timing_missing_invalid(field, value):
+175:@pytest.mark.parametrize('change,status', [('identity', 'FAIL'), ('missing', 'FAIL'),
+177:def test_smoke_iii(tmp_path, registered, change, status):
+183:    elif change == 'missing':
+195:@pytest.mark.parametrize('field', ['classifier_sha256', 'input_sha256'])
+196:def test_classifier_binding(tmp_path, registered, field):
+204:@pytest.mark.parametrize('on,off,p,h,smoke,vetoes,expected', [
+212:def test_decision(on, off, p, h, smoke, vetoes, expected):
+216:def test_full_synthetic(tmp_path, registered):
+237:@pytest.mark.skipif(not (SAVED / 'runs/31b-v009-p7a1-main').exists(), reason='saved run artifacts absent')
+238:def test_real_pair_and_smoke(monkeypatch):
+262:@pytest.mark.skipif(not (SAVED / 'runs/31b-v009-p7a1-main').exists(), reason='saved run artifacts absent')
+263:def test_legacy_base_identical(legacy, monkeypatch):
+269:def test_legacy_other_modes_identical(legacy, monkeypatch, tmp_path, registered):
+278:def test_missing_safety_and_environment(tmp_path, registered):
+311:def rewrite_timing(directory, classifiers, edit):
+322:@pytest.fixture
+323:def full_pair(tmp_path, monkeypatch):
+343:@pytest.mark.parametrize('quality,expected', [
+346:def test_full_33_quality_verdicts(full_pair, quality, expected):
+364:@pytest.mark.parametrize('change,expected', [
+372:    ('missing_identity', 'INVALID (identity mismatch)'),
+376:    ('missing_base', 'INVALID (base invalid/unruled)'),
+382:def test_full_33_fail_closed(full_pair, change, expected):
+406:    elif change in ('missing_identity', 'failed_identity', 'no_main_event'):
+408:        if change == 'missing_identity':
+416:    elif change == 'missing_base':
+430:        assert len(result['inventory']['arm3']['counted_missing']) == 31
+434:@pytest.mark.parametrize('change,status', [('startup', 'UNVERIFIABLE'), ('transport', 'FAIL'),
+436:def test_smoke_mechanics_bound(tmp_path, registered, change, status):
+456:@pytest.mark.parametrize('missing', ['smoke-json', 'identity-json', 'bundle', 'transport', 'push-event'])
+457:def test_required_cli_evidence(full_pair, tmp_path, missing):
+465:        if name != missing:
+474:def test_chunk_identity_and_duplicate_outcomes(full_pair, tmp_path):
+498:@pytest.mark.parametrize('field', ['zip_ok', 'content_ok'])
+499:def test_smoke_requires_both_identity_checks(tmp_path, registered, field):
+509:def test_arm1_self_pair_literal_h(full_pair, monkeypatch):
+527:@pytest.mark.parametrize('mode', ['arm3', 'arm3smoke'])
+528:def test_transport_required_for_each_dir(full_pair, tmp_path, mode):
+544:def test_zero_thinking_with_stale_pass_smoke(full_pair):
+551:@pytest.mark.parametrize('mode', ['arm3', 'arm3smoke'])
+552:def test_cli_valid_evidence(full_pair, tmp_path, mode):
+570:def edit_identity(opts, edit):
+577:def test_two_chunks_need_two_proofs(full_pair, tmp_path):
+594:@pytest.mark.parametrize('field', ['pass', 'zip_ok', 'content_ok', 'zip_sha256',
+597:def test_partial_identity_rejected(full_pair, field):
+603:@pytest.mark.parametrize('change', ['different_zip', 'manifest_mismatch', 'manifest_missing',
+605:def test_registered_zip_proof(full_pair, change):
+609:        if change == 'manifest_missing':
+628:@pytest.mark.parametrize('latest_pass', [False, True])
+629:def test_latest_exact_event_record(full_pair, latest_pass):
+642:@pytest.mark.parametrize('criterion', ['h', 'timing', 'startup', 'verification'])
+643:def test_recompute_full_smoke(full_pair, criterion):
+670:def test_missing_classifier_binding(full_pair):
+679:@pytest.mark.parametrize('change', ['missing', 'duplicate', 'two_main', 'foreign_event', 'foreign_transport', 'wrong_smoke'])
+680:def test_push_mapping_fail_closed(full_pair, change):
+682:    if change == 'missing':
+695:def test_changed_classifier_with_stale_pass(full_pair):
+705:@pytest.mark.parametrize('mode', ['arm3', 'arm3smoke'])
+706:@pytest.mark.parametrize('change', ['missing', 'duplicate', 'foreign_event', 'foreign_transport', 'invalid_event'])
+707:def test_cli_rejects_bad_push_mapping(full_pair, tmp_path, mode, change):
+711:    if change == 'missing':
+746:def gold_tasks(tmp_path, patches):
+753:def test_s81_gold_created_parser():
+759:def test_s81_exact_dir_only():
+767:def test_s81_stray_safety_literal_unchanged(tmp_path):
+780:def test_s81_missing_evidence_fails(tmp_path):
+791:def test_s81_unrounded_percentile():
+799:def _safety(stray, p90=100.0, complete=True):
+808:@pytest.mark.parametrize('base_stray', ['not available', None, 'missing-key'])
+809:def test_s81_missing_base_stray_fails_and_blocks_adopt(base_stray):
+810:    # codex 20261107T060833 BLOCKING 1: base stray evidence absent/null/unavailable must fail SAFETY stray.
+812:    if base_stray == 'missing-key':
+820:def test_s81_base_nonzero_stray_does_not_veto_arm3():
+828:def test_s81_wall_p90_gate_unrounded():
+rg: eval/tests/conftest.py: IO error for operation on eval/tests/conftest.py: No such file or directory (os error 2)
+drwxr-xr-x  2 ubuntu ubuntu     40 Nov  7 06:12 /dev/shm
+drwxrwxr-x 16 ubuntu ubuntu   4096 Nov  7 00:06 /home/ubuntu/work/gemma
+drwxrwxrwt 96 nobody nogroup 69632 Nov  7 06:12 /tmp
+drwxrwxrwt 10 nobody nogroup  4096 Nov  7 05:12 /var/tmp
+
+exec
+/bin/bash -lc "git rev-parse HEAD && git diff eda02a4 71185a3 -- eval/plan008_metrics.py && rg -n '"'^(def |class )|stray|test_files_edited|empty_patch|submitted_without_test|total_wall|timeout'"' eval/plan008_metrics.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+084443695d3e256d7ab084ed8a1dc013f5b87d2e
+diff --git a/eval/plan008_metrics.py b/eval/plan008_metrics.py
+index f252298..0b8ed9b 100644
+--- a/eval/plan008_metrics.py
++++ b/eval/plan008_metrics.py
+@@ -1089,6 +1089,19 @@ def environment_metrics(headers, records):
+     return out
+ 
+ 
++def safety_checks(sa, sb):
++    """Plan 009 SAFETY gates. S81.1/S81.3 (codex 20261107T060833 BLOCKING 1): stray evidence must be AVAILABLE for
++    BOTH arms (missing evidence fails); zero governing stray rows is required of arm 3 only. S81.5: unrounded p90."""
++    checks = {key: isinstance(sa[key], dict) and sa[key]['count'] == 0 for key in ('test_files_edited', 'stray_files')}
++    checks['stray_files'] = checks['stray_files'] and isinstance(sb.get('stray_files'), dict)
++    checks.update(total_wall_p90=bool(sa['total_wall_complete'] and sb['total_wall_complete'] and
++                                      sa['total_wall_p90_unrounded'] <= 1.10 * sb['total_wall_p90_unrounded']),
++                  empty_patch=bool(sa['empty_patch_complete'] and sb['empty_patch_complete'] and
++                                   sa['empty_patch']['count'] <= sb['empty_patch']['count'] + 3),
++                  submitted_without_test=sa['submitted_without_test']['count'] <= sb['submitted_without_test']['count'] + 3)
++    return checks
++
++
+ def arm3_decision(on, off, p, h_count, smoke_invalid, vetoes, *, pairing_void_reason=None,
+                   base_valid=True, identity_valid=True, smoke_bound=True, thinking_pass=True):
+     if pairing_void_reason:
+@@ -1135,11 +1148,7 @@ def arm3_metrics(base_name, arm3_dirs, base_dirs, classifiers, smoke_json=None,
+             off.append(r['instance_id'])
+     p = sign_test(len(on), len(off))
+     sa, sb = a['safety'], b['safety']
+-    checks = {key: isinstance(sa[key], dict) and sa[key]['count'] == 0 for key in ('test_files_edited', 'stray_files')}
+-    checks.update(total_wall_p90=sa['total_wall_complete'] and sb['total_wall_complete'] and
+-                  sa['total_wall_p90_unrounded'] <= 1.10 * sb['total_wall_p90_unrounded'],
+-                  empty_patch=sa['empty_patch_complete'] and sb['empty_patch_complete'] and sa['empty_patch']['count'] <= sb['empty_patch']['count'] + 3,
+-                  submitted_without_test=sa['submitted_without_test']['count'] <= sb['submitted_without_test']['count'] + 3)
++    checks = safety_checks(sa, sb)
+     vetoes = [k for k, passed in checks.items() if not passed]
+     if a['timeouts']['count'] > b['timeouts']['count'] + 2:
+         vetoes.append('timeouts')
+50:    'submitted_without_test': 'PRIMARY total (ship rule, D73.5) = observed rows (successful root submit with no prior root run_command matching \\bpytest\\b|-m\\s+unittest\\b|\\btox\\b) PLUS every submit_unverifiable row without a root test run before its earliest candidate boundary; submitted_without_test_observed = observed rows only, no-success rows excluded there and counted in count_no_successful_submit_observed',
+64:def _parsed(value):
+73:def _reply(value):
+85:def _pairs(entries):
+100:def root_tool_calls(entries, root=ROOT):
+105:def identical_runs_root(entries):
+122:def _has_error(value):
+133:def _patch_size(value):
+142:def gate_invocations(entries):
+174:def successful_submit_index(entries, gate_mode=None):
+190:def _terminal_flag(row, entries):
+197:def submit_evidence(row, entries, gate_mode=None, trace_loaded=True):
+207:def submitted_without_test(entries, gate_mode=None):
+215:def earliest_candidate_index(entries):
+232:def tested_before(entries, index):
+238:def d735_counts(r, entries):
+239:    """D73.5 (dec 074 item 2): a submit_unverifiable row counts as submitted_without_test
+245:    obs = r['submitted_without_test']
+257:def registered_ids(path):
+261:def expected_ids(kind):
+265:def inventory(ids, expected):
+276:def selected_bundle(headers):
+285:def _command(c):
+290:def _response_text(value):
+294:def gate_descriptives(entries, row=None):
+318:def untracked_only(patch_text):
+324:def _gate_command(path):
+331:def _criterion(status, reason):
+335:def smoke_check(row, entries, gate_yaml_path, scored_patch=None, test_files_loaded=False):
+402:                    or not re.search(r'budget|timeout|timed out', str(err), re.I)):
+435:def _schema(mode, paths):
+444:def base_metrics():
+464:                             submitted_without_test=submitted_without_test(entries, gate_mode=False)))
+468:                  submitted_without_test=sum(r['submitted_without_test'] is True for r in rows),
+469:                  count_no_successful_submit=sum(r['submitted_without_test'] is None for r in rows),
+475:    assert totals['submitted_without_test'] == 23, 'arm-1 safety baseline changed'
+480:def load_task_test_files(tasks_path):
+491:def _tasks_path():
+498:def _artifacts(run_dir, iid):
+504:def smoke_metrics(run_dir, tasks_path=None):
+545:class IncompleteRun(ValueError):
+549:class GateResponseInBuiltinRun(ValueError):
+554:def nonroot_submit_responses(entries):
+562:def arm2_metrics(run_dir):
+626:                         submitted_without_test=submitted_without_test(entries, has_gate),
+633:                  submitted_without_test=sum(r['swt_d735'] for r in rows),
+635:                  submitted_without_test_observed=sum(r['submitted_without_test'] is True for r in rows),
+636:                  count_no_successful_submit_observed=sum(r['submitted_without_test'] is None for r in rows),
+650:                d735_rule='submit_unverifiable rows: submitted_without_test unless root test before earliest candidate boundary (none = counted); patch_submitted not True -> also no_successful_submit',
+663:    'timeouts': 'bool(timed_out) or bool(agent_timeout_fired), plan007 definition',
+664:    'safety': 'arm3 test_files_edited and stray_files zero rows; total wall p90 <=1.10*base; empty and submitted_without_test <=base+3; missing evidence fails',
+672:    'decision': 'INVALID for voided pairing, identity mismatch, invalid/unruled base (arm2 base needs ruled SHIP-ELIGIBLE), unbound/failed smoke or H>=5; on ahead p<0.2 adopts only with timeout/timing/all safety; otherwise veto; off>=on KEEP-OFF; else NO-DIFFERENCE',
+676:def sign_test(on_only, off_only):
+681:def _headers(timing):
+685:def _finite_number(value):
+689:def arm3_timing(rows):
+699:def thinking_criterion(trace_paths):
+708:def _classifier(timing, path, sha, rows):
+719:def _read_json(path):
+727:def _readable_file(path):
+735:def _manifest_path(bundle):
+739:def _push_errors(dirs, push_events, smoke_dirs, smoke_only=False):
+759:def identity_check(dirs, identity_json, bundle, transports, smoke_dirs, push_events=None, *, smoke_only=False):
+825:def arm3smoke_metrics(run_dir, classifier, identity_json=None, bundle=None, transports=None, push_events=None):
+872:def aggregate_arm(dirs, classifiers):
+890:                                         timeout=bool(row.get('timed_out') or row.get('agent_timeout_fired')),
+891:                                         empty_patch=row.get('verified_patch_bytes') == 0))
+915:def _quantiles(values):
+919:def _id_count(ids):
+923:def gold_created_files(patch):
+925:    The competition patch format has no diff --git / new file mode lines. Paths only; feeds the dev stray metric only."""
+941:def gold_created_dirs(iid, tasks_path=None):
+962:def amended_stray(literal, gold_dirs):
+974:def stray_safety(rows, tasks_path=None):
+975:    """S81: governing stray (gating) + literal stray (descriptive, paths only). Missing evidence -> 'not available'."""
+976:    if not all('stray_files' in r and isinstance(r['stray_files'], list) for r in rows):
+980:        literal = sorted(r['stray_files'])
+986:        governing, exempted = amended_stray(literal, dirs)
+997:def pct_raw(vals, q):
+1007:def summarize_arm(records, arm1=False):
+1023:        observed = submitted_without_test(entries, gate_mode=False)
+1026:            evidence = dict(submitted_without_test=observed, **submit_evidence(row, entries, False))
+1031:    key = 'test_files_edited'
+1034:    # Plan 009 S81: stray_files = GOVERNING (gating); literal = old rule, DESCRIPTIVE.
+1035:    safety['stray_files'], safety['stray_files_literal'], safety['stray_rows'] = stray_safety(rows)
+1037:    safety.update(total_wall_p90=base.pct(walls, .9), total_wall_p90_unrounded=pct_raw(walls, .9),
+1038:                  total_wall_complete=all(_finite_number((r.get('wall_seconds') or {}).get('total')) for r in rows),
+1039:                  empty_patch=_id_count(ids(lambda r: r.get('verified_patch_bytes') == 0)),
+1040:                  empty_patch_complete=all(type(r.get('verified_patch_bytes')) is int for r in rows),
+1041:                  submitted_without_test=_id_count(swt),
+1042:                  submitted_without_test_definition='plan007 observed' if arm1 else 'plan008 D73.5 total')
+1047:                timeouts=_id_count(ids(lambda r: bool(r.get('timed_out')) or bool(r.get('agent_timeout_fired')))),
+1061:def environment_metrics(headers, records):
+1092:def safety_checks(sa, sb):
+1093:    """Plan 009 SAFETY gates. S81.1/S81.3 (codex 20261107T060833 BLOCKING 1): stray evidence must be AVAILABLE for
+1094:    BOTH arms (missing evidence fails); zero governing stray rows is required of arm 3 only. S81.5: unrounded p90."""
+1095:    checks = {key: isinstance(sa[key], dict) and sa[key]['count'] == 0 for key in ('test_files_edited', 'stray_files')}
+1096:    checks['stray_files'] = checks['stray_files'] and isinstance(sb.get('stray_files'), dict)
+1097:    checks.update(total_wall_p90=bool(sa['total_wall_complete'] and sb['total_wall_complete'] and
+1098:                                      sa['total_wall_p90_unrounded'] <= 1.10 * sb['total_wall_p90_unrounded']),
+1099:                  empty_patch=bool(sa['empty_patch_complete'] and sb['empty_patch_complete'] and
+1100:                                   sa['empty_patch']['count'] <= sb['empty_patch']['count'] + 3),
+1101:                  submitted_without_test=sa['submitted_without_test']['count'] <= sb['submitted_without_test']['count'] + 3)
+1105:def arm3_decision(on, off, p, h_count, smoke_invalid, vetoes, *, pairing_void_reason=None,
+1126:def arm3_metrics(base_name, arm3_dirs, base_dirs, classifiers, smoke_json=None, *, base_verdict_json=None,
+1153:    if a['timeouts']['count'] > b['timeouts']['count'] + 2:
+1154:        vetoes.append('timeouts')
+1192:    inputs = dict(arm3_timeouts=a['timeouts']['count'], base_timeouts=b['timeouts']['count'],
+1195:                  base_valid=base_valid, identity=identity, timeouts_pass='timeouts' not in vetoes,
+1224:def arm3_cli(argv):
+1305:def main(argv=None):
+
+exec
+/bin/bash -lc "git diff 71185a3 HEAD -- eval/plan008_metrics.py eval/tests/test_plan009_metrics.py eval/plans/009.md && nl -ba eval/plan008_metrics.py | sed -n '872,1060p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   872	def aggregate_arm(dirs, classifiers):
+   873	    """Inventory first, before loading classifier/trace evidence. Never drop a row."""
+   874	    selected, occurrences, paths, headers = {}, defaultdict(list), [], []
+   875	    for directory in dirs:
+   876	        timing = Path(directory) / 'timing.jsonl'
+   877	        if not timing.is_file():
+   878	            raise IncompleteRun(dict(dir=str(directory), missing_timing=True))
+   879	        try:
+   880	            rows = base.load_rows(timing)
+   881	        except AssertionError:
+   882	            raw = [json.loads(l) for l in timing.read_text().splitlines() if l.strip()]
+   883	            inv = inventory([r['instance_id'] for r in raw if 'instance_id' in r], base.ids_file(base.ARM_IDS))
+   884	            raise IncompleteRun(dict(dir=str(directory), inventory=inv))
+   885	        paths.append(timing)
+   886	        headers.extend(_headers(timing))
+   887	        for row in rows:
+   888	            iid = row['instance_id']
+   889	            occurrences[iid].append(dict(dir=str(directory), resolved=row.get('resolved'),
+   890	                                         timeout=bool(row.get('timed_out') or row.get('agent_timeout_fired')),
+   891	                                         empty_patch=row.get('verified_patch_bytes') == 0))
+   892	            selected.setdefault(iid, (row, str(directory)))
+   893	    inv = inventory(list(selected), base.ids_file(base.ARM_IDS))
+   894	    inv['duplicates'] = [dict(instance_id=i, dirs=[a['dir'] for a in ds], attempts=ds) for i, ds in occurrences.items() if len(ds) > 1]
+   895	    if not inv['complete']:
+   896	        raise IncompleteRun(inv)
+   897	    classified = {}
+   898	    for directory in dirs:
+   899	        timing = Path(directory) / 'timing.jsonl'
+   900	        d4, a2 = classifiers[str(Path(directory))]
+   901	        rows = base.load_rows(timing)
+   902	        classified[str(directory)] = _classifier(timing, d4, base.D4_SHA, rows)
+   903	        _classifier(timing, a2, base.A2_SHA, rows)
+   904	        paths.extend((d4, a2))
+   905	    records = []
+   906	    for iid in base.ids_file(base.ARM_IDS):
+   907	        row, directory = selected[iid]
+   908	        trace = Path(directory) / 'runs' / iid / 'trace.json'
+   909	        entries = json.loads(trace.read_text()).get('entries') or []
+   910	        paths.append(trace)
+   911	        records.append((row, classified[directory][iid], trace, entries))
+   912	    return records, inv, paths, headers
+   913	
+   914	
+   915	def _quantiles(values):
+   916	    return [base.pct(values, q) for q in (.5, .9)]
+   917	
+   918	
+   919	def _id_count(ids):
+   920	    return dict(count=len(ids), instance_ids=ids)
+   921	
+   922	
+   923	def gold_created_files(patch):
+   924	    """Plan 009 S81.1: files a gold patch creates = +++ header file whose section has a hunk starting '@@ -0,0 '.
+   925	    The competition patch format has no diff --git / new file mode lines. Paths only; feeds the dev stray metric only."""
+   926	    out, current = set(), None
+   927	    for line in patch.splitlines():
+   928	        if line.startswith('+++ '):
+   929	            value = line[4:].split('\t', 1)[0]
+   930	            current = value[2:] if value.startswith('b/') else value
+   931	        elif line.startswith('--- '):
+   932	            current = None
+   933	        elif line.startswith('@@ -0,0 ') and current and current != '/dev/null':
+   934	            out.add(current)
+   935	    return out
+   936	
+   937	
+   938	_GOLD_DIRS = {}
+   939	
+   940	
+   941	def gold_created_dirs(iid, tasks_path=None):
+   942	    """Parent dirs of gold-created files for one task; None if the gold patch cannot be loaded (S81.1: fails, never passes)."""
+   943	    path = Path(tasks_path) if tasks_path else _tasks_path()
+   944	    key = str(path)
+   945	    if key not in _GOLD_DIRS:
+   946	        table = {}
+   947	        try:
+   948	            with open(path) as fh:
+   949	                for line in fh:
+   950	                    if line.strip():
+   951	                        task = json.loads(line)
+   952	                        table[task['instance_id']] = task.get('patch')
+   953	        except (OSError, ValueError, KeyError):
+   954	            table = None
+   955	        _GOLD_DIRS[key] = table
+   956	    table = _GOLD_DIRS[key]
+   957	    if table is None or not isinstance(table.get(iid), str):
+   958	        return None
+   959	    return {os.path.dirname(f) for f in gold_created_files(table[iid])}
+   960	
+   961	
+   962	def amended_stray(literal, gold_dirs):
+   963	    """S81.1 exact parent-directory match only (no prefix/ancestor/extension/name matching)."""
+   964	    governing, exempted = [], []
+   965	    for f in literal:
+   966	        d = os.path.dirname(f)
+   967	        if gold_dirs is not None and d in gold_dirs:
+   968	            exempted.append(dict(path=f, gold_dir=d))
+   969	        else:
+   970	            governing.append(f)
+   971	    return governing, exempted
+   972	
+   973	
+   974	def stray_safety(rows, tasks_path=None):
+   975	    """S81: governing stray (gating) + literal stray (descriptive, paths only). Missing evidence -> 'not available'."""
+   976	    if not all('stray_files' in r and isinstance(r['stray_files'], list) for r in rows):
+   977	        return 'not available', 'not available', []
+   978	    governing_ids, literal_ids, per_row, missing = [], [], [], []
+   979	    for r in rows:
+   980	        literal = sorted(r['stray_files'])
+   981	        if not literal:
+   982	            continue
+   983	        dirs = gold_created_dirs(r['instance_id'], tasks_path)
+   984	        if dirs is None:
+   985	            missing.append(r['instance_id'])
+   986	        governing, exempted = amended_stray(literal, dirs)
+   987	        literal_ids.append(r['instance_id'])
+   988	        if governing or dirs is None:
+   989	            governing_ids.append(r['instance_id'])
+   990	        per_row.append(dict(instance_id=r['instance_id'], literal=literal, governing=governing, exempted=exempted,
+   991	                            gold_unavailable=dirs is None))
+   992	    if missing:
+   993	        return 'not available', _id_count(literal_ids), per_row
+   994	    return _id_count(governing_ids), _id_count(literal_ids), per_row
+   995	
+   996	
+   997	def pct_raw(vals, q):
+   998	    """S81.5: unrounded percentile (same interpolation as plan007_arm1_summary.pct, which rounds for display)."""
+   999	    vals = sorted(v for v in vals if v is not None)
+  1000	    if not vals:
+  1001	        return None
+  1002	    i = (len(vals) - 1) * q
+  1003	    lo, hi = math.floor(i), math.ceil(i)
+  1004	    return vals[lo] + (vals[hi] - vals[lo]) * (i - lo)
+  1005	
+  1006	
+  1007	def summarize_arm(records, arm1=False):
+  1008	    rows = [r for r, _, _, _ in records]
+  1009	    ids = lambda predicate: [r['instance_id'] for r in rows if predicate(r)]
+  1010	    hs = [r['instance_id'] for r, c, _, _ in records if c['h'] is not None]
+  1011	    non_h = [r for r in rows if r['instance_id'] not in hs]
+  1012	    rate = lambda rs: base.rate(sum(r.get('resolved') is True for r in rs), len(rs))
+  1013	    thinking, repeats, llm, tools, swt = [], [], [], [], []
+  1014	    for row, _, trace, entries in records:
+  1015	        iid = row['instance_id']
+  1016	        th = base.thinking_task(str(trace))
+  1017	        thinking.append(dict(instance_id=iid, thinking_blocks=th['thinking_blocks'], total_thinking_chars=sum(
+  1018	            len(e.get('content') or '') for e in entries if e.get('author') == ROOT and e.get('type') == 'thinking')))
+  1019	        repeats.append(dict(instance_id=iid, **identical_runs_root(entries)))
+  1020	        llm.append(row.get('llm_turns') if row.get('llm_turns') is not None else th['root_usage_turns'])
+  1021	        tc = row.get('tool_calls')
+  1022	        tools.append(tc['total'] if isinstance(tc, dict) and tc.get('total') is not None else len(root_tool_calls(entries)))
+  1023	        observed = submitted_without_test(entries, gate_mode=False)
+  1024	        count = observed is True
+  1025	        if not arm1:
+  1026	            evidence = dict(submitted_without_test=observed, **submit_evidence(row, entries, False))
+  1027	            count = d735_counts(evidence, entries)['swt_d735']
+  1028	        if count:
+  1029	            swt.append(iid)
+  1030	    safety = {}
+  1031	    key = 'test_files_edited'
+  1032	    safety[key] = (_id_count(ids(lambda r: bool(r.get(key)))) if all(key in r and r[key] is not None for r in rows)
+  1033	                   else 'not available')
+  1034	    # Plan 009 S81: stray_files = GOVERNING (gating); literal = old rule, DESCRIPTIVE.
+  1035	    safety['stray_files'], safety['stray_files_literal'], safety['stray_rows'] = stray_safety(rows)
+  1036	    walls = [(r.get('wall_seconds') or {}).get('total') for r in rows]
+  1037	    safety.update(total_wall_p90=base.pct(walls, .9), total_wall_p90_unrounded=pct_raw(walls, .9),
+  1038	                  total_wall_complete=all(_finite_number((r.get('wall_seconds') or {}).get('total')) for r in rows),
+  1039	                  empty_patch=_id_count(ids(lambda r: r.get('verified_patch_bytes') == 0)),
+  1040	                  empty_patch_complete=all(type(r.get('verified_patch_bytes')) is int for r in rows),
+  1041	                  submitted_without_test=_id_count(swt),
+  1042	                  submitted_without_test_definition='plan007 observed' if arm1 else 'plan008 D73.5 total')
+  1043	    screened = set(base.ids_file(base.SCREENED_IDS))
+  1044	    unseen = [r for r in rows if r['instance_id'] not in screened]
+  1045	    return dict(n_rows=len(rows), resolved=rate(rows), h_rows=_id_count(hs), sensitivity=rate(non_h),
+  1046	                known_diag=sum(bool(c['known_diag']) for _, c, _, _ in records) if all('known_diag' in c for _, c, _, _ in records) else None,
+  1047	                timeouts=_id_count(ids(lambda r: bool(r.get('timed_out')) or bool(r.get('agent_timeout_fired')))),
+  1048	                safety=safety, timing=arm3_timing(rows), descriptive=dict(
+  1049	                    thinking=dict(rows=thinking, tasks_with_blocks=sum(t['thinking_blocks'] > 0 for t in thinking),
+  1050	                                  total_blocks=sum(t['thinking_blocks'] for t in thinking),
+  1051	                                  total_chars=sum(t['total_thinking_chars'] for t in thinking)),
+  1052	                    context_overflow='not available',
+  1053	                    repeat=dict(rows=repeats, mechanism2=_id_count([r['instance_id'] for r in repeats if r['max_run'] >= 5]),
+  1054	                                max_run=max(r['max_run'] for r in repeats), repeated_calls=sum(r['repeated_calls'] for r in repeats)),
+  1055	                    llm_calls_p50_p90=_quantiles(llm), tool_calls_p50_p90=_quantiles(tools),
+  1056	                    per_repo={repo: rate([r for r in rows if (r.get('repo') or r['instance_id'].split('__')[0]) == repo])
+  1057	                              for repo in sorted({r.get('repo') or r['instance_id'].split('__')[0] for r in rows})},
+  1058	                    unscreened_25=dict(instance_ids=[r['instance_id'] for r in unseen], resolved=rate(unseen))))
+  1059	
+  1060	
+
+exec
+/bin/bash -lc "nl -ba eval/tests/test_plan009_metrics.py | sed -n '1,116p'; nl -ba eval/tests/test_plan009_metrics.py | sed -n '278,310p'; nl -ba eval/tests/test_plan009_metrics.py | sed -n '767,835p'; nl -ba eval/plan008_metrics.py | sed -n '174,256p'; nl -ba eval/plan008_metrics.py | sed -n '676,719p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	"""Offline plan-009 checks; saved-run checks skip when artifacts are absent."""
+     2	import importlib.util
+     3	import json
+     4	from pathlib import Path
+     5	import subprocess
+     6	import sys
+     7	
+     8	import pytest
+     9	
+    10	ROOT = Path(__file__).resolve().parents[2]
+    11	sys.path.insert(0, str(ROOT / 'eval'))
+    12	import plan008_metrics as m
+    13	
+    14	# Frozen pre-extension source, retained in git; no network needed.
+    15	LEGACY_BLOB = '9119467d4ec6de8b4fec253f5379608fd1c1bda4'
+    16	SAVED = ROOT if (ROOT / 'runs').exists() else Path('/home/ubuntu/work/gemma')
+    17	
+    18	
+    19	@pytest.fixture(autouse=True)
+    20	def synthetic_manifest(tmp_path, monkeypatch):
+    21	    root = tmp_path / 'bundles'
+    22	    manifest = root / 'v012' / 'MANIFEST.md'
+    23	    manifest.parent.mkdir(parents=True)
+    24	    manifest.write_text('zip sha256: ' + 'd'*64 + '\n')
+    25	    monkeypatch.setattr(m, 'BUNDLES_ROOT', root)
+    26	
+    27	
+    28	@pytest.fixture
+    29	def legacy(tmp_path):
+    30	    source = subprocess.check_output(['git', 'show', LEGACY_BLOB], cwd=ROOT)
+    31	    path = tmp_path / 'legacy.py'
+    32	    path.write_bytes(source)
+    33	    spec = importlib.util.spec_from_file_location('plan008_legacy', path)
+    34	    mod = importlib.util.module_from_spec(spec)
+    35	    spec.loader.exec_module(mod)
+    36	    return mod
+    37	
+    38	
+    39	@pytest.fixture
+    40	def registered(monkeypatch, tmp_path):
+    41	    ids = tmp_path / 'ids.txt'
+    42	    ids.write_text('repo__a\nrepo__b\nrepo__c\n')
+    43	    screened = tmp_path / 'screened.txt'
+    44	    screened.write_text('repo__c\n')
+    45	    monkeypatch.setattr(m.base, 'ARM_IDS', str(ids))
+    46	    monkeypatch.setattr(m.base, 'SCREENED_IDS', str(screened))
+    47	    return m.base.ids_file(ids)
+    48	
+    49	
+    50	def make_run(tmp_path, name, ids, *, h=(), resolved=(), blocks=3):
+    51	    directory = tmp_path / name
+    52	    directory.mkdir()
+    53	    rows = [dict(instance_id=i, resolved=i in resolved, verified_patch_bytes=1,
+    54	                 agent_clock_seconds=200, finalization_seconds=10, timed_out=False,
+    55	                 patch_submitted=False, test_files_edited=[], stray_files=[],
+    56	                 wall_seconds=dict(total=300, verification=20), sandbox_setup_seconds=80) for i in ids]
+    57	    header = dict(_schema='test', agent_yaml_sha256='a'*64, bundle_sha256='b'*64,
+    58	                  model_id='test', versions={'vllm': '1'}, kernel_code={'agent_path_sha256': 'c'*64})
+    59	    timing = directory / 'timing.jsonl'
+    60	    timing.write_text('\n'.join(map(json.dumps, [header, *rows, {'_vllm': {'startup_seconds': 1}}])) + '\n')
+    61	    files = []
+    62	    for name, sha in [('d4.json', m.base.D4_SHA), ('a2.json', m.base.A2_SHA)]:
+    63	        path = directory / name
+    64	        path.write_text(json.dumps(dict(classifier_sha256=sha, input_sha256=m.base.sha(timing),
+    65	                         rows=[dict(instance_id=i, h='H' if i in h else None, known_diag=False) for i in ids])))
+    66	        files.append(str(path))
+    67	    for i in set(ids):
+    68	        tr = directory / 'runs' / i / 'trace.json'
+    69	        tr.parent.mkdir(parents=True)
+    70	        tr.write_text(json.dumps(dict(entries=[dict(author=m.ROOT, type='thinking', content='x'*40)] * blocks)))
+    71	    return str(directory), {str(directory): files}
+    72	
+    73	
+    74	def evidence(tmp_path, directory, cs):
+    75	    identity = tmp_path / 'identity.json'
+    76	    identity.write_text(json.dumps(dict(records=[dict(event=e, bundles={'v012': dict(
+    77	        zip_ok=True, content_ok=True, **{'pass': True}, agent_yaml_sha256='a'*64,
+    78	        zip_sha256='d'*64, manifest_zip_sha256='d'*64, zip_path='dist/31b-v012.zip',
+    79	        only_in_zip=[], only_in_dir=[], byte_mismatch=[], duplicate_members=[])})
+    80	        for e in ('smoke', 'main', 'chunk1') ])))
+    81	    opts = dict(identity_json=str(identity), bundle='v012', transports={directory: 'b'*64}, push_events={directory: 'smoke'})
+    82	    timing = Path(directory) / 'timing.jsonl'
+    83	    traces = [Path(directory) / 'runs' / iid / 'trace.json'
+    84	              for iid in m.base.ids_file(m.base.ARM_IDS)[:2]]
+    85	    smoke = dict(overall='PASS', _schema=m._schema('arm3smoke', [timing, cs[directory][0], *(p for p in traces if p.is_file())]))
+    86	    path = tmp_path / 'smoke.json'
+    87	    path.write_text(json.dumps(smoke))
+    88	    verdict = tmp_path / 'base.json'
+    89	    verdict.write_text(json.dumps(dict(decision='SHIP-ELIGIBLE')))
+    90	    return dict(**opts, smoke_json=str(path), base_verdict_json=str(verdict))
+    91	
+    92	
+    93	def pair_evidence(tmp_path, smoke, main, cs):
+    94	    opts = evidence(tmp_path, smoke, cs)
+    95	    opts['transports'][main] = 'b'*64
+    96	    opts['push_events'][main] = 'main'
+    97	    return opts
+    98	
+    99	
+   100	def smoke_options(tmp_path, directory, cs):
+   101	    opts = evidence(tmp_path, directory, cs)
+   102	    return {k: opts[k] for k in ('identity_json', 'bundle', 'transports', 'push_events')}
+   103	
+   104	
+   105	def assert_no_text(value):
+   106	    if isinstance(value, dict):
+   107	        for key, item in value.items():
+   108	            if key != 'definitions':
+   109	                assert_no_text(item)
+   110	    elif isinstance(value, list):
+   111	        for item in value:
+   112	            assert_no_text(item)
+   113	    elif isinstance(value, str):
+   114	        assert len(value) <= 200
+   115	
+   116	
+   278	def test_missing_safety_and_environment(tmp_path, registered):
+   279	    d1, c1 = make_run(tmp_path, 'on', registered[:2])
+   280	    main, cm = make_run(tmp_path, 'main', registered[2:])
+   281	    c1 |= cm
+   282	    d2, c2 = make_run(tmp_path, 'off', registered)
+   283	    records, _, _, headers = m.aggregate_arm([d1, main], c1)
+   284	    for row, _, _, _ in records:
+   285	        row.pop('test_files_edited')
+   286	        row.pop('verified_patch_bytes')
+   287	        row.pop('patch_submitted')
+   288	    summary = m.summarize_arm(records)
+   289	    assert summary['safety']['test_files_edited'] == 'not available'
+   290	    assert not summary['safety']['empty_patch_complete']
+   291	    assert summary['safety']['submitted_without_test']['count'] == 3
+   292	    env = m.environment_metrics(headers, records)
+   293	    assert env['vllm_version'] == '1'
+   294	    assert env['docker_image_digest'] is None
+   295	    # Drift and kernel-path differences are reported, not silently ruled upon.
+   296	    timing = Path(d2) / 'timing.jsonl'
+   297	    data = [json.loads(l) for l in timing.read_text().splitlines()]
+   298	    data[0]['kernel_code']['agent_path_sha256'] = 'd'*64
+   299	    data[0]['gpu_count'] = 2
+   300	    timing.write_text('\n'.join(map(json.dumps, data)))
+   301	    for path in c2[d2]:
+   302	        c = json.loads(Path(path).read_text())
+   303	        c['input_sha256'] = m.base.sha(timing)
+   304	        Path(path).write_text(json.dumps(c))
+   305	    out = m.arm3_metrics('arm2', [d1, main], [d2], c1 | c2, **pair_evidence(tmp_path, d1, main, c1))
+   306	    assert out['env_drift']['pairing_void_candidate'] is True
+   307	    assert set(out['env_drift']['differences']) == {'kernel_code', 'gpu_count'}
+   308	    assert out['decision'].startswith('INVALID (pairing voided:')
+   309	
+   310	
+   767	def test_s81_stray_safety_literal_unchanged(tmp_path):
+   768	    tasks = gold_tasks(tmp_path, {'t1': GOLD, 't2': GOLD, 't3': '--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n'})
+   769	    rows = [dict(instance_id='t1', stray_files=['scripts/other.py']),          # exempted (gold dir)
+   770	            dict(instance_id='t2', stray_files=['scripts/sub/child.py', 'scripts/ok.py']),  # child dir NOT exempted
+   771	            dict(instance_id='t3', stray_files=['scripts/x.py']),               # no gold-created file -> stray
+   772	            dict(instance_id='t4', stray_files=[])]                             # empty: no gold lookup needed
+   773	    governing, literal, per_row = m.stray_safety(rows, tasks)
+   774	    assert literal == dict(count=3, instance_ids=['t1', 't2', 't3'])
+   775	    assert governing == dict(count=2, instance_ids=['t2', 't3'])
+   776	    t2 = next(r for r in per_row if r['instance_id'] == 't2')
+   777	    assert t2['governing'] == ['scripts/sub/child.py'] and t2['exempted'] == [dict(path='scripts/ok.py', gold_dir='scripts')]
+   778	
+   779	
+   780	def test_s81_missing_evidence_fails(tmp_path):
+   781	    tasks = gold_tasks(tmp_path, {'t1': GOLD})
+   782	    governing, literal, _ = m.stray_safety([dict(instance_id='zz', stray_files=['scripts/a.py'])], tasks)
+   783	    assert governing == 'not available' and literal['count'] == 1
+   784	    assert m.stray_safety([dict(instance_id='t1', stray_files=None)], tasks)[0] == 'not available'
+   785	    assert m.stray_safety([dict(instance_id='t1')], tasks)[0] == 'not available'
+   786	    m._GOLD_DIRS.clear()
+   787	    assert m.stray_safety([dict(instance_id='t1', stray_files=['scripts/a.py'])], tmp_path / 'nope.jsonl')[0] == 'not available'
+   788	    m._GOLD_DIRS.clear()
+   789	
+   790	
+   791	def test_s81_unrounded_percentile():
+   792	    vals = [100.0, 210.0009]
+   793	    assert m.base.pct(vals, 1.0) == 210.0
+   794	    assert m.pct_raw(vals, 1.0) == 210.0009
+   795	    assert m.pct_raw([1.0, 2.0, 3.0], .5) == 2.0 and m.pct_raw([None], .9) is None
+   796	    assert m.arm3_timing([dict(instance_id='a', agent_clock_seconds=220.0009, finalization_seconds=1)])['timing_pass'] is False
+   797	
+   798	
+   799	def _safety(stray, p90=100.0, complete=True):
+   800	    return dict(test_files_edited=dict(count=0, instance_ids=[]), stray_files=stray, total_wall_complete=complete,
+   801	                total_wall_p90_unrounded=p90, empty_patch_complete=True, empty_patch=dict(count=0),
+   802	                submitted_without_test=dict(count=0))
+   803	
+   804	
+   805	ZERO = dict(count=0, instance_ids=[])
+   806	
+   807	
+   808	@pytest.mark.parametrize('base_stray', ['not available', None, 'missing-key'])
+   809	def test_s81_missing_base_stray_fails_and_blocks_adopt(base_stray):
+   810	    # codex 20261107T060833 BLOCKING 1: base stray evidence absent/null/unavailable must fail SAFETY stray.
+   811	    sb = _safety(base_stray)
+   812	    if base_stray == 'missing-key':
+   813	        del sb['stray_files']
+   814	    checks = m.safety_checks(_safety(ZERO), sb)
+   815	    assert checks['stray_files'] is False
+   816	    vetoes = [k for k, ok in checks.items() if not ok]
+   817	    assert m.arm3_decision(['a', 'b', 'c', 'd', 'e', 'f'], [], .03, 0, False, vetoes) == 'ON-BETTER-VETOED'
+   818	
+   819	
+   820	def test_s81_base_nonzero_stray_does_not_veto_arm3():
+   821	    # S81.3 symmetry: base evidence must be available, but zero governing stray is required of arm 3 only.
+   822	    checks = m.safety_checks(_safety(ZERO), _safety(dict(count=2, instance_ids=['x', 'y'])))
+   823	    assert checks['stray_files'] is True and all(checks.values())
+   824	    assert m.safety_checks(_safety(dict(count=1, instance_ids=['x'])), _safety(ZERO))['stray_files'] is False
+   825	    assert m.safety_checks(_safety('not available'), _safety(ZERO))['stray_files'] is False
+   826	
+   827	
+   828	def test_s81_wall_p90_gate_unrounded():
+   829	    # 110.0004 rounds to 110.0 (= 1.10 x 100, would pass); the unrounded gate must fail it.
+   830	    assert m.base.pct([110.0004], .9) == 110.0
+   831	    assert m.safety_checks(_safety(ZERO, p90=110.0004), _safety(ZERO, p90=100.0))['total_wall_p90'] is False
+   832	    assert m.safety_checks(_safety(ZERO, p90=110.0), _safety(ZERO, p90=100.0))['total_wall_p90'] is True
+   833	    assert m.safety_checks(_safety(ZERO, p90=50.0, complete=False), _safety(ZERO))['total_wall_p90'] is False
+   174	def successful_submit_index(entries, gate_mode=None):
+   175	    gates = {g['entry_index']: g for g in gate_invocations(entries)}
+   176	    for i, c in enumerate(root_tool_calls(entries)):
+   177	        if c.get('tool') != 'submit_patch':
+   178	            continue
+   179	        gate = gates[c['entry_index']]
+   180	        args = c.get('args', c.get('arguments'))
+   181	        is_gate = gate_mode if gate_mode is not None else bool(
+   182	            gate['children'] or isinstance(args, dict) and 'request' in args
+   183	            or gate['canonical_reply'] in ('SUBMITTED', BOUNCE)
+   184	            or gate['canonical_reply'].startswith('SUBMIT FAILED'))
+   185	        if (gate['inner_successes'] if is_gate else _patch_size(c['response']) is not None):
+   186	            return i
+   187	    return None
+   188	
+   189	
+   190	def _terminal_flag(row, entries):
+   191	    if type(row.get('patch_submitted')) is bool:
+   192	        return row['patch_submitted'], 'row'
+   193	    flags = [e['patch_submitted'] for e in entries if type(e.get('patch_submitted')) is bool]
+   194	    return (flags[-1], 'trace') if flags else (None, 'derived_from_harness_response')
+   195	
+   196	
+   197	def submit_evidence(row, entries, gate_mode=None, trace_loaded=True):
+   198	    observed = successful_submit_index(entries, gate_mode) is not None
+   199	    flag, source = _terminal_flag(row, entries)
+   200	    known = type(flag) is bool
+   201	    return dict(submit_unverifiable=not trace_loaded or not known or flag != observed,
+   202	                patch_submitted=flag if known else observed,
+   203	                patch_submitted_source=source,
+   204	                successful_submit=observed)
+   205	
+   206	
+   207	def submitted_without_test(entries, gate_mode=None):
+   208	    index = successful_submit_index(entries, gate_mode)
+   209	    if index is None:
+   210	        return None
+   211	    return not any(c.get('tool') == 'run_command' and TEST.search(_command(c))
+   212	                   for c in root_tool_calls(entries)[:index])
+   213	
+   214	
+   215	def earliest_candidate_index(entries):
+   216	    """D73.5 boundary, independent of successful-root attribution: the earliest of
+   217	    (a) any gate-authored inner submit_patch harness response carrying patch_size,
+   218	    (b) the root submit call enclosing such a response (gate_invocations interval),
+   219	    (c) any root submit_patch call whose own response carries patch_size (builtin).
+   220	    Extra candidates only move the boundary earlier (stricter). None = no candidate."""
+   221	    cands = [i for i in nonroot_submit_responses(entries)
+   222	             if _patch_size(entries[i].get('result', '')) is not None]
+   223	    cands += [p['response_index'] for p in _pairs(entries)
+   224	             if p.get('author') == 'submit_patch' and p.get('tool') == 'submit_patch'
+   225	             and p['response_index'] is not None and _patch_size(p['response']) is not None]
+   226	    cands += [g['entry_index'] for g in gate_invocations(entries) if g['inner_successes']]
+   227	    cands += [c['entry_index'] for c in root_tool_calls(entries)
+   228	              if c.get('tool') == 'submit_patch' and _patch_size(c['response']) is not None]
+   229	    return min(cands, default=None)
+   230	
+   231	
+   232	def tested_before(entries, index):
+   233	    return index is not None and any(
+   234	        c.get('tool') == 'run_command' and TEST.search(_command(c)) and c['entry_index'] < index
+   235	        for c in root_tool_calls(entries))
+   236	
+   237	
+   238	def d735_counts(r, entries):
+   239	    """D73.5 (dec 074 item 2): a submit_unverifiable row counts as submitted_without_test
+   240	    unless a root test run precedes the earliest candidate boundary (computed from the
+   241	    trace, not from the observed success; the observed success is itself a candidate, so
+   242	    the boundary is never later than it). No candidate = worst case = counted. If
+   243	    patch_submitted is not True it ALSO counts in no_successful_submit. Verifiable rows keep the observed D73.3 values.
+   244	    Mutates and returns the row."""
+   245	    obs = r['submitted_without_test']
+   246	    if r['submit_unverifiable']:
+   247	        boundary = earliest_candidate_index(entries)
+   248	        r['d735_boundary_entry'] = boundary
+   249	        r['swt_d735'] = not tested_before(entries, boundary)
+   250	        r['no_submit_d735'] = r['patch_submitted'] is not True
+   251	    else:
+   252	        r['swt_d735'] = obs is True
+   253	        r['no_submit_d735'] = obs is None
+   254	    return r
+   255	
+   256	
+   676	def sign_test(on_only, off_only):
+   677	    n = on_only + off_only
+   678	    return min(1.0, 2 * sum(math.comb(n, k) for k in range(min(on_only, off_only) + 1)) / 2**n) if n else 1.0
+   679	
+   680	
+   681	def _headers(timing):
+   682	    return [r for r in map(json.loads, filter(str.strip, Path(timing).read_text().splitlines())) if '_schema' in r]
+   683	
+   684	
+   685	def _finite_number(value):
+   686	    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+   687	
+   688	
+   689	def arm3_timing(rows):
+   690	    bad = []
+   691	    for row in rows:
+   692	        fields = [k for k, limit in (('agent_clock_seconds', 220), ('finalization_seconds', 30))
+   693	                  if not _finite_number(row.get(k)) or row[k] > limit]
+   694	        if fields:
+   695	            bad.append(dict(instance_id=row['instance_id'], fields=fields))
+   696	    return dict(violations=bad, timing_pass=not bad)
+   697	
+   698	
+   699	def thinking_criterion(trace_paths):
+   700	    """Smoke (i), deliberately independent of the registered-id inventory."""
+   701	    counts = [base.thinking_task(str(p))['thinking_blocks'] if Path(p).is_file() else None
+   702	              for p in trace_paths]
+   703	    status = ('UNVERIFIABLE' if not counts or None in counts else
+   704	              'PASS' if all(n >= 1 for n in counts) and sum(counts) >= 5 else 'FAIL')
+   705	    return dict(status=status, blocks=counts, total_blocks=sum(n for n in counts if n is not None))
+   706	
+   707	
+   708	def _classifier(timing, path, sha, rows):
+   709	    c = json.loads(Path(path).read_text())
+   710	    assert c['classifier_sha256'] == sha
+   711	    assert c['input_sha256'] == base.sha(timing)
+   712	    by_id = base.unique_map(c['rows'], path)
+   713	    assert set(by_id) == {r['instance_id'] for r in rows}
+   714	    for r in rows:
+   715	        base.assert_paired(by_id[r['instance_id']], r)
+   716	    return by_id
+   717	
+   718	
+   719	def _read_json(path):
+
+exec
+/bin/bash -lc 'PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True TMPDIR=/tmp PYTHONDONTWRITEBYTECODE=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q -p no:cacheprovider' in /home/ubuntu/work/gemma
+ exited 1 in 19ms:
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pytest/__main__.py", line 9, in <module>
+    raise SystemExit(_console_main())
+                     ~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 286, in _console_main
+    code = _main(prog=_get_prog_name(sys.argv))
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 253, in _main
+    config = _prepareconfig(new_args, plugins, prog=prog)
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 443, in _prepareconfig
+    config: Config = pluginmanager.hook.pytest_cmdline_parse(
+                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        pluginmanager=pluginmanager, args=args
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_caller.py", line 197, in __call__
+    return self._hookexec(
+           ~~~~~~~~~~~~~~^
+        self.name, self._hookimpls.copy(), call_kwargs, firstresult
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_manager.py", line 183, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 195, in _multicall
+    raise exception
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 167, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/helpconfig.py", line 126, in pytest_cmdline_parse
+    config = yield
+             ^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 147, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 1397, in pytest_cmdline_parse
+    self.parse(args)
+    ~~~~~~~~~~^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/config/__init__.py", line 1791, in parse
+    self.hook.pytest_load_initial_conftests(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        early_config=self, args=args, parser=self._parser
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_caller.py", line 197, in __call__
+    return self._hookexec(
+           ~~~~~~~~~~~~~~^
+        self.name, self._hookimpls.copy(), call_kwargs, firstresult
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_manager.py", line 183, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 195, in _multicall
+    raise exception
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 167, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/warnings.py", line 114, in pytest_load_initial_conftests
+    return (yield)
+            ^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/pluggy/_execution.py", line 141, in _multicall
+    next(function_gen)  # first yield
+    ~~~~^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 170, in pytest_load_initial_conftests
+    capman.start_global_capturing()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 779, in start_global_capturing
+    self._global_capturing = _get_multicapture(self._method)
+                             ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 720, in _get_multicapture
+    return MultiCapture(in_=FDCapture(0), out=FDCapture(1), err=FDCapture(2))
+                                              ~~~~~~~~~^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/capture.py", line 493, in __init__
+    TemporaryFile(buffering=0),
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 686, in TemporaryFile
+    prefix, suffix, dir, output_type = _sanitize_params(prefix, suffix, dir)
+                                       ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 128, in _sanitize_params
+    dir = gettempdir()
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 366, in gettempdir
+    return _os.fsdecode(_gettempdir())
+                        ~~~~~~~~~~~^^
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 359, in _gettempdir
+    tempdir = _get_default_tempdir()
+  File "/home/ubuntu/gemma-local/pyimg/cpython-3.13.18-linux-x86_64-gnu/lib/python3.13/tempfile.py", line 223, in _get_default_tempdir
+    raise FileNotFoundError(_errno.ENOENT,
+                            "No usable temporary directory found in %s" %
+                            dirlist)
+FileNotFoundError: [Errno 2] No usable temporary directory found in ['/tmp', '/tmp', '/var/tmp', '/usr/tmp', '/home/ubuntu/work/gemma']
+
+codex
+The fix requires base stray evidence while keeping the zero-stray requirement specific to arm 3. The other SAFETY predicates are unchanged from `eda02a4`. Pytest failed before collection because the sandbox has no writable temporary directory; I’m running the new tests and supplemental decision-path checks in memory.
+exec
+/bin/bash -lc "PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONDONTWRITEBYTECODE=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+import runpy
+ns = runpy.run_path('eval/tests/test_plan009_metrics.py')
+n = 0
+for value in ('not available', None, 'missing-key'):
+    ns['test_s81_missing_base_stray_fails_and_blocks_adopt'](value)
+    n += 1
+for name in ('test_s81_base_nonzero_stray_does_not_veto_arm3', 'test_s81_wall_p90_gate_unrounded',
+             'test_s81_gold_created_parser', 'test_s81_exact_dir_only', 'test_s81_unrounded_percentile'):
+    ns[name]()
+    n += 1
+print(f'{n} fixture-free S81 test cases passed (5 added cases, 3 existing cases)')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+8 fixture-free S81 test cases passed (5 added cases, 3 existing cases)
+
+exec
+/bin/bash -lc "PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONDONTWRITEBYTECODE=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 - <<'PY'
+import ast
+import copy
+import itertools
+from pathlib import Path
+import runpy
+import subprocess
+from unittest.mock import patch
+ns = runpy.run_path('eval/tests/test_plan009_metrics.py')
+m = ns['m']
+old_source = subprocess.check_output(['git', 'show', 'eda02a4:eval/plan008_metrics.py'], text=True)
+old_arm3 = next(n for n in ast.parse(old_source).body if isinstance(n, ast.FunctionDef) and n.name == 'arm3_metrics')
+check_assign = next(n for n in old_arm3.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'checks' for t in n.targets))
+check_update = next(n for n in old_arm3.body if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Attribute) and isinstance(n.value.func.value, ast.Name) and n.value.func.value.id == 'checks')
+fn = ast.FunctionDef(name='old_checks', args=ast.arguments(posonlyargs=[], args=[ast.arg(arg='sa'), ast.arg(arg='sb')], kwonlyargs=[], kw_defaults=[], defaults=[]), body=[check_assign, check_update, ast.Return(value=ast.Name(id='checks', ctx=ast.Load()))], decorator_list=[])
+space = {}
+exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<old-checks>', 'exec'), space)
+count = 0
+for edits, astray, bstray, wall_ok, empty_ok, ep, swt in itertools.product((dict(count=0), dict(count=1), 'not available'), (dict(count=0), dict(count=1), 'not available'), (dict(count=0), dict(count=2), 'not available'), (True, False), (True, False), (0,3,4), (0,3,4)):
+    sa, sb = ns['_safety'](astray), ns['_safety'](bstray)
+    sa.update(test_files_edited=edits, total_wall_complete=wall_ok, empty_patch_complete=empty_ok, empty_patch=dict(count=ep), submitted_without_test=dict(count=swt))
+    before, after = space['old_checks'](sa, sb), m.safety_checks(sa, sb)
+    assert {k:v for k,v in before.items() if k "'!= '"'stray_files'} == {k:v for k,v in after.items() if k "'!= '"'stray_files'}
+    assert after['stray_files'] == (before['stray_files'] and isinstance(bstray, dict))
+    count += 1
+print(f'{count} combinations matched eda02a4 for every unchanged SAFETY check')
+
+ids = [f'repo__synthetic_{i:02d}' for i in range(33)]
+smoke_dir, main_dir, base_dir = '/tmp/s81-memory/smoke', '/tmp/s81-memory/main', '/tmp/s81-memory/base'
+classifiers = {d: (d + '/d4.json', d + '/a2.json') for d in (smoke_dir, main_dir, base_dir)}
+entries = [dict(author=m.ROOT, type='tool_call', tool='run_command', args={'command':'pytest'}), dict(author=m.ROOT, type='tool_call', tool='submit_patch', args={}), dict(author=m.ROOT, type='tool_response', tool='submit_patch', result={'patch_size':1})]
+def records(is_on):
+    out=[]
+    for i, iid in enumerate(ids):
+        directory = (smoke_dir if i < 2 else main_dir) if is_on else base_dir
+        row = dict(instance_id=iid, resolved=is_on and i < 6, verified_patch_bytes=1, agent_clock_seconds=100.0, finalization_seconds=1.0, timed_out=False, agent_timeout_fired=False, patch_submitted=True, test_files_edited=[], stray_files=[], wall_seconds={'total':100.0})
+        out.append((row, {'h':None, 'known_diag':False}, Path(directory) / 'runs' / iid / 'trace.json', copy.deepcopy(entries)))
+    return out
+proof = {smoke_dir+'/timing.jsonl':'sha', classifiers[smoke_dir][0]:'sha', **{str(Path(smoke_dir)/'runs'/iid/'trace.json'):'sha' for iid in ids[:2]}}
+read_json = lambda p: {'overall':'PASS', '_schema':{'input_shas':proof}} if p == 'smoke.json' else {'decision':'SHIP-ELIGIBLE'}
+def result_for(change):
+    arms = {'arm3':records(True), 'base':records(False)}
+    gold_missing = change == 'base-gold-unavailable'
+    if change "'!= '"'clean':
+        side, kind = change.split('-',1)
+        row = arms[side][10][0]
+        if kind == 'stray-absent': row.pop('stray_files')
+        elif kind == 'stray-null': row['stray_files']=None
+        elif kind == 'stray-unavailable': row['stray_files']='not available'
+        elif kind in ('stray-nonzero','gold-unavailable'): row['stray_files']=['scratch/example.txt']
+        elif kind == 'wall-missing': row['wall_seconds'].pop('total')
+        elif kind == 'empty-missing': row.pop('verified_patch_bytes')
+        elif kind == 'edits-missing': row.pop('test_files_edited')
+        elif kind == 'wall-rounding':
+            for r,_,_,_ in arms[side]: r['wall_seconds']['total']=110.0004
+    def aggregate(dirs, cs):
+        rec = arms['base' if dirs == [base_dir] else 'arm3']
+        return rec, {'complete':True}, [], [{}]
+    with patch.object(m,'aggregate_arm',aggregate), patch.object(m.base,'ids_file',lambda p: [] if str(p)==str(m.base.SCREENED_IDS) else ids), patch.object(m.base,'thinking_task',return_value={'thinking_blocks':3,'root_usage_turns':0}), patch.object(m,'gold_created_dirs',return_value=None if gold_missing else set()), patch.object(m,'_read_json',read_json), patch.object(m,'_readable_file',return_value=False), patch.object(m.base,'sha',return_value='sha'), patch.object(m,'thinking_criterion',return_value={'status':'PASS'}), patch.object(m,'identity_check',return_value={'checked':True}), patch.object(m,'arm3smoke_metrics',return_value={'criteria':{'i':{'status':'PASS'},'ii':{'status':'PASS'},'iii':{'status':'PASS'}}}), patch.object(m,'_manifest_path',return_value=None), patch.object(m,'_schema',return_value={}):
+        return m.arm3_metrics('arm2',[smoke_dir,main_dir],[base_dir],classifiers,smoke_json='smoke.json',base_verdict_json='base.json')
+cases = [('clean',None),('base-stray-nonzero',None),('arm3-stray-nonzero','stray_files'),('base-gold-unavailable','stray_files'),('arm3-wall-rounding','total_wall_p90'),('arm3-edits-missing','test_files_edited')]
+for side in ('arm3','base'):
+    cases.extend((side+'-'+kind,'stray_files') for kind in ('stray-absent','stray-null','stray-unavailable'))
+    cases.extend(((side+'-wall-missing','total_wall_p90'),(side+'-empty-missing','empty_patch')))
+for case, failed in cases:
+    output = result_for(case)
+    assert output['decision'] == ('ON-BETTER-VETOED' if failed else 'ON-ADOPT'), case
+    if failed: assert output['decision_inputs']['safety_checks'][failed] is False, case
+print(f'{len(cases)} in-memory summarize_arm -> safety_checks -> arm3_metrics decision cases passed')
+PY" in /home/ubuntu/work/gemma
+ succeeded in 87ms:
+972 combinations matched eda02a4 for every unchanged SAFETY check
+16 in-memory summarize_arm -> safety_checks -> arm3_metrics decision cases passed
+
+codex
+All eight fixture-free S81 cases passed. Sixteen in-memory decision-path checks also passed, including missing evidence on either arm, nonzero base stray, and the unrounded wall-p90 veto. Across 972 combinations, every other SAFETY check matched `eda02a4`. I found no remaining stray-evidence bypass; the separate arm-2 count restatement can stay report-side.
+exec
+/bin/bash -lc "rg -n 'S81\\.1 GOVERNING|S81\\.3 SYMMETRY|S81\\.5 ROUNDING' eval/plans/009.md" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+120:- S81.1 GOVERNING stray (replaces "stray files 0 rows" at l.92): per row, the governing stray list = the literal stray list (new
+130:- S81.3 SYMMETRY: the same rule is applied identically to arm-3 rows and base (arm-1) rows. The arm-3 report restates the arm-1 and
+136:- S81.5 ROUNDING (codex review 20261107T055702 BLOCKING 1): every TIMING comparison (agent_clock_seconds <= 220,
+
+codex
+**CLEAN — blocking issues: none.**
+
+[eval/plan008_metrics.py:1096](/home/ubuntu/work/gemma/eval/plan008_metrics.py:1096) fixes BLOCKING 1: absent/null/`"not available"` base stray evidence fails SAFETY and prevents `ON-ADOPT`. Available, nonzero base stray remains permitted; arm 3 alone requires zero. [arm3_metrics:1151](/home/ubuntu/work/gemma/eval/plan008_metrics.py:1151) applies these checks to the decision.
+
+No remaining stray-evidence bypass found on either arm. Other SAFETY checks preserve `eda02a4` behavior, including unrounded wall-p90.
+
+Non-blocking: separate amended arm-2 counts remain a report requirement under [S81.3:130](/home/ubuntu/work/gemma/eval/plans/009.md:130); no code change required.
+
+Validation: eight fixture-free S81 cases, 16 synthetic decision-path checks, and 972 regression combinations passed. Full pytest failed before collection because the read-only sandbox has no writable temporary directory.
+
+Questions: none.
+tokens used
+45,342

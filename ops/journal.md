@@ -400,3 +400,4 @@
 2026-11-07T06:08:33Z | S81 code committed eda02a4 (governing/literal stray, gold-dir exact match, unrounded wall-p90; 1619 tests pass); pre-data sanity on EXISTING rows: arm1 governing 0 / literal 0, arm2 governing 0 / literal 1 (fastapi_15661 exempted, scripts); codex-review-s81-light started (dec 081 item 4 gate, CLEAN required before any arm-3 metric) | eval/plan008_metrics.py ops/jobs/codex-review-s81-light.status
 2026-11-07T06:11Z | codex-review-s81-light done: BLOCKING 1 (missing base stray evidence -> ON-ADOPT possible) + 2 non-blocking | ops/codex/review-20261107T060833.md
 2026-11-07T06:12Z | fix 71185a3: safety_checks() requires stray evidence for both arms; tests missing-base + unrounded wall-p90 gate (1624 pass); re-review codex-review-s81b-light started | eval/plan008_metrics.py
+2026-11-07T06:16Z | codex re-review s81b CLEAN (S81 BLOCKING 1 fix 71185a3 confirmed); arm-3 metrics unblocked; smoke still RUNNING | ops/codex/review-20261107T061229.md
