@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 09:14Z (cycle 184; DEC 087: finals rule = own score OR knob-only <= diff (mechanical check built); DEC 086: FINALS RULE 31B cap<=3.5 now MET + item-3 match rule; 31b-v002 SCORED 0.15 -> dec 083 (a) HOLDS; DEC 084+085: v009 Gate-2 item WAIVED (085 confirms, adds nothing, does NOT re-issue auth) -> Nov 8 = 31b-v009 CONDITIONAL (dec 083 a-f); e4b-v002h AUTHORIZED CONDITIONAL, slot after 31B). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 09:16Z (cycle 185; DEC 088: dec 087 applies to e4b too (cap==H3 bound = zero margin), every e4b final candidate needs own COMPLETE score or knob-only <= diff vs COMPLETE e4b; DEC 087: finals rule = own score OR knob-only <= diff (mechanical check built); DEC 086: FINALS RULE 31B cap<=3.5 now MET + item-3 match rule; 31b-v002 SCORED 0.15 -> dec 083 (a) HOLDS; DEC 084+085: v009 Gate-2 item WAIVED (085 confirms, adds nothing, does NOT re-issue auth) -> Nov 8 = 31b-v009 CONDITIONAL (dec 083 a-f); e4b-v002h AUTHORIZED CONDITIONAL, slot after 31B). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -6,7 +6,7 @@
   budget row updated, Director FYI'd. No runtime fields from CLI. E4B validator acceptance VERIFIED. Next e4b submit: next UTC day at earliest. Guard v6 applied b9caae4 (dry checks rc=3 x2).
 - 31b-v002 (v001-t4 + cap 3.5): dist/31b-v002.zip sha256=e56a05e5701fa16a8dbbabb304d98f63a465511cefbb28d65850ea5ce086ec88
   SUBMITTED 2026-11-07T00:06:31Z ref 58072907 (dec 055). SCORED public 0.15 (COMPLETE; first final poll 09:06:53Z, T=9.006 h,
-  bracket (8.506, 9.006] h). json + budget row filled, Director FYI 09:08Z (dec 079 DONE). Waiter done. Dec 061(i) moot.
+  bracket (8.506, 9.006] h). json + budget row filled, Director FYI 09:08Z (dec 079 DONE). Waiter done.
   Validation submit: expect weak LB, don't act alone; write-up notes FastAPI-hint caveat (dec 060). config.env SUBMIT_KERNEL now = 31b kernel:
   next e4b submit needs the reverse config commit first. Next submit slot: 2026-11-08 UTC (ledger blocks same-day).
 - CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 12B/E2B validator
@@ -19,7 +19,7 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (09:14Z): memguard-light, review-finals-elig-light (codex, dec 087 checker), submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
+## Running jobs (09:16Z): memguard-light, review-finals-elig-light (codex, dec 087 checker), submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
 - CODEX S81: review 060833 BLOCKING 1 (base stray evidence missing could still ON-ADOPT) -> fixed 71185a3 (safety_checks(): both arms need
   available stray evidence, zero governing for arm 3 only; +5 tests incl. unrounded wall-p90 gate; 1624 pass). Re-review s81b ops/codex/review-20261107T061229.md CLEAN (no blocking) -> arm-3 metrics allowed. Report must list amended arm-2 counts separately (S81.3).
 - DEC 081 (on 020, approve A w/ changes): (1) arm-3 SMOKE (v4) PASS results/plan009_arm3_smoke.json: thinking blocks [5,10]=15, timing PASS,
@@ -38,7 +38,6 @@
 - DEC 069 (rep 018, A w/ conditions): arm 1 VALID by POST-HOC ruling = plan 007 Addendum C (7ceb059). PRIMARY 4/33 FINAL
   (codex 132715 BLOCKING = missing descriptive lines -> fixed; re-review 133120 CLEAN). results/plan007_arm1_summary.json v2
   (script sha 349b1bda...): a 4/33 (W 4.8-27.3), c 4/26, d 4/27 (literal), d' 4/33, empty 12/33 (2 to/10 non), unscreened 3/25, ENV CONTROL caveat l.152 on every arm-1 citation.
-- PLAN 008 / 31b-v010-p8 (DONE, report 019/020): pre-reg eval/plans/008.md; prompt-level repeat guard + in-bundle submit_patch gate; NOT ship-eligible.
 - PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
   33 dev fixed order eval/plans/007-arm1-ids.txt, --with-verification --no-stock-probe, slug aniket0202/gemma-31b-passrate.
 - DEC 061: (ii) v004 CPU draft, no slot. Item 6: arm E/F results schema-headed; dec 038 evidence by Nov 9 23:59Z.
@@ -55,7 +54,8 @@
   DEC 086: 31B cap<=3.5 MET (v002 COMPLETE); never raise 31B cap >3.5. DEC 087 BINDING (both tracks, replaces match clause): final must (a) score
   COMPLETE itself OR (b) differ from a COMPLETE bundle ONLY by <= cap/calls/turns/thinking/max_out, all else byte-identical. MECHANICAL:
   eval/finals_eligibility.py + ops/drafts/finals-checklist.md: v012, v009 vs v002 and e4b-v002h vs e4b-v002 all INELIGIBLE (system.md) -> each needs
-  own score. Dec 087 item 3: if report 021 shows v012 winning, propose v012 scored submit there for first free slot after e4b-v002h (Nov 9).
+  own score. DEC 088: e4b too (LoRA/prompt variants need own score by Nov 29).
+  Codex review-finals-elig-light: CLEAN -> journal only; BLOCKING -> fix, re-review, re-run 3 checks before relying. Dec 087 item 3: if report 021 shows v012 winning, propose v012 scored submit there for first free slot after e4b-v002h (Nov 9).
 - TOPICS (Director mail 01:47Z, owner req): docs/TOPICS.md saved; on any topic status change (used now | planned | adjacent, not used) update its line + repo ref in the same cycle as the journal entry.
 - DEC 082 (approve, no reply): report 021 FIRST results table = pass rate + arm3-vs-arm1 TIMEOUT count + EMPTY count w/ paired discordants
   (not footnote). On land: quota AFTER + budget row FIRST, then classifiers/metrics per dec 081 i1; budget hit w/ missing ids -> D73.7, no top-up.
