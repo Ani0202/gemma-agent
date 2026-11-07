@@ -966,3 +966,439 @@ Date:   Sat Nov 7 09:22:33 2026 +0000
    341	if __name__ == '__main__':
    342	    sys.exit(main())
 
+exec
+/bin/bash -lc "nl -ba eval/finals_eligibility.py | sed -n '1,220p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	#!/usr/bin/env python3
+     2	"""Mechanical FINALS RULE check (dec 087 item 1, clause (b)), v2 (strict; codex review 091327).
+     3	
+     4	A candidate final qualifies via a COMPLETE-scored reference bundle only if the two zips are
+     5	byte-identical except for single-line value changes of these knobs, each <= the reference value:
+     6	  eval_config.yaml (zip root)   evaluation.max_time_minutes / max_tool_calls / max_turns
+     7	  agent config documents         generate_content_config.max_output_tokens /
+     8	  (agent.yaml + every sub-agent  generate_content_config.thinking_config.thinking_budget
+     9	   reached via agent_tool         (inline, or in the file named by a top-level
+    10	   config_path, recursively)      `generate_content_config: !include F`: max_output_tokens /
+    11	                                  thinking_config.thinking_budget at that file's top level)
+    12	Rules (all conservative -> INELIGIBLE):
+    13	- Zip entries: unique names (also case-folded), normalized relative POSIX paths, regular files only
+    14	  (no directory entries, symlinks or other types, no encryption), no file/directory conflicts.
+    15	  The candidate and reference must have the same entry names.
+    16	- Every file not listed above must be byte-identical. A listed file may differ only on lines of the
+    17	  form `<indent><knob>: <number><trailing>` with identical prefix/suffix bytes, same line count; the
+    18	  changed value node must sit exactly at an allowed path (checked on the composed YAML node tree;
+    19	  duplicate mapping keys rejected). Comments, quoting, anchors, aliases, flow style: must be identical.
+    20	- Domains: max_output_tokens, max_tool_calls, max_turns int >= 1; thinking_budget int >= 0;
+    21	  max_time_minutes number > 0. No leading zeros, no sign, no exponent/underscore.
+    22	- Include / config_path targets are resolved both root-relative and relative to the containing
+    23	  document; if both resolutions exist as different entries the target is ambiguous and gets no
+    24	  allowance (must stay byte-identical).
+    25	
+    26	Clause (a) (the candidate itself scored COMPLETE) is not checked here; --reference-lb checks that
+    27	the reference has status COMPLETE and that its sha256 matches the reference zip.
+    28	
+    29	Usage: eval/finals_eligibility.py CANDIDATE.zip REFERENCE.zip [--reference-lb results/lb_X.json]
+    30	                                  [--out results/finals_eligibility_X_vs_Y.json]
+    31	Exit 0 = ELIGIBLE, 1 = INELIGIBLE, 2 = usage/input error.
+    32	"""
+    33	import argparse
+    34	import hashlib
+    35	import json
+    36	import posixpath
+    37	import re
+    38	import stat
+    39	import sys
+    40	import unicodedata
+    41	import zipfile
+    42	
+    43	import yaml
+    44	
+    45	EVAL_CONFIG = 'eval_config.yaml'
+    46	ROOT_AGENT = 'agent.yaml'
+    47	SCHEMA = 'finals_eligibility_v2'
+    48	INT_TAG = 'tag:yaml.org,2002:int'
+    49	FLOAT_TAG = 'tag:yaml.org,2002:float'
+    50	# knob -> (value regex, minimum, allow_float, strict minimum)
+    51	DOMAINS = {
+    52	    'max_time_minutes': (r'(?:0|[1-9][0-9]*)(?:\.[0-9]+)?', 0, True, True),
+    53	    'max_tool_calls': (r'[1-9][0-9]*', 1, False, False),
+    54	    'max_turns': (r'[1-9][0-9]*', 1, False, False),
+    55	    'max_output_tokens': (r'[1-9][0-9]*', 1, False, False),
+    56	    'thinking_budget': (r'0|[1-9][0-9]*', 0, False, False),
+    57	}
+    58	EVAL_PATHS = {('evaluation', k): k for k in ('max_time_minutes', 'max_tool_calls', 'max_turns')}
+    59	GCC_REL = {('max_output_tokens',): 'max_output_tokens',
+    60	           ('thinking_config', 'thinking_budget'): 'thinking_budget'}
+    61	LINE_RE = re.compile(rb'^([ ]*)([a-z_]+)(:[ ]+)([0-9.]+)([ \t]*\r?\n?)$')
+    62	
+    63	
+    64	class ZipProblem(Exception):
+    65	    pass
+    66	
+    67	
+    68	def sha256_file(path):
+    69	    h = hashlib.sha256()
+    70	    with open(path, 'rb') as f:
+    71	        for chunk in iter(lambda: f.read(1 << 20), b''):
+    72	            h.update(chunk)
+    73	    return h.hexdigest()
+    74	
+    75	
+    76	def read_zip(path):
+    77	    """Return ({name: bytes}, [problems]). Problems make the zip unusable for clause (b)."""
+    78	    files, problems, seen_fold = {}, [], {}
+    79	    with zipfile.ZipFile(path) as z:
+    80	        infos = z.infolist()
+    81	        for i in infos:
+    82	            n = i.filename
+    83	            if n in files:
+    84	                problems.append(f'duplicate entry {n!r}')
+    85	                continue
+    86	            fold = unicodedata.normalize('NFC', n).casefold()
+    87	            if fold in seen_fold:
+    88	                problems.append(f'entry {n!r} collides with {seen_fold[fold]!r} (case/unicode fold)')
+    89	            seen_fold[fold] = n
+    90	            if n.endswith('/') or i.is_dir():
+    91	                problems.append(f'directory entry {n!r}')
+    92	                continue
+    93	            parts = n.split('/')
+    94	            if ('\\' in n or n.startswith('/') or any(p in ('', '.', '..') for p in parts)
+    95	                    or posixpath.normpath(n) != n or '\x00' in n):
+    96	                problems.append(f'non-normalized path {n!r}')
+    97	                continue
+    98	            mode = (i.external_attr >> 16) & 0xFFFF
+    99	            if mode and stat.S_IFMT(mode) not in (0, stat.S_IFREG):
+   100	                problems.append(f'entry {n!r} is not a regular file (mode {oct(mode)})')
+   101	                continue
+   102	            if i.flag_bits & 0x1:
+   103	                problems.append(f'entry {n!r} is encrypted')
+   104	                continue
+   105	            files[n] = z.read(i)
+   106	    names = set(files)
+   107	    for n in names:
+   108	        parts = n.split('/')
+   109	        for k in range(1, len(parts)):
+   110	            if '/'.join(parts[:k]) in names:
+   111	                problems.append(f'file/directory conflict: {"/".join(parts[:k])!r} vs {n!r}')
+   112	    return files, problems
+   113	
+   114	
+   115	class StrictComposer(yaml.SafeLoader):
+   116	    pass
+   117	
+   118	
+   119	def compose(data, name):
+   120	    """Composed YAML node tree (no construction, so custom tags are kept). Raises ValueError."""
+   121	    try:
+   122	        return yaml.compose(data.decode('utf-8'), Loader=StrictComposer)
+   123	    except Exception as e:  # noqa: BLE001
+   124	        raise ValueError(f'{name}: YAML compose failed: {e}') from e
+   125	
+   126	
+   127	def walk_paths(root):
+   128	    """Yield (path tuple, node) for every node; alias cycles cut by node identity on the path.
+   129	    Raises ValueError on duplicate mapping keys."""
+   130	    stack = [((), root, frozenset())]
+   131	    while stack:
+   132	        path, node, onpath = stack.pop()
+   133	        yield path, node
+   134	        if id(node) in onpath:
+   135	            continue
+   136	        onpath = onpath | {id(node)}
+   137	        if isinstance(node, yaml.MappingNode):
+   138	            keys = []
+   139	            for k, v in node.value:
+   140	                key = (k.tag, k.value) if isinstance(k, yaml.ScalarNode) else ('<complex>', id(k))
+   141	                if key in keys:
+   142	                    raise ValueError(f'duplicate mapping key {k.value!r} at {"/".join(map(str, path))}')
+   143	                keys.append(key)
+   144	                label = k.value if isinstance(k, yaml.ScalarNode) else '<complex>'
+   145	                stack.append((path + (label,), v, onpath))
+   146	        elif isinstance(node, yaml.SequenceNode):
+   147	            for idx, v in enumerate(node.value):
+   148	                stack.append((path + (idx,), v, onpath))
+   149	
+   150	
+   151	def resolve(target, containing, names):
+   152	    """Resolve an include/config_path value; None if missing or ambiguous."""
+   153	    if not isinstance(target, str) or not target:
+   154	        return None
+   155	    cands = set()
+   156	    for base in ('', posixpath.dirname(containing)):
+   157	        p = posixpath.normpath(posixpath.join(base, target))
+   158	        if p in names:
+   159	            cands.add(p)
+   160	    return cands.pop() if len(cands) == 1 else None
+   161	
+   162	
+   163	def allowed_files(ref):
+   164	    """{file: {path tuple: knob}} for files whose knob lines may change (derived from REFERENCE)."""
+   165	    names, out, notes = set(ref), {}, []
+   166	    if EVAL_CONFIG in names:
+   167	        out[EVAL_CONFIG] = dict(EVAL_PATHS)
+   168	    todo, done = [ROOT_AGENT] if ROOT_AGENT in names else [], set()
+   169	    while todo:
+   170	        doc = todo.pop()
+   171	        if doc in done:
+   172	            continue
+   173	        done.add(doc)
+   174	        try:
+   175	            root = compose(ref[doc], doc)
+   176	            nodes = list(walk_paths(root)) if root is not None else []
+   177	        except ValueError as e:
+   178	            notes.append(f'agent doc {doc} not analyzable, no allowance: {e}')
+   179	            continue
+   180	        perms = out.setdefault(doc, {})
+   181	        for path, node in nodes:
+   182	            if (len(path) >= 2 and path[-1] == 'config_path' and 'agent_tool' in path
+   183	                    and isinstance(node, yaml.ScalarNode)):
+   184	                t = resolve(node.value, doc, names)
+   185	                if t is None:
+   186	                    notes.append(f'{doc}: config_path {node.value!r} missing/ambiguous')
+   187	                else:
+   188	                    todo.append(t)
+   189	        for path, node in nodes:
+   190	            if path == ('generate_content_config',):
+   191	                if isinstance(node, yaml.MappingNode):
+   192	                    for rel, knob in GCC_REL.items():
+   193	                        perms[('generate_content_config',) + rel] = knob
+   194	                elif isinstance(node, yaml.ScalarNode) and node.tag == '!include':
+   195	                    t = resolve(node.value, doc, names)
+   196	                    if t is None:
+   197	                        notes.append(f'{doc}: gcc include {node.value!r} missing/ambiguous, no allowance')
+   198	                    else:
+   199	                        out.setdefault(t, {}).update(GCC_REL)
+   200	    return out, notes
+   201	
+   202	
+   203	def parse_value(knob, text):
+   204	    pat, lo, allow_float, strict = DOMAINS[knob]
+   205	    if not re.fullmatch(pat, text):
+   206	        return None
+   207	    v = float(text) if allow_float else int(text)
+   208	    if (strict and v <= lo) or v < lo:
+   209	        return None
+   210	    return v
+   211	
+   212	
+   213	def compare_allowed(name, cdata, rdata, perms, knobs, violations):
+   214	    def bad(reason, line=None):
+   215	        violations.append({'file': name, 'path': [] if line is None else [f'line {line}'], 'reason': reason})
+   216	
+   217	    cl, rl = cdata.splitlines(keepends=True), rdata.splitlines(keepends=True)
+   218	    if len(cl) != len(rl):
+   219	        return bad(f'line count {len(cl)} != reference {len(rl)}')
+   220	    changed = []
+
+exec
+/bin/bash -lc 'cat ops/codex/review-20261107T091327.md && git status --short && git show --stat 0d3e3b4 && ls -lh dist && cat ops/STATE.md && cat docs/PLAN.md' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+1. **BLOCKING: Knob recognition is not restricted to agent configurations.** [eval/finals_eligibility.py:117](/home/ubuntu/work/gemma/eval/finals_eligibility.py:117) accepts any path containing `generate_content_config`. Reproduced: changing an unrelated `skills/config.yaml` from `parameters.generate_content_config.max_output_tokens: 8192` to `1` returns **ELIGIBLE**. This changes a skill asset, not an agent’s generation settings. Restrict allowances to verified agent configuration locations. The test at [test_finals_eligibility.py:130](/home/ubuntu/work/gemma/eval/tests/test_finals_eligibility.py:130) only checks a key outside that namespace.
+
+2. **BLOCKING: Relative includes authorize changes to the wrong file.** [eval/finals_eligibility.py:95](/home/ubuntu/work/gemma/eval/finals_eligibility.py:95) records the literal include string; [line 115](/home/ubuntu/work/gemma/eval/finals_eligibility.py:115) treats it as a ZIP-root filename. Reproduced with `sub_agents/code_analyzer.yaml` containing `generate_content_config: !include sampling.yaml`: lowering `max_output_tokens` in an unrelated root `sampling.yaml` returns **ELIGIBLE**, while the actual `sub_agents/sampling.yaml` remains unchanged. Resolve each include relative to its containing document before assigning permissions.
+
+3. **BLOCKING: Parsing every YAML file hides forbidden asset changes.** [eval/finals_eligibility.py:185](/home/ubuntu/work/gemma/eval/finals_eligibility.py:185) and [line 202](/home/ubuntu/work/gemma/eval/finals_eligibility.py:202) apply semantic comparison to arbitrary YAML assets. Changing a comment containing instructions in `skills/recipe.yaml` returns **ELIGIBLE**, violating byte-identical skills. There are additional lossy comparisons:
+   - Prepending `instruction: "DIFFERENT PROMPT"` to real v002’s `agent.yaml` returns **ELIGIBLE** because SafeLoader discards the shadowed duplicate key.
+   - Changing a YAML mapping key from integer `1` to boolean `true` returns **ELIGIBLE** because dictionary lookup conflates those keys at [line 135](/home/ubuntu/work/gemma/eval/finals_eligibility.py:135).
+
+   Require byte equality for assets, reject duplicate keys, and preserve key types when comparing configuration trees.
+
+4. **BLOCKING: ZIP entries and file types disappear during loading.** [eval/finals_eligibility.py:74](/home/ubuntu/work/gemma/eval/finals_eligibility.py:74) collapses duplicate filenames, skips directories, and ignores entry type metadata. Against real `dist/31b-v002.zip`, all these candidates returned **ELIGIBLE**:
+   - Additional duplicate prompt entries, provided the last contains the original bytes.
+   - A prompt entry changed to a symlink through `external_attr`, retaining its bytes.
+   - An added directory named `agent.yaml/`, conflicting with the existing root file.
+
+   Validate entry uniqueness, normalized paths, types, and directory/file conflicts before comparing contents.
+
+5. **BLOCKING: Invalid token settings pass as decreases.** [eval/finals_eligibility.py:129](/home/ubuntu/work/gemma/eval/finals_eligibility.py:129) and [line 158](/home/ubuntu/work/gemma/eval/finals_eligibility.py:158) accept arbitrary nonnegative floats and zero. Against real v002, changing `max_output_tokens: 8192` to either `4095.5` or `0` returns **ELIGIBLE**. The installed harness schema rejects both; it also rejects fractional thinking budgets accepted here. Enforce each knob’s valid numeric domain before comparing values. Boolean knob values were correctly rejected.
+
+**Non-blocking**
+
+- Valid include decreases can be rejected. Besides relative paths above, `thinking_config: !include thinking.yaml` followed by a decrease inside that file returns **INELIGIBLE**. Include discovery only recognizes whole `generate_content_config` includes at [line 95](/home/ubuntu/work/gemma/eval/finals_eligibility.py:95).
+- Recursive aliases cause an uncaught `RecursionError`: an unchanged document containing `cycle: &cycle [*cycle]` crashes the traversal at [line 92](/home/ubuntu/work/gemma/eval/finals_eligibility.py:92). This occurred only on synthetic input, so it is non-blocking under your criterion.
+
+Validation: the requested files match commit `aeb66ff`. All 29 existing test cases passed when called directly with RAM-backed file I/O because the sandbox is read-only. All 324 comparisons among the 18 actual `dist/` bundles completed without crashes.
+
+**Questions:** None.
+ M ops/codex/review-20261107T092238.log
+commit 0d3e3b4b973befbeb4ceb804c8d97597bcca4f06
+Author: Aniket <agrawalaniket02@gmail.com>
+Date:   Sat Nov 7 09:22:33 2026 +0000
+
+    finals_eligibility v2: strict byte/line-level check (codex 091327 BLOCKING x5 fixed), 49 tests, 3 checks re-run (verdicts unchanged)
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_014u5C9X4dmNqhoiSKe7TVpQ
+
+ eval/finals_eligibility.py                         | 382 +++++++++++-------
+ eval/tests/test_finals_eligibility.py              | 126 +++++-
+ ops/codex/review-20261107T091327.log               | 428 +++++++++++++++++++++
+ ops/codex/review-20261107T091327.md                |  27 ++
+ ops/drafts/finals-checklist.md                     |  12 +-
+ ops/jobs/review-finals-elig-light.status           |   2 +-
+ ops/logs/memguard.log                              |   1 +
+ ops/logs/router.log                                |   2 +
+ .../read/20261107T091857-4045-from-router.md       |   4 +
+ .../finals_eligibility_31b_v002_vs_31b_v002.json   |  99 +----
+ .../finals_eligibility_31b_v009_vs_31b_v002.json   | 100 ++---
+ .../finals_eligibility_31b_v012_vs_31b_v002.json   | 104 ++---
+ .../finals_eligibility_e4b_v002_vs_e4b_v002.json   |  99 +----
+ .../finals_eligibility_e4b_v002h_vs_e4b_v002.json  | 101 +----
+ 14 files changed, 938 insertions(+), 549 deletions(-)
+total 136K
+-rw------- 1 ubuntu ubuntu 4.0K Nov  4 22:29 31b-v000.zip
+-rw------- 1 ubuntu ubuntu 4.2K Nov  5 21:23 31b-v001.zip
+-rw------- 1 ubuntu ubuntu 4.2K Nov  6 00:13 31b-v002.zip
+-rw------- 1 ubuntu ubuntu 5.3K Nov  6 01:04 31b-v003.zip
+-rw------- 1 ubuntu ubuntu 5.4K Nov  6 04:38 31b-v004.zip
+-rw------- 1 ubuntu ubuntu 5.3K Nov  6 02:23 31b-v005.zip
+-rw------- 1 ubuntu ubuntu 5.3K Nov  6 02:23 31b-v006.zip
+-rw------- 1 ubuntu ubuntu 5.2K Nov  6 04:35 31b-v007.zip
+-rw------- 1 ubuntu ubuntu 5.3K Nov  6 05:30 31b-v008.zip
+-rw------- 1 ubuntu ubuntu 5.3K Nov  6 06:28 31b-v009.zip
+-rw------- 1 ubuntu ubuntu 7.1K Nov  6 14:16 31b-v010.zip
+-rw------- 1 ubuntu ubuntu 5.6K Nov  6 13:43 31b-v011.zip
+-rw------- 1 ubuntu ubuntu 5.3K Nov  6 14:48 31b-v012.zip
+-rw------- 1 ubuntu ubuntu 5.6K Nov  6 14:48 31b-v013.zip
+-rw------- 1 ubuntu ubuntu 4.0K Nov  4 22:29 e4b-v000.zip
+-rw------- 1 ubuntu ubuntu 4.1K Nov  5 17:58 e4b-v001.zip
+-rw------- 1 ubuntu ubuntu 4.1K Nov  5 21:05 e4b-v002.zip
+-rw------- 1 ubuntu ubuntu 4.1K Nov  7 06:34 e4b-v002h.zip
+# STATE: snapshot 2026-11-07 09:24Z (cycle 186; finals checker v2 0d3e3b4 after codex 091327 BLOCKING x5, re-review running; DEC 088: dec 087 applies to e4b too (cap==H3 bound = zero margin), every e4b final candidate needs own COMPLETE score or knob-only <= diff vs COMPLETE e4b; DEC 087: finals rule = own score OR knob-only <= diff (mechanical check built); DEC 086: FINALS RULE 31B cap<=3.5 now MET + item-3 match rule; 31b-v002 SCORED 0.15 -> dec 083 (a) HOLDS; DEC 084+085: v009 Gate-2 item WAIVED (085 confirms, adds nothing, does NOT re-issue auth) -> Nov 8 = 31b-v009 CONDITIONAL (dec 083 a-f); e4b-v002h AUTHORIZED CONDITIONAL, slot after 31B). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
+- v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
+- e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
+  SUBMITTED 2026-11-06T00:11:23Z ref 58039259; SCORED public 0.05 (COMPLETE; first final poll 05:11:49Z, T=5.007 h). results/lb_e4b_v002.json filled,
+  budget row updated, Director FYI'd. No runtime fields from CLI. E4B validator acceptance VERIFIED. Next e4b submit: next UTC day at earliest. Guard v6 applied b9caae4 (dry checks rc=3 x2).
+- 31b-v002 (v001-t4 + cap 3.5): dist/31b-v002.zip sha256=e56a05e5701fa16a8dbbabb304d98f63a465511cefbb28d65850ea5ce086ec88
+  SUBMITTED 2026-11-07T00:06:31Z ref 58072907 (dec 055). SCORED public 0.15 (COMPLETE; first final poll 09:06:53Z, T=9.006 h,
+  bracket (8.506, 9.006] h). json + budget row filled, Director FYI 09:08Z (dec 079 DONE). Waiter done.
+  Validation submit: expect weak LB, don't act alone; write-up notes FastAPI-hint caveat (dec 060). config.env SUBMIT_KERNEL now = 31b kernel:
+  next e4b submit needs the reverse config commit first. Next submit slot: 2026-11-08 UTC (ledger blocks same-day).
+- CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 12B/E2B validator
+  acceptance (E4B VERIFIED by 58039259 scoring); l.55 submit_patch/get_status vs call limits; l.63 private-LB multiple runs; l.72 wheels arch
+  (x86 assumed, unrecorded); 12h overrun ruling. VERIFIED: l.42 submit method = kernel output (dec 041); l.76 superseded by l.112.
+## Eval data
+- Splits v2 FROZEN: clean 48 (rich 39, fastapi 9), dev 33, holdout 15; holdout uses = 0. Hashes: eval/splits/MANIFEST.json.
+- requests/httpx dropped (wheel shadowing = scorer property, dec 014). Gold v2 files in results/ (gold_calibration_*, gold_failure_causes).
+- RE-GROUND EVERY CYCLE (dec 021/025). Linger: `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
+- Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
+- DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
+  submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
+## Running jobs (09:24Z): memguard-light, review-finals-elig2-light (codex re-review of checker v2 0d3e3b4), submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
+- CODEX S81: review 060833 BLOCKING 1 (base stray evidence missing could still ON-ADOPT) -> fixed 71185a3 (safety_checks(): both arms need
+  available stray evidence, zero governing for arm 3 only; +5 tests incl. unrounded wall-p90 gate; 1624 pass). Re-review s81b ops/codex/review-20261107T061229.md CLEAN (no blocking) -> arm-3 metrics allowed. Report must list amended arm-2 counts separately (S81.3).
+- DEC 081 (on 020, approve A w/ changes): (1) arm-3 SMOKE (v4) PASS results/plan009_arm3_smoke.json: thinking blocks [5,10]=15, timing PASS,
+  0 H (d4cdf0f0 results/plan009_arm3_smoke_d4cdf0f0.json; a208a023 alongside 0 H), identity OK; both rows NO_PATCH/timeout (descriptive). Quota
+  smoke +0.63 h (11.89 AFTER). identity --event main PASS 06:26:50Z. MAIN pushed v5 06:27:20Z: 31 ids eval/plans/009-main-ids.txt, ONE session,
+  budget 30000 s, seed-max 803, TRANSPORT 203e542b (dry-run == smoke), quota BEFORE 11.89 h. On land: quota AFTER + budget row; classify main
+  (PYTHONPATH=eval/kaggle python3 eval/plan007_pinned/classify_rows_d4cdf0f0.py TIMING --out ...; also a208a023); plan008_metrics.py arm3
+  (dirs smoke,main; --identity-json --bundle v012 --transport DIR=203e542b.. --push-event DIR=smoke|main --smoke-json results/plan009_arm3_smoke.json
+  [--base-verdict-json]); report with amended arm-2 stray counts listed separately (S81.3). Missing ids -> D73.7 rule.
+  (2-4) Addendum S81 f9a9562 PRE-DATA; code eda02a4+71185a3; codex s81b 061229 CLEAN. Pre-data rows: arm1 gov 0/lit 0, arm2 gov 0/lit 1.
+  (5) backlog: tool-level empty-patch lever plan (tolerant edit_file error + exploration budget signal) AFTER arm 3. (6) Nov 8 slot due 12:00Z.
+- DEC 080/report 020: diagnosis results/plan008_arm2_diagnosis.md (stray row = deliberate deliverable; empties 7 never-edited, 3 malformed edit_file). Arm 2
+  (report 019) 8/33 vs arm1 4/33, A-only 4/B-only 0 p=0.125, MECH1/2 FAIL -> NOT SHIP-ELIGIBLE; base = arm 1; 31B default draft stays v009. Files 4de6787.
+  arm3 CLI: --identity-json --bundle --transport DIR=SHA --push-event DIR=EVENT (every dir) --smoke-json [--base-verdict-json]. Arm-3 bundle
+  31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096), load PASS (e5196a4).
+- DEC 069 (rep 018, A w/ conditions): arm 1 VALID by POST-HOC ruling = plan 007 Addendum C (7ceb059). PRIMARY 4/33 FINAL
+  (codex 132715 BLOCKING = missing descriptive lines -> fixed; re-review 133120 CLEAN). results/plan007_arm1_summary.json v2
+  (script sha 349b1bda...): a 4/33 (W 4.8-27.3), c 4/26, d 4/27 (literal), d' 4/33, empty 12/33 (2 to/10 non), unscreened 3/25, ENV CONTROL caveat l.152 on every arm-1 citation.
+- PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
+  33 dev fixed order eval/plans/007-arm1-ids.txt, --with-verification --no-stock-probe, slug aniket0202/gemma-31b-passrate.
+- DEC 061: (ii) v004 CPU draft, no slot. Item 6: arm E/F results schema-headed; dec 038 evidence by Nov 9 23:59Z.
+- DEC 057: no new bundle carries a repo-named hint; v000-v002 (both tracks) carry the FastAPI hint -> reports must say so. 31b-v004 CPU DRAFT 50537e1d (v007+quoting), no slot.
+- GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU week of 11-07: 11.89/30 h at 06:26Z (arm 2 + arm-3 smoke done; 18.11 h left; arm-3 main est ~11 h). Log: ops/budget/kaggle.md. Resets 2026-11-14T00:00Z.
+## Live caveats (dec 078: no FYIs for routine clean reviews; dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035). Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
+  (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
+  results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
+- Director reminder 2026-11-06T23:02Z: GCP quota re-request line to Aniket (keep until a decision marks it done). Kaggle GPU kernels pin starter docker_image (py3.12, cp312). Hosted-LLM-API data Q OPEN; no new 3rd-party svc. One pending submission; no partial credit on timeout. Quota log before/after smoke+main (dec 063/064).
+## Timing facts (results/kaggle_timing_e4b_v000_setup.json) setup ~210 s/task, outside max_time_minutes (clock starts after setup); flat across repos. vLLM startup 5.39 min; verification ~410 s (excluded from the 12 h). Agent clock p90 144 s at cap 5.
+- Timing kernel (plan 006 DONE, G1 held -> dec 055): stack main 2db5f51 per Addendum A (gate fix from 92a74c7, worktree
+  gemma-wt/codex-kernel-probes-gate). Last FROZEN+noted classifier: a208a023 (0d49b1c); rev-5 d4cdf0f0 frozen pending Director note (report 016).
+- FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
+  DEC 086: 31B cap<=3.5 MET (v002 COMPLETE); never raise 31B cap >3.5. DEC 087 BINDING (both tracks, replaces match clause): final must (a) score
+  COMPLETE itself OR (b) differ from a COMPLETE bundle ONLY by <= cap/calls/turns/thinking/max_out, all else byte-identical. MECHANICAL:
+  eval/finals_eligibility.py + ops/drafts/finals-checklist.md: v012, v009 vs v002 and e4b-v002h vs e4b-v002 all INELIGIBLE (system.md) -> each needs
+  own score. DEC 088: e4b too (LoRA/prompt variants need own score by Nov 29).
+  Codex 091327: BLOCKING x5 (false-ELIGIBLE paths) -> v2 strict byte/line check 0d3e3b4 (49 tests, suite 1673 pass), 3 checks re-run, verdicts
+  unchanged. Re-review review-finals-elig2-light: CLEAN -> journal only; BLOCKING -> fix, re-review, re-run checks before relying. Dec 087 item 3: if report 021 shows v012 winning, propose v012 scored submit there for first free slot after e4b-v002h (Nov 9).
+- TOPICS (Director mail 01:47Z, owner req): docs/TOPICS.md saved; on any topic status change (used now | planned | adjacent, not used) update its line + repo ref in the same cycle as the journal entry.
+- DEC 082 (approve, no reply): report 021 FIRST results table = pass rate + arm3-vs-arm1 TIMEOUT count + EMPTY count w/ paired discordants
+  (not footnote). On land: quota AFTER + budget row FIRST, then classifiers/metrics per dec 081 i1; budget hit w/ missing ids -> D73.7, no top-up.
+- DEC 083 (approve-with-changes; repeats REJECTED, guard refuses ledger shas, do NOT edit guard): SUBMIT AUTHORIZE 31b-v009 dist/31b-v009.zip
+  sha256=d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d, CONDITIONAL, checklist ops/drafts/nov8-submit-31b-v009-checklist.md:
+  (a) 58072907 FINAL COMPLETE w/ score (any value; ERROR/timeout -> VOID, CAP-BOUND, mail at once); (b) day>=11-08, nothing pending, no stacking,
+  auth carries to first day (a) holds; (c) Gate-2 codex review job review-31b-v009-submit-light, no BLOCKING; (d) Gate-4 journal line pre-submit;
+  (e) kernel aniket0202/gemma-submit-31b v2 pushed 06:34:57Z, output BYTE_IDENTICAL (results/submit_kernel_v2_verify.txt); SUBMIT_KERNEL stays 31b;
+  MANIFEST updated; (f) lb_31b_v009.json + waiter; write-up caveats. Window waiter submit-window-nov8-light fires 2026-11-08T00:00:30Z.
+- DEC 083 item 2: e4b-v002h bundles/e4b/v002h dist/e4b-v002h.zip sha256=938d618ceaeb7602d86e49a9cf7d2b7ce7191e8936d9520bb7d005a6c5f04836
+  (= e4b-v002 minus FastAPI/docs_src line; zip diff = 1 deleted line, same file set; load check == v002 results/bundle_load_check_e4b_v002h.json).
+  Codex review job review-e4b-v002h-light. Kernel aniket0202/gemma-submit-e4b v2 output BYTE_IDENTICAL (same txt). Do NOT flip SUBMIT_KERNEL
+  until authorized (Director: Nov 8 if v002 ERRORS, else Nov 9). Item 5: LB-noise repeat deferred.
+- GATE 2 DONE 06:36Z: v009 review 063339 BLOCKING 1 (empty diff on timeout/cap) WAIVED by DEC 084 item 1 / DEC 085 for d38c55c7 -> journal the waiver
+  WITH the Gate-4 line before submit (checklist (c) = PASS by waiver; dec 085 write-up line added to checklist (f)). Prompt nits -> ops/backlog-prompt.md (do NOT edit v009). MANIFEST nits done (no sha change).
+- DEC 084 item 3: e4b-v002h AUTHORIZED CONDITIONAL, checklist ops/drafts/submit-e4b-v002h-checklist.md (first UTC day: nothing pending,
+  no other submit that day, AND (31b-v009 VOID or already submitted on an earlier day & not pending); reverse SUBMIT_KERNEL commit + kernel recheck first).
+## Next 3
+1. Nov 8 00:00:30Z (submit-window-nov8-light): 58072907 COMPLETE 0.15 so (a) holds -> run ops/drafts/nov8-submit-31b-v009-checklist.md
+   (re-verify (a) with `kaggle competitions submissions` right before; waiver + Gate-4 journal lines first; then lb_31b_v009.json + waiter).
+2. e4b-v002h: Nov 9 at earliest (day after 31b-v009 submitted & not pending), reverse SUBMIT_KERNEL commit + kernel recheck first.
+3. On arm-3 main land: quota/budget row, seal check, classifiers, arm3 metrics, report 021 (dec 082 table; if v012 wins, propose v012 scored slot after Nov 9 per dec 087 i3).
+# Plan (the Director may revise it; log revisions in the journal)
+
+Today is Nov 4. The final deadline is Dec 2, 23:59 UTC. Each phase ends in a gate report to the
+Director.
+
+## P0: Foundation and baselines (Nov 4–7)
+Follow `docs/KICKOFF.md`.
+
+**Gate 0:**
+- The harness is verified and the facts are corrected.
+- Gold calibration has produced the clean task list.
+- The splits are frozen.
+- `pack` and the eval runners work.
+- 31B and E4B baseline bundles exist.
+- The first baseline submission is authorized.
+
+## P1: Scaffold iteration, both tracks (Nov 7–18)
+- Use the E4B track as a cheap testbed: a 1×L4 runs about 4× cheaper than 4×L4. Port its wins to
+  31B and confirm them there.
+- Work on the failure taxonomy, harness-trap fixes, the prompt workflow, skills, the localizer
+  sub-agent and sampling.
+- Submit daily when there's an eligible candidate.
+
+**Gate 1:** each track's best bundle beats its baseline on paired dev, and the timing bound holds.
+
+## P2: Post-training (Nov 12–25)
+- Collect trajectories on dev tasks (never holdout).
+- Use rejection-sampling SFT, plus scripted trajectories built from the reference patches.
+- LoRA: no A100 on GCP (decision 003). Cost out E4B LoRA on Kaggle L4x4 or GCP l4x1 spot, and whether 31B LoRA is feasible at all, in a report before Phase 2.
+- Run 1–2 rounds of expert iteration.
+- Lever (unscheduled): open-weight teacher distillation (licence must permit training other models). Needs GPUs we lack or a paid API (Aniket approval); cost out only when LoRA work starts (decision 003 item 3).
+- Ship rule (decision 004-002-001): leave-one-repo-out is mandatory for every ship decision; repo-specific prompt content is rejected; weight the four public repos equally.
+- Ship only if it wins paired on dev **and** holdout, in the exact vLLM base.
+
+**Gate 2:** for each track, decide adapter vs no adapter.
+
+## P3: Hardening (Nov 24–29)
+- Freeze candidates.
+- Run leave-one-repo-out checks, variance runs, and a timing rehearsal on 4×L4.
+- Get the last scored submissions in by about Nov 29.
+
+## P4: Finals (Nov 30–Dec 2)
+- Run the Director's selection analysis.
+- Escalate to Aniket on Dec 1.
+- Lock the selection by Dec 2, 18:00 UTC.
+
+## Budget plan ($150 hard cap; the Director releases it in increments)
+| Use | Approx. |
+|---|---|
+| CPU x86 VM for gold calibration and Phase-2 checks | $5 |
+| E4B on 1×L4 (spot) | $30 |
+| 31B on 4×L4 (spot) | $65 |
+| LoRA training (no A100 on GCP for now; see decision 003) | TBD |
+| Reserve | $20 |
+
+Kaggle L4x4 gives about 15 h/week, reserved for exact-environment smoke tests and timing.
+
