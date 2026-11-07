@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 00:14Z (cycle 168; dec 079 approve, waiting jobs). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 01:55Z (cycle 169; TOPICS.md saved, waiting jobs). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -36,8 +36,7 @@
   smoke = first 2 registered ids, needs >=1 root thinking block/row and >=5 total, else INVALID) - review running; (b) Nov 8 inputs
   DONE ops/drafts/nov8-slot-inputs.md (matrix on U1 v002 LB x U2 arm-2 verdict; e4b-v003 NOT packed); (c) B3 codex-build running.
 - DEC 077/076: arm 2 = v011, NO smoke, ONE session, D73.7 chunk rule; exit-4 guard 9486a3b CLEAN. Launch = timing_push.sh per 008.md l.42 w/ bundles/31b/v011.
-- DEC 074 D73: D73.5 submit_unverifiable counts AGAINST arm 2 (metrics arm2 mode implements); D73.6 fired (cycle 151).
-- DEC 072/073: D72 = governing pre-data metric defs (gate arms; v010 gate moot for arm 2); metrics assert mech2 17/empty 12 else STOP+report.
+- DEC 074 D73: D73.5 submit_unverifiable counts AGAINST arm 2 (metrics arm2 mode implements); D73.6 fired (cycle 151). DEC 072/073: D72 = governing pre-data metric defs (gate arms; v010 gate moot for arm 2); metrics assert mech2 17/empty 12 else STOP+report.
 - DEC 071 (gate approved w/ conditions): items 1-3 DONE 787b465. Plan 008 Addendum D71: wiring (a) YES same Context (gate alive),
   (b) scored = patch at submit call, else end-of-session workspace diff, (c) no name keying (keep name submit_patch), (d) gate counts:
   worst +3 calls/+7 turns. Smoke ids eval/plans/008-smoke-ids.txt (rule: first 2 non-timeout empty arm-1 rows) sha dcae5058...;
@@ -74,6 +73,7 @@
   gemma-wt/codex-kernel-probes-gate). Last FROZEN+noted classifier: a208a023 (0d49b1c); rev-5 d4cdf0f0 frozen pending Director note (report 016).
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
+- TOPICS (Director mail 01:47Z, owner req): docs/TOPICS.md saved; on any topic status change (used now | planned | adjacent, not used) update its line + repo ref in the same cycle as the journal entry.
 ## Next 3
 1. On arm-2 COMPLETE: seal check, quota AFTER, plan008 metrics arm2 -> report (ship rule per 008.md). Then arm 3 per plan 009 (base by verdict).
 2. On 31b-v002 final: fill results/lb_31b_v002.json + budget row + Director FYI (ERROR -> CAP-BOUND binds per dec 061 i).
