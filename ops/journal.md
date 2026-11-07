@@ -391,3 +391,7 @@
 2026-11-07T05:57Z | plan 009 base selection (mechanical, l.17-19): verdict != SHIP-ELIGIBLE -> BASE = arm 1 (v009) -> arm-3 bundle 31b-v012-p9a dist/31b-v012.zip 78a8fd30; NOT pushed (HARM "diagnose first" question to Director) | eval/plans/009.md ops/reports/019-plan008-arm2-result.md
 2026-11-07T05:57Z | codex-review-arm2sum-light launched on eval/plan008_arm2_summary.py | ops/jobs/codex-review-arm2sum-light.status
 2026-11-07T06:00Z | report 019 -> Director (NEEDS_DECISION: HARM clause vs arm 3 timing) | ops/reports/019-plan008-arm2-result.md
+2026-11-07T06:35Z | dec 080 read: v011 not adopted, arm 3 = v012, diagnose first | ops/decisions/080-019-plan008-arm2-result.md
+2026-11-07T06:35Z | codex-review-arm2sum-light done: BLOCKING agent-clock rounding (rich_3468 210.0009 s > 210), missing-evidence pass; NB paired empties 8/5; table numbers confirmed | ops/codex/review-20261107T055702.log
+2026-11-07T06:35Z | arm-2 diagnosis committed: stray = wrong-name deliverable; stray classifier flags correct fixes on 2/33 dev tasks -> arm-3 defect -> STOP per dec 080 item 3; empties 7 never-edited / 3 edit_file old_string-missing | results/plan008_arm2_diagnosis.md
+2026-11-07T06:35Z | report 020 -> Director (NEEDS_DECISION: stray amendment + push arm 3) | ops/reports/020-arm2-diagnosis-stray-defect.md

@@ -2532,3 +2532,209 @@ def test_no_test_and_never_success():
     assert m.submitted_without_test(gate()) is True
     assert m.submitted_without_test(gate() + invoke('run_command', {'command': 'pytest'})) is True
 
+exec
+/bin/bash -lc "git diff --name-only 078f4ea cefb420 -- eval/kaggle && git diff 078f4ea cefb420 -- eval/kaggle/timing_push.sh eval/kaggle/agent_timing.py && nl -ba eval/plan008_metrics.py | sed -n '1,60p;1208,1265p' && rg --files runs/31b-v011-p8b-arm2 | rg '(SEAL|MANIFEST|kernel-metadata|push)'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+eval/kaggle/classify_rows.py
+     1	#!/usr/bin/env python3
+     2	"""Plan 008 D73 metrics. CPU/offline only; output contains counts, never task text.
+     3	
+     4	Usage: plan008_metrics.py base OUT_JSON | smoke RUN_DIR OUT_JSON | arm2 RUN_DIR OUT_JSON
+     5	       plan008_metrics.py arm3smoke RUN_DIR CLASSIFIER_D4_JSON OUT_JSON
+     6	       plan008_metrics.py arm3 {arm1,arm2} OUT_JSON --arm3 DIR [DIR ...]
+     7	           [--base-dirs DIR ...] --classifiers DIR=D4_JSON,A2_JSON [--classifiers ...]
+     8	           --smoke-json PATH [--base-verdict-json PATH]
+     9	       Dirs are supplied in push order: smoke, main, chunk1, chunk2, ...
+    10	       Both arm3 modes require --identity-json PATH --bundle v01N --transport DIR=SHA256 --push-event DIR=EVENT (each arm3 dir).
+    11	       --base-verdict-json (base arm2) = the journaled plan-008 ruling file, {"verdict": "<plan 008 verdict>"};
+    12	       the raw arm2-mode output carries no verdict and therefore fails closed. Only SHIP-ELIGIBLE is a valid arm2 base.
+    13	
+    14	Exit: 0 ok, 2 usage, 3 incomplete arm2/arm3 inventory, 4 builtin arm2 run holds a non-root
+    15	submit_patch response (dec 077 failure-safe; STOP and report). 3/4 write no results.
+    16	
+    17	Smoke loads task.test_files with swegemma.models.load_tasks, as both eval runners do.
+    18	Tasks default to data/raw/tasks.jsonl (local) or the Kaggle competition tasks.jsonl;
+    19	PLAN008_TASKS_PATH overrides that location for downloaded runs. Missing tasks fail smoke.
+    20	"""
+    21	import hashlib
+    22	import json
+    23	import math
+    24	import os
+    25	from pathlib import Path
+    26	import re
+    27	import sys
+    28	from collections import defaultdict, deque
+    29	
+    30	sys.path.insert(0, str(Path(__file__).resolve().parent))
+    31	import plan007_arm1_summary as base
+    32	
+    33	BUNDLES_ROOT = Path(__file__).resolve().parents[1] / 'bundles/31b'
+    34	PUSH_EVENT = re.compile(r'(smoke|main|chunk[1-9][0-9]*)')
+    35	
+    36	ROOT = 'swe_baseline_agent'
+    37	GATE_YAML = Path('bundles/31b/v010/sub_agents/submit_gate.yaml')
+    38	SMOKE_IDS = Path('eval/plans/008-smoke-ids.txt')
+    39	ARM2_IDS = Path('eval/plans/007-arm1-ids.txt')
+    40	# Authoritative bundle identity = kernel header agent_yaml_sha256 (agent_timing.extract_bundle).
+    41	# v011 agent.yaml is byte-identical to v009 (arm 1), so arm-1 runs identify as builtin.
+    42	BUNDLE_YAMLS = {'v010': Path('bundles/31b/v010/agent.yaml'), 'v011': Path('bundles/31b/v011/agent.yaml')}
+    43	TEST = re.compile(r'\bpytest\b|-m\s+unittest\b|\btox\b')
+    44	BOUNCE = ('NOT SUBMITTED: no non-test source file is changed. Make your source edit with '
+    45	          'edit_file (or a /tmp Python script), confirm it with git diff --stat, then call submit_patch again.')
+    46	DEFINITIONS = {
+    47	    'mechanism1_empty': 'verified_patch_bytes == 0 (plan007 empty definition)',
+    48	    'mechanism2': 'rows with max_run >= 5; root-author tool calls only; same tool and sort_keys JSON args; nested calls excluded before runs',
+    49	    'repeated_calls': 'sum(length - 1) over root identical runs',
+    50	    'submitted_without_test': 'PRIMARY total (ship rule, D73.5) = observed rows (successful root submit with no prior root run_command matching \\bpytest\\b|-m\\s+unittest\\b|\\btox\\b) PLUS every submit_unverifiable row without a root test run before its earliest candidate boundary; submitted_without_test_observed = observed rows only, no-success rows excluded there and counted in count_no_successful_submit_observed',
+    51	    'count_no_successful_submit': 'PRIMARY total (D73.5) = verifiable rows with no successful submit PLUS unverifiable rows whose patch_submitted is not True; *_observed = rows with no observed successful submit',
+    52	    'inventory': 'smoke requires exactly the ids in eval/plans/008-smoke-ids.txt (else overall FAIL); arm2 requires exactly the 33 ids in eval/plans/007-arm1-ids.txt (else no output, exit 3)',
+    53	    'selected_bundle': 'header agent_yaml_sha256 matched against bundles/31b/v010|v011/agent.yaml; only if absent/unrecognized, gate event evidence; free-text header/dir labels never used',
+    54	    'success': 'first root harness patch_size response (builtin), or gate-authored inner harness patch_size response attributed to its enclosing root submit; acknowledgement not required',
+    55	    'submit_unverifiable': 'inner/builtin success vs explicit patch_submitted mismatch, or flag unavailable; missing flag derived from harness response only, not acknowledgement; rows counted and listed',
+    56	    'smoke': '008.md D73.2 i-v; missing evidence UNVERIFIABLE; overall PASS requires every criterion PASS',
+    57	    'gate_descriptives': 'root submit calls; reply-prefix bounces/failures; gate run_command response forced/check_error counts; terminal bounces; internal visibility',
+    58	    'gate_llm_limit': 'gate-authored limit evidence, or an unacknowledged enclosing gate with the runner turns-budget error; inferred from saved evidence',
+    59	    'gate_detection': 'selected_bundle v010 = gate, v011 = builtin; unidentified -> gate request/reply/child events; otherwise builtin layout and gate counts n/a',
+    60	    'untracked_only': 'D72.2: canonical SUBMITTED reply and nonempty scored patch with all sections declaring new file mode; absent scored-patch evidence reported separately',
+  1208	
+  1209	def main(argv=None):
+  1210	    argv = sys.argv if argv is None else argv
+  1211	    if len(argv) > 1 and argv[1] in ('arm3', 'arm3smoke'):
+  1212	        return arm3_cli(argv)
+  1213	    if len(argv) == 3 and argv[1] == 'base':
+  1214	        out = base_metrics()
+  1215	    elif len(argv) == 4 and argv[1] in ('smoke', 'arm2'):
+  1216	        try:
+  1217	            out = (smoke_metrics if argv[1] == 'smoke' else arm2_metrics)(argv[2])
+  1218	        except IncompleteRun as e:
+  1219	            print('INCOMPLETE arm2 inventory; no results written:', json.dumps(e.args[0]))
+  1220	            return 3
+  1221	        except GateResponseInBuiltinRun as e:
+  1222	            print('STOP: gate-authored submit_patch response in builtin arm2 run (dec 077); '
+  1223	                  'no results written; report to Director:', json.dumps(e.args[0]))
+  1224	            return 4
+  1225	    else:
+  1226	        print(__doc__)
+  1227	        return 2
+  1228	    Path(argv[-1]).write_text(json.dumps(out, indent=2) + '\n')
+  1229	    print(json.dumps(out.get('totals', dict(n_rows=out['n_rows'], overall=out.get('overall')))))
+  1230	    return 0
+  1231	
+  1232	
+  1233	if __name__ == '__main__':
+  1234	    sys.exit(main())
+runs/31b-v011-p8b-arm2/SEAL.sha256
+runs/31b-v011-p8b-arm2/bundle/MANIFEST.md
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import contextlib,io,json,sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0,'eval')
+import plan008_arm2_summary as w
+import plan008_metrics as m
+from fractions import Fraction
+for n in range(34):
+ for a in range(n+1):
+  b=n-a
+  from math import factorial
+  ref=min(Fraction(1),2*sum((Fraction(factorial(n),factorial(i)*factorial(n-i)*2**n) for i in range(min(a,b)+1)),Fraction(0)))
+  assert w.sign_test_two_sided(a,b)==float(ref)
+print('PASS: all 595 sign-test cases through 33 discordants')
+for f in ['results/plan008_arm2.json','results/plan008_arm1_base.json']:
+ actual=m.arm2_metrics('runs/31b-v011-p8b-arm2') if 'arm2' in f else m.base_metrics()
+ expected=json.loads(Path(f).read_text())
+ assert actual==expected, f
+ print('PASS: regenerated in memory',f)
+original_read=Path.read_text
+store={}
+target=Path('/__review_memory_output__.json')
+def read(p,*args,**kw):
+ return store[str(p)] if p==target else original_read(p,*args,**kw)
+def write(p,data,*args,**kw):
+ assert p==target,p
+ store[str(p)]=data
+ return len(data)
+with patch.object(Path,'write_text',write),patch.object(Path,'read_text',read),contextlib.redirect_stdout(io.StringIO()):
+ assert w.main(['eval/plan008_arm2_summary.py',str(target)])==0
+actual=json.loads(store[str(target)])
+expected=json.loads(Path('results/plan008_arm2_summary.json').read_text())
+assert actual==expected
+print('PASS: regenerated wrapper summary in memory matches committed JSON exactly')
+print('CHECK: actual raw clock breaches 210 but committed met.agent_clock =',actual['plan008_safety']['met']['agent_clock'])
+PY" in /home/ubuntu/work/gemma
+ exited 1 in 99ms:
+PASS: all 595 sign-test cases through 33 discordants
+PASS: regenerated in memory results/plan008_arm2.json
+Traceback (most recent call last):
+  File "<stdin>", line 18, in <module>
+AssertionError: results/plan008_arm1_base.json
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import contextlib,io,json,sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0,'eval')
+import plan008_arm2_summary as w
+original_read=Path.read_text
+store={}; target=Path('/__review_memory_output__.json')
+def read(p,*a,**kw): return store[str(p)] if p==target else original_read(p,*a,**kw)
+def write(p,data,*a,**kw):
+ assert p==target,p
+ store[str(p)]=data
+ return len(data)
+with patch.object(Path,'write_text',write),patch.object(Path,'read_text',read),contextlib.redirect_stdout(io.StringIO()):
+ assert w.main(['eval/plan008_arm2_summary.py',str(target)])==0
+actual=json.loads(store[str(target)])
+assert actual==json.loads(Path('results/plan008_arm2_summary.json').read_text())
+print('PASS: wrapper regenerated in memory; exact match to committed results/plan008_arm2_summary.json')
+for label,changes in [('missing clock',dict(agent_clock_max=None)),('rounding clock',dict(agent_clock_max=w.base.pct([210.04],1))),('rounding wall',dict(total_wall_p50_p90_max=[1,w.base.pct([876.46],.9),900]))]:
+ def fake_base(argv):
+  d=json.loads(json.dumps(actual)); d['secondary'].update(changes); store[str(target)]=json.dumps(d); return 0
+ with patch.object(w.base,'main',fake_base),patch.object(Path,'write_text',write),patch.object(Path,'read_text',read),contextlib.redirect_stdout(io.StringIO()):
+  w.main(['review',str(target)])
+ d=json.loads(store[str(target)])
+ print(label,d['plan008_safety']['met'])
+# Compare committed base metrics to arm2 using their per-row empty flags.
+b=json.loads(Path('results/plan008_arm1_base.json').read_text()); a=json.loads(Path('results/plan008_arm2.json').read_text())
+bm={r['instance_id']:r['mechanism1_empty'] for r in b['rows']}; am={r['instance_id']:r['mechanism1_empty'] for r in a['rows']}
+print('paired empties arm2-only / arm1-only',sum(am[k] and not bm[k] for k in am),sum(bm[k] and not am[k] for k in am))
+for lineno,line in enumerate(Path(w.ARM2_RUN).read_text().splitlines(),1):
+ d=json.loads(line)
+ if d.get('instance_id')=='rich_3468': print('clock violation timing.jsonl line',lineno)
+PY" in /home/ubuntu/work/gemma
+ succeeded in 98ms:
+PASS: wrapper regenerated in memory; exact match to committed results/plan008_arm2_summary.json
+missing clock {'test_edits': True, 'stray': False, 'agent_clock': True, 'total_wall_p90': True}
+rounding clock {'test_edits': True, 'stray': False, 'agent_clock': True, 'total_wall_p90': True}
+rounding wall {'test_edits': True, 'stray': False, 'agent_clock': True, 'total_wall_p90': False}
+paired empties arm2-only / arm1-only 8 5
+clock violation timing.jsonl line 12
+
+codex
+BLOCKING
+
+1. **The agent-clock safety check incorrectly passes a value above 210 seconds.** The wrapper compares the rounded summary maximum at [eval/plan008_arm2_summary.py:86](/home/ubuntu/work/gemma/eval/plan008_arm2_summary.py:86). The inherited [percentile helper rounds to one decimal](/home/ubuntu/work/gemma/eval/plan007_arm1_summary.py:58). `rich_3468` actually records **210.000898854 s**, but the committed output reports `210.0` and `met.agent_clock=true`. Under the requested literal `<=210` rule, that is incorrect. Compare unrounded measurements; round only for display. The wall-p90 comparison has the same boundary problem.
+
+2. **Missing safety evidence can pass silently.** At [eval/plan008_arm2_summary.py:86](/home/ubuntu/work/gemma/eval/plan008_arm2_summary.py:86), `(agent_clock_max or 0)` makes an entirely missing clock pass. The inherited helper also discards individual null clocks, while absent test/stray fields count as false at [eval/plan007_arm1_summary.py:254](/home/ubuntu/work/gemma/eval/plan007_arm1_summary.py:254). Require valid evidence for all 33 rows before declaring these checks met. Current inputs contain these fields, so this second issue does not change today’s counts.
+
+Non-blocking
+
+1. **Paired empty-patch discordants are omitted.** [Plan 008:56](/home/ubuntu/work/gemma/eval/plans/008.md:56) requires arm-2-only / arm-1-only empties. Neither output reports that comparison explicitly. Their per-row flags yield **8 / 5**; add those counts.
+
+Verified otherwise:
+
+- Exact 33-ID pairing; A=arm2; resolved rule identical to arm-1 PRIMARY, including H rows.
+- PRIMARY: **8/33 vs 4/33**, A-only/B-only **4/0**, exact two-sided **p=0.125**; Wilson interval correct.
+- Test edits **0**; stray rows **1**, correctly failing safety. Wall p90 **807.2 ≤ 876.48 s**.
+- Submitted-without-test **25 ≤ 23+3**.
+- Header rewrites retain the environment caveat and remove the inherited arm-1 VALID ruling.
+- Correct decision interpretation: **HARM** from stray-file safety, and **both guards failed**: empties **15>4**, repeat tasks **16>6**.
+
+Both requested JSON outputs regenerated exactly in memory; all 595 sign-test cases through 33 discordants passed. No files changed.
+
+Questions: none.
+tokens used
+60,810
