@@ -1232,10 +1232,107 @@ ARM4_DEFINITIONS = {**DEFINITIONS, **ARM3_DEFINITIONS,
     'timing': 'Unrounded finite nonnegative agent_clock_seconds <=220 and finalization_seconds <=30 for every arm4 row.',
     'safety': 'Zero test edits and S81 governing stray; unrounded wall p90 <=1.10*arm3; submitted_without_test <=10, D73.5 on both arms.',
     'limits': 'ABSOLUTE arm4 timeouts <=16 (timed_out OR agent_timeout_fired), empties <=18 (verified_patch_bytes ==0).',
+    'kernel_code': 'Per-dir recorded git_sha and SHA256 of committed agent_timing.py, timing_push.sh and vendor/SHA256SUMS; complete matching fingerprints required across all arm4/arm3 headers.',
+    'concurrency': 'Every arm4 and arm3 header must record integer concurrency 1.',
+    'gold': 'Resolved tasks file selected by PLAN008_TASKS_PATH/_tasks_path; exact bytes hashed in input_shas and parsed afresh for S81.',
     'context_overflow': 'Trace error events/fields only: context length/window exceeded, context overflow, or too many tokens. Explicit false or a terminal event establishes no overflow; aggregate-only summaries remain unknown; unknown ids listed.',
     'descriptive': 'Original plan-009 rule vs arm1 (observed arm1 submit counts), including timeout/empty vetoes; no effect on arm4 decision.',
     'decision': 'INVALID first; D>=3 -> 2048-WORSE; limits fail -> 2048-NO-GAIN; timing/safety fail -> VETOED; else 2048-ADOPT.',
 }
+
+
+ARM4_KERNEL_PATHS = ('eval/kaggle/agent_timing.py', 'eval/kaggle/timing_push.sh',
+                     'eval/kaggle/vendor/SHA256SUMS')
+
+
+def arm4_git_read(git_sha, path):
+    """Read raw committed bytes locally, independent of the caller's cwd."""
+    import subprocess
+    return subprocess.run(['git', 'show', f'{git_sha}:{path}'],
+                          cwd=Path(__file__).resolve().parents[1], check=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
+
+
+def arm4_header_evidence(dirs, git_reader=None):
+    """All push headers, including retries; never infer equality from absent evidence."""
+    import subprocess
+    reader = git_reader or arm4_git_read
+    kernel, concurrency = {}, {}
+    for directory in dirs:
+        headers = _headers(Path(directory) / 'timing.jsonl')
+        kernel[str(directory)], concurrency[str(directory)] = [], []
+        for header in headers:
+            sha = header.get('git_sha')
+            fingerprint = None
+            if isinstance(sha, str) and sha.strip() and not sha.startswith('-'):
+                try:
+                    fingerprint = {path: hashlib.sha256(reader(sha, path)).hexdigest()
+                                   for path in ARM4_KERNEL_PATHS}
+                except (OSError, ValueError, TypeError, subprocess.CalledProcessError):
+                    pass
+            kernel[str(directory)].append(dict(git_sha=sha, kernel_fingerprint=fingerprint))
+            concurrency[str(directory)].append(header.get('concurrency'))
+    return dict(kernel_code=kernel, concurrency=concurrency)
+
+
+def arm4_kernel_status(*environments):
+    fingerprints = []
+    for environment in environments:
+        for headers in environment['kernel_code'].values():
+            if not headers or any(h['kernel_fingerprint'] is None for h in headers):
+                return 'missing'
+            fingerprints.extend(h['kernel_fingerprint'] for h in headers)
+    if not fingerprints:
+        return 'missing'
+    return 'match' if all(f == fingerprints[0] for f in fingerprints) else 'differs'
+
+
+def arm4_concurrency_status(*environments):
+    values = [values for env in environments for values in env['concurrency'].values()]
+    return 'ok' if values and all(vs and all(type(v) is int and v == 1 for v in vs)
+                                  for vs in values) else 'invalid'
+
+
+def arm4_gold_evidence():
+    """Hash and parse the same snapshot; avoid the legacy path-only gold cache."""
+    path = _tasks_path().resolve()
+    try:
+        content = path.read_bytes()
+    except OSError:
+        return path, None, None
+    digest = hashlib.sha256(content).hexdigest()
+    try:
+        tasks = [json.loads(line) for line in content.splitlines() if line.strip()]
+        dirs = {t['instance_id']: {os.path.dirname(f) for f in gold_created_files(t['patch'])}
+                for t in tasks if isinstance(t.get('patch'), str)}
+    except (ValueError, KeyError, TypeError):
+        dirs = None
+    return path, digest, dirs
+
+
+def arm4_summarize(records, gold_dirs, arm1=False):
+    # Replace the legacy cached S81 result with the snapshot hashed for this arm4 report.
+    summary = summarize_arm(records, arm1=arm1)
+    rows = [r for r, _, _, _ in records]
+    if not all(isinstance(r.get('stray_files'), list) for r in rows):
+        return summary
+    governing_ids, literal_ids, details, missing = [], [], [], False
+    for row in rows:
+        literal = sorted(row['stray_files'])
+        if not literal:
+            continue
+        iid = row['instance_id']
+        dirs = gold_dirs.get(iid) if gold_dirs is not None else None
+        governing, exempted = amended_stray(literal, dirs)
+        literal_ids.append(iid)
+        if governing or dirs is None:
+            governing_ids.append(iid)
+        missing |= dirs is None
+        details.append(dict(instance_id=iid, literal=literal, governing=governing,
+                            exempted=exempted, gold_unavailable=dirs is None))
+    summary['safety'].update(stray_files='not available' if missing else _id_count(governing_ids),
+                             stray_files_literal=_id_count(literal_ids), stray_rows=details)
+    return summary
 
 
 def arm4_schema(paths):
@@ -1284,7 +1381,8 @@ def arm4_discordants(left, right, predicate):
 
 
 def arm4_metrics(arm4_dirs, base_dirs, arm1_dirs, classifiers, smoke_json, base_json, *,
-                 identity_json, bundle, transports, push_events):
+                 identity_json, bundle, transports, push_events, git_reader=None):
+    gold_path, gold_sha, gold_dirs = arm4_gold_evidence()
     paths = [base.ARM_IDS, base.SCREENED_IDS, base.__file__, 'eval/plan007_report.py', 'eval/thinking_bound.py']
     arms, inventories, records, envs, arm_paths = {}, {}, {}, {}, {}
     for name, dirs in (('arm4', arm4_dirs), ('arm3', base_dirs), ('arm1', arm1_dirs)):
@@ -1294,9 +1392,11 @@ def arm4_metrics(arm4_dirs, base_dirs, arm1_dirs, classifiers, smoke_json, base_
         paths.extend(inputs)
         records[name], inventories[name], arm_paths[name] = rec, inv, inputs
         # D73.5 applies symmetrically to the primary comparison, including its base.
-        arms[name] = summarize_arm(rec)
+        arms[name] = arm4_summarize(rec, gold_dirs)
         arms[name]['descriptive']['context_overflow'] = context_overflow(rec)
         envs[name] = environment_metrics(headers, rec)
+        if name in ('arm4', 'arm3'):
+            envs[name].update(arm4_header_evidence(dirs, git_reader))
     a, b, c = (arms[n] for n in ('arm4', 'arm3', 'arm1'))
     primary = arm4_discordants(records['arm4'], records['arm3'], lambda r: r.get('resolved') is True)
     primary.update(D=primary['comparator_only']['count'] - primary['arm4_only']['count'],
@@ -1349,10 +1449,18 @@ def arm4_metrics(arm4_dirs, base_dirs, arm1_dirs, classifiers, smoke_json, base_
         missing[name] = [r['instance_id'] for r, cl, trace, entries in rec if
                          type(r.get('resolved')) is not bool or r.get('verification_skipped') is True
                          or type(r.get('verified_patch_bytes')) is not int or r['verified_patch_bytes'] < 0
-                         or type(r.get('timed_out')) is not bool
-                         or any(k in r and type(r[k]) is not bool for k in ('timed_out', 'agent_timeout_fired'))
+                         or any(type(r.get(k)) is not bool for k in ('timed_out', 'agent_timeout_fired'))
                          or 'h' not in cl or not isinstance(_read_json(trace).get('entries'), list)]
     invalid = []
+    if gold_sha is None:
+        invalid.append('gold tasks file unreadable')
+    kernel_status = arm4_kernel_status(envs['arm4'], envs['arm3'])
+    if kernel_status == 'missing':
+        invalid.append('kernel evidence missing')
+    elif kernel_status == 'differs':
+        invalid.append('pairing voided: kernel agent/verification path differs')
+    if arm4_concurrency_status(envs['arm4'], envs['arm3']) != 'ok':
+        invalid.append('concurrency evidence missing or != 1')
     if not base_valid:
         invalid.append('base evidence invalid/unbound')
     if not identity['checked']:
@@ -1363,14 +1471,15 @@ def arm4_metrics(arm4_dirs, base_dirs, arm1_dirs, classifiers, smoke_json, base_
         invalid.append('literal H>=5')
     if any(missing.values()):
         invalid.append('missing row evidence')
-    differences = [k for k in envs['arm4'] if envs['arm4'][k] != envs['arm3'][k]]
-    if 'kernel_code' in differences:
-        invalid.append('pairing voided: kernel agent/verification path differs')
+    differences = [k for k in envs['arm4'] if k not in ('kernel_code', 'concurrency')
+                   and envs['arm4'][k] != envs['arm3'][k]]
+    if kernel_status == 'differs':
+        differences.append('kernel_code')
     decision = ('INVALID' if invalid else '2048-WORSE' if primary['D'] >= 3 else
                 '2048-NO-GAIN' if not all(limits.values()) else
                 'VETOED' if not a['timing']['timing_pass'] or not all(checks.values()) else '2048-ADOPT')
     # Plan 009 against arm1 remains descriptive, including its original observed arm1 counts.
-    original_arm1 = summarize_arm(records['arm1'], arm1=True)
+    original_arm1 = arm4_summarize(records['arm1'], gold_dirs, arm1=True)
     original_checks = safety_checks(a['safety'], original_arm1['safety'])
     original_vetoes = [k for k, passed in original_checks.items() if not passed]
     if a['timeouts']['count'] > c['timeouts']['count'] + 2:
@@ -1381,14 +1490,17 @@ def arm4_metrics(arm4_dirs, base_dirs, arm1_dirs, classifiers, smoke_json, base_
     secondary.update(descriptive_only=True, vetoes=original_vetoes, safety_checks=original_checks,
                      decision=arm3_decision(secondary['arm4_only']['count'], secondary['comparator_only']['count'],
                                            secondary['p'], a['h_rows']['count'], bool(invalid), original_vetoes))
-    return dict(_schema=arm4_schema(paths), mode='arm4', n_rows=33, base_arm='arm3',
+    schema = arm4_schema(paths)
+    if gold_sha is not None:
+        schema['input_shas'][str(gold_path)] = gold_sha
+    return dict(_schema=schema, mode='arm4', n_rows=33, base_arm='arm3',
                 inventory=inventories, arms=arms, primary=primary, comparisons=comparisons,
                 secondary_plan009_vs_arm1=secondary, decision=decision, verdict=decision,
                 decision_inputs=dict(limits=limits, safety_checks=checks, timing_pass=a['timing']['timing_pass'],
                                      invalid_reasons=invalid, missing_evidence=missing, base_valid=base_valid,
                                      base_bound=base_bound, identity=identity, smoke_bound=smoke_bound,
                                      smoke_recomputed=recomputed),
-                env_drift=dict(arms=envs, differences=differences))
+                environment=envs, env_drift=dict(arms=envs, differences=differences))
 
 
 def arm4_cli(argv):
