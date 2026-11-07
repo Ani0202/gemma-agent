@@ -45,10 +45,8 @@
 - PLAN 008 / 31b-v010-p8 (DONE, report 019/020): pre-reg eval/plans/008.md; prompt-level repeat guard + in-bundle submit_patch gate; NOT ship-eligible.
 - PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
   33 dev fixed order eval/plans/007-arm1-ids.txt, --with-verification --no-stock-probe, slug aniket0202/gemma-31b-passrate.
-- DEC 061: (i) v002 ERROR/timeout -> CAP-BOUND binds; (ii) v004 CPU draft, no slot. Items 4/5 DONE (plan 007; Nov 8 proposal -> dec 083).
-  Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
-- DEC 057: no new bundle carries a repo-named hint; v000-v002 (both tracks) carry the FastAPI hint -> reports must say so; LB may tilt FastAPI-ward. e4b-v003 = e4b-v002 + generic fixes minus that line (CPU draft).
-  31b-v004 CPU DRAFT dist/31b-v004.zip 50537e1d... (v007 + quoting line), no slot (dec 061 ii); NB3 timeout empty patch unguaranteed (dec 056 item 6).
+- DEC 061: (i) v002 ERROR/timeout -> CAP-BOUND binds; (ii) v004 CPU draft, no slot. Item 6: arm E/F results schema-headed; dec 038 evidence by Nov 9 23:59Z.
+- DEC 057: no new bundle carries a repo-named hint; v000-v002 (both tracks) carry the FastAPI hint -> reports must say so. 31b-v004 CPU DRAFT 50537e1d (v007+quoting), no slot.
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU week of 11-07: 11.89/30 h at 06:26Z (arm 2 + arm-3 smoke done; 18.11 h left; arm-3 main est ~11 h). Log: ops/budget/kaggle.md. Resets 2026-11-14T00:00Z.
 ## Live caveats (dec 078: no FYIs for routine clean reviews; dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035). Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
   (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
