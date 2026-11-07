@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 06:31Z (cycle 177; dec 082 approve, Nov 8 proposal SENT early). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 06:37Z (cycle 178; dec 083: Nov 8 = 31b-v009 CONDITIONAL; e4b-v002h fallback built). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -21,8 +21,8 @@
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
 - DEC 079: approve, nothing changes. On v002 final mail Director T (first final poll - 00:06:31Z), exact status, public score; fill json.
-  ERROR/timeout -> mail AT ONCE before any slot. Nov 8 default if PENDING at 12:00Z = e4b-v002 repeat. Dec 038 files rechecked OK 00:13Z.
-## Running jobs (06:30Z): memguard-light, lb-31b-v002-wait-light (PENDING 06:06Z), passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
+  ERROR/timeout -> mail AT ONCE before any slot. (Nov 8 repeat default SUPERSEDED by dec 083.) Dec 038 files rechecked OK 00:13Z.
+## Running jobs (06:37Z): memguard-light, lb-31b-v002-wait-light (PENDING 06:06Z), review-31b-v009-submit-light, review-e4b-v002h-light, submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
 - CODEX S81: review 060833 BLOCKING 1 (base stray evidence missing could still ON-ADOPT) -> fixed 71185a3 (safety_checks(): both arms need
   available stray evidence, zero governing for arm 3 only; +5 tests incl. unrounded wall-p90 gate; 1624 pass). Re-review s81b ops/codex/review-20261107T061229.md CLEAN (no blocking) -> arm-3 metrics allowed. Report must list amended arm-2 counts separately (S81.3).
 - DEC 081 (on 020, approve A w/ changes): (1) arm-3 SMOKE (v4) PASS results/plan009_arm3_smoke.json: thinking blocks [5,10]=15, timing PASS,
@@ -38,24 +38,14 @@
   (report 019) 8/33 vs arm1 4/33, A-only 4/B-only 0 p=0.125, MECH1/2 FAIL -> NOT SHIP-ELIGIBLE; base = arm 1; 31B default draft stays v009. Files 4de6787.
   arm3 CLI: --identity-json --bundle --transport DIR=SHA --push-event DIR=EVENT (every dir) --smoke-json [--base-verdict-json]. Arm-3 bundle
   31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096), load PASS (e5196a4).
-- DEC 071 (gate approved w/ conditions): items 1-3 DONE 787b465. Plan 008 Addendum D71: wiring (a) YES same Context (gate alive),
-  (b) scored = patch at submit call, else end-of-session workspace diff, (c) no name keying (keep name submit_patch), (d) gate counts:
-  worst +3 calls/+7 turns. Smoke ids eval/plans/008-smoke-ids.txt (rule: first 2 non-timeout empty arm-1 rows) sha dcae5058...;
-  smoke PASS = ALL of (i)-(v) per D71.2. Arm 2 = v010 iff smoke PASS else v011. FALLBACK 31b-v011-p8b dist/31b-v011.zip
-  sha256=4f5b078a367e964ffb7d7426f4d42e13451d0c9dde79322c7fee5bd3a88f4938 (agent.yaml==v009, PROMPT-LEVEL), pack+load PASS.
+- DEC 071 (DONE; arm 2 ran): gate details plan 008 Addendum D71. FALLBACK 31b-v011-p8b dist/31b-v011.zip 4f5b078a... (agent.yaml==v009, PROMPT-LEVEL).
 - DEC 069 (rep 018, A w/ conditions): arm 1 VALID by POST-HOC ruling = plan 007 Addendum C (7ceb059). PRIMARY 4/33 FINAL
   (codex 132715 BLOCKING = missing descriptive lines -> fixed; re-review 133120 CLEAN). results/plan007_arm1_summary.json v2
   (script sha 349b1bda...): a 4/33 (W 4.8-27.3), c 4/26, d 4/27 (literal), d' 4/33, empty 12/33 (2 to/10 non), unscreened 3/25, ENV CONTROL caveat l.152 on every arm-1 citation.
-- PLAN 008 / 31b-v010-p8 (dec 069 item 3 + DEC 070): pre-reg eval/plans/008.md (1169579). Feasibility: bundle callbacks silently dropped
-  (no registry passed), so repeat guard = PROMPT-LEVEL (Option A text verbatim + edit 2-fail -> shorter anchor or /tmp script, NOT write_file);
-  empty guard = dec 070 1(b) prompt rule + IN-BUNDLE agent_tool gate named submit_patch (shares Context; <=2 bounces). Both deviations
-  accepted (dec 072). Ship rule: pass delta>=0 AND empty<=4/33 AND run>=5 tasks<=6/33 AND safety (submitted-without-test <= 23+3=26).
-  Dec 070 item 5: arm-3 addendum must require smoke thinking blocks > 0.
+- PLAN 008 / 31b-v010-p8 (DONE, report 019/020): pre-reg eval/plans/008.md; prompt-level repeat guard + in-bundle submit_patch gate; NOT ship-eligible.
 - PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
   33 dev fixed order eval/plans/007-arm1-ids.txt, --with-verification --no-stock-probe, slug aniket0202/gemma-31b-passrate.
-- DEC 061 (on report 014): approve-with-changes; (i) v002 ERROR/timeout -> CAP-BOUND binds; (ii) v004 CPU draft, no slot; (iii) done.
-  Item 4: plan 007 pre-reg (33-dev pass rate; H1 env; thinking off vs on paired arm) DUE 2026-11-07T18:00Z (may use leftover quota pre-reset).
-  Item 5: Nov 8 slot candidate + 1-para justification DUE 2026-11-07T12:00Z (e4b-v002 repeat / e4b-v003 if packed+reviewed+smoke / 31b-v002 repeat).
+- DEC 061: (i) v002 ERROR/timeout -> CAP-BOUND binds; (ii) v004 CPU draft, no slot. Items 4/5 DONE (plan 007; Nov 8 proposal -> dec 083).
   Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
 - DEC 057: no new bundle carries a repo-named hint; v000-v002 (both tracks) carry the FastAPI hint -> reports must say so; LB may tilt FastAPI-ward. e4b-v003 = e4b-v002 + generic fixes minus that line (CPU draft).
   31b-v004 CPU DRAFT dist/31b-v004.zip 50537e1d... (v007 + quoting line), no slot (dec 061 ii); NB3 timeout empty patch unguaranteed (dec 056 item 6).
@@ -72,8 +62,17 @@
 - TOPICS (Director mail 01:47Z, owner req): docs/TOPICS.md saved; on any topic status change (used now | planned | adjacent, not used) update its line + repo ref in the same cycle as the journal entry.
 - DEC 082 (approve, no reply): report 021 FIRST results table = pass rate + arm3-vs-arm1 TIMEOUT count + EMPTY count w/ paired discordants
   (not footnote). On land: quota AFTER + budget row FIRST, then classifiers/metrics per dec 081 i1; budget hit w/ missing ids -> D73.7, no top-up.
-- Nov 8 proposal SENT 06:30Z ops/drafts/nov8-slot-proposal.md (PENDING/ERROR -> e4b-v002 repeat; SCORED>=0.10 -> 31b-v002 repeat). Awaiting SUBMIT decision.
+- DEC 083 (approve-with-changes; repeats REJECTED, guard refuses ledger shas, do NOT edit guard): SUBMIT AUTHORIZE 31b-v009 dist/31b-v009.zip
+  sha256=d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d, CONDITIONAL, checklist ops/drafts/nov8-submit-31b-v009-checklist.md:
+  (a) 58072907 FINAL COMPLETE w/ score (any value; ERROR/timeout -> VOID, CAP-BOUND, mail at once); (b) day>=11-08, nothing pending, no stacking,
+  auth carries to first day (a) holds; (c) Gate-2 codex review job review-31b-v009-submit-light, no BLOCKING; (d) Gate-4 journal line pre-submit;
+  (e) kernel aniket0202/gemma-submit-31b v2 pushed 06:34:57Z, output BYTE_IDENTICAL (results/submit_kernel_v2_verify.txt); SUBMIT_KERNEL stays 31b;
+  MANIFEST updated; (f) lb_31b_v009.json + waiter; write-up caveats. Window waiter submit-window-nov8-light fires 2026-11-08T00:00:30Z.
+- DEC 083 item 2: e4b-v002h bundles/e4b/v002h dist/e4b-v002h.zip sha256=938d618ceaeb7602d86e49a9cf7d2b7ce7191e8936d9520bb7d005a6c5f04836
+  (= e4b-v002 minus FastAPI/docs_src line; zip diff = 1 deleted line, same file set; load check == v002 results/bundle_load_check_e4b_v002h.json).
+  Codex review job review-e4b-v002h-light. Kernel aniket0202/gemma-submit-e4b v2 output BYTE_IDENTICAL (same txt). Do NOT flip SUBMIT_KERNEL
+  until authorized (Director: Nov 8 if v002 ERRORS, else Nov 9). Item 5: LB-noise repeat deferred.
 ## Next 3
-1. On 31b-v002 final: fill results/lb_31b_v002.json + budget row + Director FYI (ERROR -> CAP-BOUND binds per dec 061 i); note which proposal row now applies.
-2. On SUBMIT decision for Nov 8: (e4b) reverse SUBMIT_KERNEL config commit first, grep-journaled; never while 58072907 PENDING.
+1. On review jobs: read verdicts (BLOCKING -> fix/report); mail Director e4b-v002h review + kernel verify result.
+2. On 31b-v002 final: dec 079 item 2 FIRST (json, budget row, mail T/status/score); then dec 083 checklist (submit >= 11-08T00:00Z only).
 3. On arm-3 main land: quota/budget row, seal check, classifiers, arm3 metrics, report 021 (dec 082 item 1 table layout).

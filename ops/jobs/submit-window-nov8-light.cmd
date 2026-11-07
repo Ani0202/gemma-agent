@@ -1,0 +1,1 @@
+bash -c T=\$\(date\ -u\ -d\ 2026-11-08T00:00:30Z\ +%s\)\;\ while\ \[\ \"\$\(date\ -u\ +%s\)\"\ -lt\ \"\$T\"\ \]\;\ do\ sleep\ 300\;\ done\;\ echo\ \"Nov\ 8\ submit\ window\ open\ \(dec\ 083\ item\ 1b\)\ \$\(date\ -u\ +%FT%TZ\)\" 

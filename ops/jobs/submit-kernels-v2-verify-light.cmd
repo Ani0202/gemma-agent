@@ -1,0 +1,1 @@
+/tmp/claude-1001/-home-ubuntu-work-gemma/0d629544-390d-4452-b231-6911f837c3d9/scratchpad/verify_kernels.sh 
