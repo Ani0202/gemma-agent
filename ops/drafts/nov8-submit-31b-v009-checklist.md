@@ -1,3 +1,4 @@
+# SUPERSEDED as primary by dec 089: Nov 8 = 31b-v012 (ops/drafts/nov8-submit-31b-v012-checklist.md). This list applies ONLY as the dec 089 item-4 FALLBACK if v012 conditions are unmet by 2026-11-07T23:45Z.
 # Nov 8+ submit checklist: 31b-v009 (dec 083 item 1). Run IN ORDER at submit time; any FAIL voids the authorization.
 a. `kaggle competitions submissions` right before submitting: 58072907 FINAL COMPLETE with a public score (any value). ERROR/timeout -> VOID, CAP-BOUND binds, mail Director AT ONCE.
    (First, dec 079 item 2: fill results/lb_31b_v002.json, mail T / status / score.)
