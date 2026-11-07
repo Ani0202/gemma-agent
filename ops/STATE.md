@@ -36,12 +36,7 @@
   arm3 CLI needs --identity-json --bundle --transport DIR=SHA --push-event DIR=EVENT (every dir) --smoke-json [--base-verdict-json].
   v012/v013 review 144907 CLEAN. Arm-3 packed e5196a4: 31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096);
   31b-v013-p9b dist/31b-v013.zip sha256=06eff226d661c0528105a14d4fe0b69f67a8fb84fc52e654a0d54b6bc59a5dbb (v011+think 4096); load checks PASS.
-- DEC 078: approve; nothing changes. No FYIs for routine clean reviews (fold into next report/STATE). Idle order: (a) arm-3 addendum
-  DONE eval/plans/009.md (1b0054a; base = v011 iff plan-008 SHIP-ELIGIBLE else v009; arm-3 = base + thinking 0->4096 only;
-  smoke = first 2 registered ids, needs >=1 root thinking block/row and >=5 total, else INVALID) - review running; (b) Nov 8 inputs
-  DONE ops/drafts/nov8-slot-inputs.md (matrix on U1 v002 LB x U2 arm-2 verdict; e4b-v003 NOT packed); (c) B3 codex-build running.
-- DEC 077/076: arm 2 = v011, NO smoke, ONE session, D73.7 chunk rule; exit-4 guard 9486a3b CLEAN. Launch = timing_push.sh per 008.md l.42 w/ bundles/31b/v011.
-- DEC 074 D73: D73.5 submit_unverifiable counts AGAINST arm 2 (metrics arm2 mode implements); D73.6 fired (cycle 151). DEC 072/073: D72 = governing pre-data metric defs (gate arms; v010 gate moot for arm 2); metrics assert mech2 17/empty 12 else STOP+report.
+- DEC 078: no FYIs for routine clean reviews. arm-3 smoke = first 2 registered ids, >=1 root thinking block/row and >=5 total else INVALID (eval/plans/009.md 1b0054a). Nov 8 inputs ops/drafts/nov8-slot-inputs.md. Arm-2 decs 072-077 history: journal.
 - DEC 071 (gate approved w/ conditions): items 1-3 DONE 787b465. Plan 008 Addendum D71: wiring (a) YES same Context (gate alive),
   (b) scored = patch at submit call, else end-of-session workspace diff, (c) no name keying (keep name submit_patch), (d) gate counts:
   worst +3 calls/+7 turns. Smoke ids eval/plans/008-smoke-ids.txt (rule: first 2 non-timeout empty arm-1 rows) sha dcae5058...;
