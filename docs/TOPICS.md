@@ -48,7 +48,7 @@ Status: used now | planned | adjacent, not used.
 ## D. Model and model internals
 - Gemma 4 family (31B / 12B / E4B / E2B, instruction-tuned; one model per bundle) | used now | | docs/COMPETITION.md
 - "Effective"-parameter small models (E-series) | E4B used now; internals adjacent, not studied | |
-- Thinking mode (thinking_budget, include_thoughts), thinking loops | used now | Root thinking is off (budget 0) in the 31B default; the analyzer uses 4096; a paired on/off test is planned (plan 009 arm 3). | eval/thinking_bound.py, results/thinking_bound_*.json, eval/plans/009.md
+- Thinking mode (thinking_budget, include_thoughts), thinking loops | used now | Root thinking is off (budget 0) in the 31B default; the analyzer uses 4096. Plan 009 arm 3 (root 4096) resolved 10/33 vs 4/33 (6/0, p=0.031) but was VETOED by its pre-registered timeout/empty limits; decision pending (report 021). | eval/thinking_bound.py, results/thinking_bound_*.json, eval/plans/009.md, results/plan009_arm3_vs_arm1.json
 - Sampling (temperature 0.2, top_p 0.95, max_output_tokens 8192; a T 0.6 arm) | used now | | bundles/31b/v011/configs/sampling.yaml, ops/reports/015, results/plan005_armF_vs_D.json
 - Chat template and tool-call parsing | used now (implicitly) | | results/trace_tool_errors_*.json
 - Interpretability, probing, attention internals | adjacent, not used

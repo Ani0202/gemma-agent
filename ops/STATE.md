@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 09:38Z (cycle 188; finals checker v3 3404fbb CLEAN (codex 093116) -> usable; DEC 088: dec 087 applies to e4b too (cap==H3 bound = zero margin), every e4b final candidate needs own COMPLETE score or knob-only <= diff vs COMPLETE e4b; DEC 087: finals rule = own score OR knob-only <= diff (mechanical check built); DEC 086: FINALS RULE 31B cap<=3.5 now MET + item-3 match rule; 31b-v002 SCORED 0.15 -> dec 083 (a) HOLDS; DEC 084+085: v009 Gate-2 item WAIVED (085 confirms, adds nothing, does NOT re-issue auth) -> Nov 8 = 31b-v009 CONDITIONAL (dec 083 a-f); e4b-v002h AUTHORIZED CONDITIONAL, slot after 31B). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 11:25Z (cycle 189; ARM-3 LANDED: ON-BETTER-VETOED 10/33 vs 4/33 (6/0 p=.031), timeouts 21 vs 4, empties 18 vs 12 -> report 021 NEEDS_DECISION (rec b: v012 scored Nov 10; c: swap Nov 8); finals checker v3 3404fbb CLEAN (codex 093116) -> usable; DEC 088: dec 087 applies to e4b too (cap==H3 bound = zero margin), every e4b final candidate needs own COMPLETE score or knob-only <= diff vs COMPLETE e4b; DEC 087: finals rule = own score OR knob-only <= diff (mechanical check built); DEC 086: FINALS RULE 31B cap<=3.5 now MET + item-3 match rule; 31b-v002 SCORED 0.15 -> dec 083 (a) HOLDS; DEC 084+085: v009 Gate-2 item WAIVED (085 confirms, adds nothing, does NOT re-issue auth) -> Nov 8 = 31b-v009 CONDITIONAL (dec 083 a-f); e4b-v002h AUTHORIZED CONDITIONAL, slot after 31B). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -19,7 +19,9 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (09:38Z): memguard-light, submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
+## Running jobs (11:25Z): memguard-light, submit-window-nov8-light, review-31b-v012-submit-light (pre-emptive Gate-2 for v012, no auth yet).
+- ARM-3 DONE: kernel v5 COMPLETE ~11:19Z, SEAL runs/31b-v012-p9a-main/SEAL.sha256 (c0d01bb4..) OK; quota AFTER 21.59 h (+9.70; 8.41 h left to 11-14).
+  Classifiers results/plan009_arm3_main_{d4cdf0f0,a208a023}.json (0 H); metrics results/plan009_arm3_vs_arm1.json; report 021.
 - CODEX S81: 060833 BLOCKING 1 fixed 71185a3; re-review s81b 061229 CLEAN -> arm-3 metrics allowed. Report lists amended arm-2 counts separately (S81.3).
 - DEC 081 (on 020, approve A w/ changes): (1) arm-3 SMOKE (v4) PASS results/plan009_arm3_smoke.json: thinking blocks [5,10]=15, timing PASS,
   0 H (d4cdf0f0 results/plan009_arm3_smoke_d4cdf0f0.json; a208a023 alongside 0 H), identity OK; both rows NO_PATCH/timeout (descriptive). Quota
@@ -40,7 +42,7 @@
 - PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
   33 dev fixed order eval/plans/007-arm1-ids.txt, --with-verification --no-stock-probe, slug aniket0202/gemma-31b-passrate.
 - DEC 057: no new bundle carries a repo-named hint; v000-v002 (both tracks) carry the FastAPI hint -> reports must say so. 31b-v004 CPU DRAFT 50537e1d (v007+quoting), no slot.
-- GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU week of 11-07: 11.89/30 h at 06:26Z (arm 2 + arm-3 smoke done; 18.11 h left; arm-3 main est ~11 h). Log: ops/budget/kaggle.md. Resets 2026-11-14T00:00Z.
+- GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU week of 11-07: 21.59/30 h at 11:20Z (arm 2 + arm-3 smoke+main done; 8.41 h left). Log: ops/budget/kaggle.md. Resets 2026-11-14T00:00Z.
 ## Live caveats (dec 078: no FYIs for routine clean reviews; dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035). Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
   (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
   results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
@@ -57,8 +59,7 @@
   3404fbb (56 tests, suite 1680 pass; new tests fail on v2), 5 checks re-run, verdicts unchanged. Re-review 093116 CLEAN (non-blocking:
   nested !include/flow/anchor knob edits stay conservatively INELIGIBLE) -> checker v3 RELIED ON. Dec 087 item 3: if report 021 shows v012 winning, propose v012 scored submit there for first free slot after e4b-v002h (Nov 9).
 - TOPICS (Director mail 01:47Z, owner req): docs/TOPICS.md saved; on any topic status change (used now | planned | adjacent, not used) update its line + repo ref in the same cycle as the journal entry.
-- DEC 082 (approve, no reply): report 021 FIRST results table = pass rate + arm3-vs-arm1 TIMEOUT count + EMPTY count w/ paired discordants
-  (not footnote). On land: quota AFTER + budget row FIRST, then classifiers/metrics per dec 081 i1; budget hit w/ missing ids -> D73.7, no top-up.
+- DEC 082: report 021 first table = pass + timeout + empty w/ paired discordants (DONE in 021).
 - DEC 083 (approve-with-changes; repeats REJECTED, guard refuses ledger shas, do NOT edit guard): SUBMIT AUTHORIZE 31b-v009 dist/31b-v009.zip
   sha256=d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d, CONDITIONAL, checklist ops/drafts/nov8-submit-31b-v009-checklist.md:
   (a) 58072907 FINAL COMPLETE w/ score (any value; ERROR/timeout -> VOID, CAP-BOUND, mail at once); (b) day>=11-08, nothing pending, no stacking,
@@ -74,7 +75,7 @@
 - DEC 084 item 3: e4b-v002h AUTHORIZED CONDITIONAL, checklist ops/drafts/submit-e4b-v002h-checklist.md (first UTC day: nothing pending,
   no other submit that day, AND (31b-v009 VOID or already submitted on an earlier day & not pending); reverse SUBMIT_KERNEL commit + kernel recheck first).
 ## Next 3
-1. Nov 8 00:00:30Z (submit-window-nov8-light): 58072907 COMPLETE 0.15 so (a) holds -> run ops/drafts/nov8-submit-31b-v009-checklist.md
-   (re-verify (a) with `kaggle competitions submissions` right before; waiver + Gate-4 journal lines first; then lb_31b_v009.json + waiter).
-2. e4b-v002h: Nov 9 at earliest (day after 31b-v009 submitted & not pending), reverse SUBMIT_KERNEL commit + kernel recheck first.
-3. On arm-3 main land: quota/budget row, seal check, classifiers, arm3 metrics, report 021 (dec 082 table; if v012 wins, propose v012 scored slot after Nov 9 per dec 087 i3).
+1. Await Director ruling on report 021. If (c): v012 Gate-2 review must be CLEAN/waived + new auth + checklist before 00:00Z;
+   submit-window-nov8-light then needs the v012 sha, not v009 (do NOT edit guard). Else Nov 8 00:00:30Z: run nov8-submit-31b-v009-checklist.
+2. When review-31b-v012-submit-light lands: triage BLOCKING vs non-blocking, FYI only if it changes report 021 options (dec 078).
+3. e4b-v002h: Nov 9 at earliest (reverse SUBMIT_KERNEL commit + kernel recheck first). Follow-up thinking 1024-2048 arm: week of 11-14 quota.
