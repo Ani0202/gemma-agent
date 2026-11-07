@@ -920,6 +920,90 @@ def _id_count(ids):
     return dict(count=len(ids), instance_ids=ids)
 
 
+def gold_created_files(patch):
+    """Plan 009 S81.1: files a gold patch creates = +++ header file whose section has a hunk starting '@@ -0,0 '.
+    The competition patch format has no diff --git / new file mode lines. Paths only; feeds the dev stray metric only."""
+    out, current = set(), None
+    for line in patch.splitlines():
+        if line.startswith('+++ '):
+            value = line[4:].split('\t', 1)[0]
+            current = value[2:] if value.startswith('b/') else value
+        elif line.startswith('--- '):
+            current = None
+        elif line.startswith('@@ -0,0 ') and current and current != '/dev/null':
+            out.add(current)
+    return out
+
+
+_GOLD_DIRS = {}
+
+
+def gold_created_dirs(iid, tasks_path=None):
+    """Parent dirs of gold-created files for one task; None if the gold patch cannot be loaded (S81.1: fails, never passes)."""
+    path = Path(tasks_path) if tasks_path else _tasks_path()
+    key = str(path)
+    if key not in _GOLD_DIRS:
+        table = {}
+        try:
+            with open(path) as fh:
+                for line in fh:
+                    if line.strip():
+                        task = json.loads(line)
+                        table[task['instance_id']] = task.get('patch')
+        except (OSError, ValueError, KeyError):
+            table = None
+        _GOLD_DIRS[key] = table
+    table = _GOLD_DIRS[key]
+    if table is None or not isinstance(table.get(iid), str):
+        return None
+    return {os.path.dirname(f) for f in gold_created_files(table[iid])}
+
+
+def amended_stray(literal, gold_dirs):
+    """S81.1 exact parent-directory match only (no prefix/ancestor/extension/name matching)."""
+    governing, exempted = [], []
+    for f in literal:
+        d = os.path.dirname(f)
+        if gold_dirs is not None and d in gold_dirs:
+            exempted.append(dict(path=f, gold_dir=d))
+        else:
+            governing.append(f)
+    return governing, exempted
+
+
+def stray_safety(rows, tasks_path=None):
+    """S81: governing stray (gating) + literal stray (descriptive, paths only). Missing evidence -> 'not available'."""
+    if not all('stray_files' in r and isinstance(r['stray_files'], list) for r in rows):
+        return 'not available', 'not available', []
+    governing_ids, literal_ids, per_row, missing = [], [], [], []
+    for r in rows:
+        literal = sorted(r['stray_files'])
+        if not literal:
+            continue
+        dirs = gold_created_dirs(r['instance_id'], tasks_path)
+        if dirs is None:
+            missing.append(r['instance_id'])
+        governing, exempted = amended_stray(literal, dirs)
+        literal_ids.append(r['instance_id'])
+        if governing or dirs is None:
+            governing_ids.append(r['instance_id'])
+        per_row.append(dict(instance_id=r['instance_id'], literal=literal, governing=governing, exempted=exempted,
+                            gold_unavailable=dirs is None))
+    if missing:
+        return 'not available', _id_count(literal_ids), per_row
+    return _id_count(governing_ids), _id_count(literal_ids), per_row
+
+
+def pct_raw(vals, q):
+    """S81.5: unrounded percentile (same interpolation as plan007_arm1_summary.pct, which rounds for display)."""
+    vals = sorted(v for v in vals if v is not None)
+    if not vals:
+        return None
+    i = (len(vals) - 1) * q
+    lo, hi = math.floor(i), math.ceil(i)
+    return vals[lo] + (vals[hi] - vals[lo]) * (i - lo)
+
+
 def summarize_arm(records, arm1=False):
     rows = [r for r, _, _, _ in records]
     ids = lambda predicate: [r['instance_id'] for r in rows if predicate(r)]
@@ -944,10 +1028,13 @@ def summarize_arm(records, arm1=False):
         if count:
             swt.append(iid)
     safety = {}
-    for key in ('test_files_edited', 'stray_files'):
-        safety[key] = (_id_count(ids(lambda r: bool(r.get(key)))) if all(key in r and r[key] is not None for r in rows)
-                       else 'not available')
-    safety.update(total_wall_p90=base.pct([(r.get('wall_seconds') or {}).get('total') for r in rows], .9),
+    key = 'test_files_edited'
+    safety[key] = (_id_count(ids(lambda r: bool(r.get(key)))) if all(key in r and r[key] is not None for r in rows)
+                   else 'not available')
+    # Plan 009 S81: stray_files = GOVERNING (gating); literal = old rule, DESCRIPTIVE.
+    safety['stray_files'], safety['stray_files_literal'], safety['stray_rows'] = stray_safety(rows)
+    walls = [(r.get('wall_seconds') or {}).get('total') for r in rows]
+    safety.update(total_wall_p90=base.pct(walls, .9), total_wall_p90_unrounded=pct_raw(walls, .9),
                   total_wall_complete=all(_finite_number((r.get('wall_seconds') or {}).get('total')) for r in rows),
                   empty_patch=_id_count(ids(lambda r: r.get('verified_patch_bytes') == 0)),
                   empty_patch_complete=all(type(r.get('verified_patch_bytes')) is int for r in rows),
@@ -1050,7 +1137,7 @@ def arm3_metrics(base_name, arm3_dirs, base_dirs, classifiers, smoke_json=None, 
     sa, sb = a['safety'], b['safety']
     checks = {key: isinstance(sa[key], dict) and sa[key]['count'] == 0 for key in ('test_files_edited', 'stray_files')}
     checks.update(total_wall_p90=sa['total_wall_complete'] and sb['total_wall_complete'] and
-                  sa['total_wall_p90'] <= 1.10 * sb['total_wall_p90'],
+                  sa['total_wall_p90_unrounded'] <= 1.10 * sb['total_wall_p90_unrounded'],
                   empty_patch=sa['empty_patch_complete'] and sb['empty_patch_complete'] and sa['empty_patch']['count'] <= sb['empty_patch']['count'] + 3,
                   submitted_without_test=sa['submitted_without_test']['count'] <= sb['submitted_without_test']['count'] + 3)
     vetoes = [k for k, passed in checks.items() if not passed]

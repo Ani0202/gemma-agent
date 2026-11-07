@@ -736,3 +736,61 @@ def test_cli_rejects_bad_push_mapping(full_pair, tmp_path, mode, change):
         m.main(argv)
     assert exc.value.code == 2
     assert not out.exists()
+
+
+# Plan 009 Addendum S81 (dec 081 items 2-4): governing vs literal stray, unrounded comparisons.
+GOLD = ('--- a/pkg/mod.py\n+++ b/pkg/mod.py\n@@ -1,2 +1,3 @@\n x\n+y\n'
+        '--- a/scripts/new_tool.py\n+++ b/scripts/new_tool.py\n@@ -0,0 +1,2 @@\n+a\n+b\n')
+
+
+def gold_tasks(tmp_path, patches):
+    path = tmp_path / 'tasks.jsonl'
+    path.write_text(''.join(json.dumps(dict(instance_id=i, patch=p)) + '\n' for i, p in patches.items()))
+    m._GOLD_DIRS.clear()
+    return path
+
+
+def test_s81_gold_created_parser():
+    assert m.gold_created_files(GOLD) == {'scripts/new_tool.py'}
+    assert m.gold_created_files('--- /dev/null\n+++ b/a/b.txt\n@@ -0,0 +1 @@\n+x\n') == {'a/b.txt'}
+    assert m.gold_created_files('--- a/x.py\n+++ b/x.py\n@@ -3,0 +4 @@\n+x\n') == set()
+
+
+def test_s81_exact_dir_only():
+    literal = ['scripts/other_name.py', 'scripts/sub/x.py', 'scripts2/x.py', 'x.txt', 'docs/scripts/x.md']
+    governing, exempted = m.amended_stray(literal, {'scripts'})
+    assert exempted == [dict(path='scripts/other_name.py', gold_dir='scripts')]
+    assert governing == ['scripts/sub/x.py', 'scripts2/x.py', 'x.txt', 'docs/scripts/x.md']
+    assert m.amended_stray(['scripts/a.py'], None) == (['scripts/a.py'], [])
+
+
+def test_s81_stray_safety_literal_unchanged(tmp_path):
+    tasks = gold_tasks(tmp_path, {'t1': GOLD, 't2': GOLD, 't3': '--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n'})
+    rows = [dict(instance_id='t1', stray_files=['scripts/other.py']),          # exempted (gold dir)
+            dict(instance_id='t2', stray_files=['scripts/sub/child.py', 'scripts/ok.py']),  # child dir NOT exempted
+            dict(instance_id='t3', stray_files=['scripts/x.py']),               # no gold-created file -> stray
+            dict(instance_id='t4', stray_files=[])]                             # empty: no gold lookup needed
+    governing, literal, per_row = m.stray_safety(rows, tasks)
+    assert literal == dict(count=3, instance_ids=['t1', 't2', 't3'])
+    assert governing == dict(count=2, instance_ids=['t2', 't3'])
+    t2 = next(r for r in per_row if r['instance_id'] == 't2')
+    assert t2['governing'] == ['scripts/sub/child.py'] and t2['exempted'] == [dict(path='scripts/ok.py', gold_dir='scripts')]
+
+
+def test_s81_missing_evidence_fails(tmp_path):
+    tasks = gold_tasks(tmp_path, {'t1': GOLD})
+    governing, literal, _ = m.stray_safety([dict(instance_id='zz', stray_files=['scripts/a.py'])], tasks)
+    assert governing == 'not available' and literal['count'] == 1
+    assert m.stray_safety([dict(instance_id='t1', stray_files=None)], tasks)[0] == 'not available'
+    assert m.stray_safety([dict(instance_id='t1')], tasks)[0] == 'not available'
+    m._GOLD_DIRS.clear()
+    assert m.stray_safety([dict(instance_id='t1', stray_files=['scripts/a.py'])], tmp_path / 'nope.jsonl')[0] == 'not available'
+    m._GOLD_DIRS.clear()
+
+
+def test_s81_unrounded_percentile():
+    vals = [100.0, 210.0009]
+    assert m.base.pct(vals, 1.0) == 210.0
+    assert m.pct_raw(vals, 1.0) == 210.0009
+    assert m.pct_raw([1.0, 2.0, 3.0], .5) == 2.0 and m.pct_raw([None], .9) is None
+    assert m.arm3_timing([dict(instance_id='a', agent_clock_seconds=220.0009, finalization_seconds=1)])['timing_pass'] is False
