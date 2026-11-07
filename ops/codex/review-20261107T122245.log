@@ -579,3 +579,1715 @@ b4c8eff cycle 196: report 023 drafted, review-plan011-diag-light running
    110	if __name__ == '__main__':
    111	    sys.exit(main())
 
+exec
+/bin/bash -lc "nl -ba eval/plan011_empty_diag.py && nl -ba eval/plan007_arm1_summary.py | sed -n '130,220p' && cat results/plan011_diag_arm3_v2.json" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	"""Plan 011 CPU diagnosis (dec 081 item 5 / dec 089 item 6 / dec 090 item 2): per-row tally of empty patches.
+     2	
+     3	v2 (dec 090 item 2, fixes codex review 20261107T121430 non-blocking 1-3):
+     4	  - empty = agent_patch is None or exactly zero bytes (same as plan007_arm1_summary.py verified_patch_bytes == 0).
+     5	  - edit success = tool_response for edit_file/write_file parses as a JSON object with status == "ok".
+     6	    empty_edit_failed now requires >= 1 edit attempt and 0 successful edits; an empty row with a successful
+     7	    edit is its own class empty_edited_ok.
+     8	  - inventory: classifier ids must be unique and equal the --ids file(s); every trace/result must exist,
+     9	    else exit 2 (no counts printed).
+    10	  - rule tally (dec 090 item 2): target rows = empty AND (edit_failed OR call_exhausted), whatever the
+    11	    agent_end label (overlap rows count, as in report 023). call_exhausted = tool calls >= --max-tool-calls
+    12	    OR any get_status response with tool_calls_remaining == 0.
+    13	
+    14	Usage (prints counts and per-row metadata only, no task text):
+    15	  python3 eval/plan011_empty_diag.py --max-tool-calls 40 \
+    16	      --pair RUN_DIR CLASSIFIER_JSON IDS_FILE [--pair ...]
+    17	"""
+    18	import argparse, collections, json, os, sys
+    19	
+    20	EDIT_TOOLS = ('edit_file', 'write_file')
+    21	
+    22	
+    23	def read_ids(path):
+    24	    with open(path) as f:
+    25	        return [ln.strip() for ln in f if ln.strip() and not ln.lstrip().startswith('#')]
+    26	
+    27	
+    28	def parse(s):
+    29	    try:
+    30	        j = json.loads(s) if isinstance(s, str) else s
+    31	    except (TypeError, ValueError):
+    32	        return None
+    33	    return j if isinstance(j, dict) else None
+    34	
+    35	
+    36	def diag_row(run, iid, c, max_calls):
+    37	    t = json.load(open(f'{run}/runs/{iid}/trace.json'))
+    38	    r = json.load(open(f'{run}/runs/{iid}/result.json'))
+    39	    calls = []  # [tool, args, parsed_response_or_None]
+    40	    for e in t['entries']:
+    41	        if e['type'] == 'tool_call':
+    42	            calls.append([e['tool'], e.get('args') or {}, None])
+    43	        elif e['type'] == 'tool_response' and calls:
+    44	            calls[-1][2] = parse(e.get('result'))
+    45	    eds = [k for k in calls if k[0] in EDIT_TOOLS]
+    46	    ed_ok = sum(1 for k in eds if k[2] is not None and k[2].get('status') == 'ok')
+    47	    malformed = sum(1 for k in eds if k[0] == 'edit_file' and ('old_string' not in k[1] or 'new_string' not in k[1]))
+    48	    status_zero = any(k[0] == 'get_status' and k[2] is not None and k[2].get('tool_calls_remaining') == 0 for k in calls)
+    49	    call_exhausted = len(calls) >= max_calls or status_zero
+    50	    patch = r.get('agent_patch')
+    51	    empty = patch is None or len(patch.encode('utf-8')) == 0
+    52	    edit_failed = bool(eds) and ed_ok == 0
+    53	    timeout = c['agent_end'] == 'timeout'
+    54	    cls = ('resolved' if r['resolved'] else
+    55	           'empty_timeout' if empty and timeout else
+    56	           'empty_never_edited' if empty and not eds else
+    57	           'empty_edit_failed' if empty and edit_failed else
+    58	           'empty_edited_ok' if empty else
+    59	           'patch_timeout' if timeout else 'patch_wrong')
+    60	    first_edit = next((k + 1 for k, x in enumerate(calls) if x[0] in EDIT_TOOLS), None)
+    61	    return dict(id=iid, cls=cls, end=c['agent_end'], calls=len(calls), edits=len(eds), edit_ok=ed_ok,
+    62	                edit_err=len(eds) - ed_ok, malformed=malformed, call_exhausted=call_exhausted,
+    63	                rule_target=empty and (edit_failed or call_exhausted),
+    64	                first_edit_call=first_edit, dur_s=round(r['duration_seconds']))
+    65	
+    66	
+    67	def main(argv=None):
+    68	    ap = argparse.ArgumentParser()
+    69	    ap.add_argument('--pair', nargs=3, action='append', required=True, metavar=('RUN_DIR', 'CLASSIFIER_JSON', 'IDS_FILE'))
+    70	    ap.add_argument('--max-tool-calls', type=int, required=True)
+    71	    a = ap.parse_args(argv)
+    72	    errs, rows, seen = [], [], set()
+    73	    for run, clf, idf in a.pair:
+    74	        crows = json.load(open(clf))['rows']
+    75	        cids = [x['instance_id'] for x in crows]
+    76	        exp = read_ids(idf)
+    77	        if len(cids) != len(set(cids)):
+    78	            errs.append(f'{clf}: duplicate classifier ids')
+    79	        if len(exp) != len(set(exp)):
+    80	            errs.append(f'{idf}: duplicate expected ids')
+    81	        if set(cids) != set(exp):
+    82	            errs.append(f'{clf}: ids != {idf} (missing {len(set(exp) - set(cids))}, extra {len(set(cids) - set(exp))})')
+    83	        if seen & set(cids):
+    84	            errs.append(f'{clf}: ids overlap an earlier --pair')
+    85	        seen |= set(cids)
+    86	        for iid in cids:
+    87	            for fn in ('trace.json', 'result.json'):
+    88	                if not os.path.isfile(f'{run}/runs/{iid}/{fn}'):
+    89	                    errs.append(f'{run}: missing artifact for one id ({fn})')
+    90	        if errs:
+    91	            continue
+    92	        C = {x['instance_id']: x for x in crows}
+    93	        rows += [dict(diag_row(run, iid, C[iid], a.max_tool_calls), run=run) for iid in sorted(C)]
+    94	    if errs:
+    95	        print('INVENTORY FAIL:\n' + '\n'.join(errs), file=sys.stderr)
+    96	        return 2
+    97	    tally = collections.Counter(x['cls'] for x in rows)
+    98	    extra = dict(n=len(rows), malformed_edit_calls=sum(x['malformed'] for x in rows),
+    99	                 edit_errors=sum(x['edit_err'] for x in rows),
+   100	                 empty=sum(1 for x in rows if x['cls'].startswith('empty_')),
+   101	                 empty_call_exhausted=sum(1 for x in rows if x['cls'].startswith('empty_') and x['call_exhausted']),
+   102	                 rule_target=sum(1 for x in rows if x['rule_target']))
+   103	    extra['rule_verdict'] = 'PROPOSE_PLAN011' if extra['rule_target'] >= 3 else 'STAY_SHELVED'
+   104	    out = dict(script='eval/plan011_empty_diag.py v2', pairs=a.pair, max_tool_calls=a.max_tool_calls,
+   105	               counts=dict(tally), summary=extra, rows=rows)
+   106	    print(json.dumps(out, indent=1))
+   107	    return 0
+   108	
+   109	
+   110	if __name__ == '__main__':
+   111	    sys.exit(main())
+   130	    for part, tpath, d4path, a2path in PARTS:
+   131	        d4 = json.loads(Path(d4path).read_text())
+   132	        a2 = json.loads(Path(a2path).read_text())
+   133	        assert d4['classifier_sha256'] == D4_SHA and a2['classifier_sha256'] == A2_SHA
+   134	        assert d4['input_sha256'] == sha(tpath) == a2['input_sha256']
+   135	        trows = load_rows(tpath)
+   136	        d4rows = unique_map(d4['rows'], d4path)
+   137	        a2rows = unique_map(a2['rows'], a2path)
+   138	        assert len(d4['rows']) == len(a2['rows']) == len(trows)
+   139	        assert set(d4rows) == set(a2rows) == {r['instance_id'] for r in trows}
+   140	        assert len(d4rows) == len(trows)
+   141	        for t in trows:
+   142	            c = d4rows[t['instance_id']]
+   143	            assert_paired(c, t)
+   144	            assert_paired(a2rows[t['instance_id']], t)
+   145	            rows.append((part, t, c, a2rows[t['instance_id']]))
+   146	        inputs.append(dict(part=part, timing=tpath, timing_sha256=sha(tpath),
+   147	                           d4cdf0f0=d4path, a208a023=a2path, n=len(trows)))
+   148	
+   149	    order = ids_file(ARM_IDS)
+   150	    got = [t['instance_id'] for _, t, _, _ in rows]
+   151	    assert got == order, 'row order/ids differ from the fixed arm-1 order'
+   152	    n = len(rows)
+   153	
+   154	    def res(t):
+   155	        return t.get('resolved') is True
+   156	
+   157	    def is_h(c):
+   158	        return c['h'] is not None
+   159	
+   160	    ep = {t['instance_id'] for _, t, c, _ in rows if is_h(c) and is_h_verify_empty_patch(c, t)}
+   161	
+   162	    def strip_known_diag(c):
+   163	        # dec 069 item 1 line (d'): the literal predicate applied to a COPY whose reasons omit 'known_diag:*' flags
+   164	        # (plan l.51: a flag, never gating). is_h_verify_empty_patch itself is unchanged.
+   165	        return dict(c, reasons=[x for x in c['reasons'] if not str(x).startswith('known_diag:')])
+   166	
+   167	    ep_prime = {t['instance_id'] for _, t, c, _ in rows if is_h(c) and is_h_verify_empty_patch(strip_known_diag(c), t)}
+   168	    assert ep <= ep_prime
+   169	    non_h_but_ep_prime = [t for _, t, c, _ in rows if not is_h(c) or t['instance_id'] in ep_prime]
+   170	    per_repo = {}
+   171	    for repo in sorted({t['repo'] for _, t, _, _ in rows}):
+   172	        sub = [t for _, t, _, _ in rows if t['repo'] == repo]
+   173	        per_repo[repo] = rate(sum(res(t) for t in sub), len(sub))
+   174	
+   175	    non_h = [t for _, t, c, _ in rows if not is_h(c)]
+   176	    non_h_but_ep = [t for _, t, c, _ in rows if not is_h(c) or t['instance_id'] in ep]
+   177	    h_rows = [dict(instance_id=t['instance_id'], part=p, h=c['h'], reasons=c['reasons'],
+   178	                   h_verify_empty_patch=t['instance_id'] in ep,
+   179	                   verified_patch_bytes=t.get('verified_patch_bytes'), exit_code=t.get('exit_code'),
+   180	                   patch_submitted=t.get('patch_submitted'))
+   181	              for p, t, c, _ in rows if is_h(c)]
+   182	
+   183	    def timeout(t):
+   184	        return bool(t.get('timed_out')) or bool(t.get('agent_timeout_fired'))
+   185	
+   186	    empty = [(p, t) for p, t, _, _ in rows if t.get('verified_patch_bytes') == 0]
+   187	    empty_rows = [dict(instance_id=t['instance_id'], timeout=timeout(t), llm_turns=t.get('llm_turns'),
+   188	                       per_tool=(t.get('tool_calls') or {}).get('per_tool'))
+   189	                  for _, t in empty]
+   190	    walls = [t.get('wall_seconds') or {} for _, t, _, _ in rows]
+   191	
+   192	    screened = ids_file(SCREENED_IDS)
+   193	    assert len(screened) == len(set(screened)) == 8 and set(screened) <= set(order)
+   194	    unscreened = [t for _, t, _, _ in rows if t['instance_id'] not in set(screened)]
+   195	    assert len(unscreened) == n - 8
+   196	
+   197	    run_dir = {part: str(Path(tp).parent) for part, tp, _, _ in PARTS}
+   198	    rep_rows, th_rows = [], []
+   199	    for p, t, _, _ in rows:
+   200	        tr = Path(run_dir[p]) / 'runs' / t['instance_id'] / 'trace.json'
+   201	        assert tr.is_file(), f'missing trace for {t["instance_id"]}'
+   202	        rep_rows.append(dict(instance_id=t['instance_id'], **identical_runs(tr)))
+   203	        th = thinking_task(str(tr))
+   204	        th_rows.append(dict(instance_id=t['instance_id'], thinking_blocks=th['thinking_blocks'],
+   205	                            max_thinking_chars=th['max_thinking_chars'],
+   206	                            total_thinking_chars=sum(len(e.get('content') or '') for e in
+   207	                                                     json.loads(tr.read_text()).get('entries') or []
+   208	                                                     if e.get('author') == 'swe_baseline_agent'
+   209	                                                     and e.get('type') == 'thinking')))
+   210	
+   211	    out = {
+   212	        '_schema': 'plan007_arm1_summary/v2',
+   213	        'header': {
+   214	            'arm': '31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7...)',
+   215	            'kernel_code_sha': '078f4ea (pre-fold; dec 065 deviation: smoke+main ran before the rev-5 re-freeze)',
+   216	            'governing_classifier_sha256': D4_SHA, 'also_counted_classifier_sha256': A2_SHA,
+   217	            'agent_timing_py_sha256': sha('eval/kaggle/agent_timing.py'),
+   218	            'report_predicate_sha256': sha('eval/plan007_report.py'),
+   219	            'summary_script_sha256': sha(__file__),
+   220	            'k': 1, 'env_caveat': 'env agreement with the local gold calibration unmeasured in the kernel path',
+{
+ "script": "eval/plan011_empty_diag.py v2",
+ "pairs": [
+  [
+   "runs/31b-v012-p9a-main",
+   "results/plan009_arm3_main_d4cdf0f0.json",
+   "eval/plans/009-main-ids.txt"
+  ],
+  [
+   "runs/31b-v012-p9a-smoke",
+   "results/plan009_arm3_smoke_d4cdf0f0.json",
+   "eval/plans/009-smoke-ids.txt"
+  ]
+ ],
+ "max_tool_calls": 40,
+ "counts": {
+  "patch_wrong": 3,
+  "empty_timeout": 18,
+  "patch_timeout": 2,
+  "resolved": 10
+ },
+ "summary": {
+  "n": 33,
+  "malformed_edit_calls": 9,
+  "edit_errors": 11,
+  "empty": 18,
+  "empty_call_exhausted": 1,
+  "rule_target": 1,
+  "rule_verdict": "STAY_SHELVED"
+ },
+ "rows": [
+  {
+   "id": "fastapi_14258",
+   "cls": "patch_wrong",
+   "end": null,
+   "calls": 36,
+   "edits": 1,
+   "edit_ok": 1,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 32,
+   "dur_s": 798,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "fastapi_14372",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 26,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 431,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "fastapi_14851",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 41,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": true,
+   "rule_target": true,
+   "first_edit_call": null,
+   "dur_s": 430,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "fastapi_14986",
+   "cls": "patch_timeout",
+   "end": "timeout",
+   "calls": 14,
+   "edits": 2,
+   "edit_ok": 2,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 13,
+   "dur_s": 856,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "fastapi_15661",
+   "cls": "patch_timeout",
+   "end": "timeout",
+   "calls": 20,
+   "edits": 1,
+   "edit_ok": 1,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 20,
+   "dur_s": 856,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "fastapi_15800",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 30,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 431,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_2725",
+   "cls": "resolved",
+   "end": null,
+   "calls": 16,
+   "edits": 1,
+   "edit_ok": 1,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 9,
+   "dur_s": 850,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_2943",
+   "cls": "resolved",
+   "end": null,
+   "calls": 33,
+   "edits": 4,
+   "edit_ok": 2,
+   "edit_err": 2,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 19,
+   "dur_s": 787,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3006",
+   "cls": "resolved",
+   "end": null,
+   "calls": 14,
+   "edits": 1,
+   "edit_ok": 1,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 7,
+   "dur_s": 101,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3043",
+   "cls": "resolved",
+   "end": "timeout",
+   "calls": 19,
+   "edits": 1,
+   "edit_ok": 1,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 5,
+   "dur_s": 252,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3052",
+   "cls": "patch_wrong",
+   "end": null,
+   "calls": 9,
+   "edits": 3,
+   "edit_ok": 3,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 4,
+   "dur_s": 819,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3061",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 25,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 227,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3067",
+   "cls": "resolved",
+   "end": null,
+   "calls": 14,
+   "edits": 1,
+   "edit_ok": 1,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 5,
+   "dur_s": 706,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3180",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 15,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 428,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3454",
+   "cls": "resolved",
+   "end": null,
+   "calls": 27,
+   "edits": 10,
+   "edit_ok": 1,
+   "edit_err": 9,
+   "malformed": 9,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 5,
+   "dur_s": 831,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3468",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 13,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 428,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3470",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 26,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 428,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3471",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 16,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 427,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3480",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 5,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 228,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3506",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 8,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 228,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3518",
+   "cls": "resolved",
+   "end": null,
+   "calls": 14,
+   "edits": 1,
+   "edit_ok": 1,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 8,
+   "dur_s": 740,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3521",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 5,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 428,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3535",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 7,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 428,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3675",
+   "cls": "patch_wrong",
+   "end": null,
+   "calls": 32,
+   "edits": 1,
+   "edit_ok": 1,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 11,
+   "dur_s": 833,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3718",
+   "cls": "resolved",
+   "end": null,
+   "calls": 23,
+   "edits": 2,
+   "edit_ok": 2,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 19,
+   "dur_s": 847,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3894",
+   "cls": "resolved",
+   "end": null,
+   "calls": 10,
+   "edits": 1,
+   "edit_ok": 1,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 6,
+   "dur_s": 750,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3905",
+   "cls": "resolved",
+   "end": null,
+   "calls": 16,
+   "edits": 1,
+   "edit_ok": 1,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": 5,
+   "dur_s": 709,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3930",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 8,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 428,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3935",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 17,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 429,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3938",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 35,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 428,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3944",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 28,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 428,
+   "run": "runs/31b-v012-p9a-main"
+  },
+  {
+   "id": "rich_3063",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 5,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 229,
+   "run": "runs/31b-v012-p9a-smoke"
+  },
+  {
+   "id": "rich_3953",
+   "cls": "empty_timeout",
+   "end": "timeout",
+   "calls": 10,
+   "edits": 0,
+   "edit_ok": 0,
+   "edit_err": 0,
+   "malformed": 0,
+   "call_exhausted": false,
+   "rule_target": false,
+   "first_edit_call": null,
+   "dur_s": 429,
+   "run": "runs/31b-v012-p9a-smoke"
+  }
+ ]
+}
+
+exec
+/bin/bash -lc "cat ops/STATE.md && cat docs/PLAN.md && git show --stat a91a1da && rg -n 'plan011|verified_patch_bytes|tool_response' eval --glob '*test*' --glob '*plan007*' && rg -n 'tool_response|tool_call' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core --glob '*.py'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+# STATE: snapshot 2026-11-07 12:45Z (cycle 198; DEC 090 on report 023 = approve A: tool-level empty-patch lever SHELVED for v012 lineage (backlog (c) updated); plan 010 Addendum B PRE-DATA committed a91a1da (arm-4 re-check of plan011 diag, rule_target>=3/33 -> plan 011 proposal, else stays shelved); plan011_empty_diag.py v2 (exact-byte empty, inventory checks, edit-success) reproduces 023 (results/plan011_diag_arm3_v2.json: 18 empty_timeout, rule_target 1); codex review-plan011-diag-v2-light RUNNING (CLEAN needed before B2). Option C (further knob cut) only in arm-4 report if timeouts still dominate. Priorities unchanged: Nov 8 v012 submit 00:00:30Z waiter; Nov 9 e4b-v002h; arm 4 week of 11-14). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
+- v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
+- e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
+  SUBMITTED 2026-11-06T00:11:23Z ref 58039259; SCORED public 0.05 (COMPLETE; first final poll 05:11:49Z, T=5.007 h). results/lb_e4b_v002.json filled,
+  budget row updated, Director FYI'd. No runtime fields from CLI. E4B validator acceptance VERIFIED. Next e4b submit: next UTC day at earliest. Guard v6 applied b9caae4 (dry checks rc=3 x2).
+- 31b-v002 (v001-t4 + cap 3.5): dist/31b-v002.zip sha256=e56a05e5701fa16a8dbbabb304d98f63a465511cefbb28d65850ea5ce086ec88
+  SUBMITTED 2026-11-07T00:06:31Z ref 58072907 (dec 055). SCORED public 0.15 (COMPLETE; first final poll 09:06:53Z, T=9.006 h,
+  bracket (8.506, 9.006] h). json + budget row filled, Director FYI 09:08Z (dec 079 DONE). Waiter done.
+  Validation submit: expect weak LB, don't act alone; write-up notes FastAPI-hint caveat (dec 060). config.env SUBMIT_KERNEL now = 31b kernel:
+  next e4b submit needs the reverse config commit first. Next submit slot: 2026-11-08 UTC (ledger blocks same-day).
+- CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 12B/E2B validator
+  acceptance (E4B VERIFIED by 58039259 scoring); l.55 submit_patch/get_status vs call limits; l.63 private-LB multiple runs; l.72 wheels arch
+  (x86 assumed, unrecorded); 12h overrun ruling. VERIFIED: l.42 submit method = kernel output (dec 041); l.76 superseded by l.112.
+## Eval data
+- Splits v2 FROZEN: clean 48 (rich 39, fastapi 9), dev 33, holdout 15; holdout uses = 0. Hashes: eval/splits/MANIFEST.json.
+- requests/httpx dropped (wheel shadowing = scorer property, dec 014). Gold v2 files in results/ (gold_calibration_*, gold_failure_causes).
+- RE-GROUND EVERY CYCLE (dec 021/025). Linger: `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
+- Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
+- DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
+  submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
+## Running jobs (12:45Z): memguard-light, submit-window-nov8-v012-light (fires 2026-11-08T00:00:30Z), review-plan011-diag-v2-light.
+- v014 (plan 010 arm 4): dist/31b-v014.zip 7980846995e3acb38418427755676931fbfc7fa22998b1e9b2599da499135def = v012 + root thinking 2048; load check PASS results/bundle_load_check_31b_v014.json; finals pre-check ELIGIBLE results/finals_eligibility_31b-v014_vs_31b-v012.json (needs v012 COMPLETE). READY for smoke+main week of 11-14.
+- ARM-3 DONE: kernel v5 COMPLETE ~11:19Z, SEAL runs/31b-v012-p9a-main/SEAL.sha256 (c0d01bb4..) OK; quota AFTER 21.59 h (+9.70; 8.41 h left to 11-14).
+  Classifiers results/plan009_arm3_main_{d4cdf0f0,a208a023}.json (0 H); metrics results/plan009_arm3_vs_arm1.json; report 021.
+- CODEX S81: 060833 BLOCKING 1 fixed 71185a3; re-review s81b 061229 CLEAN -> arm-3 metrics allowed. Report lists amended arm-2 counts separately (S81.3).
+- DEC 081 (on 020, approve A w/ changes): (1) arm-3 SMOKE (v4) PASS results/plan009_arm3_smoke.json: thinking blocks [5,10]=15, timing PASS,
+  0 H (d4cdf0f0 results/plan009_arm3_smoke_d4cdf0f0.json; a208a023 alongside 0 H), identity OK; both rows NO_PATCH/timeout (descriptive). Quota
+  smoke +0.63 h (11.89 AFTER). identity --event main PASS 06:26:50Z. MAIN pushed v5 06:27:20Z: 31 ids eval/plans/009-main-ids.txt, ONE session,
+  budget 30000 s, seed-max 803, TRANSPORT 203e542b (dry-run == smoke), quota BEFORE 11.89 h. On land: quota AFTER + budget row; classify main
+  (PYTHONPATH=eval/kaggle python3 eval/plan007_pinned/classify_rows_d4cdf0f0.py TIMING --out ...; also a208a023); plan008_metrics.py arm3
+  (dirs smoke,main; --identity-json --bundle v012 --transport DIR=203e542b.. --push-event DIR=smoke|main --smoke-json results/plan009_arm3_smoke.json
+  [--base-verdict-json]); report with amended arm-2 stray counts listed separately (S81.3). Missing ids -> D73.7 rule.
+  (2-4) Addendum S81 f9a9562 PRE-DATA; code eda02a4+71185a3; codex s81b 061229 CLEAN. Pre-data rows: arm1 gov 0/lit 0, arm2 gov 0/lit 1.
+  (5) backlog: tool-level empty-patch lever plan (tolerant edit_file error + exploration budget signal) AFTER arm 3. (6) Nov 8 slot due 12:00Z.
+- DEC 080/report 020: diagnosis results/plan008_arm2_diagnosis.md (stray row = deliberate deliverable; empties 7 never-edited, 3 malformed edit_file). Arm 2
+  (report 019) 8/33 vs arm1 4/33, A-only 4/B-only 0 p=0.125, MECH1/2 FAIL -> NOT SHIP-ELIGIBLE; base = arm 1; 31B default draft stays v009. Files 4de6787.
+  arm3 CLI: --identity-json --bundle --transport DIR=SHA --push-event DIR=EVENT (every dir) --smoke-json [--base-verdict-json]. Arm-3 bundle
+  31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096), load PASS (e5196a4).
+- DEC 069 (rep 018, A w/ conditions): arm 1 VALID by POST-HOC ruling = plan 007 Addendum C (7ceb059). PRIMARY 4/33 FINAL
+  (codex 132715 BLOCKING = missing descriptive lines -> fixed; re-review 133120 CLEAN). results/plan007_arm1_summary.json v2
+  (script sha 349b1bda...): a 4/33 (W 4.8-27.3), c 4/26, d 4/27 (literal), d' 4/33, empty 12/33 (2 to/10 non), unscreened 3/25, ENV CONTROL caveat l.152 on every arm-1 citation.
+- PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
+  33 dev fixed order eval/plans/007-arm1-ids.txt, --with-verification --no-stock-probe, slug aniket0202/gemma-31b-passrate.
+- DEC 057: no new bundle carries a repo-named hint; v000-v002 (both tracks) carry the FastAPI hint -> reports must say so. 31b-v004 CPU DRAFT 50537e1d (v007+quoting), no slot.
+- GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU week of 11-07: 21.59/30 h at 11:20Z (arm 2 + arm-3 smoke+main done; 8.41 h left). Log: ops/budget/kaggle.md. Resets 2026-11-14T00:00Z.
+## Live caveats (dec 078: no FYIs for routine clean reviews; dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035). Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
+  (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
+  results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
+- Director reminder 2026-11-06T23:02Z: GCP quota re-request line to Aniket (keep until a decision marks it done). Kaggle GPU kernels pin starter docker_image (py3.12, cp312). Hosted-LLM-API data Q OPEN; no new 3rd-party svc. One pending submission; no partial credit on timeout. Quota log before/after smoke+main (dec 063/064).
+## Timing facts (results/kaggle_timing_e4b_v000_setup.json) setup ~210 s/task, outside max_time_minutes (clock starts after setup); flat across repos. vLLM startup 5.39 min; verification ~410 s (excluded from the 12 h). Agent clock p90 144 s at cap 5.
+- Timing kernel (plan 006 DONE, G1 held -> dec 055): stack main 2db5f51 per Addendum A (gate fix from 92a74c7, worktree
+  gemma-wt/codex-kernel-probes-gate). Last FROZEN+noted classifier: a208a023 (0d49b1c); rev-5 d4cdf0f0 frozen pending Director note (report 016).
+- FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
+  DEC 086: 31B cap<=3.5 MET (v002 COMPLETE); never raise 31B cap >3.5. DEC 087 BINDING (both tracks, replaces match clause): final must (a) score
+  COMPLETE itself OR (b) differ from a COMPLETE bundle ONLY by <= cap/calls/turns/thinking/max_out, all else byte-identical. MECHANICAL:
+  eval/finals_eligibility.py + ops/drafts/finals-checklist.md: v012, v009 vs v002 and e4b-v002h vs e4b-v002 all INELIGIBLE (system.md) -> each needs
+  own score. DEC 088: e4b too (LoRA/prompt variants need own score by Nov 29).
+  Codex 091327 BLOCKING x5 -> v2 0d3e3b4; codex 092238 BLOCKING x2 (merge-key shadowed agent_tool; skill resources w/ gcc allowance) -> v3
+  3404fbb (56 tests, suite 1680 pass; new tests fail on v2), 5 checks re-run, verdicts unchanged. Re-review 093116 CLEAN (non-blocking:
+  nested !include/flow/anchor knob edits stay conservatively INELIGIBLE) -> checker v3 RELIED ON. Dec 087 item 3: if report 021 shows v012 winning, propose v012 scored submit there for first free slot after e4b-v002h (Nov 9).
+- TOPICS (Director mail 01:47Z, owner req): docs/TOPICS.md saved; on any topic status change (used now | planned | adjacent, not used) update its line + repo ref in the same cycle as the journal entry.
+- DEC 083 (approve-with-changes; repeats REJECTED, guard refuses ledger shas, do NOT edit guard): SUBMIT AUTHORIZE 31b-v009 dist/31b-v009.zip
+  sha256=d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d, CONDITIONAL, checklist ops/drafts/nov8-submit-31b-v009-checklist.md:
+  (a) 58072907 FINAL COMPLETE w/ score (any value; ERROR/timeout -> VOID, CAP-BOUND, mail at once); (b) day>=11-08, nothing pending, no stacking,
+  auth carries to first day (a) holds; (c) Gate-2 codex review job review-31b-v009-submit-light, no BLOCKING; (d) Gate-4 journal line pre-submit;
+  (e) kernel aniket0202/gemma-submit-31b v2 pushed 06:34:57Z, output BYTE_IDENTICAL (results/submit_kernel_v2_verify.txt); SUBMIT_KERNEL stays 31b;
+  MANIFEST updated; (f) lb_31b_v009.json + waiter; write-up caveats. Window waiter submit-window-nov8-light fires 2026-11-08T00:00:30Z.
+- DEC 083 item 2: e4b-v002h bundles/e4b/v002h dist/e4b-v002h.zip sha256=938d618ceaeb7602d86e49a9cf7d2b7ce7191e8936d9520bb7d005a6c5f04836
+  (= e4b-v002 minus FastAPI/docs_src line; zip diff = 1 deleted line, same file set; load check == v002 results/bundle_load_check_e4b_v002h.json).
+  Codex review job review-e4b-v002h-light. Kernel aniket0202/gemma-submit-e4b v2 output BYTE_IDENTICAL (same txt). Do NOT flip SUBMIT_KERNEL
+  until authorized (Director: Nov 8 if v002 ERRORS, else Nov 9). Item 5: LB-noise repeat deferred.
+- GATE 2 DONE 06:36Z: v009 review 063339 BLOCKING 1 (empty diff on timeout/cap) WAIVED by DEC 084 item 1 / DEC 085 for d38c55c7 -> journal the waiver Prompt nits -> ops/backlog-prompt.md (no v009 edit); MANIFEST nits done.
+- DEC 084 item 3: e4b-v002h AUTHORIZED CONDITIONAL, checklist ops/drafts/submit-e4b-v002h-checklist.md (first UTC day: nothing pending,
+  no other submit that day, AND (31b-v009 VOID or already submitted on an earlier day & not pending); reverse SUBMIT_KERNEL commit + kernel recheck first).
+## Next 3
+1. 00:00:30Z waiter: run nov8-submit-31b-v012-checklist (re-check submissions list; Gate-4 journal line; kernel v3), then lb_31b_v012.json + waiter. ERROR/timeout -> VOID, mail Director. v009 auth lapses on v012 submit.
+2. PLAN 010 arm 4: gate CLEARED, v014 load PASS. Run smoke+main week of 11-14 (after 00:00Z quota reset; quota BEFORE/AFTER log), then arm4 metrics + Addendum B2 diag (results/plan011_diag_arm4.json) + report (Option C only if timeouts still dominant empties).
+3. review-plan011-diag-v2-light: if BLOCKING fix + re-review to CLEAN (must be CLEAN before arm-4 data / Addendum B2). Then e4b-v002h Nov 9 (reverse SUBMIT_KERNEL commit + kernel recheck first). CPU work light, pre-data only; no new arms (dec 090 item 5).
+# Plan (the Director may revise it; log revisions in the journal)
+
+Today is Nov 4. The final deadline is Dec 2, 23:59 UTC. Each phase ends in a gate report to the
+Director.
+
+## P0: Foundation and baselines (Nov 4–7)
+Follow `docs/KICKOFF.md`.
+
+**Gate 0:**
+- The harness is verified and the facts are corrected.
+- Gold calibration has produced the clean task list.
+- The splits are frozen.
+- `pack` and the eval runners work.
+- 31B and E4B baseline bundles exist.
+- The first baseline submission is authorized.
+
+## P1: Scaffold iteration, both tracks (Nov 7–18)
+- Use the E4B track as a cheap testbed: a 1×L4 runs about 4× cheaper than 4×L4. Port its wins to
+  31B and confirm them there.
+- Work on the failure taxonomy, harness-trap fixes, the prompt workflow, skills, the localizer
+  sub-agent and sampling.
+- Submit daily when there's an eligible candidate.
+
+**Gate 1:** each track's best bundle beats its baseline on paired dev, and the timing bound holds.
+
+## P2: Post-training (Nov 12–25)
+- Collect trajectories on dev tasks (never holdout).
+- Use rejection-sampling SFT, plus scripted trajectories built from the reference patches.
+- LoRA: no A100 on GCP (decision 003). Cost out E4B LoRA on Kaggle L4x4 or GCP l4x1 spot, and whether 31B LoRA is feasible at all, in a report before Phase 2.
+- Run 1–2 rounds of expert iteration.
+- Lever (unscheduled): open-weight teacher distillation (licence must permit training other models). Needs GPUs we lack or a paid API (Aniket approval); cost out only when LoRA work starts (decision 003 item 3).
+- Ship rule (decision 004-002-001): leave-one-repo-out is mandatory for every ship decision; repo-specific prompt content is rejected; weight the four public repos equally.
+- Ship only if it wins paired on dev **and** holdout, in the exact vLLM base.
+
+**Gate 2:** for each track, decide adapter vs no adapter.
+
+## P3: Hardening (Nov 24–29)
+- Freeze candidates.
+- Run leave-one-repo-out checks, variance runs, and a timing rehearsal on 4×L4.
+- Get the last scored submissions in by about Nov 29.
+
+## P4: Finals (Nov 30–Dec 2)
+- Run the Director's selection analysis.
+- Escalate to Aniket on Dec 1.
+- Lock the selection by Dec 2, 18:00 UTC.
+
+## Budget plan ($150 hard cap; the Director releases it in increments)
+| Use | Approx. |
+|---|---|
+| CPU x86 VM for gold calibration and Phase-2 checks | $5 |
+| E4B on 1×L4 (spot) | $30 |
+| 31B on 4×L4 (spot) | $65 |
+| LoRA training (no A100 on GCP for now; see decision 003) | TBD |
+| Reserve | $20 |
+
+Kaggle L4x4 gives about 15 h/week, reserved for exact-environment smoke tests and timing.
+commit a91a1dae9a27f46637653aefe1a9339dfa18dfeb
+Author: Aniket <agrawalaniket02@gmail.com>
+Date:   Sat Nov 7 12:22:37 2026 +0000
+
+    dec 090: plan 010 Addendum B (PRE-DATA), plan011 diag v2, lever shelved in backlog
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_014u5C9X4dmNqhoiSKe7TVpQ
+
+ eval/plan011_empty_diag.py        | 132 ++++++++--
+ eval/plans/010.md                 |  16 ++
+ ops/backlog-prompt.md             |   4 +-
+ results/plan011_diag_arm3_v2.json | 528 ++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 654 insertions(+), 26 deletions(-)
+eval/plan007_arm1_summary.py:179:                   verified_patch_bytes=t.get('verified_patch_bytes'), exit_code=t.get('exit_code'),
+eval/plan007_arm1_summary.py:186:    empty = [(p, t) for p, t, _, _ in rows if t.get('verified_patch_bytes') == 0]
+eval/plan007_report.py:9:  verified_patch_bytes == 0, exit_code is an int not in (0, -1), resolved is False,
+eval/plan007_report.py:38:    pb = timing_row.get('verified_patch_bytes')
+eval/tests/test_classify_rows.py:17:                     agent_error_text=None, verified_patch_bytes=10, setup_calls=[],
+eval/tests/test_classify_rows.py:104:                                     exit_code=code, verified_patch_bytes=50))
+eval/tests/test_classify_rows.py:150:    assert classifier.classify(row(verified_patch_bytes=30, exit_code=code))['h'] == 'H-VERIFY'
+eval/tests/test_classify_rows.py:156:    result = classifier.classify(row(verified_patch_bytes=30, exit_code=code))
+eval/tests/test_classify_rows.py:161:    result = classifier.classify(row(verified_patch_bytes=0, exit_code=-1,
+eval/tests/test_classify_rows.py:186:    assert classifier.classify(row(verified_patch_bytes=10, exit_code=None, result_error='Agent exceeded tool call budget'))['h'] == 'H-VERIFY'
+eval/tests/test_classify_rows.py:191:    result = classifier.classify(row(verified_patch_bytes=patch_bytes, exit_code=code))
+eval/tests/test_classify_rows.py:209:    result = classifier.classify(row(verified_patch_bytes=0, exit_code=None))
+eval/tests/test_classify_rows.py:254:    (dict(verified_patch_bytes=0, exit_code='garbage'), 'r9:invalid_exit_code'),
+eval/tests/test_classify_rows.py:255:    (dict(verified_patch_bytes=0, exit_code=True), 'r9:invalid_exit_code'),
+eval/tests/test_classify_rows.py:268:    dict(resolved=True, verified_patch_bytes=0, exit_code=0),
+eval/tests/test_classify_rows.py:269:    dict(resolved=True, verified_patch_bytes=0, exit_code=None),
+eval/tests/test_classify_rows.py:287:    (dict(verified_patch_bytes=0, exit_code=None), 'NO_PATCH'),
+eval/tests/test_classify_rows.py:288:    (dict(verified_patch_bytes=0, exit_code=-1), 'NO_PATCH'),
+eval/tests/test_classify_rows.py:417:    assert classifier.classify(row(verified_patch_bytes=patch, exit_code=code,
+eval/tests/test_classify_rows.py:423:    assert classifier.classify(row(verified_patch_bytes=0, exit_code=code))['h'] == 'H-VERIFY'
+eval/tests/test_agent_timing.py:73:    trace = Entry(entries=[trace_entry('tool_call', 1, command), trace_entry('tool_response', 4),
+eval/tests/test_agent_timing.py:74:                           trace_entry('tool_call', 5, 'ls'), trace_entry('tool_response', 7),
+eval/tests/test_agent_timing.py:75:                           trace_entry('tool_call', 8, command, 'read_file'), trace_entry('tool_response', 9, tool='read_file')])
+eval/tests/test_agent_timing.py:83:                           trace_entry('tool_response', 4), trace_entry('tool_response', 7),
+eval/tests/test_agent_timing.py:648:    assert {'result_error', 'agent_error_text', 'verified_patch_bytes'} <= row.keys()
+eval/tests/test_agent_timing.py:651:    assert row['verified_patch_bytes'] == expected_bytes
+eval/tests/test_agent_timing.py:668:                   and any(isinstance(c, ast.keyword) and c.arg == 'verified_patch_bytes'
+eval/tests/test_agent_timing.py:673:        'result_error', 'agent_error_text', 'verified_patch_bytes'}
+eval/tests/test_plan007_report.py:20:    r = dict(instance_id='t1', verified_patch_bytes=0, exit_code=1, resolved=False,
+eval/tests/test_plan007_report.py:49:    dict(verified_patch_bytes=1), dict(verified_patch_bytes=None), dict(verified_patch_bytes=0.0),
+eval/tests/test_plan007_report.py:50:    dict(verified_patch_bytes=False),
+eval/tests/test_plan007_report.py:73:@pytest.mark.parametrize('key', ['result_error', 'agent_error_text', 'verified_patch_bytes', 'exit_code', 'resolved'])
+eval/tests/test_plan010_metrics.py:82:                     verified_patch_bytes=0 if self.ids.index(i) < empties else 1,
+eval/tests/test_plan010_metrics.py:186:        **({'timed_out': i < count} if metric == 'timeouts' else {'verified_patch_bytes': 0 if i < count else 1})))
+eval/tests/test_plan010_metrics.py:231:@pytest.mark.parametrize('field', ['stray_files', 'test_files_edited', 'wall_seconds', 'verified_patch_bytes', 'resolved', 'timed_out'])
+eval/tests/test_plan010_metrics.py:280:            dict(author=m.ROOT, type='tool_response', tool='submit_patch', result={'patch_size': 1})]
+eval/tests/test_plan009_metrics.py:53:    rows = [dict(instance_id=i, resolved=i in resolved, verified_patch_bytes=1,
+eval/tests/test_plan009_metrics.py:286:        row.pop('verified_patch_bytes')
+eval/tests/test_plan008_metrics.py:36:    return dict(type='tool_response', author=author, tool=tool,
+eval/tests/test_plan008_metrics.py:57:    return dict(dict(verified_patch_bytes=23, agent_clock_seconds=210, patch_submitted=True), **kw)
+eval/tests/test_plan008_metrics.py:169:    assert check(row(verified_patch_bytes=24), gate(), YAML)['ii']['status'] == 'FAIL'
+eval/tests/test_plan008_metrics.py:170:    assert check(row(verified_patch_bytes=None), gate(), YAML)['ii']['status'] == 'UNVERIFIABLE'
+eval/tests/test_plan008_metrics.py:240:    run, artifacts = make_run(tmp_path, gate(size=len(NEW)), row(verified_patch_bytes=len(NEW.encode())))
+eval/tests/test_plan008_metrics.py:321:    assert check(row(verified_patch_bytes=len(text.encode())), es, patch=text)['ii']['status'] == 'PASS'
+eval/tests/test_plan008_metrics.py:322:    assert check(row(verified_patch_bytes=len(text)), es, patch=text)['ii']['status'] == 'FAIL'
+eval/tests/test_plan008_metrics.py:323:    assert check(row(verified_patch_bytes=len(text.encode())), gate(size=24), patch=text)['ii']['status'] == 'FAIL'
+eval/tests/test_plan008_metrics.py:336:    r = row(verified_patch_bytes=len(scored.encode()))
+eval/tests/test_plan008_metrics.py:466:    r = row(verified_patch_bytes=len(patch.encode()))
+eval/tests/test_plan008_metrics.py:501:        r = dict(row(patch_submitted=i != 1, verified_patch_bytes=0 if i == 1 else 23), instance_id=iid)
+eval/tests/test_plan008_metrics.py:566:@pytest.mark.parametrize('kind', ['tool_response', 'tool_result'])
+eval/tests/test_plan008_metrics.py:581:@pytest.mark.parametrize('kind', ['tool_response', 'tool_result'])
+eval/tests/test_plan007_blind_gate.py:18:             verified_patch_bytes=10, setup_calls=[], exit_code=0, resolved=False, error=None,
+eval/tests/test_run_agent_eval.py:155:        e('tool_call', 10), e('tool_response', 200)]))[2] == {}
+eval/tests/test_kernel_probes.py:69:                    E(timestamp=106.0, usage=None, event_type='tool_response'),
+eval/plan007_rev5_repro.py:5:B = dict(instance_id="t", repo="x/y", resolved=True, exit_code=0, verified_patch_bytes=10, result_error=None,
+eval/plan007_rev5_repro.py:22:run('4b', {"resolved": False, "result_error": P, "verified_patch_bytes": 0, "exit_code": -1})
+eval/plan007_rev5_repro.py:23:run('5', {"resolved": False, "verified_patch_bytes": 0, "exit_code": 999})
+eval/plan007_rev5_repro.py:40:               ({"resolved": False, "verified_patch_bytes": 0, "exit_code": None}, 'L-nopatch-null'),
+eval/plan007_rev5_repro.py:41:               ({"resolved": False, "verified_patch_bytes": 0, "exit_code": -1}, 'L-nopatch-1'),
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/templates.py:74:        "tool_call": "tool_call",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/templates.py:75:        "tool_response": "tool_response",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/templates.py:114:    if t == "tool_call":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/templates.py:120:    if t == "tool_response":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/templates.py:175:    elif t == "tool_call":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/templates.py:183:    elif t == "tool_response":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/budget.py:19:    tool_calls: int | None = None  # Max total tool invocations
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/viewer.py:67:    tool_calls_used: int = 0
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/viewer.py:71:    max_tool_calls: int = 0
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/viewer.py:166:        m.max_tool_calls = _get_int("max_tool_calls", 0)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/viewer.py:169:        m.tool_calls_used = _get_int("tool_calls_used", 0)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/viewer.py:498:        if m.tool_calls_used > 0 or m.max_tool_calls > 0:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/viewer.py:502:                    f"{m.tool_calls_used} / {m.max_tool_calls}" if m.max_tool_calls > 0 else f"{m.tool_calls_used}",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/viewer.py:503:                    "warn" if m.max_tool_calls > 0 and m.tool_calls_used / m.max_tool_calls > 0.8 else "",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/viewer.py:580:        breakdown = summary.get("tool_call_breakdown", {})
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/viewer.py:635:        # Identify paired tool_call / tool_response entries (by tool name, in FIFO order).
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/viewer.py:640:            if e.event_type == "tool_call":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/viewer/viewer.py:642:            elif e.event_type == "tool_response":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:108:    max_tool_calls: int | None = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:155:            self.max_tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:156:            if self.max_tool_calls is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:157:            else self.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:173:                tool_calls=tc,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/__init__.py:86:    unwrap_tool_response,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/__init__.py:170:    "unwrap_tool_response",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/models/task.py:170:    tool_calls: int = Field(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/results.py:27:        'tool_calls': (
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/results.py:28:            getattr(result, 'tool_calls', 0)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/results.py:29:            or getattr(result, 'tool_calls_used', 0)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/utils/__init__.py:10:from adk_eval_core.utils.utils import setup_model_registry, unwrap_tool_response
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/utils/__init__.py:19:    "unwrap_tool_response",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py:349:                tool_calls=context.tool_calls_used,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py:381:        res.tool_calls = context.tool_calls_used
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py:517:                    slot_obj.context.tool_calls_used
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py:520:                        getattr(context, 'tool_calls_used', 0)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/evaluate.py:541:                    tool_calls=err_tools,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/utils/utils.py:14:def unwrap_tool_response(fr: Any) -> dict[str, Any] | None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:14:    parse_tool_response,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:440:        return parse_tool_response(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:462:        return parse_tool_response(search_similar_code(ctx, query, k))
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/graph.py:478:        return parse_tool_response(get_code_subgraph(ctx, nodes))
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/hud.py:191:        tc = b_dict.get("tool_calls")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/hud.py:193:            tc = getattr(ctx, "tool_calls", None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/hud.py:199:        tc_max = b_dict.get("max_tool_calls")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/hud.py:201:            tc_max = getattr(ctx, "max_tool_calls", None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:14:    parse_tool_response,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:76:@budget_gated(count_tool_call=False)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:119:@budget_gated(count_tool_call=False)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:128:        'tool_calls_used': ctx.tool_calls_used,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:132:    if ctx.budget.tool_calls is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:133:        status_data['tool_calls_remaining'] = max(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:134:            0, ctx.budget.tool_calls - ctx.tool_calls_used
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:136:        status_data['max_tool_calls'] = ctx.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:158:        return parse_tool_response(run_command(ctx, command))
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:171:        return parse_tool_response(submit_patch(ctx))
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:180:        return parse_tool_response(get_status(ctx))
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/base.py:34:def parse_tool_response(raw_response: str | dict[str, Any]) -> dict[str, Any]:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/base.py:50:    max_calls = getattr(budget, 'tool_calls', None) if budget is not None else None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/base.py:51:    used_calls = getattr(ctx, 'tool_calls_used', None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/base.py:75:    count_tool_call: bool = True,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/base.py:87:                            count_tool_call=count_tool_call
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/base.py:97:                        count_tool_call=count_tool_call
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/base.py:105:            if count_tool_call and isinstance(res, str):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/event_display.py:25:from adk_eval_core.utils.utils import unwrap_tool_response
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/event_display.py:494:                    self._handle_tool_call(part.function_call, ectx)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/event_display.py:497:                    self._handle_tool_response(part.function_response, content, ectx)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/event_display.py:524:    def _handle_tool_call(self, fc: Any, ectx: _EventContext) -> None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/event_display.py:549:    def _handle_tool_response(self, fr: Any, content: Any, ectx: _EventContext) -> None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/event_display.py:552:        parsed = unwrap_tool_response(fr)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/workspace.py:16:    parse_tool_response,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/workspace.py:317:        return parse_tool_response(read_file(ctx, filepath, start_line, end_line))
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/workspace.py:331:        return parse_tool_response(write_file(ctx, filepath, content))
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/workspace.py:358:        return parse_tool_response(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:250:    async def before_tool_callback(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:345:        if config.budget.tool_calls is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:347:                f'- Tool calls allowance: {config.budget.tool_calls} calls'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:804:                        turn_has_tool_call = False
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:836:                                context.budget.tool_calls is None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:837:                                or context.tool_calls_used < context.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:839:                                turn_has_tool_call = True
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:933:                            context.budget.tool_calls is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:934:                            and context.tool_calls_used >= context.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:938:                                    f'Agent exceeded tool call budget ({context.budget.tool_calls} calls)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:943:                                context.budget.tool_calls,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:962:                        if turn_has_tool_call:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:980:                        has_truncated_tool_call = '<|tool_call>' in last_assistant_text
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:982:                        if has_truncated_tool_call:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:985:                                '(<|tool_call|> was cut off). Do NOT repeat your prior reasoning in thought—emit your '
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/protocol.py:84:    def tool_calls(self) -> int:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/protocol.py:89:    def max_tool_calls(self) -> int | None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/cli.py:255:            max_tool_calls=args.max_tool_calls,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/dashboard.py:129:            count = getattr(ctx, "tool_calls_used", None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/dashboard.py:131:                count = getattr(ctx, "tool_calls", 0)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/dashboard.py:264:                    eff_tools = getattr(ctx, "tool_calls_used", None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/dashboard.py:266:                        eff_tools = getattr(ctx, "tool_calls", 0)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/dashboard.py:270:                        budget_obj.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/dashboard.py:273:                            and getattr(budget_obj, "tool_calls", None) is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/ui/dashboard.py:275:                        else getattr(ctx, "max_tool_calls", None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:61:        max_tool_calls: int | None = None,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:93:        final_tool_calls = (
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:94:            max_tool_calls if max_tool_calls is not None else base_budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:103:            tool_calls=final_tool_calls,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:131:        self.max_tool_calls = self.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:139:        self.tool_calls_used = 0
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:295:                    is_pure_tool_response = bool(parts) and all(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:298:                    if has_content and not is_pure_tool_response:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:360:    def tool_calls(self) -> int:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:362:        return self.tool_calls_used
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:422:            'tool_calls': self.tool_calls,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:423:            'max_tool_calls': self.max_tool_calls,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:468:    def check_budget(self, *, count_tool_call: bool = True) -> str | None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:472:                count_tool_call
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:473:                and self.budget.tool_calls is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:474:                and self.tool_calls_used >= self.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:480:                        'error_message': f'Tool call budget exhausted ({self.budget.tool_calls} calls)',
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:486:                count_tool_call
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:500:                count_tool_call
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:514:                count_tool_call
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:549:            if count_tool_call:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:550:                self.tool_calls_used += 1
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:556:            eff_tools = getattr(self, 'tool_calls_used', 0) or 0
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:558:                self.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:559:                if (self.budget and self.budget.tool_calls is not None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:560:                else getattr(self, 'max_tool_calls', None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/markdown.py:68:        lines.append(f"**Tool calls**: {summary['tool_calls']}")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/markdown.py:74:        if summary["tool_call_breakdown"]:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/markdown.py:76:            for name, count in sorted(summary["tool_call_breakdown"].items()):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/markdown.py:120:        elif entry.event_type == "tool_call":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/markdown.py:126:        elif entry.event_type == "tool_response":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:16:from adk_eval_core.utils.utils import unwrap_tool_response
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:29:        event_type: Category of event (e.g., "tool_call", "tool_response",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:33:        tool_name: Name of the tool (for tool_call and tool_response events).
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:34:        tool_args: Arguments passed to the tool (for tool_call events).
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:35:        tool_result: Serialized tool response (for tool_response events).
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:44:        str  # "thinking", "tool_call", "tool_response", "text", "final", "error"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:198:                event_type="tool_call",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:218:        parsed = unwrap_tool_response(fr)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:224:                event_type="tool_response",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:386:    def tool_call_breakdown(self) -> dict[str, int]:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:390:            if e.event_type == "tool_call":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:396:        breakdown = self.tool_call_breakdown
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:418:            "tool_calls": sum(breakdown.values()),
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:419:            "tool_call_breakdown": breakdown,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:461:                    and not step.get("tool_calls")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:486:                for idx, tc in enumerate(step.get("tool_calls", [])):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:503:                            event_type="tool_call",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py:523:                            event_type="tool_response",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif_converter.py:43:        if entry.event_type == "tool_call":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif_converter.py:55:            tool_call = ToolCallSchema(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif_converter.py:56:                tool_call_id=call_id,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif_converter.py:66:                and prev_event_type in (None, "thinking", "tool_call")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif_converter.py:68:                steps[-1].tool_calls.append(tool_call)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif_converter.py:83:                        tool_calls=[tool_call],
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif_converter.py:89:        elif entry.event_type == "tool_response":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif_converter.py:101:            if steps and steps[-1].source == "agent" and steps[-1].observation is None and steps[-1].tool_calls:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif.py:17:    tool_call_id: str
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif.py:25:            "tool_call_id": self.tool_call_id,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif.py:39:    tool_call_id: str | None = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif.py:47:        if self.tool_call_id is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif.py:48:            d["tool_call_id"] = self.tool_call_id
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif.py:62:    tool_calls: list[ToolCallSchema] = field(default_factory=list)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif.py:78:        if self.tool_calls:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/atif.py:79:            d["tool_calls"] = [tc.to_dict() for tc in self.tool_calls]
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import contextlib, io, json, runpy, collections, statistics
+from pathlib import Path
+m=runpy.run_path('eval/plan011_empty_diag.py')
+argv=['--max-tool-calls','40']
+for part in ('main','smoke'):
+    argv += ['--pair', f'runs/31b-v012-p9a-{part}',f'results/plan009_arm3_{part}_d4cdf0f0.json',f'eval/plans/009-{part}-ids.txt']
+out=io.StringIO()
+with contextlib.redirect_stdout(out):
+    code=m['main'](argv)
+r=json.loads(out.getvalue()); saved=json.loads(Path('results/plan011_diag_arm3_v2.json').read_text())
+print('exit:',code,'saved_object_equal:',r==saved)
+print('counts:',r['counts'],'summary:',r['summary'])
+empty=[x for x in r['rows'] if x['cls'].startswith('empty_')]
+print('empty median/range/calls<=10:',statistics.median(x['calls'] for x in empty),min(x['calls'] for x in empty),max(x['calls'] for x in empty),sum(x['calls']<=10 for x in empty))
+shapes=collections.Counter(); edits=collections.Counter(); statuses=[]; anomalies=[]; byte_checks=collections.Counter(); pending_at_end=collections.Counter(); tools=collections.Counter()
+for part in ('main','smoke'):
+    run=Path(f'runs/31b-v012-p9a-{part}')
+    cs=json.loads(Path(f'results/plan009_arm3_{part}_d4cdf0f0.json').read_text())
+    print(part,'classifier top keys:',sorted(cs),'row keys:',sorted(cs['rows'][0]))
+    for c in cs['rows']:
+        iid=c['instance_id']; result=json.loads((run/'runs'/iid/'result.json').read_text())
+        tr=json.loads((run/'runs'/iid/'trace.json').read_text())
+        patch=result.get('agent_patch'); b=0 if patch is None else len(patch.encode())
+        byte_checks[(b==0,c.get('verified_patch_bytes')==0)]+=1
+        pending=[]
+        for e in tr['entries']:
+            if e['type']=='tool_call':
+                tools[e['tool']]+=1
+                if pending: anomalies.append((iid,'multiple_pending',pending[-1]['tool'],e['tool']))
+                pending.append(e)
+            elif e['type']=='tool_response':
+                p=m['parse'](e.get('result'))
+                shapes[(type(e.get('result')).__name__,type(p).__name__)]+=1
+                if not pending: anomalies.append((iid,'no_pending',e.get('tool'))); continue
+                call=pending.pop()
+                if call['tool'] "'!= e.get('"'tool'): anomalies.append((iid,'name_mismatch',call['tool'],e.get('tool')))
+                if call['tool'] in m['EDIT_TOOLS']: edits[(call['tool'],None if p is None else p.get('status'))]+=1
+                if call['tool']=='get_status': statuses.append({k:p.get(k) for k in ('status','tool_calls_used','tool_calls_remaining','time_remaining_seconds')} if p else {'unparsed':True})
+        for call in pending: pending_at_end[call['tool']]+=1
+print('response shapes:',dict(shapes))
+print('edit response status counts:',dict(edits))
+print('all tool names/counts:',dict(tools))
+print('get_status safe fields:',statuses)
+print('response pairing anomalies:',anomalies,'unanswered final calls:',dict(pending_at_end))
+print('result-empty vs classifier verified_patch_bytes:',dict(byte_checks))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+exit: 0 saved_object_equal: True
+counts: {'patch_wrong': 3, 'empty_timeout': 18, 'patch_timeout': 2, 'resolved': 10} summary: {'n': 33, 'malformed_edit_calls': 9, 'edit_errors': 11, 'empty': 18, 'empty_call_exhausted': 1, 'rule_target': 1, 'rule_verdict': 'STAY_SHELVED'}
+empty median/range/calls<=10: 15.5 5 41 7
+main classifier top keys: ['_schema', 'classifier_sha256', 'counts', 'h_rows', 'input', 'input_sha256', 'kernel_void', 'kernel_void_reasons', 'n_rows', 'rows'] row keys: ['agent', 'agent_end', 'h', 'instance_id', 'known_diag', 'reasons', 'repo', 'resolved']
+smoke classifier top keys: ['_schema', 'classifier_sha256', 'counts', 'h_rows', 'input', 'input_sha256', 'kernel_void', 'kernel_void_reasons', 'n_rows', 'rows'] row keys: ['agent', 'agent_end', 'h', 'instance_id', 'known_diag', 'reasons', 'repo', 'resolved']
+response shapes: {('str', 'dict'): 617}
+edit response status counts: {('edit_file', 'ok'): 19, ('edit_file', None): 9, ('edit_file', 'error'): 2, ('write_file', 'ok'): 1}
+all tool names/counts: {'run_command': 311, 'read_file': 260, 'edit_file': 30, 'submit_patch': 12, 'get_code_neighbors': 1, 'get_status': 1, 'search_similar_code': 1, 'write_file': 1}
+get_status safe fields: [{'status': 'ok', 'tool_calls_used': 40, 'tool_calls_remaining': 0, 'time_remaining_seconds': None}]
+response pairing anomalies: [] unanswered final calls: {}
+result-empty vs classifier verified_patch_bytes: {(True, False): 18, (False, False): 15}
+
+codex
+The rerun exactly matches the saved v2 JSON: 18 `empty_timeout` rows and `rule_target = 1`. All 617 tool responses parse as JSON objects and match their preceding calls. I’ll now check edge cases for whitespace patches, edit success, timeout overlap, and invalid inventories.
+exec
+/bin/bash -lc "git diff a91a1da -- eval/plan011_empty_diag.py eval/plans/010.md results/plan011_diag_arm3_v2.json && rg --files eval | rg 'plan011|test.*diag|diag.*test' && nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py | sed -n '119,142p' && nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py | sed -n '55,85p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+eval/plan011_empty_diag.py
+   119	@budget_gated(count_tool_call=False)
+   120	def get_status(ctx: Any) -> str:
+   121	    """Check active budget details (time, tool calls) and active patch details.
+   122	
+   123	    Args:
+   124	        ctx: Context instance.
+   125	    """
+   126	    status_data: dict[str, Any] = {
+   127	        'status': 'ok',
+   128	        'tool_calls_used': ctx.tool_calls_used,
+   129	        'patch_submitted': ctx.submitted_patch is not None,
+   130	        'patch_size': len(ctx.submitted_patch) if ctx.submitted_patch else 0,
+   131	    }
+   132	    if ctx.budget.tool_calls is not None:
+   133	        status_data['tool_calls_remaining'] = max(
+   134	            0, ctx.budget.tool_calls - ctx.tool_calls_used
+   135	        )
+   136	        status_data['max_tool_calls'] = ctx.budget.tool_calls
+   137	    if ctx.budget.time_minutes is not None:
+   138	        status_data['time_seconds_remaining'] = ctx.remaining_time_seconds
+   139	        status_data['max_time_minutes'] = ctx.budget.time_minutes
+   140	        status_data['agent_elapsed_seconds'] = ctx.agent_elapsed_seconds
+   141	    if ctx.budget.turns is not None:
+   142	        status_data['max_turns'] = ctx.budget.turns
+    55	    def to_dict(self) -> dict[str, Any]:
+    56	        """Convert the trace entry to a dictionary."""
+    57	        d = {
+    58	            "timestamp": self.timestamp,
+    59	            "elapsed_s": round(self.elapsed, 3),
+    60	            "type": self.event_type,
+    61	        }
+    62	        if self.author:
+    63	            d["author"] = self.author
+    64	        if self.content:
+    65	            d["content"] = self.content
+    66	        if self.tool_name:
+    67	            d["tool"] = self.tool_name
+    68	        if self.tool_args is not None:
+    69	            d["args"] = self.tool_args
+    70	        if self.tool_result:
+    71	            d["result"] = self.tool_result
+    72	        if self.usage:
+    73	            d["usage"] = self.usage
+    74	        if self.model_version:
+    75	            d["model"] = self.model_version
+    76	        if self.metadata:
+    77	            d["metadata"] = self.metadata
+    78	        return d
+    79	
+    80	
+    81	class SessionTrace:
+    82	    """Records and exports a complete session trace.
+    83	
+    84	    Usage:
+    85	        trace = SessionTrace()
+
+exec
+/bin/bash -lc "cat ops/STATE.md && cat docs/PLAN.md && git show --format=fuller --stat a91a1da && rg -n 'verified_patch_bytes|agent_patch' eval/kaggle/agent_timing.py && nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_eval_core/tracing/trace.py | sed -n '180,235p' && nl -ba /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/workspace.py | sed -n '130,245p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+# STATE: snapshot 2026-11-07 12:45Z (cycle 198; DEC 090 on report 023 = approve A: tool-level empty-patch lever SHELVED for v012 lineage (backlog (c) updated); plan 010 Addendum B PRE-DATA committed a91a1da (arm-4 re-check of plan011 diag, rule_target>=3/33 -> plan 011 proposal, else stays shelved); plan011_empty_diag.py v2 (exact-byte empty, inventory checks, edit-success) reproduces 023 (results/plan011_diag_arm3_v2.json: 18 empty_timeout, rule_target 1); codex review-plan011-diag-v2-light RUNNING (CLEAN needed before B2). Option C (further knob cut) only in arm-4 report if timeouts still dominate. Priorities unchanged: Nov 8 v012 submit 00:00:30Z waiter; Nov 9 e4b-v002h; arm 4 week of 11-14). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
+- v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
+- e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
+  SUBMITTED 2026-11-06T00:11:23Z ref 58039259; SCORED public 0.05 (COMPLETE; first final poll 05:11:49Z, T=5.007 h). results/lb_e4b_v002.json filled,
+  budget row updated, Director FYI'd. No runtime fields from CLI. E4B validator acceptance VERIFIED. Next e4b submit: next UTC day at earliest. Guard v6 applied b9caae4 (dry checks rc=3 x2).
+- 31b-v002 (v001-t4 + cap 3.5): dist/31b-v002.zip sha256=e56a05e5701fa16a8dbbabb304d98f63a465511cefbb28d65850ea5ce086ec88
+  SUBMITTED 2026-11-07T00:06:31Z ref 58072907 (dec 055). SCORED public 0.15 (COMPLETE; first final poll 09:06:53Z, T=9.006 h,
+  bracket (8.506, 9.006] h). json + budget row filled, Director FYI 09:08Z (dec 079 DONE). Waiter done.
+  Validation submit: expect weak LB, don't act alone; write-up notes FastAPI-hint caveat (dec 060). config.env SUBMIT_KERNEL now = 31b kernel:
+  next e4b submit needs the reverse config commit first. Next submit slot: 2026-11-08 UTC (ledger blocks same-day).
+- CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 12B/E2B validator
+  acceptance (E4B VERIFIED by 58039259 scoring); l.55 submit_patch/get_status vs call limits; l.63 private-LB multiple runs; l.72 wheels arch
+  (x86 assumed, unrecorded); 12h overrun ruling. VERIFIED: l.42 submit method = kernel output (dec 041); l.76 superseded by l.112.
+## Eval data
+- Splits v2 FROZEN: clean 48 (rich 39, fastapi 9), dev 33, holdout 15; holdout uses = 0. Hashes: eval/splits/MANIFEST.json.
+- requests/httpx dropped (wheel shadowing = scorer property, dec 014). Gold v2 files in results/ (gold_calibration_*, gold_failure_causes).
+- RE-GROUND EVERY CYCLE (dec 021/025). Linger: `loginctl show-user "$(id -un)" -p Linger --value` must be `yes`, else tell Director. After NEXT reboot once: `systemctl --user list-units --type=service --state=running` names only; report non-ours units, never touch (may be Etho).
+- Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
+- DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
+  submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
+## Running jobs (12:45Z): memguard-light, submit-window-nov8-v012-light (fires 2026-11-08T00:00:30Z), review-plan011-diag-v2-light.
+- v014 (plan 010 arm 4): dist/31b-v014.zip 7980846995e3acb38418427755676931fbfc7fa22998b1e9b2599da499135def = v012 + root thinking 2048; load check PASS results/bundle_load_check_31b_v014.json; finals pre-check ELIGIBLE results/finals_eligibility_31b-v014_vs_31b-v012.json (needs v012 COMPLETE). READY for smoke+main week of 11-14.
+- ARM-3 DONE: kernel v5 COMPLETE ~11:19Z, SEAL runs/31b-v012-p9a-main/SEAL.sha256 (c0d01bb4..) OK; quota AFTER 21.59 h (+9.70; 8.41 h left to 11-14).
+  Classifiers results/plan009_arm3_main_{d4cdf0f0,a208a023}.json (0 H); metrics results/plan009_arm3_vs_arm1.json; report 021.
+- CODEX S81: 060833 BLOCKING 1 fixed 71185a3; re-review s81b 061229 CLEAN -> arm-3 metrics allowed. Report lists amended arm-2 counts separately (S81.3).
+- DEC 081 (on 020, approve A w/ changes): (1) arm-3 SMOKE (v4) PASS results/plan009_arm3_smoke.json: thinking blocks [5,10]=15, timing PASS,
+  0 H (d4cdf0f0 results/plan009_arm3_smoke_d4cdf0f0.json; a208a023 alongside 0 H), identity OK; both rows NO_PATCH/timeout (descriptive). Quota
+  smoke +0.63 h (11.89 AFTER). identity --event main PASS 06:26:50Z. MAIN pushed v5 06:27:20Z: 31 ids eval/plans/009-main-ids.txt, ONE session,
+  budget 30000 s, seed-max 803, TRANSPORT 203e542b (dry-run == smoke), quota BEFORE 11.89 h. On land: quota AFTER + budget row; classify main
+  (PYTHONPATH=eval/kaggle python3 eval/plan007_pinned/classify_rows_d4cdf0f0.py TIMING --out ...; also a208a023); plan008_metrics.py arm3
+  (dirs smoke,main; --identity-json --bundle v012 --transport DIR=203e542b.. --push-event DIR=smoke|main --smoke-json results/plan009_arm3_smoke.json
+  [--base-verdict-json]); report with amended arm-2 stray counts listed separately (S81.3). Missing ids -> D73.7 rule.
+  (2-4) Addendum S81 f9a9562 PRE-DATA; code eda02a4+71185a3; codex s81b 061229 CLEAN. Pre-data rows: arm1 gov 0/lit 0, arm2 gov 0/lit 1.
+  (5) backlog: tool-level empty-patch lever plan (tolerant edit_file error + exploration budget signal) AFTER arm 3. (6) Nov 8 slot due 12:00Z.
+- DEC 080/report 020: diagnosis results/plan008_arm2_diagnosis.md (stray row = deliberate deliverable; empties 7 never-edited, 3 malformed edit_file). Arm 2
+  (report 019) 8/33 vs arm1 4/33, A-only 4/B-only 0 p=0.125, MECH1/2 FAIL -> NOT SHIP-ELIGIBLE; base = arm 1; 31B default draft stays v009. Files 4de6787.
+  arm3 CLI: --identity-json --bundle --transport DIR=SHA --push-event DIR=EVENT (every dir) --smoke-json [--base-verdict-json]. Arm-3 bundle
+  31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096), load PASS (e5196a4).
+- DEC 069 (rep 018, A w/ conditions): arm 1 VALID by POST-HOC ruling = plan 007 Addendum C (7ceb059). PRIMARY 4/33 FINAL
+  (codex 132715 BLOCKING = missing descriptive lines -> fixed; re-review 133120 CLEAN). results/plan007_arm1_summary.json v2
+  (script sha 349b1bda...): a 4/33 (W 4.8-27.3), c 4/26, d 4/27 (literal), d' 4/33, empty 12/33 (2 to/10 non), unscreened 3/25, ENV CONTROL caveat l.152 on every arm-1 citation.
+- PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
+  33 dev fixed order eval/plans/007-arm1-ids.txt, --with-verification --no-stock-probe, slug aniket0202/gemma-31b-passrate.
+- DEC 057: no new bundle carries a repo-named hint; v000-v002 (both tracks) carry the FastAPI hint -> reports must say so. 31b-v004 CPU DRAFT 50537e1d (v007+quoting), no slot.
+- GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU week of 11-07: 21.59/30 h at 11:20Z (arm 2 + arm-3 smoke+main done; 8.41 h left). Log: ops/budget/kaggle.md. Resets 2026-11-14T00:00Z.
+## Live caveats (dec 078: no FYIs for routine clean reviews; dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035). Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
+  (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
+  results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
+- Director reminder 2026-11-06T23:02Z: GCP quota re-request line to Aniket (keep until a decision marks it done). Kaggle GPU kernels pin starter docker_image (py3.12, cp312). Hosted-LLM-API data Q OPEN; no new 3rd-party svc. One pending submission; no partial credit on timeout. Quota log before/after smoke+main (dec 063/064).
+## Timing facts (results/kaggle_timing_e4b_v000_setup.json) setup ~210 s/task, outside max_time_minutes (clock starts after setup); flat across repos. vLLM startup 5.39 min; verification ~410 s (excluded from the 12 h). Agent clock p90 144 s at cap 5.
+- Timing kernel (plan 006 DONE, G1 held -> dec 055): stack main 2db5f51 per Addendum A (gate fix from 92a74c7, worktree
+  gemma-wt/codex-kernel-probes-gate). Last FROZEN+noted classifier: a208a023 (0d49b1c); rev-5 d4cdf0f0 frozen pending Director note (report 016).
+- FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
+  DEC 086: 31B cap<=3.5 MET (v002 COMPLETE); never raise 31B cap >3.5. DEC 087 BINDING (both tracks, replaces match clause): final must (a) score
+  COMPLETE itself OR (b) differ from a COMPLETE bundle ONLY by <= cap/calls/turns/thinking/max_out, all else byte-identical. MECHANICAL:
+  eval/finals_eligibility.py + ops/drafts/finals-checklist.md: v012, v009 vs v002 and e4b-v002h vs e4b-v002 all INELIGIBLE (system.md) -> each needs
+  own score. DEC 088: e4b too (LoRA/prompt variants need own score by Nov 29).
+  Codex 091327 BLOCKING x5 -> v2 0d3e3b4; codex 092238 BLOCKING x2 (merge-key shadowed agent_tool; skill resources w/ gcc allowance) -> v3
+  3404fbb (56 tests, suite 1680 pass; new tests fail on v2), 5 checks re-run, verdicts unchanged. Re-review 093116 CLEAN (non-blocking:
+  nested !include/flow/anchor knob edits stay conservatively INELIGIBLE) -> checker v3 RELIED ON. Dec 087 item 3: if report 021 shows v012 winning, propose v012 scored submit there for first free slot after e4b-v002h (Nov 9).
+- TOPICS (Director mail 01:47Z, owner req): docs/TOPICS.md saved; on any topic status change (used now | planned | adjacent, not used) update its line + repo ref in the same cycle as the journal entry.
+- DEC 083 (approve-with-changes; repeats REJECTED, guard refuses ledger shas, do NOT edit guard): SUBMIT AUTHORIZE 31b-v009 dist/31b-v009.zip
+  sha256=d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d, CONDITIONAL, checklist ops/drafts/nov8-submit-31b-v009-checklist.md:
+  (a) 58072907 FINAL COMPLETE w/ score (any value; ERROR/timeout -> VOID, CAP-BOUND, mail at once); (b) day>=11-08, nothing pending, no stacking,
+  auth carries to first day (a) holds; (c) Gate-2 codex review job review-31b-v009-submit-light, no BLOCKING; (d) Gate-4 journal line pre-submit;
+  (e) kernel aniket0202/gemma-submit-31b v2 pushed 06:34:57Z, output BYTE_IDENTICAL (results/submit_kernel_v2_verify.txt); SUBMIT_KERNEL stays 31b;
+  MANIFEST updated; (f) lb_31b_v009.json + waiter; write-up caveats. Window waiter submit-window-nov8-light fires 2026-11-08T00:00:30Z.
+- DEC 083 item 2: e4b-v002h bundles/e4b/v002h dist/e4b-v002h.zip sha256=938d618ceaeb7602d86e49a9cf7d2b7ce7191e8936d9520bb7d005a6c5f04836
+  (= e4b-v002 minus FastAPI/docs_src line; zip diff = 1 deleted line, same file set; load check == v002 results/bundle_load_check_e4b_v002h.json).
+  Codex review job review-e4b-v002h-light. Kernel aniket0202/gemma-submit-e4b v2 output BYTE_IDENTICAL (same txt). Do NOT flip SUBMIT_KERNEL
+  until authorized (Director: Nov 8 if v002 ERRORS, else Nov 9). Item 5: LB-noise repeat deferred.
+- GATE 2 DONE 06:36Z: v009 review 063339 BLOCKING 1 (empty diff on timeout/cap) WAIVED by DEC 084 item 1 / DEC 085 for d38c55c7 -> journal the waiver Prompt nits -> ops/backlog-prompt.md (no v009 edit); MANIFEST nits done.
+- DEC 084 item 3: e4b-v002h AUTHORIZED CONDITIONAL, checklist ops/drafts/submit-e4b-v002h-checklist.md (first UTC day: nothing pending,
+  no other submit that day, AND (31b-v009 VOID or already submitted on an earlier day & not pending); reverse SUBMIT_KERNEL commit + kernel recheck first).
+## Next 3
+1. 00:00:30Z waiter: run nov8-submit-31b-v012-checklist (re-check submissions list; Gate-4 journal line; kernel v3), then lb_31b_v012.json + waiter. ERROR/timeout -> VOID, mail Director. v009 auth lapses on v012 submit.
+2. PLAN 010 arm 4: gate CLEARED, v014 load PASS. Run smoke+main week of 11-14 (after 00:00Z quota reset; quota BEFORE/AFTER log), then arm4 metrics + Addendum B2 diag (results/plan011_diag_arm4.json) + report (Option C only if timeouts still dominant empties).
+3. review-plan011-diag-v2-light: if BLOCKING fix + re-review to CLEAN (must be CLEAN before arm-4 data / Addendum B2). Then e4b-v002h Nov 9 (reverse SUBMIT_KERNEL commit + kernel recheck first). CPU work light, pre-data only; no new arms (dec 090 item 5).
+# Plan (the Director may revise it; log revisions in the journal)
+
+Today is Nov 4. The final deadline is Dec 2, 23:59 UTC. Each phase ends in a gate report to the
+Director.
+
+## P0: Foundation and baselines (Nov 4–7)
+Follow `docs/KICKOFF.md`.
+
+**Gate 0:**
+- The harness is verified and the facts are corrected.
+- Gold calibration has produced the clean task list.
+- The splits are frozen.
+- `pack` and the eval runners work.
+- 31B and E4B baseline bundles exist.
+- The first baseline submission is authorized.
+
+## P1: Scaffold iteration, both tracks (Nov 7–18)
+- Use the E4B track as a cheap testbed: a 1×L4 runs about 4× cheaper than 4×L4. Port its wins to
+  31B and confirm them there.
+- Work on the failure taxonomy, harness-trap fixes, the prompt workflow, skills, the localizer
+  sub-agent and sampling.
+- Submit daily when there's an eligible candidate.
+
+**Gate 1:** each track's best bundle beats its baseline on paired dev, and the timing bound holds.
+
+## P2: Post-training (Nov 12–25)
+- Collect trajectories on dev tasks (never holdout).
+- Use rejection-sampling SFT, plus scripted trajectories built from the reference patches.
+- LoRA: no A100 on GCP (decision 003). Cost out E4B LoRA on Kaggle L4x4 or GCP l4x1 spot, and whether 31B LoRA is feasible at all, in a report before Phase 2.
+- Run 1–2 rounds of expert iteration.
+- Lever (unscheduled): open-weight teacher distillation (licence must permit training other models). Needs GPUs we lack or a paid API (Aniket approval); cost out only when LoRA work starts (decision 003 item 3).
+- Ship rule (decision 004-002-001): leave-one-repo-out is mandatory for every ship decision; repo-specific prompt content is rejected; weight the four public repos equally.
+- Ship only if it wins paired on dev **and** holdout, in the exact vLLM base.
+
+**Gate 2:** for each track, decide adapter vs no adapter.
+
+## P3: Hardening (Nov 24–29)
+- Freeze candidates.
+- Run leave-one-repo-out checks, variance runs, and a timing rehearsal on 4×L4.
+- Get the last scored submissions in by about Nov 29.
+
+## P4: Finals (Nov 30–Dec 2)
+- Run the Director's selection analysis.
+- Escalate to Aniket on Dec 1.
+- Lock the selection by Dec 2, 18:00 UTC.
+
+## Budget plan ($150 hard cap; the Director releases it in increments)
+| Use | Approx. |
+|---|---|
+| CPU x86 VM for gold calibration and Phase-2 checks | $5 |
+| E4B on 1×L4 (spot) | $30 |
+| 31B on 4×L4 (spot) | $65 |
+| LoRA training (no A100 on GCP for now; see decision 003) | TBD |
+| Reserve | $20 |
+
+Kaggle L4x4 gives about 15 h/week, reserved for exact-environment smoke tests and timing.
+commit a91a1dae9a27f46637653aefe1a9339dfa18dfeb
+Author:     Aniket <agrawalaniket02@gmail.com>
+AuthorDate: Sat Nov 7 12:22:37 2026 +0000
+Commit:     Aniket <agrawalaniket02@gmail.com>
+CommitDate: Sat Nov 7 12:22:37 2026 +0000
+
+    dec 090: plan 010 Addendum B (PRE-DATA), plan011 diag v2, lever shelved in backlog
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_014u5C9X4dmNqhoiSKe7TVpQ
+
+ eval/plan011_empty_diag.py        | 132 ++++++++--
+ eval/plans/010.md                 |  16 ++
+ ops/backlog-prompt.md             |   4 +-
+ results/plan011_diag_arm3_v2.json | 528 ++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 654 insertions(+), 26 deletions(-)
+806:async def skip_verification(docker, config, task, snapshot_path, *, agent_patch='',
+811:        agent_patch=agent_patch, test_output='', test_exit_code=0,
+1081:            patch = times.get('raw_patch', result.agent_patch if result else evaluator.patch) or ''
+1091:                                  result.agent_patch if result else evaluator.patch)
+1098:                verified_patch_bytes=(len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+1118:                    ('verified_patch_bytes', lambda: len((result.agent_patch or '').encode('utf-8')) if result is not None else None),
+   180	        return False
+   181	
+   182	    def _record_function_call(
+   183	        self,
+   184	        part: Any,
+   185	        author: str,
+   186	        model: str,
+   187	        now: float,
+   188	        elapsed: float,
+   189	        consume_usage: Callable[[], dict[str, Any] | None],
+   190	    ) -> None:
+   191	        """Record a tool function call event."""
+   192	        fc = part.function_call
+   193	        args = dict(fc.args) if fc.args else {}
+   194	        self._add(
+   195	            TraceEntry(
+   196	                timestamp=now,
+   197	                elapsed=elapsed,
+   198	                event_type="tool_call",
+   199	                author=author,
+   200	                tool_name=fc.name,
+   201	                tool_args=args,
+   202	                usage=consume_usage(),
+   203	                model_version=model,
+   204	            )
+   205	        )
+   206	
+   207	    def _record_function_response(
+   208	        self,
+   209	        part: Any,
+   210	        author: str,
+   211	        model: str,
+   212	        now: float,
+   213	        elapsed: float,
+   214	        consume_usage: Callable[[], dict[str, Any] | None],
+   215	    ) -> None:
+   216	        """Record a tool function response event."""
+   217	        fr = part.function_response
+   218	        parsed = unwrap_tool_response(fr)
+   219	        resp_text = json.dumps(parsed, default=str) if parsed is not None else ""
+   220	        self._add(
+   221	            TraceEntry(
+   222	                timestamp=now,
+   223	                elapsed=elapsed,
+   224	                event_type="tool_response",
+   225	                author=author,
+   226	                tool_name=getattr(fr, "name", "") or "",
+   227	                tool_result=resp_text,
+   228	                usage=consume_usage(),
+   229	                model_version=model,
+   230	            )
+   231	        )
+   232	
+   233	    def _record_thought(
+   234	        self,
+   235	        part: Any,
+   130	                filepath=filepath,
+   131	                content='',
+   132	                start_line=1,
+   133	                end_line=0,
+   134	                total_lines=0,
+   135	                is_truncated=False,
+   136	            )
+   137	
+   138	        start = coerced_start if coerced_start is not None else 1
+   139	        end = coerced_end if coerced_end is not None else total_lines
+   140	
+   141	        start = max(start, 1)
+   142	        end = min(end, total_lines)
+   143	
+   144	        if start > end:
+   145	            return error_response(
+   146	                error_type='ValueError',
+   147	                error_message=f'start_line ({start}) cannot be greater than end_line ({end})',
+   148	                details={},
+   149	            )
+   150	
+   151	        max_lines = getattr(ctx.harness, 'max_file_lines', 150)
+   152	        max_chars = getattr(ctx.harness, 'max_file_chars', 10000)
+   153	        is_truncated = False
+   154	        if max_lines is not None and (end - start + 1) > max_lines:
+   155	            end = start + max_lines - 1
+   156	            is_truncated = True
+   157	
+   158	        selected_lines = lines[start - 1 : end]
+   159	        snippet = '\n'.join(selected_lines)
+   160	
+   161	        if max_chars is not None and len(snippet) > max_chars:
+   162	            snippet = snippet[:max_chars]
+   163	            is_truncated = True
+   164	
+   165	        return ok_response(
+   166	            filepath=filepath,
+   167	            content=snippet,
+   168	            start_line=start,
+   169	            end_line=end,
+   170	            total_lines=total_lines,
+   171	            is_truncated=is_truncated,
+   172	        )
+   173	    except Exception as e:
+   174	        return error_response(
+   175	            error_type='FileReadError',
+   176	            error_message=str(e),
+   177	        )
+   178	
+   179	
+   180	@budget_gated
+   181	def write_file(ctx: Any, filepath: str, content: str) -> str:
+   182	    """Create or overwrite a file in the workspace.
+   183	
+   184	    Args:
+   185	        ctx: Context instance.
+   186	        filepath: Relative path to the file to create or overwrite.
+   187	        content: Full content of the file.
+   188	    """
+   189	    try:
+   190	        dest_path = _resolve_workspace_path(filepath, allow_root=False)
+   191	        quoted_parent = shlex.quote(str(dest_path.parent))
+   192	
+   193	        with tempfile.TemporaryDirectory() as tmpdir:
+   194	            tmp_file = Path(tmpdir) / dest_path.name
+   195	            tmp_file.write_text(content, encoding='utf-8')
+   196	
+   197	            mkdir_res = ctx.docker.exec(ctx.container_id, f'mkdir -p {quoted_parent}')
+   198	            if mkdir_res.exit_code != 0:
+   199	                raise RuntimeError(
+   200	                    f'Failed to create directory {dest_path.parent} inside container: {mkdir_res.stderr}'
+   201	                )
+   202	
+   203	            ctx.docker.copy_to(ctx.container_id, tmp_file, f'{dest_path.parent}/')
+   204	
+   205	        return ok_response(
+   206	            filepath=filepath,
+   207	            size=len(content),
+   208	        )
+   209	    except Exception as e:
+   210	        return error_response(
+   211	            error_type='FileWriteError',
+   212	            error_message=str(e),
+   213	        )
+   214	
+   215	
+   216	@budget_gated
+   217	def edit_file(
+   218	    ctx: Any,
+   219	    filepath: str,
+   220	    old_string: str,
+   221	    new_string: str,
+   222	    allow_multiple: bool = False,
+   223	) -> str:
+   224	    """Replace a contiguous block of text in an existing file.
+   225	
+   226	    More token-efficient than write_file for targeted changes. Provide 2-4 lines of unique
+   227	    surrounding context in old_string to ensure an unambiguous match.
+   228	
+   229	    Args:
+   230	        ctx: Context instance.
+   231	        filepath: Relative path to the target file.
+   232	        old_string: Text block to replace.
+   233	        new_string: Replacement text block.
+   234	        allow_multiple: Replace all occurrences of old_string if True.
+   235	    """
+   236	    try:
+   237	        from swegemma.edit import apply_replacement
+   238	
+   239	        dest_path = _resolve_workspace_path(filepath, allow_root=False)
+   240	        filename = dest_path.name
+   241	
+   242	        with tempfile.TemporaryDirectory() as tmpdir:
+   243	            local_file = Path(tmpdir) / filename
+   244	            ctx.docker.copy_from(ctx.container_id, str(dest_path), local_file)
+   245	
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import contextlib, io, itertools, json, runpy
+from pathlib import Path
+from unittest.mock import patch
+m=runpy.run_path('eval/plan011_empty_diag.py')
+def call(tool, response=None):
+    es=[{'type':'tool_call','tool':tool,'args':{'old_string':'a','new_string':'b'}}]
+    if response is not None: es.append({'type':'tool_response','tool':tool,'result':response})
+    return es
+patterns=[[],call('edit_file',json.dumps({'status':'ok'})),call('write_file',{'status':'ok'}),call('edit_file',json.dumps({'status':'error'})),call('edit_file',json.dumps({'error':'missing argument'})),call('edit_file','malformed'),call('edit_file'),call('edit_file',json.dumps({'status':'error'}))+call('write_file',json.dumps({'status':'ok'})),call('get_status',json.dumps({'status':'ok','tool_calls_remaining':0})),call('get_status',{'status':'ok','tool_calls_remaining':1}),call('read_file')*39,call('read_file')*40,call('read_file')*41]
+n=0
+for p,end,resolved,es in itertools.product([None,'',' \\n','x','é'],[None,'timeout','call_budget'],[False,True],patterns):
+    fs={'r/runs/i/trace.json':json.dumps({'entries':es}),'r/runs/i/result.json':json.dumps({'agent_patch':p,'resolved':resolved,'duration_seconds':1})}
+    def op(path,*args,**kw): return io.StringIO(fs[str(path)])
+    with patch('builtins.open',side_effect=op): row=m['diag_row']('r','i',{'agent_end':end},40)
+    cs=[e for e in es if e['type']=='tool_call']; eds=[e for e in cs if e['tool'] in ('edit_file','write_file')]
+    oks=0; status_zero=False
+    for e in es:
+        if e['type']"'!='"'tool_response': continue
+        q=e['result']
+        try: q=json.loads(q) if isinstance(q,str) else q
+        except ValueError: q=None
+        if isinstance(q,dict):
+            oks+=e['tool'] in ('edit_file','write_file') and q.get('status')=='ok'
+            status_zero|=e['tool']=='get_status' and q.get('tool_calls_remaining')==0
+    empty=p is None or p==''; exhausted=len(cs)>=40 or status_zero
+    assert row['rule_target']==(empty and ((len(eds)>0 and oks==0) or exhausted))
+    assert row['edit_ok']==oks
+    if not resolved and empty and end"'!='"'timeout' and eds:
+        assert row['cls']==('empty_edit_failed' if oks==0 else 'empty_edited_ok')
+    n+=1
+print('row predicate fixtures passed:',n)
+
+def inventory(cids,expected,missing=(),pairs=None):
+    pairs=pairs or [['r','c','ids']]
+    fs={'c':json.dumps({'rows':[{'instance_id':i,'agent_end':None} for i in cids]}),'ids':'\\n'.join(expected)}
+    for i in set(cids):
+        fs[f'r/runs/{i}/trace.json']=json.dumps({'entries':[]})
+        fs[f'r/runs/{i}/result.json']=json.dumps({'agent_patch':'x','resolved':False,'duration_seconds':1})
+    for f in missing: fs.pop(f,None)
+    stdout,stderr=io.StringIO(),io.StringIO()
+    with patch('builtins.open',side_effect=lambda p,*a,**kw:io.StringIO(fs[str(p)])),patch('os.path.isfile',side_effect=lambda p:p in fs),contextlib.redirect_stdout(stdout),contextlib.redirect_stderr(stderr):
+        argv=['--max-tool-calls','40']
+        for p in pairs: argv+=['--pair']+p
+        code=m['main'](argv)
+    assert code==2 and stdout.getvalue()=='' and 'INVENTORY FAIL' in stderr.getvalue(),(code,stdout.getvalue())
+inventory(['a','a'],['a'])
+inventory(['a'],['a','a'])
+inventory(['a'],['a','b'])
+inventory(['a','b'],['a'])
+inventory(['a'],['a'],['r/runs/a/trace.json'])
+inventory(['a'],['a'],['r/runs/a/result.json'])
+inventory(['a'],['a'],pairs=[['r','c','ids'],['r','c','ids']])
+print('inventory fixtures passed: 7 (exit 2 and no stdout counts)')
+
+pairs=json.loads(Path('results/plan011_diag_arm3_v2.json').read_text())['pairs']
+for run,clf,_ in pairs:
+    obj=json.loads(Path(clf).read_text()); inp=Path(obj['input'])
+    print('classifier input path:',inp,'exists:',inp.exists())
+    if inp.exists():
+        raw=inp.read_text(); timing=[json.loads(s) for s in raw.splitlines() if s.strip()] if inp.suffix=='.jsonl' else json.loads(raw)
+        if isinstance(timing,dict): timing=timing.get('rows',timing.get('tasks',[]))
+        ct=0
+        for t in timing:
+            result=json.loads(Path(run,'runs',t['instance_id'],'result.json').read_text())
+            assert t.get('verified_patch_bytes')==(len((result.get('agent_patch') or '').encode()))
+            ct+=1
+        print('verified_patch_bytes equivalence checked:',ct)
+PY" in /home/ubuntu/work/gemma
+ exited 1 in 42ms:
+row predicate fixtures passed: 390
+inventory fixtures passed: 7 (exit 2 and no stdout counts)
+classifier input path: runs/31b-v012-p9a-main/timing.jsonl exists: True
+Traceback (most recent call last):
+  File "<stdin>", line 64, in <module>
+KeyError: 'instance_id'
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import json,collections
+from pathlib import Path
+for part in ('main','smoke'):
+    run=Path(f'runs/31b-v012-p9a-{part}')
+    ts=[json.loads(s) for s in (run/'timing.jsonl').read_text().splitlines() if s.strip()]
+    print(part,'timing record key sets:',dict(collections.Counter(tuple(sorted(t)) for t in ts)))
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+main timing record key sets: {('_schema', 'agent_yaml_sha256', 'bundle_sha256', 'caps', 'concurrency', 'created_utc', 'fields', 'git_sha', 'gpu_count', 'gpu_names', 'mcp_import_ok', 'platform_probe', 'task_ids', 'vllm_startup_seconds'): 1, ('_vllm',): 1, ('agent_clock_seconds', 'agent_error_text', 'agent_outcome', 'agent_timeout_fired', 'agent_timeout_seconds', 'completion_tokens', 'completion_tokens_per_second', 'editable_failed', 'editable_rc', 'empty_patch', 'error', 'exit_code', 'fallback_patch_used', 'finalization_exec', 'finalization_seconds', 'image_emulation_seconds', 'instance_id', 'llm_calls', 'llm_turns', 'missing_tool_deps', 'patch_bytes', 'patch_files', 'patch_submitted', 'phase1_source', 'phase1_wall_seconds', 'post_phase1_seconds', 'pre_agent_seconds', 'prompt_tokens', 'repo', 'resolved', 'result_error', 'retrying_lines', 'sandbox_setup_seconds', 'setup_calls', 'setup_failed', 'setup_fix', 'setup_output_artifact', 'setup_subprocesses', 'stock_setup', 'stray_files', 'teardown_seconds', 'test_files_edited', 'test_run', 'timed_out', 'tool_calls', 'tool_seconds', 'verification_skipped', 'verified_patch_bytes', 'wall_seconds'): 31, ('_done',): 1}
+smoke timing record key sets: {('_schema', 'agent_yaml_sha256', 'bundle_sha256', 'caps', 'concurrency', 'created_utc', 'fields', 'git_sha', 'gpu_count', 'gpu_names', 'mcp_import_ok', 'platform_probe', 'task_ids', 'vllm_startup_seconds'): 1, ('_vllm',): 1, ('agent_clock_seconds', 'agent_error_text', 'agent_outcome', 'agent_timeout_fired', 'agent_timeout_seconds', 'completion_tokens', 'completion_tokens_per_second', 'editable_failed', 'editable_rc', 'empty_patch', 'error', 'exit_code', 'fallback_patch_used', 'finalization_exec', 'finalization_seconds', 'image_emulation_seconds', 'instance_id', 'llm_calls', 'llm_turns', 'missing_tool_deps', 'patch_bytes', 'patch_files', 'patch_submitted', 'phase1_source', 'phase1_wall_seconds', 'post_phase1_seconds', 'pre_agent_seconds', 'prompt_tokens', 'repo', 'resolved', 'result_error', 'retrying_lines', 'sandbox_setup_seconds', 'setup_calls', 'setup_failed', 'setup_fix', 'setup_output_artifact', 'setup_subprocesses', 'stock_setup', 'stray_files', 'teardown_seconds', 'test_files_edited', 'test_run', 'timed_out', 'tool_calls', 'tool_seconds', 'verification_skipped', 'verified_patch_bytes', 'wall_seconds'): 2, ('_done',): 1}
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import json,collections,hashlib
+from pathlib import Path
+all_ids=[]; empty=0; checks=0; ends=collections.Counter(); zero=[]
+for part in ('smoke','main'):
+    run=Path(f'runs/31b-v012-p9a-{part}')
+    classifier=json.loads(Path(f'results/plan009_arm3_{part}_d4cdf0f0.json').read_text())
+    raw=(run/'timing.jsonl').read_bytes()
+    assert classifier['input_sha256']==hashlib.sha256(raw).hexdigest()
+    cs={c['instance_id']:c for c in classifier['rows']}
+    timing=[json.loads(s) for s in raw.splitlines() if s.strip()]
+    timing=[t for t in timing if 'instance_id' in t]
+    expected=[s.strip() for s in Path(f'eval/plans/009-{part}-ids.txt').read_text().splitlines() if s.strip() and not s.lstrip().startswith('#')]
+    assert set(cs)==set(expected)=={t['instance_id'] for t in timing}
+    for t in timing:
+        result=json.loads((run/'runs'/t['instance_id']/'result.json').read_text())
+        assert t['verified_patch_bytes']==len((result.get('agent_patch') or '').encode('utf-8'))
+        assert t['resolved']==result['resolved']==cs[t['instance_id']]['resolved']
+        checks+=1; empty+=t['verified_patch_bytes']==0
+    for iid in expected:
+        entries=json.loads((run/'runs'/iid/'trace.json').read_text())['entries']
+        for e in entries:
+            if e['type']=='tool_response' and e.get('tool')=='get_status':
+                v=json.loads(e['result'])
+                zero.append({k:v[k] for k in ('tool_calls_used','tool_calls_remaining','time_seconds_remaining')})
+    all_ids+=expected
+fixed=[s.strip() for s in Path('eval/plans/007-arm1-ids.txt').read_text().splitlines() if s.strip() and not s.lstrip().startswith('#')]
+assert all_ids==fixed
+print('Classifier input hashes, timing/result/classifier resolution, inventories and exact patch bytes: PASS',checks,'rows; empties:',empty)
+print('Main/smoke id files cover registered 33 dev ids in order: PASS')
+print('Real get_status budget fields:',zero)
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+Classifier input hashes, timing/result/classifier resolution, inventories and exact patch bytes: PASS 33 rows; empties: 18
+Main/smoke id files cover registered 33 dev ids in order: PASS
+Real get_status budget fields: [{'tool_calls_used': 40, 'tool_calls_remaining': 0, 'time_seconds_remaining': 18.269173257000148}]
+
+codex
+**BLOCKING:** None.
+
+**Non-blocking:** None.
+
+**Questions:** None.
+
+**CLEAN for commit `a91a1da`.**
+
+- All three fixes are correct: [exact zero-byte predicate](eval/plan011_empty_diag.py:51), [edit-response success checking](eval/plan011_empty_diag.py:46), and [inventory validation](eval/plan011_empty_diag.py:77). Seven invalid-inventory fixtures returned exit 2 with no counts on stdout.
+- [summary.rule_target](eval/plan011_empty_diag.py:63) implements [Addendum B3](eval/plans/010.md:76) exactly, including timeout overlap, either exhaustion condition, and counting each matching row once. All 390 predicate fixtures passed.
+- Real-trace parsing is correct for these runs: all **617 responses** contain parseable JSON objects and match the preceding call. Edit responses yield **20 successes and 11 failures**. The overlapping exhaustion row reports **40 used, 0 remaining, 18.269 seconds left**.
+- Rerunning the specified main/smoke inputs reproduces [the saved v2 JSON](results/plan011_diag_arm3_v2.json:21) exactly: **33 rows, 18 empty_timeout, rule_target 1, STAY_SHELVED**. Classifier input hashes, expected IDs, and timing/result patch-byte counts agree across all 33 rows.
+- [Report 023’s counts](ops/reports/023-item5-lever-premise-v012.md:14) reproduce, including median **15.5 calls**, range **5–41**, and **7** empty rows with ≤10 calls.
+
+No files changed; no task text printed.
+tokens used
+44,596
