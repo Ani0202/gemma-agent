@@ -385,3 +385,4 @@
 2026-11-07T00:08:48Z | STATE rewritten; status WAITING_JOBS lb-31b-v002-wait-light,passrate-31b-v011-arm2-wait-light | ops/STATE.md
 2026-11-07T00:14:00Z | dec 079 read (approve, nothing changes); Nov 8 pending-default = e4b-v002 repeat noted in draft; dec 038 evidence files rechecked present+schema-headed | ops/decisions/079-20261107T000828-19008-from-builder.md ops/drafts/nov8-slot-inputs.md
 2026-11-07T01:48Z | docs/TOPICS.md saved from Director mail 20261107T014718 (owner request); 5 bare bundle-relative paths qualified to bundles/31b/v011/...; Builder maintains topic lines alongside journal entries | docs/TOPICS.md
+2026-11-07T04:50Z | periodic check: 31b-v002 PENDING (poll 04:36Z), arm2 kernel RUNNING (04:43Z), memguard OK 0 KILL, linger yes, disk 87G free | ops/STATE.md
