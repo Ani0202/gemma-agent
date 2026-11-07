@@ -1089,6 +1089,19 @@ def environment_metrics(headers, records):
     return out
 
 
+def safety_checks(sa, sb):
+    """Plan 009 SAFETY gates. S81.1/S81.3 (codex 20261107T060833 BLOCKING 1): stray evidence must be AVAILABLE for
+    BOTH arms (missing evidence fails); zero governing stray rows is required of arm 3 only. S81.5: unrounded p90."""
+    checks = {key: isinstance(sa[key], dict) and sa[key]['count'] == 0 for key in ('test_files_edited', 'stray_files')}
+    checks['stray_files'] = checks['stray_files'] and isinstance(sb.get('stray_files'), dict)
+    checks.update(total_wall_p90=bool(sa['total_wall_complete'] and sb['total_wall_complete'] and
+                                      sa['total_wall_p90_unrounded'] <= 1.10 * sb['total_wall_p90_unrounded']),
+                  empty_patch=bool(sa['empty_patch_complete'] and sb['empty_patch_complete'] and
+                                   sa['empty_patch']['count'] <= sb['empty_patch']['count'] + 3),
+                  submitted_without_test=sa['submitted_without_test']['count'] <= sb['submitted_without_test']['count'] + 3)
+    return checks
+
+
 def arm3_decision(on, off, p, h_count, smoke_invalid, vetoes, *, pairing_void_reason=None,
                   base_valid=True, identity_valid=True, smoke_bound=True, thinking_pass=True):
     if pairing_void_reason:
@@ -1135,11 +1148,7 @@ def arm3_metrics(base_name, arm3_dirs, base_dirs, classifiers, smoke_json=None, 
             off.append(r['instance_id'])
     p = sign_test(len(on), len(off))
     sa, sb = a['safety'], b['safety']
-    checks = {key: isinstance(sa[key], dict) and sa[key]['count'] == 0 for key in ('test_files_edited', 'stray_files')}
-    checks.update(total_wall_p90=sa['total_wall_complete'] and sb['total_wall_complete'] and
-                  sa['total_wall_p90_unrounded'] <= 1.10 * sb['total_wall_p90_unrounded'],
-                  empty_patch=sa['empty_patch_complete'] and sb['empty_patch_complete'] and sa['empty_patch']['count'] <= sb['empty_patch']['count'] + 3,
-                  submitted_without_test=sa['submitted_without_test']['count'] <= sb['submitted_without_test']['count'] + 3)
+    checks = safety_checks(sa, sb)
     vetoes = [k for k, passed in checks.items() if not passed]
     if a['timeouts']['count'] > b['timeouts']['count'] + 2:
         vetoes.append('timeouts')

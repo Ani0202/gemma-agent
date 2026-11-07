@@ -794,3 +794,40 @@ def test_s81_unrounded_percentile():
     assert m.pct_raw(vals, 1.0) == 210.0009
     assert m.pct_raw([1.0, 2.0, 3.0], .5) == 2.0 and m.pct_raw([None], .9) is None
     assert m.arm3_timing([dict(instance_id='a', agent_clock_seconds=220.0009, finalization_seconds=1)])['timing_pass'] is False
+
+
+def _safety(stray, p90=100.0, complete=True):
+    return dict(test_files_edited=dict(count=0, instance_ids=[]), stray_files=stray, total_wall_complete=complete,
+                total_wall_p90_unrounded=p90, empty_patch_complete=True, empty_patch=dict(count=0),
+                submitted_without_test=dict(count=0))
+
+
+ZERO = dict(count=0, instance_ids=[])
+
+
+@pytest.mark.parametrize('base_stray', ['not available', None, 'missing-key'])
+def test_s81_missing_base_stray_fails_and_blocks_adopt(base_stray):
+    # codex 20261107T060833 BLOCKING 1: base stray evidence absent/null/unavailable must fail SAFETY stray.
+    sb = _safety(base_stray)
+    if base_stray == 'missing-key':
+        del sb['stray_files']
+    checks = m.safety_checks(_safety(ZERO), sb)
+    assert checks['stray_files'] is False
+    vetoes = [k for k, ok in checks.items() if not ok]
+    assert m.arm3_decision(['a', 'b', 'c', 'd', 'e', 'f'], [], .03, 0, False, vetoes) == 'ON-BETTER-VETOED'
+
+
+def test_s81_base_nonzero_stray_does_not_veto_arm3():
+    # S81.3 symmetry: base evidence must be available, but zero governing stray is required of arm 3 only.
+    checks = m.safety_checks(_safety(ZERO), _safety(dict(count=2, instance_ids=['x', 'y'])))
+    assert checks['stray_files'] is True and all(checks.values())
+    assert m.safety_checks(_safety(dict(count=1, instance_ids=['x'])), _safety(ZERO))['stray_files'] is False
+    assert m.safety_checks(_safety('not available'), _safety(ZERO))['stray_files'] is False
+
+
+def test_s81_wall_p90_gate_unrounded():
+    # 110.0004 rounds to 110.0 (= 1.10 x 100, would pass); the unrounded gate must fail it.
+    assert m.base.pct([110.0004], .9) == 110.0
+    assert m.safety_checks(_safety(ZERO, p90=110.0004), _safety(ZERO, p90=100.0))['total_wall_p90'] is False
+    assert m.safety_checks(_safety(ZERO, p90=110.0), _safety(ZERO, p90=100.0))['total_wall_p90'] is True
+    assert m.safety_checks(_safety(ZERO, p90=50.0, complete=False), _safety(ZERO))['total_wall_p90'] is False
