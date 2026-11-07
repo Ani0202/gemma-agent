@@ -433,3 +433,4 @@
 2026-11-07T11:33Z | v012 Gate 2 review 112341: ONE BLOCKING = empty diff on timeout/cap (equiv. 063339) -> WAIVED dec 089 2b for 78a8fd30; checklist (b) MET; no FYI (dec 089 item 7) | ops/codex/review-20261107T112341.md ops/drafts/nov8-submit-31b-v012-checklist.md
 2026-11-07T11:33Z | plan 010 review 112835: BLOCKING = v014 cannot guarantee non-empty patch (submit certification only, not the dev arm); one-knob diff PASS; rule exhaustive; Addendum A pre-data (no rule change) | ops/codex/review-20261107T112835.md eval/plans/010.md
 2026-11-07T11:33:28Z | codex-build plan010-arm4-metrics started (arm4 mode + tests per spec) | eval/plans/010-arm4-metrics-spec.md
+2026-11-07T11:44:40Z | codex-plan010-arm4-metrics DONE (57484e4, +266 metrics/+398 tests); Builder diff review OK vs spec; eval/tests 1742 pass 7 skip in worktree; codex-review job review-plan010-arm4-metrics-light started | eval/plans/010-arm4-metrics-spec.md
