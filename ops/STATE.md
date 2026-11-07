@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 11:30Z (cycle 190; DEC 089: Nov 8 = 31b-v012 78a8fd30 CONDITIONAL (checklist ops/drafts/nov8-submit-31b-v012-checklist.md: (a) MET, (b) Gate-2 PENDING review 112341, (c) pack PASS, (d) kernel v3 BYTE_IDENTICAL, (e) waiter submit-window-nov8-v012-light); deadline 23:45Z else fallback v009 (dec 083); PLAN 010 pre-reg (v014 thinking 2048 vs arm 3) review pending; arm-3 = ON-BETTER-VETOED stays). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 11:34Z (cycle 191; DEC 089: Nov 8 = 31b-v012 78a8fd30 CONDITIONAL, checklist ops/drafts/nov8-submit-31b-v012-checklist.md (a)(b)(c)(d)(e) ALL MET (b: Gate-2 112341 only BLOCKING = waived empty-diff); remaining = Gate-4 journal line + submit at 00:00:30Z waiter; PLAN 010 review 112835 done (BLOCKING = v014 submit-cert only -> Addendum A), arm4 metrics codex-build running). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -19,7 +19,7 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (11:30Z): memguard-light, submit-window-nov8-v012-light (00:00:30Z), review-31b-v012-submit-light (Gate 2, dec 089 2b), review-plan010-v014-light.
+## Running jobs (11:34Z): memguard-light, submit-window-nov8-v012-light (fires 2026-11-08T00:00:30Z), codex-plan010-arm4-metrics (spec eval/plans/010-arm4-metrics-spec.md, branch codex/plan010-arm4-metrics; review then codex-review before merge/use).
 - v014 (plan 010 arm 4): dist/31b-v014.zip 7980846995e3acb38418427755676931fbfc7fa22998b1e9b2599da499135def = v012 + root thinking 2048; pre-check ELIGIBLE vs v012 (needs v012 COMPLETE).
 - ARM-3 DONE: kernel v5 COMPLETE ~11:19Z, SEAL runs/31b-v012-p9a-main/SEAL.sha256 (c0d01bb4..) OK; quota AFTER 21.59 h (+9.70; 8.41 h left to 11-14).
   Classifiers results/plan009_arm3_main_{d4cdf0f0,a208a023}.json (0 H); metrics results/plan009_arm3_vs_arm1.json; report 021.
@@ -74,7 +74,6 @@
 - DEC 084 item 3: e4b-v002h AUTHORIZED CONDITIONAL, checklist ops/drafts/submit-e4b-v002h-checklist.md (first UTC day: nothing pending,
   no other submit that day, AND (31b-v009 VOID or already submitted on an earlier day & not pending); reverse SUBMIT_KERNEL commit + kernel recheck first).
 ## Next 3
-1. Gate-2 review 112341 lands: only BLOCKING = empty-diff-on-timeout (waived dec 089 2b) -> checklist (b) PASS, no FYI; any OTHER BLOCKING -> no v012, fallback item 4, mail Director.
-   00:00:30Z: run nov8-submit-31b-v012-checklist (Gate-4 journal line, kernel v3), then lb_31b_v012.json + waiter. ERROR/timeout -> VOID, mail Director.
-2. Plan 010 review lands: fix BLOCKINGs; build plan008_metrics arm4 mode (codex-build) + load check v014; run week of 11-14 (smoke+main one week).
+1. 00:00:30Z waiter: run nov8-submit-31b-v012-checklist (re-check submissions list; Gate-4 journal line; kernel v3), then lb_31b_v012.json + waiter. ERROR/timeout -> VOID, mail Director. v009 auth lapses on v012 submit.
+2. codex-plan010-arm4-metrics lands: review diff + run eval/tests (pyimg runner), codex-review CLEAN (pre-data gate), merge; then v014 load check; run week of 11-14 (smoke+main same week).
 3. e4b-v002h Nov 9 (reverse SUBMIT_KERNEL commit + kernel recheck first). CPU: dec 081 item-5 tool-level empty-patch lever design on v012 (own score needed).

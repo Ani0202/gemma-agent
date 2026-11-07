@@ -1,4 +1,4 @@
-# Spec: `arm4` mode in eval/plan008_metrics.py (plan 010, Addendum A5). Written PRE-DATA 2026-11-07T11:40Z.
+# Spec: `arm4` mode in eval/plan008_metrics.py (plan 010, Addendum A5). Written PRE-DATA 2026-11-07T11:33Z.
 Source of requirements: eval/plans/010.md (rule + Addendum A) and codex review ops/codex/review-20261107T112835.md item 4.
 Do NOT change behaviour of existing modes (arm2/arm3/arm3smoke/base); existing tests must keep passing.
 
