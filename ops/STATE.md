@@ -59,7 +59,6 @@
   3404fbb (56 tests, suite 1680 pass; new tests fail on v2), 5 checks re-run, verdicts unchanged. Re-review 093116 CLEAN (non-blocking:
   nested !include/flow/anchor knob edits stay conservatively INELIGIBLE) -> checker v3 RELIED ON. Dec 087 item 3: if report 021 shows v012 winning, propose v012 scored submit there for first free slot after e4b-v002h (Nov 9).
 - TOPICS (Director mail 01:47Z, owner req): docs/TOPICS.md saved; on any topic status change (used now | planned | adjacent, not used) update its line + repo ref in the same cycle as the journal entry.
-- DEC 082: report 021 first table = pass + timeout + empty w/ paired discordants (DONE in 021).
 - DEC 083 (approve-with-changes; repeats REJECTED, guard refuses ledger shas, do NOT edit guard): SUBMIT AUTHORIZE 31b-v009 dist/31b-v009.zip
   sha256=d38c55c79103950d6d269a722bd0c9db9db22e1c0ec96be230f6c24a332d130d, CONDITIONAL, checklist ops/drafts/nov8-submit-31b-v009-checklist.md:
   (a) 58072907 FINAL COMPLETE w/ score (any value; ERROR/timeout -> VOID, CAP-BOUND, mail at once); (b) day>=11-08, nothing pending, no stacking,
