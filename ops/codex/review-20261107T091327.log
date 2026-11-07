@@ -2143,3 +2143,431 @@ rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/agent_ru
 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3
 /home/ubuntu/gemma-local/venv/bin/python
 
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import io, sys, zipfile, warnings
+from pathlib import Path
+sys.path.insert(0,'eval')
+import finals_eligibility as fe
+
+def archive(entries):
+ out=io.BytesIO()
+ with warnings.catch_warnings():
+  warnings.simplefilter('ignore',UserWarning)
+  with zipfile.ZipFile(out,'w') as z:
+   for name, content in entries:
+    z.writestr(name,content)
+ out.seek(0)
+ return out
+with zipfile.ZipFile('dist/31b-v002.zip') as z:
+ base={i.filename:z.read(i) for i in z.infolist()}
+def run(label,changes=None,ref_changes=None,extra=()):
+ r={**base,**(ref_changes or {})}; c={**r,**(changes or {})}
+ result=fe.check(archive(list(c.items())+list(extra)),archive(list(r.items())))
+ print(label, result['verdict'],result['violations'])
+ return result
+# Real COMPLETE reference: prepend shadow keys / YAML merge.
+a=base['agent.yaml'].decode()
+run('shadow instruction key',{'agent.yaml':'instruction: \"DIFFERENT PROMPT\"\\n'+a})
+run('new YAML anchor and merge key',{'agent.yaml':'<<: &defaults {instruction: \"DIFFERENT PROMPT\"}\\n'+a})
+run('max_output_tokens fractional',{'configs/sampling.yaml':base['configs/sampling.yaml'].replace(b'max_output_tokens: 8192',b'max_output_tokens: 4095.5')})
+run('max_output_tokens bool',{'configs/sampling.yaml':base['configs/sampling.yaml'].replace(b'max_output_tokens: 8192',b'max_output_tokens: false')})
+run('max_output_tokens zero',{'configs/sampling.yaml':base['configs/sampling.yaml'].replace(b'max_output_tokens: 8192',b'max_output_tokens: 0')})
+run('duplicate zip prompt',extra=[('prompts/system.md',b'DIFFERENT PROMPT'),('prompts/system.md',base['prompts/system.md'])])
+run('extra directory',extra=[('rogue/',b'')])
+symlink=zipfile.ZipInfo('prompts/system.md'); symlink.create_system=3; symlink.external_attr=0o120777<<16
+run('symlink metadata',extra=[(symlink,base['prompts/system.md'])])
+# False classification in a non-agent YAML asset shared by both bundles.
+run('nested fake generation path', {'skills/config.yaml':'parameters:\\n  generate_content_config:\\n    max_output_tokens: 1\\n'}, {'skills/config.yaml':'parameters:\\n  generate_content_config:\\n    max_output_tokens: 8192\\n'})
+# include discovered in a sub-agent wrongly authorizes a different root file.
+sub=base['sub_agents/code_analyzer.yaml'].decode()
+start=sub.index('generate_content_config:')
+sub=sub[:start]+'generate_content_config: "'!include sampling.yaml'"\\n'
+run('relative include authorizes root decoy',{'sampling.yaml':'max_output_tokens: 1\\n'}, {'sampling.yaml':'max_output_tokens: 8192\\n','sub_agents/sampling.yaml':base['configs/sampling.yaml'],'sub_agents/code_analyzer.yaml':sub})
+run('YAML skill content changed semantically equal',{'skills/recipe.yaml':'# NEW INSTRUCTIONS\\nsteps: [run]\\n'},{'skills/recipe.yaml':'# OLD INSTRUCTIONS\\nsteps: [run]\\n'})
+run('YAML mapping key bool-vs-int',{'skills/recipe.yaml':'true: do work\\n'},{'skills/recipe.yaml':'1: do work\\n'})
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+shadow instruction key ELIGIBLE []
+new YAML anchor and merge key ELIGIBLE []
+max_output_tokens fractional ELIGIBLE []
+max_output_tokens bool INELIGIBLE [{'file': 'configs/sampling.yaml', 'path': ['max_output_tokens'], 'reason': 'knob max_output_tokens not a non-negative number: False vs 8192'}]
+max_output_tokens zero ELIGIBLE []
+duplicate zip prompt ELIGIBLE []
+extra directory ELIGIBLE []
+symlink metadata ELIGIBLE []
+nested fake generation path ELIGIBLE []
+relative include authorizes root decoy ELIGIBLE []
+YAML skill content changed semantically equal ELIGIBLE []
+YAML mapping key bool-vs-int ELIGIBLE []
+
+codex
+Several in-memory checks returned `ELIGIBLE` incorrectly: a decrease in an unrelated YAML asset, a relative include that authorizes changes to the wrong file, and ZIP changes hidden by duplicate-name handling. All 18 bundles currently in `dist/` passed self-comparison without crashes; the three documented lineage comparisons returned `INELIGIBLE` as expected.
+exec
+/bin/bash -lc 'git show aeb66ff:eval/finals_eligibility.py | sha256sum && sha256sum eval/finals_eligibility.py && git show aeb66ff:eval/tests/test_finals_eligibility.py | sha256sum && sha256sum eval/tests/test_finals_eligibility.py' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+e85b879f28b02064893fd07ff44b2fc45ec2af32e158a21b0d22cba7333a741a  -
+e85b879f28b02064893fd07ff44b2fc45ec2af32e158a21b0d22cba7333a741a  eval/finals_eligibility.py
+8b7c5b97776e056f5a4d4f4a9bf8929feaad4a62e6c17ac4dab2b1e95d251841  -
+8b7c5b97776e056f5a4d4f4a9bf8929feaad4a62e6c17ac4dab2b1e95d251841  eval/tests/test_finals_eligibility.py
+
+exec
+/bin/bash -lc "sed -n '1,65p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py && sed -n '195,245p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py && rg -n '(time_minutes|budget.turns|budget.tool_calls)' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/agent* /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma -g '*.py' | head -75 && rg --files /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages -g '*pytest*' | head -5" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+"""Restricted Pydantic schema for sandboxed agent configurations.
+
+This module defines the Pydantic models used to parse and validate agent YAML
+configurations submitted by participants. To ensure sandboxed execution, these models
+mirror the standard ADK configuration structure but **replace all ``CodeConfig``-based
+fields** with safe string-reference alternatives (e.g., file paths or registry keys).
+
+Primary Models:
+    * :class:`SandboxedLlmAgentConfig`: Configuration for LLM-backed agents.
+    * :class:`SandboxedSequentialAgentConfig`: Configuration for sequential multi-agent workflows.
+    * :class:`SandboxedParallelAgentConfig`: Configuration for parallel multi-agent workflows.
+    * :class:`SandboxedLoopAgentConfig`: Configuration for iterative loop workflows.
+    * :class:`SandboxedAgentConfig`: Root discriminated union model for parsing arbitrary agent configs.
+
+Security & Validation:
+    All file path references (such as sub-agent configs and skill directories) are strictly
+    validated against path traversal attacks (e.g., absolute paths or ``..`` directory climbing).
+    Generation parameters are parsed permissively here and subsequently enforced by
+    :class:`~adk_submission.limits.GenerationConstraints` during compilation.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Annotated, Any, Literal
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    RootModel,
+    Tag,
+    ValidationInfo,
+    field_validator,
+)
+
+from .paths import ensure_no_traversal_components
+
+# ---------------------------------------------------------------------------
+# Sub-agent reference — config_path only, no code references
+# ---------------------------------------------------------------------------
+
+
+class SubAgentRef(BaseModel):
+    """Reference to a sub-agent's YAML configuration file.
+
+    This model is used within multi-agent workflows (Sequential, Parallel, Loop, and LLM sub-agents)
+    to reference child agents. Only ``config_path`` is supported; the standard ADK ``code`` field
+    (which resolves arbitrary Python imports) is intentionally excluded to prevent unsandboxed code execution.
+    The ``config_path`` field is strictly validated to prevent path traversal attacks.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    config_path: str = Field(
+        description="Relative path to the sub-agent's YAML config within "
+        "the submission directory."
+    )
+
+    @field_validator("config_path")
+    @classmethod
+    def validate_no_path_traversal(cls, v: str) -> str:
+        """Validate that the configuration path does not attempt directory traversal.
+
+        presence_penalty (Optional[float]): Penalty for repeated tokens based on presence. Defaults to None.
+        frequency_penalty (Optional[float]): Penalty for repeated tokens based on frequency. Defaults to None.
+        response_mime_type (Optional[str]): Expected MIME type for the model response (e.g., 'application/json'). Defaults to None.
+        seed (Optional[int]): Random seed for deterministic generation. Defaults to None.
+        thinking_config (Optional[ThinkingConfig]): Configuration for model reasoning/thinking. Defaults to None.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    temperature: float | None = Field(default=None, ge=0.0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    stop_sequences: list[str] | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    response_mime_type: str | None = None
+    seed: int | None = None
+    thinking_config: ThinkingConfig | None = None
+
+    @field_validator(
+        "temperature",
+        "top_p",
+        "top_k",
+        "max_output_tokens",
+        "presence_penalty",
+        "frequency_penalty",
+        "seed",
+        mode="before",
+    )
+    @classmethod
+    def _validate_numeric_fields(cls, v: Any, info: ValidationInfo) -> Any:
+        return _reject_bool_nan_inf(v, info.field_name or "numeric_field")
+
+
+# ---------------------------------------------------------------------------
+# Agent configs — shared base + specialized subclasses
+# ---------------------------------------------------------------------------
+
+
+class _BaseAgentFields(BaseModel):
+    """Fields shared by all agent configuration types.
+
+    Not part of the public API — use the concrete subclasses below.
+
+    Attributes:
+        name (str): The unique identifying name of the agent.
+        description (str): Optional description of the agent's purpose. Defaults to an empty string.
+        before_agent_callbacks (Optional[list[str]]): List of callback names to execute before the agent runs.
+        after_agent_callbacks (Optional[list[str]]): List of callback names to execute after the agent completes.
+    """
+rg: /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/agent*: No such file or directory (os error 2)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/budget.py:18:    time_minutes: float | None = 60.0  # Max session wall-clock time in minutes
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:107:    max_time_minutes: int | float | None = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:150:            self.max_time_minutes
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:151:            if self.max_time_minutes is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:152:            else self.budget.time_minutes
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:157:            else self.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:165:                else self.budget.turns
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/config.py:172:                time_minutes=t_min,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:33:    if ctx.budget.time_minutes is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:132:    if ctx.budget.tool_calls is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:134:            0, ctx.budget.tool_calls - ctx.tool_calls_used
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:136:        status_data['max_tool_calls'] = ctx.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:137:    if ctx.budget.time_minutes is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:139:        status_data['max_time_minutes'] = ctx.budget.time_minutes
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:141:    if ctx.budget.turns is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/tools/execution.py:142:        status_data['max_turns'] = ctx.budget.turns
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:341:        if config.budget.time_minutes is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:343:                f'- Time allowance: {config.budget.time_minutes} minutes'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:345:        if config.budget.tool_calls is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:347:                f'- Tool calls allowance: {config.budget.tool_calls} calls'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:349:        if config.budget.turns is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:350:            budget_lines.append(f'- Max loop iterations: {config.budget.turns} turns')
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:613:            max_time_minutes=config.budget.time_minutes,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:715:            config.budget.turns if config.budget.turns is not None else 500
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:719:            config.budget.time_minutes * 60
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:720:            if config.budget.time_minutes is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:792:                                f'Agent exceeded turns budget ({config.budget.turns} turns)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:793:                                if config.budget.turns is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:836:                                context.budget.tool_calls is None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:837:                                or context.tool_calls_used < context.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:870:                                agent_error = f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:929:                                agent_error = f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:933:                            context.budget.tool_calls is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:934:                            and context.tool_calls_used >= context.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:938:                                    f'Agent exceeded tool call budget ({context.budget.tool_calls} calls)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:943:                                context.budget.tool_calls,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:950:                                    f'Agent exceeded turns budget ({config.budget.turns} turns)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:951:                                    if config.budget.turns is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1029:                    f'Agent exceeded session timeout ({config.budget.time_minutes} min)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1034:                    f'Agent exceeded turns budget ({config.budget.turns} turns)'
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/harness/agent_runner.py:1035:                    if config.budget.turns is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/cli.py:257:            max_time_minutes=args.max_time_minutes,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:62:        max_time_minutes: int | float | None = None,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:94:            max_tool_calls if max_tool_calls is not None else base_budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:96:        final_time_minutes = (
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:97:            max_time_minutes
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:98:            if max_time_minutes is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:99:            else base_budget.time_minutes
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:102:            time_minutes=final_time_minutes,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:104:            turns=base_budget.turns,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:130:        self.max_time_minutes = self.budget.time_minutes
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:131:        self.max_tool_calls = self.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:421:            'max_time_minutes': self.max_time_minutes,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:426:            'max_turns': self.budget.turns,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:462:        if self.budget.time_minutes is None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:465:            return self.budget.time_minutes * 60.0
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:466:        return max(0.0, (self.budget.time_minutes * 60.0) - self.agent_elapsed_seconds)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:473:                and self.budget.tool_calls is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:474:                and self.tool_calls_used >= self.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:480:                        'error_message': f'Tool call budget exhausted ({self.budget.tool_calls} calls)',
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:487:                and self.budget.turns is not None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:488:                and self.llm_calls_used >= self.budget.turns
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:494:                        'error_message': f'Turn budget exhausted ({self.budget.turns} turns)',
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:527:            if self.budget.time_minutes is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:528:                if self.budget.time_minutes <= 0:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:533:                            'error_message': f'Session time budget exhausted ({self.budget.time_minutes} minutes)',
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:539:                    if elapsed_minutes > self.budget.time_minutes:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:544:                                'error_message': f'Session time budget exhausted ({self.budget.time_minutes} minutes)',
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:558:                self.budget.tool_calls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/context.py:559:                if (self.budget and self.budget.tool_calls is not None)
+/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages/__pycache__/pytest_timeout.cpython-312-pytest-9.2.0.pyc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages/__pycache__/pytest_timeout.cpython-313-pytest-9.2.0.pyc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages/__pycache__/pytest_timeout.cpython-313.pyc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/__pycache__/pytester.cpython-312.pyc
+/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/__pycache__/pytester.cpython-313.pyc
+
+exec
+/bin/bash -lc "PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B - <<'PY'
+import contextlib, io, inspect, itertools, runpy
+from unittest.mock import patch
+mod=runpy.run_path('eval/tests/test_finals_eligibility.py')
+files={}
+class MemoryPath(str):
+ def __truediv__(self,name): return MemoryPath(str(self)+'/'+name)
+ def write_text(self,text): files[str(self)]=text.encode(); return len(text)
+ def read_text(self): return files[str(self)].decode()
+real_open=io.open
+class MemoryStream(io.BytesIO):
+ def __init__(self,path,mode):
+  self.path,self.mode=path,mode
+  if 'r' in mode and path not in files: raise FileNotFoundError(path)
+  super().__init__(b'' if 'w' in mode else files.get(path,b''))
+ def close(self):
+  if not self.closed and any(m in self.mode for m in 'wa+'): files[self.path]=self.getvalue()
+  super().close()
+def memory_open(path,mode='r',*args,**kwargs):
+ if isinstance(path,(str,MemoryPath)) and str(path).startswith('/__review_memory__/'):
+  stream=MemoryStream(str(path),mode)
+  return stream if 'b' in mode else io.TextIOWrapper(stream,encoding=kwargs.get('encoding') or 'utf-8')
+ return real_open(path,mode,*args,**kwargs)
+count=0
+with patch('builtins.open',memory_open),patch('io.open',memory_open),contextlib.redirect_stdout(io.StringIO()):
+ for name,fn in mod.items():
+  if not name.startswith('test_') or not inspect.isfunction(fn): continue
+  variants=[{}]
+  for mark in getattr(fn,'pytestmark',[]):
+   if mark.name"'!='"'parametrize': continue
+   names=mark.args[0].split(',');values=mark.args[1]
+   variants=[{**old,**dict(zip(names,v if isinstance(v,tuple) else (v,)))} for old in variants for v in values]
+  for params in variants:
+   count+=1
+   kwargs={'tmp_path':MemoryPath('/__review_memory__/case'+str(count)),**params}
+   if 'capsys' in inspect.signature(fn).parameters: kwargs['capsys']=None
+   fn(**kwargs)
+print(f'{count} existing test cases PASS (called directly; tmp_path/file I/O replaced with RAM-only storage)')
+PY" in /home/ubuntu/work/gemma
+exec
+/bin/bash -lc "PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B - <<'PY'
+import ast, pathlib
+from pydantic import BaseModel, ConfigDict, Field, field_validator, ValidationInfo, ValidationError
+from typing import Any
+import math
+p=pathlib.Path('/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py')
+tree=ast.parse(p.read_text()); names={'_reject_bool_nan_inf','ThinkingConfig','GenerateContentConfig'}
+nodes=[n for n in tree.body if isinstance(n,(ast.ClassDef,ast.FunctionDef)) and n.name in names]
+exec(compile(ast.Module(body=nodes,type_ignores=[]),str(p),'exec'))
+for config in ({'max_output_tokens':4095.5},{'max_output_tokens':0},{'thinking_config':{'thinking_budget':1.5}}):
+ try:
+  GenerateContentConfig.model_validate(config)
+  print(config, 'HARNESS SCHEMA ACCEPTED')
+ except ValidationError as e:
+  print(config, 'HARNESS SCHEMA REJECTED:', e.errors()[0]['type'])
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+{'max_output_tokens': 4095.5} HARNESS SCHEMA REJECTED: int_from_float
+{'max_output_tokens': 0} HARNESS SCHEMA REJECTED: greater_than_equal
+{'thinking_config': {'thinking_budget': 1.5}} HARNESS SCHEMA REJECTED: int_from_float
+
+ succeeded in 86ms:
+29 existing test cases PASS (called directly; tmp_path/file I/O replaced with RAM-only storage)
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import io, sys, zipfile
+from pathlib import Path
+sys.path.insert(0,'eval'); import finals_eligibility as fe
+
+def z(files):
+ out=io.BytesIO()
+ with zipfile.ZipFile(out,'w') as a:
+  for n,b in files.items(): a.writestr(n,b)
+ out.seek(0); return out
+with zipfile.ZipFile('dist/31b-v002.zip') as a: base={i.filename:a.read(i) for i in a.infolist()}
+# Existing root generation target reused for a skill: one decrease changes both uses.
+r={**base,'skills/settings.yaml':base['configs/sampling.yaml']}
+r['agent.yaml']=base['agent.yaml'].replace(b'configs/sampling.yaml', b'skills/settings.yaml')+b'\\nskills: [skills/limits]\\n'
+r['skills/limits/SKILL.md']=b'Read /skills/settings.yaml as task instructions and use its output limit setting.\\n'
+c={**r,'skills/settings.yaml':r['skills/settings.yaml'].replace(b'max_output_tokens: 8192',b'max_output_tokens: 4096')}
+result=fe.check(z(c),z(r)); print('shared generation/skill asset:',result['verdict'],result['violations'])
+# A normal relative target is not recognized, producing a false negative.
+r={**base,'sub_agents/sampling.yaml':base['configs/sampling.yaml']}
+s=r['sub_agents/code_analyzer.yaml'].decode();s=s[:s.index('generate_content_config:')]+'generate_content_config: "'!include sampling.yaml'"\\n';r['sub_agents/code_analyzer.yaml']=s
+c={**r,'sub_agents/sampling.yaml':r['sub_agents/sampling.yaml'].replace(b'max_output_tokens: 8192',b'max_output_tokens: 4096')}
+result=fe.check(z(c),z(r)); print('legitimate relative decrease:',result['verdict'],result['violations'])
+# Recursive YAML aliases crash even for unchanged bytes (synthetic input only).
+r={**base,'unused.yaml':'cycle: &cycle [*cycle]\\n'}
+try: fe.check(z(r),z(r))
+except Exception as e: print('recursive alias:',type(e).__name__)
+# All comparisons between the actual ZIPs in dist.
+zips=sorted(Path('dist').glob('*.zip'));counts={};crashes=[]
+for c in zips:
+ for r in zips:
+  try:
+   v=fe.check(c,r)['verdict'];counts[v]=counts.get(v,0)+1
+  except Exception as e: crashes.append((c.name,r.name,type(e).__name__))
+print('actual dist comparisons:',len(zips)**2,'counts=',counts,'crashes=',crashes)
+PY" in /home/ubuntu/work/gemma
+ succeeded in 1393ms:
+shared generation/skill asset: ELIGIBLE []
+legitimate relative decrease: INELIGIBLE [{'file': 'sub_agents/sampling.yaml', 'path': ['max_output_tokens'], 'reason': 'value differs: 4096 vs reference 8192'}]
+recursive alias: RecursionError
+actual dist comparisons: 324 counts= {'ELIGIBLE': 38, 'INELIGIBLE': 286} crashes= []
+
+codex
+All 29 existing test cases passed when called with file I/O redirected to memory. They miss the reproduced bypasses. I also checked all 324 pairs of real `dist/` bundles and found no crashes. Separately, fractional token budgets and a zero output-token limit return `ELIGIBLE` even though the installed harness schema rejects them.
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import io, sys, zipfile
+sys.path.insert(0,'eval'); import finals_eligibility as fe
+with zipfile.ZipFile('dist/31b-v002.zip') as ref:
+ out=io.BytesIO()
+ with zipfile.ZipFile(out,'w') as cand:
+  for info in ref.infolist(): cand.writestr(info,ref.read(info))
+  cand.writestr('agent.yaml/',b'')
+ out.seek(0)
+ print('Real v002 plus conflicting directory agent.yaml/:',fe.check(out,'dist/31b-v002.zip')['verdict'])
+# Included YAML configuration beneath thinking_config is a valid location for a decrease.
+def pack(files):
+ out=io.BytesIO()
+ with zipfile.ZipFile(out,'w') as z:
+  for n,v in files.items(): z.writestr(n,v)
+ out.seek(0); return out
+r={'agent.yaml':'name: a\\nmodel: m\\ngenerate_content_config:\\n  max_output_tokens: 8192\\n  thinking_config: "'!include thinking.yaml'"\\n','thinking.yaml':'thinking_budget: 4096\\n'}
+c={**r,'thinking.yaml':'thinking_budget: 2048\\n'}
+res=fe.check(pack(c),pack(r)); print('thinking_config subtree include decrease:',res['verdict'],res['violations'])
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+Real v002 plus conflicting directory agent.yaml/: ELIGIBLE
+thinking_config subtree include decrease: INELIGIBLE [{'file': 'thinking.yaml', 'path': ['thinking_budget'], 'reason': 'value differs: 2048 vs reference 4096'}]
+
+codex
+1. **BLOCKING: Knob recognition is not restricted to agent configurations.** [eval/finals_eligibility.py:117](/home/ubuntu/work/gemma/eval/finals_eligibility.py:117) accepts any path containing `generate_content_config`. Reproduced: changing an unrelated `skills/config.yaml` from `parameters.generate_content_config.max_output_tokens: 8192` to `1` returns **ELIGIBLE**. This changes a skill asset, not an agent’s generation settings. Restrict allowances to verified agent configuration locations. The test at [test_finals_eligibility.py:130](/home/ubuntu/work/gemma/eval/tests/test_finals_eligibility.py:130) only checks a key outside that namespace.
+
+2. **BLOCKING: Relative includes authorize changes to the wrong file.** [eval/finals_eligibility.py:95](/home/ubuntu/work/gemma/eval/finals_eligibility.py:95) records the literal include string; [line 115](/home/ubuntu/work/gemma/eval/finals_eligibility.py:115) treats it as a ZIP-root filename. Reproduced with `sub_agents/code_analyzer.yaml` containing `generate_content_config: !include sampling.yaml`: lowering `max_output_tokens` in an unrelated root `sampling.yaml` returns **ELIGIBLE**, while the actual `sub_agents/sampling.yaml` remains unchanged. Resolve each include relative to its containing document before assigning permissions.
+
+3. **BLOCKING: Parsing every YAML file hides forbidden asset changes.** [eval/finals_eligibility.py:185](/home/ubuntu/work/gemma/eval/finals_eligibility.py:185) and [line 202](/home/ubuntu/work/gemma/eval/finals_eligibility.py:202) apply semantic comparison to arbitrary YAML assets. Changing a comment containing instructions in `skills/recipe.yaml` returns **ELIGIBLE**, violating byte-identical skills. There are additional lossy comparisons:
+   - Prepending `instruction: "DIFFERENT PROMPT"` to real v002’s `agent.yaml` returns **ELIGIBLE** because SafeLoader discards the shadowed duplicate key.
+   - Changing a YAML mapping key from integer `1` to boolean `true` returns **ELIGIBLE** because dictionary lookup conflates those keys at [line 135](/home/ubuntu/work/gemma/eval/finals_eligibility.py:135).
+
+   Require byte equality for assets, reject duplicate keys, and preserve key types when comparing configuration trees.
+
+4. **BLOCKING: ZIP entries and file types disappear during loading.** [eval/finals_eligibility.py:74](/home/ubuntu/work/gemma/eval/finals_eligibility.py:74) collapses duplicate filenames, skips directories, and ignores entry type metadata. Against real `dist/31b-v002.zip`, all these candidates returned **ELIGIBLE**:
+   - Additional duplicate prompt entries, provided the last contains the original bytes.
+   - A prompt entry changed to a symlink through `external_attr`, retaining its bytes.
+   - An added directory named `agent.yaml/`, conflicting with the existing root file.
+
+   Validate entry uniqueness, normalized paths, types, and directory/file conflicts before comparing contents.
+
+5. **BLOCKING: Invalid token settings pass as decreases.** [eval/finals_eligibility.py:129](/home/ubuntu/work/gemma/eval/finals_eligibility.py:129) and [line 158](/home/ubuntu/work/gemma/eval/finals_eligibility.py:158) accept arbitrary nonnegative floats and zero. Against real v002, changing `max_output_tokens: 8192` to either `4095.5` or `0` returns **ELIGIBLE**. The installed harness schema rejects both; it also rejects fractional thinking budgets accepted here. Enforce each knob’s valid numeric domain before comparing values. Boolean knob values were correctly rejected.
+
+**Non-blocking**
+
+- Valid include decreases can be rejected. Besides relative paths above, `thinking_config: !include thinking.yaml` followed by a decrease inside that file returns **INELIGIBLE**. Include discovery only recognizes whole `generate_content_config` includes at [line 95](/home/ubuntu/work/gemma/eval/finals_eligibility.py:95).
+- Recursive aliases cause an uncaught `RecursionError`: an unchanged document containing `cycle: &cycle [*cycle]` crashes the traversal at [line 92](/home/ubuntu/work/gemma/eval/finals_eligibility.py:92). This occurred only on synthetic input, so it is non-blocking under your criterion.
+
+Validation: the requested files match commit `aeb66ff`. All 29 existing test cases passed when called directly with RAM-backed file I/O because the sandbox is read-only. All 324 comparisons among the 18 actual `dist/` bundles completed without crashes.
+
+**Questions:** None.
+tokens used
+60,379
