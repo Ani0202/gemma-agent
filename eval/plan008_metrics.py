@@ -6,6 +6,10 @@ Usage: plan008_metrics.py base OUT_JSON | smoke RUN_DIR OUT_JSON | arm2 RUN_DIR 
        plan008_metrics.py arm3 {arm1,arm2} OUT_JSON --arm3 DIR [DIR ...]
            [--base-dirs DIR ...] --classifiers DIR=D4_JSON,A2_JSON [--classifiers ...]
            --smoke-json PATH [--base-verdict-json PATH]
+       plan008_metrics.py arm4 --arm4-dirs DIR[,DIR] --base-dirs DIR[,DIR]
+           --arm1-dirs DIR[,DIR] --base-json PATH --smoke-json PATH --out PATH
+           --identity-json PATH --bundle v014 --transport DIR=SHA256 --push-event DIR=EVENT
+           [--classifiers DIR=D4_JSON,A2_JSON ...] (otherwise discover hash-matched files)
        Dirs are supplied in push order: smoke, main, chunk1, chunk2, ...
        Both arm3 modes require --identity-json PATH --bundle v01N --transport DIR=SHA256 --push-event DIR=EVENT (each arm3 dir).
        --base-verdict-json (base arm2) = the journaled plan-008 ruling file, {"verdict": "<plan 008 verdict>"};
@@ -1221,6 +1225,266 @@ def arm3_metrics(base_name, arm3_dirs, base_dirs, classifiers, smoke_json=None, 
     return result
 
 
+ARM4_DEFINITIONS = {**DEFINITIONS, **ARM3_DEFINITIONS,
+    'inventory': 'Exactly the registered 33 ids in each of arm4, arm3, arm1; first attempt wins; incomplete -> NO_DECISION, exit 3.',
+    'base': 'Recorded plan-009 arm3 evidence bound by file SHA256, including both pinned classifiers; valid vetoed results accepted.',
+    'primary': 'ARM4-only / ARM3-only resolved discordants; D = ARM3-only - ARM4-only; sign test descriptive only.',
+    'timing': 'Unrounded finite nonnegative agent_clock_seconds <=220 and finalization_seconds <=30 for every arm4 row.',
+    'safety': 'Zero test edits and S81 governing stray; unrounded wall p90 <=1.10*arm3; submitted_without_test <=10, D73.5 on both arms.',
+    'limits': 'ABSOLUTE arm4 timeouts <=16 (timed_out OR agent_timeout_fired), empties <=18 (verified_patch_bytes ==0).',
+    'context_overflow': 'Trace error events/fields only: context length/window exceeded, context overflow, or too many tokens. Explicit false or a terminal event establishes no overflow; aggregate-only summaries remain unknown; unknown ids listed.',
+    'descriptive': 'Original plan-009 rule vs arm1 (observed arm1 submit counts), including timeout/empty vetoes; no effect on arm4 decision.',
+    'decision': 'INVALID first; D>=3 -> 2048-WORSE; limits fail -> 2048-NO-GAIN; timing/safety fail -> VETOED; else 2048-ADOPT.',
+}
+
+
+def arm4_schema(paths):
+    return dict(name='plan008_metrics/v1', mode='arm4', definitions=ARM4_DEFINITIONS,
+                script_sha256=base.sha(__file__),
+                input_shas={str(p): base.sha(p) for p in dict.fromkeys(map(Path, paths))})
+
+
+def context_overflow(records):
+    """Do not mistake task text, thoughts or tool output mentioning context for an error."""
+    pattern = re.compile(r'context[_ -]?(?:length|window|overflow)|maximum context|maximum model length|too many tokens', re.I)
+    found, unknown = [], []
+    for row, _, trace, entries in records:
+        document = _read_json(trace)
+        summary = document.get('summary')
+        sources = [document, summary] + [e for e in entries if e.get('type') in ('error', 'exception', 'agent_end')]
+        explicit, errors = [], []
+        for source in sources + entries:
+            if not isinstance(source, dict):
+                continue
+            if type(source.get('context_overflow')) is bool:
+                explicit.append(source['context_overflow'])
+            errors.extend(source[k] for k in ('error', 'error_message', 'exception', 'agent_error') if source.get(k))
+        for event in sources[2:]:
+            errors.extend(event.get(k) for k in ('content', 'message') if event.get(k))
+        if any(explicit) or any(pattern.search(_response_text(error)) for error in errors):
+            found.append(row['instance_id'])
+        elif not explicit and not any(e.get('type') == 'agent_end' or
+                                      e.get('type') == 'final' and e.get('author') == ROOT for e in entries):
+            unknown.append(row['instance_id'])
+    return dict(**_id_count(found), unknown=_id_count(unknown))
+
+
+def arm4_discordants(left, right, predicate):
+    a, b = [], []
+    right_by_id = {r['instance_id']: r for r, _, _, _ in right}
+    for row, _, _, _ in left:
+        other = right_by_id[row['instance_id']]
+        base.assert_paired(row, other)
+        x, y = predicate(row), predicate(other)
+        if x and not y:
+            a.append(row['instance_id'])
+        if y and not x:
+            b.append(row['instance_id'])
+    return dict(arm4_only=_id_count(a), comparator_only=_id_count(b), p=sign_test(len(a), len(b)))
+
+
+def arm4_metrics(arm4_dirs, base_dirs, arm1_dirs, classifiers, smoke_json, base_json, *,
+                 identity_json, bundle, transports, push_events):
+    paths = [base.ARM_IDS, base.SCREENED_IDS, base.__file__, 'eval/plan007_report.py', 'eval/thinking_bound.py']
+    arms, inventories, records, envs, arm_paths = {}, {}, {}, {}, {}
+    for name, dirs in (('arm4', arm4_dirs), ('arm3', base_dirs), ('arm1', arm1_dirs)):
+        rec, inv, inputs, headers = aggregate_arm(dirs, classifiers)
+        if len(rec) != 33:
+            raise IncompleteRun(dict(arm=name, inventory=inv, required=33))
+        paths.extend(inputs)
+        records[name], inventories[name], arm_paths[name] = rec, inv, inputs
+        # D73.5 applies symmetrically to the primary comparison, including its base.
+        arms[name] = summarize_arm(rec)
+        arms[name]['descriptive']['context_overflow'] = context_overflow(rec)
+        envs[name] = environment_metrics(headers, rec)
+    a, b, c = (arms[n] for n in ('arm4', 'arm3', 'arm1'))
+    primary = arm4_discordants(records['arm4'], records['arm3'], lambda r: r.get('resolved') is True)
+    primary.update(D=primary['comparator_only']['count'] - primary['arm4_only']['count'],
+                   arm4_resolved=a['resolved'], arm3_resolved=b['resolved'])
+    comparisons = {}
+    for name in ('arm3', 'arm1'):
+        comparisons[name] = {
+            'timeouts': arm4_discordants(records['arm4'], records[name],
+                                       lambda r: bool(r.get('timed_out') or r.get('agent_timeout_fired'))),
+            'empty_patch': arm4_discordants(records['arm4'], records[name], lambda r: r.get('verified_patch_bytes') == 0)}
+    for path in (smoke_json, base_json, identity_json, _manifest_path(bundle)):
+        if path and _readable_file(path):
+            paths.append(path)
+    smoke = _read_json(smoke_json)
+    traces = [r[2] for r in records['arm4'][:2]]
+    smoke_dirs = {str(t.parent.parent.parent) for t in traces}
+    evidence = smoke.get('_schema', {}).get('input_shas', {})
+    required = [*traces, *(Path(d) / 'timing.jsonl' for d in smoke_dirs),
+                *(classifiers[d][0] for d in smoke_dirs)]
+    smoke_bound = isinstance(evidence, dict) and all(evidence.get(str(p)) == base.sha(p) for p in required)
+    smoke_bound = smoke_bound and {str(Path(p)) for p in evidence if Path(p).name == 'timing.jsonl'} == {
+        str(Path(d) / 'timing.jsonl') for d in smoke_dirs}
+    identity = identity_check(arm4_dirs, identity_json, bundle, transports, smoke_dirs, push_events)
+    recomputed = None
+    if len(smoke_dirs) == 1:
+        directory = next(iter(smoke_dirs))
+        recomputed = arm3smoke_metrics(directory, classifiers[directory][0], identity_json, bundle,
+                                      {directory: transports.get(directory)}, {directory: push_events.get(directory)})
+    recorded = _read_json(base_json)
+    schema = recorded.get('_schema') or {}
+    bound = schema.get('input_shas') or {}
+    base_bound = isinstance(bound, dict) and all(bound.get(str(p)) == base.sha(p)
+                                                for name in ('arm3', 'arm1') for p in arm_paths[name])
+    recorded_inputs = recorded.get('decision_inputs') or {}
+    recorded_inventories = recorded.get('inventory') or {}
+    base_valid = (schema.get('name') == 'plan008_metrics/v1' and schema.get('mode') == 'arm3'
+                  and recorded.get('decision') in ('ON-ADOPT', 'ON-BETTER-VETOED', 'KEEP-OFF', 'NO-DIFFERENCE')
+                  and recorded.get('base_arm') == 'arm1' and recorded.get('n_rows') == 33
+                  and base_bound and b['h_rows']['count'] < 5
+                  and all((recorded_inventories.get(n) or {}).get('complete') is True for n in ('arm3', 'base'))
+                  and recorded_inputs.get('base_valid') is True and recorded_inputs.get('smoke_invalid') is False
+                  and recorded_inputs.get('smoke_bound') is True
+                  and (recorded_inputs.get('identity') or {}).get('checked') is True)
+    checks = safety_checks(a['safety'], b['safety'])
+    checks.pop('empty_patch')
+    checks['submitted_without_test'] = a['safety']['submitted_without_test']['count'] <= 10
+    limits = dict(timeouts=a['timeouts']['count'] <= 16, empty_patch=a['safety']['empty_patch']['count'] <= 18)
+    missing = {}
+    for name, rec in records.items():
+        missing[name] = [r['instance_id'] for r, cl, trace, entries in rec if
+                         type(r.get('resolved')) is not bool or r.get('verification_skipped') is True
+                         or type(r.get('verified_patch_bytes')) is not int or r['verified_patch_bytes'] < 0
+                         or type(r.get('timed_out')) is not bool
+                         or any(k in r and type(r[k]) is not bool for k in ('timed_out', 'agent_timeout_fired'))
+                         or 'h' not in cl or not isinstance(_read_json(trace).get('entries'), list)]
+    invalid = []
+    if not base_valid:
+        invalid.append('base evidence invalid/unbound')
+    if not identity['checked']:
+        invalid.append('identity mismatch')
+    if not smoke_bound or smoke.get('overall') != 'PASS' or not recomputed or recomputed['overall'] != 'PASS':
+        invalid.append('smoke failed/unbound')
+    if any(arms[n]['h_rows']['count'] >= 5 for n in ('arm4', 'arm3')):
+        invalid.append('literal H>=5')
+    if any(missing.values()):
+        invalid.append('missing row evidence')
+    differences = [k for k in envs['arm4'] if envs['arm4'][k] != envs['arm3'][k]]
+    if 'kernel_code' in differences:
+        invalid.append('pairing voided: kernel agent/verification path differs')
+    decision = ('INVALID' if invalid else '2048-WORSE' if primary['D'] >= 3 else
+                '2048-NO-GAIN' if not all(limits.values()) else
+                'VETOED' if not a['timing']['timing_pass'] or not all(checks.values()) else '2048-ADOPT')
+    # Plan 009 against arm1 remains descriptive, including its original observed arm1 counts.
+    original_arm1 = summarize_arm(records['arm1'], arm1=True)
+    original_checks = safety_checks(a['safety'], original_arm1['safety'])
+    original_vetoes = [k for k, passed in original_checks.items() if not passed]
+    if a['timeouts']['count'] > c['timeouts']['count'] + 2:
+        original_vetoes.append('timeouts')
+    if not a['timing']['timing_pass']:
+        original_vetoes.append('timing')
+    secondary = arm4_discordants(records['arm4'], records['arm1'], lambda r: r.get('resolved') is True)
+    secondary.update(descriptive_only=True, vetoes=original_vetoes, safety_checks=original_checks,
+                     decision=arm3_decision(secondary['arm4_only']['count'], secondary['comparator_only']['count'],
+                                           secondary['p'], a['h_rows']['count'], bool(invalid), original_vetoes))
+    return dict(_schema=arm4_schema(paths), mode='arm4', n_rows=33, base_arm='arm3',
+                inventory=inventories, arms=arms, primary=primary, comparisons=comparisons,
+                secondary_plan009_vs_arm1=secondary, decision=decision, verdict=decision,
+                decision_inputs=dict(limits=limits, safety_checks=checks, timing_pass=a['timing']['timing_pass'],
+                                     invalid_reasons=invalid, missing_evidence=missing, base_valid=base_valid,
+                                     base_bound=base_bound, identity=identity, smoke_bound=smoke_bound,
+                                     smoke_recomputed=recomputed),
+                env_drift=dict(arms=envs, differences=differences))
+
+
+def arm4_cli(argv):
+    import argparse
+    parser = argparse.ArgumentParser(description='Plan 010 CPU/offline metrics')
+    for flag in ('arm4-dirs', 'base-dirs', 'arm1-dirs'):
+        parser.add_argument('--' + flag, nargs='+', required=True)
+    for flag in ('identity-json', 'bundle', 'smoke-json', 'base-json', 'out'):
+        parser.add_argument('--' + flag, required=True)
+    for flag in ('transport', 'push-event'):
+        parser.add_argument('--' + flag, action='append', required=True)
+    parser.add_argument('--classifiers', action='append', default=[], help='DIR=D4_JSON,A2_JSON (as arm3); otherwise discover hash-matched evidence')
+    args = parser.parse_args(argv[2:])
+    def dirs(values):
+        return [str(Path(d)) for value in values for d in value.split(',') if d]
+    arm4_dirs, base_dirs, arm1_dirs = map(dirs, (args.arm4_dirs, args.base_dirs, args.arm1_dirs))
+    def mapping(values, flag):
+        out = {}
+        for value in values:
+            if '=' not in value:
+                parser.error(flag + ' requires DIR=VALUE')
+            directory, entry = value.rsplit('=', 1)
+            directory = str(Path(directory))
+            if directory in out:
+                parser.error('duplicate ' + flag + ' dir')
+            out[directory] = entry
+        return out
+    transports = mapping(args.transport, '--transport')
+    events = mapping(args.push_event, '--push-event')
+    if set(transports) != set(arm4_dirs) or any(not re.fullmatch('[0-9a-f]{64}', s) for s in transports.values()):
+        parser.error('--transport requires DIR=SHA256 for each arm4 dir')
+    errors = _push_errors(arm4_dirs, events, {d for d, e in events.items() if e == 'smoke'})
+    if errors:
+        parser.error('; '.join(errors))
+    if not re.fullmatch(r'v01[0-9]+', args.bundle):
+        parser.error('--bundle requires v01N')
+    paths = [args.base_json, args.smoke_json, args.identity_json]
+    try:
+        # Check every inventory before any evidence discovery or decision.
+        for directory_list in (arm4_dirs, base_dirs, arm1_dirs):
+            ids = []
+            for directory in directory_list:
+                timing = Path(directory) / 'timing.jsonl'
+                paths.append(timing)
+                if not timing.is_file():
+                    raise IncompleteRun(dict(dir=directory, missing_timing=True))
+                try:
+                    rows = base.load_rows(timing)
+                except AssertionError:
+                    raw = [json.loads(line) for line in timing.read_text().splitlines() if line.strip()]
+                    raise IncompleteRun(dict(dir=directory, inventory=inventory(
+                        [r['instance_id'] for r in raw if 'instance_id' in r], base.ids_file(base.ARM_IDS))))
+                ids.extend(r['instance_id'] for r in rows)
+            inv = inventory(list(dict.fromkeys(ids)), base.ids_file(base.ARM_IDS))
+            if not inv['complete'] or len(set(ids)) != 33:
+                raise IncompleteRun(inv)
+        classifiers = {d: pair.split(',') for d, pair in mapping(args.classifiers, '--classifiers').items()}
+        if any(len(pair) != 2 for pair in classifiers.values()):
+            parser.error('--classifiers requires DIR=D4_JSON,A2_JSON')
+        recorded_paths = (_read_json(args.base_json).get('_schema') or {}).get('input_shas') or {}
+        candidates = list(dict.fromkeys([*(Path(p) for p in recorded_paths), *Path('results').glob('*.json'),
+                                       *(p for d in arm4_dirs + base_dirs + arm1_dirs for p in Path(d).glob('*.json'))]))
+        index = {}
+        for path in candidates:
+            if path.suffix != '.json':
+                continue
+            doc = _read_json(path)
+            if doc.get('classifier_sha256') in (base.D4_SHA, base.A2_SHA):
+                index.setdefault((doc.get('input_sha256'), doc['classifier_sha256']), str(path))
+        for directory in arm4_dirs + base_dirs + arm1_dirs:
+            if directory not in classifiers:
+                sha = base.sha(Path(directory) / 'timing.jsonl')
+                local = {}
+                for path in Path(directory).glob('*.json'):
+                    doc = _read_json(path)
+                    if doc.get('input_sha256') == sha:
+                        local[doc.get('classifier_sha256')] = str(path)
+                classifiers[directory] = [local.get(classifier) or index[(sha, classifier)]
+                                          for classifier in (base.D4_SHA, base.A2_SHA)]
+        out = arm4_metrics(arm4_dirs, base_dirs, arm1_dirs, classifiers, args.smoke_json, args.base_json,
+                           identity_json=args.identity_json, bundle=args.bundle, transports=transports, push_events=events)
+        code = 0
+    except IncompleteRun as exc:
+        out = dict(_schema=arm4_schema([p for p in paths if _readable_file(p)]), mode='arm4',
+                   decision=None, verdict=None, status='NO_DECISION', inventory_error=exc.args[0])
+        code = 3
+    except (OSError, ValueError, AssertionError, KeyError, TypeError) as exc:
+        # Missing/malformed/unpaired evidence never produces a usable decision.
+        out = dict(_schema=arm4_schema([p for p in paths if _readable_file(p)]), mode='arm4',
+                   decision='INVALID', verdict='INVALID', status='EVIDENCE_FAILURE', error_type=type(exc).__name__)
+        code = 4
+    Path(args.out).write_text(json.dumps(out, indent=2) + '\n')
+    print(json.dumps({k: out[k] for k in ('n_rows', 'decision', 'verdict', 'status') if k in out}))
+    return code
+
+
 def arm3_cli(argv):
     import argparse
     parser = argparse.ArgumentParser(description='Plan 009 CPU/offline metrics')
@@ -1304,6 +1568,8 @@ def arm3_cli(argv):
 
 def main(argv=None):
     argv = sys.argv if argv is None else argv
+    if len(argv) > 1 and argv[1] == 'arm4':
+        return arm4_cli(argv)
     if len(argv) > 1 and argv[1] in ('arm3', 'arm3smoke'):
         return arm3_cli(argv)
     if len(argv) == 3 and argv[1] == 'base':
