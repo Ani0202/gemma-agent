@@ -1,18 +1,15 @@
-# STATE: snapshot 2026-11-06 21:39Z (cycle 166; periodic check, no change since 15:40Z, Phase 0). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 00:09Z (cycle 167; 31b-v002 SUBMITTED + arm 2 pushed). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
   SUBMITTED 2026-11-06T00:11:23Z ref 58039259; SCORED public 0.05 (COMPLETE; first final poll 05:11:49Z, T=5.007 h). results/lb_e4b_v002.json filled,
   budget row updated, Director FYI'd. No runtime fields from CLI. E4B validator acceptance VERIFIED. Next e4b submit: next UTC day at earliest. Guard v6 applied b9caae4 (dry checks rc=3 x2).
-- 31b-v002 (dec 052 item 3; v001-t4 + cap 3.5 only): dist/31b-v002.zip sha256=e56a05e5701fa16a8dbbabb304d98f63a465511cefbb28d65850ea5ce086ec88,
-  pack PASS, load check 8192 x2 / 210 s. Submit kernel aniket0202/gemma-submit-31b v1 (CPU) COMPLETE, output sha e56a05e5 verified. Review CLEAN.
-  DEC 055 = SUBMIT AUTHORIZED, CONDITIONAL. ALL must hold or it is void: (1) now >= 2026-11-07T00:00Z (waiter submit-window-31b-light);
-  (2) [HOLDS: COMPLETE 0.05] e4b 58039259 FINAL; (3) [HOLDS: T=5.007 h, SCORED] T = (first poll showing e4b final, results/lb_e4b_v002.polls.csv) - 00:11:23Z;
-  submit only if e4b SCORED and T <= 6.0 h. If 6<T<=8 h or e4b ERRORED (any cause): do NOT submit, mail Director T + exact status text +
-  options B (31B cap<=1.23) / C (repeat e4b-v002). e4b still pending at 2026-11-07T18:00Z: mail Director, don't submit.
-  (4) commit "config: SUBMIT_KERNEL=aniket0202/gemma-submit-31b for 31b-v002 (dec 054)", grep into journal, kernel v1.
-  (5) journal T + veto (number, threshold, verdict) BEFORE bin/kaggle-submit; then results/lb_31b_v002.json (same schema as
-  lb_e4b_v002.json) + waiter -light. Expect a weak LB score (validation submit); don't act on it alone.
+- 31b-v002 (v001-t4 + cap 3.5): dist/31b-v002.zip sha256=e56a05e5701fa16a8dbbabb304d98f63a465511cefbb28d65850ea5ce086ec88
+  SUBMITTED 2026-11-07T00:06:31Z ref 58072907 (dec 055 ALL conds held: window open; e4b COMPLETE 0.05; T=5.007 h <= 6.0 PASS;
+  config commit cefb420 SUBMIT_KERNEL=aniket0202/gemma-submit-31b, kernel v1; veto journaled pre-submit). results/lb_31b_v002.json (PENDING);
+  waiter lb-31b-v002-wait-light -> results/lb_31b_v002.polls.csv. On final: fill json (status, score, completed window), budget row, Director FYI.
+  Validation submit: expect weak LB, don't act alone; write-up notes FastAPI-hint caveat (dec 060). config.env SUBMIT_KERNEL now = 31b kernel:
+  next e4b submit needs the reverse config commit first. Next submit slot: 2026-11-08 UTC (ledger blocks same-day).
 - CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 12B/E2B validator
   acceptance (E4B VERIFIED by 58039259 scoring); l.55 submit_patch/get_status vs call limits; l.63 private-LB multiple runs; l.72 wheels arch
   (x86 assumed, unrecorded); 12h overrun ruling. VERIFIED: l.42 submit method = kernel output (dec 041); l.76 superseded by l.112.
@@ -23,7 +20,11 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (15:40Z): memguard-light, submit-window-31b-light (fires 11-07T00:00:30Z).
+## Running jobs (00:09Z): memguard-light, lb-31b-v002-wait-light, passrate-31b-v011-arm2-wait-light.
+- ARM 2 (plan 008) PUSHED gemma-31b-passrate v3 00:08:09Z: 31b-v011-p8b (staged kernel verified = dist/31b-v011.zip 4f5b078a + MANIFEST.md),
+  33 ids eval/plans/007-arm1-ids.txt, ONE session, --with-verification --no-stock-probe --seed-max 803, KERNEL_BUDGET 30000 s.
+  Quota BEFORE 0.00 h (00:08:06Z). On COMPLETE: waiter downloads to runs/31b-v011-p8b-arm2 + SEAL.sha256; log quota AFTER in ops/budget/kaggle.md;
+  run eval/plan008_metrics.py arm2 mode (B3 assert guard 9486a3b in place); D73.7 governs any chunk 2 (missing ids only).
   DONE: arm3 fix2 re-review 153229 CLEAN (F1-F3 resolved; 119 plan-009 + 91 legacy tests) -> eval/plan008_metrics.py arm3 modes CLEARED (main 7876239).
   arm3 CLI needs --identity-json --bundle --transport DIR=SHA --push-event DIR=EVENT (every dir) --smoke-json [--base-verdict-json].
   DONE: identity 145500 CLEAN (1fd32d9) -> plan009_identity.py cleared. PLAN 009 rev 2 CLEAN (145128) = FINAL.
@@ -60,7 +61,7 @@
   Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
 - DEC 057: no new bundle carries a repo-named hint; v000-v002 (both tracks) carry the FastAPI hint -> reports must say so; LB may tilt FastAPI-ward. e4b-v003 = e4b-v002 + generic fixes minus that line (CPU draft).
   31b-v004 CPU DRAFT dist/31b-v004.zip 50537e1d... (v007 + quoting line), no slot (dec 061 ii); NB3 timeout empty patch unguaranteed (dec 056 item 6).
-- GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU this week: 27.66/30 h per `kaggle quota` 13:26Z after main (+10.41); 2.34 h left. Log: ops/budget/kaggle.md. Resets 2026-11-07T00:00Z.
+- GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU week of 11-07: 0.00/30 h at 00:08Z (reset), arm 2 running. Log: ops/budget/kaggle.md. Resets 2026-11-14T00:00Z.
 ## Live caveats (dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035). Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
   (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
   results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
@@ -73,7 +74,6 @@
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 ## Next 3
-1. Arm-3 tooling cleared; arm 3 runs after arm 2 (base per plan 009). If base=arm2 ever, write ruling file {verdict} after Director rules.
-2. Dec 055 31b-v002 submit 11-07T00:00Z FIRST (checklist in Best bundles); kaggle quota log after reset; then arm-2 v011 ONE session
-   (verify kernel/runner names v011 sha 4f5b078a, journal, quota before/after, 1-line FYI).
-3. Nov 8 proposal from ops/drafts/nov8-slot-inputs.md by 11-07T12:00Z.
+1. On arm-2 COMPLETE: seal check, quota AFTER, plan008 metrics arm2 -> report (ship rule per 008.md). Then arm 3 per plan 009 (base by verdict).
+2. On 31b-v002 final: fill results/lb_31b_v002.json + budget row + Director FYI (ERROR -> CAP-BOUND binds per dec 061 i).
+3. Nov 8 slot proposal from ops/drafts/nov8-slot-inputs.md by 11-07T12:00Z (U1/U2 may still be pending: state so, propose per matrix).
