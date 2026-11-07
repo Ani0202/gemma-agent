@@ -24,8 +24,7 @@
   ERROR/timeout -> mail AT ONCE before any slot. Nov 8 default if PENDING at 12:00Z = e4b-v002 repeat. Dec 038 files rechecked OK 00:13Z.
 ## Running jobs (06:13Z): memguard-light, lb-31b-v002-wait-light (PENDING 06:06Z), passrate-31b-v012-smoke-wait-light (v4 -> runs/31b-v012-p9a-smoke, sealed), codex-review-s81b-light.
 - CODEX S81: review 060833 BLOCKING 1 (base stray evidence missing could still ON-ADOPT) -> fixed 71185a3 (safety_checks(): both arms need
-  available stray evidence, zero governing for arm 3 only; +5 tests incl. unrounded wall-p90 gate; 1624 pass). Re-review s81b must be CLEAN before arm-3 metrics.
-  Non-blocking (report-side): arm-3 report must list amended arm-2 counts (governing+literal) separately per S81.3.
+  available stray evidence, zero governing for arm 3 only; +5 tests incl. unrounded wall-p90 gate; 1624 pass). Re-review s81b must be CLEAN before arm-3 metrics. Report must list amended arm-2 counts separately (S81.3).
 - DEC 081 (on 020, approve A w/ changes): (1) arm-3 SMOKE PUSHED gemma-31b-passrate v4 06:05:14Z: 31b-v012-p9a, ids eval/plans/009-smoke-ids.txt (2),
   budget 5400, TRANSPORT 203e542bd5ea99b98a6c40821082804de6de6d6705b25b37f78caef3cda19507, identity smoke PASS (results/plan009_bundle_identity.json),
   quota BEFORE 11.26 h 06:05:05Z. On land: quota AFTER + budget row; arm3smoke check (criteria i-iii; no stray/p90 involved, so not gated by item 4);
