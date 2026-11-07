@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 06:30Z (cycle 176; arm-3 smoke PASS -> MAIN pushed v5 06:27:20Z). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 06:31Z (cycle 177; dec 082 approve, Nov 8 proposal SENT early). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -74,7 +74,10 @@
   gemma-wt/codex-kernel-probes-gate). Last FROZEN+noted classifier: a208a023 (0d49b1c); rev-5 d4cdf0f0 frozen pending Director note (report 016).
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
 - TOPICS (Director mail 01:47Z, owner req): docs/TOPICS.md saved; on any topic status change (used now | planned | adjacent, not used) update its line + repo ref in the same cycle as the journal entry.
+- DEC 082 (approve, no reply): report 021 FIRST results table = pass rate + arm3-vs-arm1 TIMEOUT count + EMPTY count w/ paired discordants
+  (not footnote). On land: quota AFTER + budget row FIRST, then classifiers/metrics per dec 081 i1; budget hit w/ missing ids -> D73.7, no top-up.
+- Nov 8 proposal SENT 06:30Z ops/drafts/nov8-slot-proposal.md (PENDING/ERROR -> e4b-v002 repeat; SCORED>=0.10 -> 31b-v002 repeat). Awaiting SUBMIT decision.
 ## Next 3
-1. Nov 8 slot proposal from ops/drafts/nov8-slot-inputs.md by 11-07T12:00Z (U2 = arm 2 NOT SHIP-ELIGIBLE; U1 pending unless scored). Arm-3 main won't land before ~12-13Z.
-2. On 31b-v002 final: fill results/lb_31b_v002.json + budget row + Director FYI (ERROR -> CAP-BOUND binds per dec 061 i).
-3. On arm-3 main land: seal check, quota/budget row, classifiers, arm3 metrics, report 021.
+1. On 31b-v002 final: fill results/lb_31b_v002.json + budget row + Director FYI (ERROR -> CAP-BOUND binds per dec 061 i); note which proposal row now applies.
+2. On SUBMIT decision for Nov 8: (e4b) reverse SUBMIT_KERNEL config commit first, grep-journaled; never while 58072907 PENDING.
+3. On arm-3 main land: quota/budget row, seal check, classifiers, arm3 metrics, report 021 (dec 082 item 1 table layout).
