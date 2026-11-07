@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 09:09Z (cycle 182; 31b-v002 SCORED 0.15 -> dec 083 (a) HOLDS; DEC 084+085: v009 Gate-2 item WAIVED (085 confirms, adds nothing, does NOT re-issue auth) -> Nov 8 = 31b-v009 CONDITIONAL (dec 083 a-f); e4b-v002h AUTHORIZED CONDITIONAL, slot after 31B). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 09:10Z (cycle 183; DEC 086: FINALS RULE 31B cap<=3.5 now MET + item-3 match rule; 31b-v002 SCORED 0.15 -> dec 083 (a) HOLDS; DEC 084+085: v009 Gate-2 item WAIVED (085 confirms, adds nothing, does NOT re-issue auth) -> Nov 8 = 31b-v009 CONDITIONAL (dec 083 a-f); e4b-v002h AUTHORIZED CONDITIONAL, slot after 31B). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -55,6 +55,10 @@
 - Timing kernel (plan 006 DONE, G1 held -> dec 055): stack main 2db5f51 per Addendum A (gate fix from 92a74c7, worktree
   gemma-wt/codex-kernel-probes-gate). Last FROZEN+noted classifier: a208a023 (0d49b1c); rev-5 d4cdf0f0 frozen pending Director note (report 016).
 - FINALS RULE: no final with cap > H3 bound (31B 1.23, e4b 1.0) unless a same-or-higher cap, same model, has SCORED on the real scorer. Plan slots so each track is validated well before Nov 29.
+  DEC 086: 31B cap<=3.5 precondition MET (v002 COMPLETE); never raise 31B cap >3.5. BINDING item 3: a 31B final must have scored COMPLETE itself OR
+  match a COMPLETE bundle on cap AND thinking_budget<= AND max_output_tokens<=. v002 knobs: results/lb_31b_v002.json finals_rule_config
+  (cap 3.5, think 4096 main+analyzer, max_out 8192 both). OPEN: v012 mechanically MATCHES v002 (Director's text said v012 needs own score);
+  asked Director 09:09Z which reading binds (prompt/lineage clause?). Until answered, plan a v012 scored slot before Nov 29 if arm 3 wins.
 - TOPICS (Director mail 01:47Z, owner req): docs/TOPICS.md saved; on any topic status change (used now | planned | adjacent, not used) update its line + repo ref in the same cycle as the journal entry.
 - DEC 082 (approve, no reply): report 021 FIRST results table = pass rate + arm3-vs-arm1 TIMEOUT count + EMPTY count w/ paired discordants
   (not footnote). On land: quota AFTER + budget row FIRST, then classifiers/metrics per dec 081 i1; budget hit w/ missing ids -> D73.7, no top-up.
