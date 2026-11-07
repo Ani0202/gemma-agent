@@ -35,7 +35,6 @@
   (report 019) 8/33 vs arm1 4/33, A-only 4/B-only 0 p=0.125, MECH1/2 FAIL -> NOT SHIP-ELIGIBLE; base = arm 1; 31B default draft stays v009. Files 4de6787.
   arm3 CLI: --identity-json --bundle --transport DIR=SHA --push-event DIR=EVENT (every dir) --smoke-json [--base-verdict-json]. Arm-3 bundle
   31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096), load PASS (e5196a4).
-- DEC 071 (DONE; arm 2 ran): gate details plan 008 Addendum D71. FALLBACK 31b-v011-p8b dist/31b-v011.zip 4f5b078a... (agent.yaml==v009, PROMPT-LEVEL).
 - DEC 069 (rep 018, A w/ conditions): arm 1 VALID by POST-HOC ruling = plan 007 Addendum C (7ceb059). PRIMARY 4/33 FINAL
   (codex 132715 BLOCKING = missing descriptive lines -> fixed; re-review 133120 CLEAN). results/plan007_arm1_summary.json v2
   (script sha 349b1bda...): a 4/33 (W 4.8-27.3), c 4/26, d 4/27 (literal), d' 4/33, empty 12/33 (2 to/10 non), unscreened 3/25, ENV CONTROL caveat l.152 on every arm-1 citation.
