@@ -386,3 +386,8 @@
 2026-11-07T00:14:00Z | dec 079 read (approve, nothing changes); Nov 8 pending-default = e4b-v002 repeat noted in draft; dec 038 evidence files rechecked present+schema-headed | ops/decisions/079-20261107T000828-19008-from-builder.md ops/drafts/nov8-slot-inputs.md
 2026-11-07T01:48Z | docs/TOPICS.md saved from Director mail 20261107T014718 (owner request); 5 bare bundle-relative paths qualified to bundles/31b/v011/...; Builder maintains topic lines alongside journal entries | docs/TOPICS.md
 2026-11-07T04:50Z | periodic check: 31b-v002 PENDING (poll 04:36Z), arm2 kernel RUNNING (04:43Z), memguard OK 0 KILL, linger yes, disk 87G free | ops/STATE.md
+2026-11-07T05:55Z | plan-008 arm 2 COMPLETE 05:53Z, downloaded 05:54:20Z, SEAL 212 files sha256sum -c OK; quota AFTER 11.26 h (+11.26) per kaggle quota 05:55:06Z | ops/budget/kaggle.md runs/31b-v011-p8b-arm2/SEAL.sha256
+2026-11-07T05:57Z | arm-2 metrics: resolved 8/33 vs arm1 4/33 (A-only 4 / B-only 0, sign p=0.125); MECH1 empty 15/33 FAIL (<=4); MECH2 16/33 FAIL (<=6); SAFETY stray 1 row (fastapi_15661) MISSED -> HARM clause; verdict NOT SHIP-ELIGIBLE (GUARD FAILED x2 + HARM) | results/plan008_arm2.json results/plan008_arm2_summary.json (4de6787)
+2026-11-07T05:57Z | plan 009 base selection (mechanical, l.17-19): verdict != SHIP-ELIGIBLE -> BASE = arm 1 (v009) -> arm-3 bundle 31b-v012-p9a dist/31b-v012.zip 78a8fd30; NOT pushed (HARM "diagnose first" question to Director) | eval/plans/009.md ops/reports/019-plan008-arm2-result.md
+2026-11-07T05:57Z | codex-review-arm2sum-light launched on eval/plan008_arm2_summary.py | ops/jobs/codex-review-arm2sum-light.status
+2026-11-07T06:00Z | report 019 -> Director (NEEDS_DECISION: HARM clause vs arm 3 timing) | ops/reports/019-plan008-arm2-result.md

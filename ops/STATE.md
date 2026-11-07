@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 04:50Z (cycle 170; periodic check, no change: v002 PENDING 4.7 h, arm 2 RUNNING 4.7 h). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 06:00Z (cycle 171; arm 2 DONE -> report 019 NEEDS_DECISION; v002 PENDING). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -22,11 +22,11 @@
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
 - DEC 079: approve, nothing changes. On v002 final mail Director T (first final poll - 00:06:31Z), exact status, public score; fill json.
   ERROR/timeout -> mail AT ONCE before any slot. Nov 8 default if PENDING at 12:00Z = e4b-v002 repeat. Dec 038 files rechecked OK 00:13Z.
-## Running jobs (00:14Z): memguard-light, lb-31b-v002-wait-light, passrate-31b-v011-arm2-wait-light.
-- ARM 2 (plan 008) PUSHED gemma-31b-passrate v3 00:08:09Z: 31b-v011-p8b (staged kernel verified = dist/31b-v011.zip 4f5b078a + MANIFEST.md),
-  33 ids eval/plans/007-arm1-ids.txt, ONE session, --with-verification --no-stock-probe --seed-max 803, KERNEL_BUDGET 30000 s.
-  Quota BEFORE 0.00 h (00:08:06Z). On COMPLETE: waiter downloads to runs/31b-v011-p8b-arm2 + SEAL.sha256; log quota AFTER in ops/budget/kaggle.md;
-  run eval/plan008_metrics.py arm2 mode (B3 assert guard 9486a3b in place); D73.7 governs any chunk 2 (missing ids only).
+## Running jobs (06:00Z): memguard-light, lb-31b-v002-wait-light, codex-review-arm2sum-light (eval/plan008_arm2_summary.py).
+- ARM 2 RESULT (report 019, NEEDS_DECISION): COMPLETE 05:53Z, SEAL OK, quota 11.26/30 h used. resolved 8/33 (W 12.8-41.0) vs arm1 4/33,
+  A-only 4 / B-only 0, p=0.125; MECH1 empty 15/33 FAIL; MECH2 16/33 FAIL; stray 1 row (fastapi_15661) SAFETY MISSED -> HARM clause.
+  Verdict NOT SHIP-ELIGIBLE. Plan-009 base = arm 1 -> arm 3 = 31b-v012-p9a (NOT pushed; awaiting ruling: diagnose-first vs run now).
+  Files: results/plan008_arm2.json, plan008_arm2_summary.json, plan008_arm2_{d4cdf0f0,a208a023}.json (4de6787). 31B default draft stays v009.
   DONE: arm3 fix2 re-review 153229 CLEAN (F1-F3 resolved; 119 plan-009 + 91 legacy tests) -> eval/plan008_metrics.py arm3 modes CLEARED (main 7876239).
   arm3 CLI needs --identity-json --bundle --transport DIR=SHA --push-event DIR=EVENT (every dir) --smoke-json [--base-verdict-json].
   v012/v013 review 144907 CLEAN. Arm-3 packed e5196a4: 31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096);
@@ -61,7 +61,7 @@
   Item 6: arm E/F results files schema-headed (plan005_armE_vs_D.json has _schema); dec 038 paper evidence by Nov 9 23:59Z.
 - DEC 057: no new bundle carries a repo-named hint; v000-v002 (both tracks) carry the FastAPI hint -> reports must say so; LB may tilt FastAPI-ward. e4b-v003 = e4b-v002 + generic fixes minus that line (CPU draft).
   31b-v004 CPU DRAFT dist/31b-v004.zip 50537e1d... (v007 + quoting line), no slot (dec 061 ii); NB3 timeout empty patch unguaranteed (dec 056 item 6).
-- GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU week of 11-07: 0.00/30 h at 00:08Z (reset), arm 2 running. Log: ops/budget/kaggle.md. Resets 2026-11-14T00:00Z.
+- GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU week of 11-07: 11.26/30 h at 05:55Z (arm 2 done; 18.74 h left). Log: ops/budget/kaggle.md. Resets 2026-11-14T00:00Z.
 ## Live caveats (dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035). Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
   (2) results/kaggle_timing_e4b_v001.NOTE.md DONE (still add decision_note to JSON at probes merge); (3) e4b-v002 LB score -> schema-headed
   results file (score, submit/complete ts, sha); (4) report 010 results files schema-headed. Paper cites only files. Never edit paper/.
@@ -75,6 +75,6 @@
 - OPEN (dec 034 item 6 / dec 058 item 7): plan 007 must pre-register which env the local sandbox models (H1: scorer site-packages test deps).
 - TOPICS (Director mail 01:47Z, owner req): docs/TOPICS.md saved; on any topic status change (used now | planned | adjacent, not used) update its line + repo ref in the same cycle as the journal entry.
 ## Next 3
-1. On arm-2 COMPLETE: seal check, quota AFTER, plan008 metrics arm2 -> report (ship rule per 008.md). Then arm 3 per plan 009 (base by verdict).
+1. On Director ruling (report 019): CPU diagnosis of stray row + non-firing empty guard (Option A), then push arm 3 v012 per plan 009 (journal base first: DONE).
 2. On 31b-v002 final: fill results/lb_31b_v002.json + budget row + Director FYI (ERROR -> CAP-BOUND binds per dec 061 i).
-3. Nov 8 slot proposal from ops/drafts/nov8-slot-inputs.md by 11-07T12:00Z (U1/U2 may still be pending: state so, propose per matrix).
+3. Nov 8 slot proposal from ops/drafts/nov8-slot-inputs.md by 11-07T12:00Z (U2 = arm 2 NOT SHIP-ELIGIBLE; U1 pending unless scored).
