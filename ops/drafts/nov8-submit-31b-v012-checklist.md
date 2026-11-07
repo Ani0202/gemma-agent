@@ -12,7 +12,8 @@ c. Gate 1/4: bin/pack bundles/31b/v012 PASS (2026-11-07T11:26Z, 9070 B; unzip ==
    STATUS: pack PASS; journal line due at submit time.
 d. Submit kernel aniket0202/gemma-submit-31b NEW version with v012 output BYTE_IDENTICAL (job submit-kernel-v012-verify-light -> results/submit_kernel_v012_verify.txt).
    SUBMIT_KERNEL stays 31b (no config change). v2 (= v009) stays available for the fallback (guard takes an explicit version).
-   STATUS: PENDING. Command (fill N from the verify file): bin/kaggle-submit dist/31b-v012.zip 31b "sha:78a8fd30389e 31b-v012 cap3.5 think4096 (dec 089)" N
+   STATUS: MET 2026-11-07T11:27:11Z: kernel v3 output BYTE_IDENTICAL (results/submit_kernel_v012_verify.txt). Journal kernel v3 at submit.
+   Command: bin/kaggle-submit dist/31b-v012.zip 31b "31b-v012 cap3.5 think4096 (dec 089)" 3   (guard prefixes sha:<12>)
 e. Window waiter: submit-window-nov8-v012-light (restarted 11:26:57Z with the v012 sha; old submit-window-nov8-light killed). Guard NOT edited.
 f. After: results/lb_31b_v012.json (lb_submission_v1, copy lb_31b_v002.json layout) + -light waiter -> results/lb_31b_v012.polls.csv.
    Write-up MUST say: plan 009 arm 3 verdict ON-BETTER-VETOED (10/33 vs 4/33, 6/0 p=.031); 21/33 local timeouts, 18/33 empty diffs (ENV CONTROL caveat);

@@ -1,0 +1,24 @@
+DECISION: approve-with-changes
+SUBMIT: AUTHORIZE sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 track=31b bundle=dist/31b-v012.zip
+GPU_ALLOWANCE: none
+ESCALATE: none
+DIGEST: Strongest paired local result so far on 31B; swapping tomorrow's slot to that candidate to get its real-scorer runtime early.
+---
+Option (c): swap Nov 8 to v012. Conditions below. Spot-check: results/plan009_arm3_vs_arm1.json primary = on_only 6 / off_only 0, p 0.03125, 10/33 vs 4/33, vetoes [empty_patch, timeouts]. All match report 021. Separately verified: bundles/31b/v012/configs/sampling.yaml and sub_agents/code_analyzer.yaml set thinking_budget 4096 on main and analyzer, and v009 sets main to 0. results/lb_31b_v002.json finals_rule_config shows v002 ran thinking 4096 main+analyzer at cap 3.5 and scored COMPLETE in <= 9.006 h.
+
+1. The arm-3 verdict stays recorded as ON-BETTER-VETOED. The eval protocol and the pre-registered rule don't change, and nobody re-labels the arm. This decision is about slot use only: the veto metrics stand in for scorer runtime, and one scored submission measures that directly.
+2. SUBMIT AUTHORIZE 31b-v012, dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5, CONDITIONAL. Write ops/drafts/nov8-submit-31b-v012-checklist.md from the v009 checklist with:
+   (a) 58072907 FINAL COMPLETE (already met). Nothing pending, day >= 11-08, no stacking.
+   (b) Gate 2: review-31b-v012-submit-light lands with NO BLOCKING, except a finding equivalent to the v009 "empty diff on timeout/cap" BLOCKING. I extend the dec 084/085 waiver to that one finding for this sha only. It's a quality issue, not a validity issue. Any other BLOCKING means NO v012 submit: fall back to item 4 and mail me.
+   (c) Gate 1/4: pack PASS, and the sha is recorded in bundles/31b/v012/MANIFEST.md. Timing bound 3.5x125+30 = 467.5 <= 660 (record it). Journal the Gate-4 line before submitting.
+   (d) Submit-kernel output BYTE_IDENTICAL to the v012 zip (re-verify like results/submit_kernel_v2_verify.txt; new kernel version if needed). SUBMIT_KERNEL stays 31b.
+   (e) Re-target the Nov 8 window by restarting submit-window-nov8-light (or a new waiter) with the v012 sha. Do NOT edit the guard.
+   (f) results/lb_31b_v012.json plus a waiter. The write-up notes that the arm is ON-BETTER-VETOED, has 21/33 local timeouts, and carries the empty-diff-on-timeout waiver. If it ERRORS or times out: VOID, mail me at once, and v012 is NOT finals-eligible at thinking 4096.
+   Deadline: all conditions met by 2026-11-07T23:45Z. Otherwise go to item 4.
+3. On a v012 submit, the dec 083 v009 authorization LAPSES. v009 no longer needs its own slot: a COMPLETE v012 covers v009 under dec 087 (b), because v009 differs only in thinking_budget main 0 <= 4096. Confirm that with eval/finals_eligibility.py once v012 is COMPLETE.
+4. FALLBACK, only if item 2 isn't met by 23:45Z: Nov 8 = v009 under dec 083 as written, and v012 takes the first free 31B slot after e4b-v002h (Nov 10).
+5. e4b-v002h (dec 084 item 3) stays on Nov 9. Read its condition "31b-v009 ... already submitted on an earlier day & not pending" as applying to whichever 31B bundle was submitted Nov 8. Reverse the SUBMIT_KERNEL commit and recheck the kernel first, as before.
+6. THE SINGLE MOST IMPORTANT NEXT EXPERIMENT: cut v012's timeouts and empties. Pre-register plan 010 now (CPU work), primary arm = v012 with thinking_budget 2048 on main (analyzer unchanged or <=), cap 3.5. All else stays byte-identical, so if v012 scores COMPLETE it's finals-eligible without its own slot (dec 087 b). Paired vs arm 3 on the same 33 ids. Pre-register the decision rule on resolved plus the timeout and empty limits vs arm 3. Run it with the week-of-Nov-14 quota (8.41 h left now is not enough for a full arm; don't split the arm across weeks). In parallel on CPU: the dec 081 item-5 tool-level empty-patch lever on top of v012, as a later arm. It changes tools/prompt, so it would need its own score.
+7. No FYI needed for a Gate-2 review that's clean or covered by the waiver. Mail me only on another BLOCKING, a fallback to item 4, or a v012 ERROR.
+
+Reasoning: (c) dominates (b). A COMPLETE v012 makes both v012 and v009 finals-eligible, while a COMPLETE v009 covers only v009 (dec 087 item 1). v009 at 4/33 is unlikely to be Final A, so its slot buys little. The main risk, a 12 h overrun, is bounded better than the report says: v012 runs exactly v002's thinking 4096 main+analyzer at cap 3.5, and v002 completed in <= 9.006 h with ~3 h of margin. Its local agent-clock mean (184 s) is no higher than v002's lineage at a higher cap. If it still overruns, we lose one of ~28 slots and learn early that thinking 4096 is unsafe for Final A, which is finals-critical information either way. Getting the score two days earlier leaves room for the plan-010 knob-down follow-up well before Nov 29.
