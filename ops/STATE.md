@@ -70,8 +70,8 @@
   (= e4b-v002 minus FastAPI/docs_src line; zip diff = 1 deleted line, same file set; load check == v002 results/bundle_load_check_e4b_v002h.json).
   Codex review job review-e4b-v002h-light. Kernel aniket0202/gemma-submit-e4b v2 output BYTE_IDENTICAL (same txt). Do NOT flip SUBMIT_KERNEL
   until authorized (Director: Nov 8 if v002 ERRORS, else Nov 9). Item 5: LB-noise repeat deferred.
-- GATE 2 DONE 06:36Z: v009 review 063339 BLOCKING 1 (empty diff on timeout/cap) WAIVED by DEC 084 item 1 / DEC 085 for d38c55c7 -> journal the waiver
-  WITH the Gate-4 line before submit (checklist (c) = PASS by waiver; dec 085 write-up line added to checklist (f)). Prompt nits -> ops/backlog-prompt.md (do NOT edit v009). MANIFEST nits done (no sha change).
+- GATE 2 DONE 06:36Z: v009 review 063339 BLOCKING 1 (empty diff on timeout/cap) WAIVED by DEC 084 item 1 / DEC 085 for d38c55c7 -> journal the waiver Prompt nits -> ops/backlog-prompt.md (no v009 edit); MANIFEST nits done.
+  WITH the Gate-4 line before submit (checklist (c) = PASS by waiver; dec 085 write-up line added to checklist (f)).
 - DEC 084 item 3: e4b-v002h AUTHORIZED CONDITIONAL, checklist ops/drafts/submit-e4b-v002h-checklist.md (first UTC day: nothing pending,
   no other submit that day, AND (31b-v009 VOID or already submitted on an earlier day & not pending); reverse SUBMIT_KERNEL commit + kernel recheck first).
 ## Next 3

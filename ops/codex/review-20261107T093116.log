@@ -1079,3 +1079,554 @@ exec
    383	if __name__ == '__main__':
    384	    sys.exit(main())
 
+exec
+/bin/bash -lc 'nl -ba eval/finals_eligibility.py' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+     1	#!/usr/bin/env python3
+     2	"""Mechanical FINALS RULE check (dec 087 item 1, clause (b)), v3 (strict; codex reviews 091327, 092238).
+     3	
+     4	A candidate final qualifies via a COMPLETE-scored reference bundle only if the two zips are
+     5	byte-identical except for single-line value changes of these knobs, each <= the reference value:
+     6	  eval_config.yaml (zip root)   evaluation.max_time_minutes / max_tool_calls / max_turns
+     7	  agent config documents         generate_content_config.max_output_tokens /
+     8	  (agent.yaml + every sub-agent  generate_content_config.thinking_config.thinking_budget
+     9	   reached via tools[i].agent_tool (inline, or in the file named by a top-level
+    10	   .config_path, recursively)     `generate_content_config: !include F`: max_output_tokens /
+    11	                                  thinking_config.thinking_budget at that file's top level)
+    12	Rules (all conservative -> INELIGIBLE):
+    13	- An agent doc using any YAML merge key (`<<`) gets no allowance and its sub-agents are not followed.
+    14	- Files inside a skill directory (dir of any SKILL.md in either zip, or any path under a `skills`
+    15	  key of an agent doc, root- or doc-relative) get no allowance even if also an include target.
+    16	- Zip entries: unique names (also case-folded), normalized relative POSIX paths, regular files only
+    17	  (no directory entries, symlinks or other types, no encryption), no file/directory conflicts.
+    18	  The candidate and reference must have the same entry names.
+    19	- Every file not listed above must be byte-identical. A listed file may differ only on lines of the
+    20	  form `<indent><knob>: <number><trailing>` with identical prefix/suffix bytes, same line count; the
+    21	  changed value node must sit exactly at an allowed path (checked on the composed YAML node tree;
+    22	  duplicate mapping keys rejected). Comments, quoting, anchors, aliases, flow style: must be identical.
+    23	- Domains: max_output_tokens, max_tool_calls, max_turns int >= 1; thinking_budget int >= 0;
+    24	  max_time_minutes number > 0. No leading zeros, no sign, no exponent/underscore.
+    25	- Include / config_path targets are resolved both root-relative and relative to the containing
+    26	  document; if both resolutions exist as different entries the target is ambiguous and gets no
+    27	  allowance (must stay byte-identical).
+    28	
+    29	Clause (a) (the candidate itself scored COMPLETE) is not checked here; --reference-lb checks that
+    30	the reference has status COMPLETE and that its sha256 matches the reference zip.
+    31	
+    32	Usage: eval/finals_eligibility.py CANDIDATE.zip REFERENCE.zip [--reference-lb results/lb_X.json]
+    33	                                  [--out results/finals_eligibility_X_vs_Y.json]
+    34	Exit 0 = ELIGIBLE, 1 = INELIGIBLE, 2 = usage/input error.
+    35	"""
+    36	import argparse
+    37	import hashlib
+    38	import json
+    39	import posixpath
+    40	import re
+    41	import stat
+    42	import sys
+    43	import unicodedata
+    44	import zipfile
+    45	
+    46	import yaml
+    47	
+    48	EVAL_CONFIG = 'eval_config.yaml'
+    49	ROOT_AGENT = 'agent.yaml'
+    50	SCHEMA = 'finals_eligibility_v3'
+    51	INT_TAG = 'tag:yaml.org,2002:int'
+    52	FLOAT_TAG = 'tag:yaml.org,2002:float'
+    53	MERGE_TAG = 'tag:yaml.org,2002:merge'
+    54	# knob -> (value regex, minimum, allow_float, strict minimum)
+    55	DOMAINS = {
+    56	    'max_time_minutes': (r'(?:0|[1-9][0-9]*)(?:\.[0-9]+)?', 0, True, True),
+    57	    'max_tool_calls': (r'[1-9][0-9]*', 1, False, False),
+    58	    'max_turns': (r'[1-9][0-9]*', 1, False, False),
+    59	    'max_output_tokens': (r'[1-9][0-9]*', 1, False, False),
+    60	    'thinking_budget': (r'0|[1-9][0-9]*', 0, False, False),
+    61	}
+    62	EVAL_PATHS = {('evaluation', k): k for k in ('max_time_minutes', 'max_tool_calls', 'max_turns')}
+    63	GCC_REL = {('max_output_tokens',): 'max_output_tokens',
+    64	           ('thinking_config', 'thinking_budget'): 'thinking_budget'}
+    65	LINE_RE = re.compile(rb'^([ ]*)([a-z_]+)(:[ ]+)([0-9.]+)([ \t]*\r?\n?)$')
+    66	
+    67	
+    68	class ZipProblem(Exception):
+    69	    pass
+    70	
+    71	
+    72	def sha256_file(path):
+    73	    h = hashlib.sha256()
+    74	    with open(path, 'rb') as f:
+    75	        for chunk in iter(lambda: f.read(1 << 20), b''):
+    76	            h.update(chunk)
+    77	    return h.hexdigest()
+    78	
+    79	
+    80	def read_zip(path):
+    81	    """Return ({name: bytes}, [problems]). Problems make the zip unusable for clause (b)."""
+    82	    files, problems, seen_fold = {}, [], {}
+    83	    with zipfile.ZipFile(path) as z:
+    84	        infos = z.infolist()
+    85	        for i in infos:
+    86	            n = i.filename
+    87	            if n in files:
+    88	                problems.append(f'duplicate entry {n!r}')
+    89	                continue
+    90	            fold = unicodedata.normalize('NFC', n).casefold()
+    91	            if fold in seen_fold:
+    92	                problems.append(f'entry {n!r} collides with {seen_fold[fold]!r} (case/unicode fold)')
+    93	            seen_fold[fold] = n
+    94	            if n.endswith('/') or i.is_dir():
+    95	                problems.append(f'directory entry {n!r}')
+    96	                continue
+    97	            parts = n.split('/')
+    98	            if ('\\' in n or n.startswith('/') or any(p in ('', '.', '..') for p in parts)
+    99	                    or posixpath.normpath(n) != n or '\x00' in n):
+   100	                problems.append(f'non-normalized path {n!r}')
+   101	                continue
+   102	            mode = (i.external_attr >> 16) & 0xFFFF
+   103	            if mode and stat.S_IFMT(mode) not in (0, stat.S_IFREG):
+   104	                problems.append(f'entry {n!r} is not a regular file (mode {oct(mode)})')
+   105	                continue
+   106	            if i.flag_bits & 0x1:
+   107	                problems.append(f'entry {n!r} is encrypted')
+   108	                continue
+   109	            files[n] = z.read(i)
+   110	    names = set(files)
+   111	    for n in names:
+   112	        parts = n.split('/')
+   113	        for k in range(1, len(parts)):
+   114	            if '/'.join(parts[:k]) in names:
+   115	                problems.append(f'file/directory conflict: {"/".join(parts[:k])!r} vs {n!r}')
+   116	    return files, problems
+   117	
+   118	
+   119	class StrictComposer(yaml.SafeLoader):
+   120	    pass
+   121	
+   122	
+   123	def compose(data, name):
+   124	    """Composed YAML node tree (no construction, so custom tags are kept). Raises ValueError."""
+   125	    try:
+   126	        return yaml.compose(data.decode('utf-8'), Loader=StrictComposer)
+   127	    except Exception as e:  # noqa: BLE001
+   128	        raise ValueError(f'{name}: YAML compose failed: {e}') from e
+   129	
+   130	
+   131	def walk_paths(root):
+   132	    """Yield (path tuple, node) for every node; alias cycles cut by node identity on the path.
+   133	    Raises ValueError on duplicate mapping keys."""
+   134	    stack = [((), root, frozenset())]
+   135	    while stack:
+   136	        path, node, onpath = stack.pop()
+   137	        yield path, node
+   138	        if id(node) in onpath:
+   139	            continue
+   140	        onpath = onpath | {id(node)}
+   141	        if isinstance(node, yaml.MappingNode):
+   142	            keys = []
+   143	            for k, v in node.value:
+   144	                key = (k.tag, k.value) if isinstance(k, yaml.ScalarNode) else ('<complex>', id(k))
+   145	                if key in keys:
+   146	                    raise ValueError(f'duplicate mapping key {k.value!r} at {"/".join(map(str, path))}')
+   147	                keys.append(key)
+   148	                label = k.value if isinstance(k, yaml.ScalarNode) else '<complex>'
+   149	                stack.append((path + (label,), v, onpath))
+   150	        elif isinstance(node, yaml.SequenceNode):
+   151	            for idx, v in enumerate(node.value):
+   152	                stack.append((path + (idx,), v, onpath))
+   153	
+   154	
+   155	def resolve(target, containing, names):
+   156	    """Resolve an include/config_path value; None if missing or ambiguous."""
+   157	    if not isinstance(target, str) or not target:
+   158	        return None
+   159	    cands = set()
+   160	    for base in ('', posixpath.dirname(containing)):
+   161	        p = posixpath.normpath(posixpath.join(base, target))
+   162	        if p in names:
+   163	            cands.add(p)
+   164	    return cands.pop() if len(cands) == 1 else None
+   165	
+   166	
+   167	def has_merge_key(nodes):
+   168	    """True if any mapping in the tree uses a YAML merge key (`<<`); such docs get no allowance."""
+   169	    for _, node in nodes:
+   170	        if isinstance(node, yaml.MappingNode):
+   171	            for k, _v in node.value:
+   172	                if k.tag == MERGE_TAG or (isinstance(k, yaml.ScalarNode) and k.value == '<<'):
+   173	                    return True
+   174	    return False
+   175	
+   176	
+   177	def resolve_all(target, containing):
+   178	    """Every plausible normalized resolution (root- and document-relative) of a path value."""
+   179	    if not isinstance(target, str) or not target:
+   180	        return set()
+   181	    return {posixpath.normpath(posixpath.join(base, target)).rstrip('/')
+   182	            for base in ('', posixpath.dirname(containing))}
+   183	
+   184	
+   185	def under(name, root):
+   186	    return root in ('', '.') or name == root or name.startswith(root + '/')
+   187	
+   188	
+   189	def allowed_files(ref, other_names=()):
+   190	    """{file: {path tuple: knob}} for files whose knob lines may change (derived from REFERENCE).
+   191	    Files inside any skill directory (dir of a SKILL.md in either zip, or a path named under a
+   192	    `skills` key of an agent doc) never get an allowance: skills must be byte-identical."""
+   193	    names, out, notes, skill_refs = set(ref), {}, [], set()
+   194	    if EVAL_CONFIG in names:
+   195	        out[EVAL_CONFIG] = dict(EVAL_PATHS)
+   196	    todo, done = [ROOT_AGENT] if ROOT_AGENT in names else [], set()
+   197	    while todo:
+   198	        doc = todo.pop()
+   199	        if doc in done:
+   200	            continue
+   201	        done.add(doc)
+   202	        try:
+   203	            root = compose(ref[doc], doc)
+   204	            nodes = list(walk_paths(root)) if root is not None else []
+   205	        except ValueError as e:
+   206	            notes.append(f'agent doc {doc} not analyzable, no allowance: {e}')
+   207	            continue
+   208	        for path, node in nodes:
+   209	            if 'skills' in path and isinstance(node, yaml.ScalarNode):
+   210	                skill_refs.update(resolve_all(node.value, doc))
+   211	        if has_merge_key(nodes):
+   212	            notes.append(f'agent doc {doc} uses a YAML merge key, no allowance and no sub-agent discovery')
+   213	            continue
+   214	        perms = out.setdefault(doc, {})
+   215	        for path, node in nodes:
+   216	            if (len(path) == 4 and path[0] == 'tools' and isinstance(path[1], int)
+   217	                    and path[2] == 'agent_tool' and path[3] == 'config_path'
+   218	                    and isinstance(node, yaml.ScalarNode)):
+   219	                t = resolve(node.value, doc, names)
+   220	                if t is None:
+   221	                    notes.append(f'{doc}: config_path {node.value!r} missing/ambiguous')
+   222	                else:
+   223	                    todo.append(t)
+   224	        for path, node in nodes:
+   225	            if path == ('generate_content_config',):
+   226	                if isinstance(node, yaml.MappingNode):
+   227	                    for rel, knob in GCC_REL.items():
+   228	                        perms[('generate_content_config',) + rel] = knob
+   229	                elif isinstance(node, yaml.ScalarNode) and node.tag == '!include':
+   230	                    t = resolve(node.value, doc, names)
+   231	                    if t is None:
+   232	                        notes.append(f'{doc}: gcc include {node.value!r} missing/ambiguous, no allowance')
+   233	                    else:
+   234	                        out.setdefault(t, {}).update(GCC_REL)
+   235	    skill_roots = skill_refs | {posixpath.dirname(n) for n in names | set(other_names)
+   236	                                if posixpath.basename(n).lower() == 'skill.md'}
+   237	    for f in sorted(out):
+   238	        hit = sorted(r for r in skill_roots if under(f, r))
+   239	        if hit:
+   240	            notes.append(f'{f}: inside skill dir {hit[0]!r}, no allowance (must be byte-identical)')
+   241	            del out[f]
+   242	    return out, notes
+   243	
+   244	
+   245	def parse_value(knob, text):
+   246	    pat, lo, allow_float, strict = DOMAINS[knob]
+   247	    if not re.fullmatch(pat, text):
+   248	        return None
+   249	    v = float(text) if allow_float else int(text)
+   250	    if (strict and v <= lo) or v < lo:
+   251	        return None
+   252	    return v
+   253	
+   254	
+   255	def compare_allowed(name, cdata, rdata, perms, knobs, violations):
+   256	    def bad(reason, line=None):
+   257	        violations.append({'file': name, 'path': [] if line is None else [f'line {line}'], 'reason': reason})
+   258	
+   259	    cl, rl = cdata.splitlines(keepends=True), rdata.splitlines(keepends=True)
+   260	    if len(cl) != len(rl):
+   261	        return bad(f'line count {len(cl)} != reference {len(rl)}')
+   262	    changed = []
+   263	    for i, (c, r) in enumerate(zip(cl, rl)):
+   264	        if c == r:
+   265	            continue
+   266	        mc, mr = LINE_RE.match(c), LINE_RE.match(r)
+   267	        if not (mc and mr) or mc.group(1, 2, 3, 5) != mr.group(1, 2, 3, 5):
+   268	            return bad('non-knob line differs', i + 1)
+   269	        knob = mc.group(2).decode()
+   270	        if knob not in DOMAINS:
+   271	            return bad(f'key {knob!r} is not a knob', i + 1)
+   272	        changed.append((i, knob, mc.group(4).decode(), mr.group(4).decode()))
+   273	    if not changed:
+   274	        return None
+   275	    trees = {}
+   276	    for side, data in (('candidate', cdata), ('reference', rdata)):
+   277	        try:
+   278	            root = compose(data, f'{side} {name}')
+   279	            trees[side] = list(walk_paths(root)) if root is not None else []
+   280	        except ValueError as e:
+   281	            return bad(str(e))
+   282	    for i, knob, ctext, rtext in changed:
+   283	        for side, text in (('candidate', ctext), ('reference', rtext)):
+   284	            hits = [(p, n) for p, n in trees[side]
+   285	                    if isinstance(n, yaml.ScalarNode) and n.start_mark.line == i and n.value == text]
+   286	            if len(hits) != 1 or hits[0][1].style is not None or hits[0][1].tag not in (INT_TAG, FLOAT_TAG):
+   287	                return bad(f'{side} value {text!r} is not a single plain numeric scalar', i + 1)
+   288	            path = hits[0][0]
+   289	            same = [p for p, n in trees[side] if n is hits[0][1]]
+   290	            if any(perms.get(p) != knob for p in same):
+   291	                return bad(f'{side} {knob} at {["/".join(map(str, p)) for p in same]} is not an allowed path', i + 1)
+   292	        cv, rv = parse_value(knob, ctext), parse_value(knob, rtext)
+   293	        entry = {'file': name, 'path': list(path), 'knob': knob, 'candidate': ctext, 'reference': rtext}
+   294	        if cv is None or rv is None:
+   295	            entry['status'] = 'NOT_COMPARABLE'
+   296	            knobs.append(entry)
+   297	            bad(f'knob {knob} outside valid domain: {ctext!r} vs {rtext!r}', i + 1)
+   298	        elif cv <= rv:
+   299	            entry['status'] = 'EQUAL' if cv == rv else 'DECREASE'
+   300	            knobs.append(entry)
+   301	        else:
+   302	            entry['status'] = 'INCREASE'
+   303	            knobs.append(entry)
+   304	            bad(f'knob {knob} increased: {ctext} > {rtext}', i + 1)
+   305	    return None
+   306	
+   307	
+   308	def check(cand_zip, ref_zip):
+   309	    cand, cprob = read_zip(cand_zip)
+   310	    ref, rprob = read_zip(ref_zip)
+   311	    violations, knobs, files = [], [], {}
+   312	    for side, probs in (('candidate', cprob), ('reference', rprob)):
+   313	        for p in probs:
+   314	            violations.append({'file': f'<{side} zip>', 'path': [], 'reason': p})
+   315	    for name in sorted(set(cand) - set(ref)):
+   316	        violations.append({'file': name, 'path': [], 'reason': 'file only in candidate'})
+   317	        files[name] = 'ONLY_CANDIDATE'
+   318	    for name in sorted(set(ref) - set(cand)):
+   319	        violations.append({'file': name, 'path': [], 'reason': 'file only in reference'})
+   320	        files[name] = 'ONLY_REFERENCE'
+   321	    allowed, notes = allowed_files(ref, set(cand))
+   322	    for name in sorted(set(cand) & set(ref)):
+   323	        if cand[name] == ref[name]:
+   324	            files[name] = 'BYTE_IDENTICAL'
+   325	            continue
+   326	        if name not in allowed:
+   327	            files[name] = 'DIFFERS'
+   328	            violations.append({'file': name, 'path': [], 'reason': 'not byte-identical (no knob allowance)'})
+   329	            continue
+   330	        before = len(violations)
+   331	        compare_allowed(name, cand[name], ref[name], allowed[name], knobs, violations)
+   332	        files[name] = 'DIFFERS' if len(violations) > before else 'KNOB_ONLY'
+   333	    return {'files': files, 'knobs': knobs, 'violations': violations,
+   334	            'allowed_files': {k: sorted('/'.join(map(str, p)) for p in v) for k, v in sorted(allowed.items())},
+   335	            'notes': notes, 'verdict': 'INELIGIBLE' if violations else 'ELIGIBLE'}
+   336	
+   337	
+   338	def check_reference_lb(lb_path, ref_sha):
+   339	    with open(lb_path) as f:
+   340	        lb = json.load(f)
+   341	    problems = []
+   342	    if lb.get('status') != 'COMPLETE':
+   343	        problems.append(f"reference lb status {lb.get('status')!r} != 'COMPLETE'")
+   344	    if lb.get('public_score') is None:
+   345	        problems.append('reference lb public_score missing')
+   346	    if lb.get('sha256') != ref_sha:
+   347	        problems.append(f"reference lb sha256 {lb.get('sha256')!r} != reference zip {ref_sha}")
+   348	    return {'path': lb_path, 'status': lb.get('status'), 'public_score': lb.get('public_score'),
+   349	            'submission_ref': lb.get('submission_ref'), 'problems': problems}
+   350	
+   351	
+   352	def main(argv=None):
+   353	    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+   354	    ap.add_argument('candidate')
+   355	    ap.add_argument('reference')
+   356	    ap.add_argument('--reference-lb')
+   357	    ap.add_argument('--out')
+   358	    a = ap.parse_args(argv)
+   359	    try:
+   360	        res = check(a.candidate, a.reference)
+   361	    except (OSError, zipfile.BadZipFile, ValueError) as e:
+   362	        print(f'ERROR: {e}', file=sys.stderr)
+   363	        return 2
+   364	    out = {'_schema': SCHEMA, 'rule': 'ops/decisions/087-20261107T090954-880-from-builder.md item 1 (b)',
+   365	           'candidate': {'zip': a.candidate, 'sha256': sha256_file(a.candidate)},
+   366	           'reference': {'zip': a.reference, 'sha256': sha256_file(a.reference)}, **res}
+   367	    if a.reference_lb:
+   368	        out['reference_lb'] = check_reference_lb(a.reference_lb, out['reference']['sha256'])
+   369	        if out['reference_lb']['problems']:
+   370	            out['verdict'] = 'INELIGIBLE'
+   371	    text = json.dumps(out, indent=1, default=repr)
+   372	    if a.out:
+   373	        with open(a.out, 'w') as f:
+   374	            f.write(text + '\n')
+   375	    print(f"{out['verdict']}: {a.candidate} vs {a.reference} "
+   376	          f"({len(out['violations'])} violations"
+   377	          f"{', ref-lb problems ' + str(len(out['reference_lb']['problems'])) if a.reference_lb else ''})")
+   378	    for v in out['violations'][:20]:
+   379	        print(f"  - {v['file']} {'/'.join(map(str, v['path']))}: {v['reason']}")
+   380	    return 0 if out['verdict'] == 'ELIGIBLE' else 1
+   381	
+   382	
+   383	if __name__ == '__main__':
+   384	    sys.exit(main())
+
+exec
+/bin/bash -lc 'cat ops/codex/review-20261107T092238.md && git status --short && git log -1 --oneline && git show --stat 3404fbb && rg --files dist eval | head -90' in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+1. **BLOCKING: Overridden merge entries authorize unrelated files.** Discovery accepts any raw path containing `agent_tool` at [finals_eligibility.py:182](/home/ubuntu/work/gemma/eval/finals_eligibility.py:182), including entries discarded by YAML merging.
+
+   Reproduced using a v002-derived reference with this unchanged tool entry:
+
+   ```yaml
+   - <<:
+       agent_tool:
+         config_path: skills/config.yaml
+     agent_tool:
+       config_path: sub_agents/code_analyzer.yaml
+       skip_summarization: true
+   ```
+
+   The harness resolves this to the original v002 tool configuration; its schema accepts it. Nevertheless, the checker follows the shadowed `skills/config.yaml`. Changing that unrelated asset’s `generate_content_config.max_output_tokens` from `8192` to `1` returns **ELIGIBLE**, with zero violations.
+
+   Grant permissions only through effective agent references at verified structural locations. Conservatively ignoring merge branches would also close this reproduction. Prior BLOCKING 1 is therefore **not fully closed**.
+
+2. **BLOCKING: Generation includes bypass byte identity for shared skill resources.** [finals_eligibility.py:199](/home/ubuntu/work/gemma/eval/finals_eligibility.py:199) grants permissions without checking whether the target also belongs to a skill.
+
+   Reproduced with an unchanged, schema-valid agent declaring:
+
+   ```yaml
+   generate_content_config: !include skills/x/references/sampling.yaml
+   skills: [skills/x]
+   ```
+
+   Both bundles contain a valid `skills/x/SKILL.md`. Lowering `max_output_tokens` inside the shared resource from `8192` to `4096` returns **ELIGIBLE**. Loading both skills through the installed ADK confirms their resource contents differ.
+
+   Decision 087 explicitly requires byte-identical skills. Discover skill directories and enforce byte identity for their contents before granting generation exceptions, including files with both roles.
+
+**Non-blocking**
+
+- Valid decreases using nested `thinking_config: !include`, flow mappings, or aliases remain conservatively **INELIGIBLE**. Discovery only supports whole-generation includes at [finals_eligibility.py:194](/home/ubuntu/work/gemma/eval/finals_eligibility.py:194); the line matcher at [line 224](/home/ubuntu/work/gemma/eval/finals_eligibility.py:224) rejects flow and anchored changes. These are false-INELIGIBLE cases under your criterion.
+
+The five prior findings resolve as follows:
+
+| Prior BLOCKING | Re-review result |
+|---|---|
+| 1. Arbitrary generation namespaces | Original reproduction fixed; merge discovery still bypasses the restriction, as above. [Regression](/home/ubuntu/work/gemma/eval/tests/test_finals_eligibility.py:164) |
+| 2. Wrong relative include target | Fixed for the reported reproduction: ambiguous targets receive no allowance; unambiguous document-relative targets work. [Regressions](/home/ubuntu/work/gemma/eval/tests/test_finals_eligibility.py:178) |
+| 3. Lossy YAML comparisons | All original reproductions fixed: asset comments, duplicate instructions, and typed keys. Shared skill resources remain an uncovered exception above. [Regressions](/home/ubuntu/work/gemma/eval/tests/test_finals_eligibility.py:196) |
+| 4. ZIP entries/types discarded | Original duplicate, symlink, and directory-conflict reproductions fixed. [Regressions](/home/ubuntu/work/gemma/eval/tests/test_finals_eligibility.py:222) |
+| 5. Invalid numeric decreases | Fixed for zero/fractional token limits and fractional/negative thinking budgets. [Domain enforcement](/home/ubuntu/work/gemma/eval/finals_eligibility.py:203) |
+
+The reviewed files match commit `0d3e3b4`. All **49 existing test cases passed**, invoked directly with RAM-backed I/O because the sandbox prohibits filesystem writes. All **324 comparisons among the 18 actual `dist/` bundles completed without crashes**. Seventeen additional scalar, flow, merge, alias, and numeric probes found no further false-ELIGIBLE paths. No files were edited.
+
+**Questions:** None.
+ M ops/codex/review-20261107T093116.log
+5ca2b4a STATE/journal: checker v3, re-review elig3 running
+commit 3404fbbeb83c678f7db87c52cfabb8791af5c950
+Author: Aniket <agrawalaniket02@gmail.com>
+Date:   Sat Nov 7 09:31:16 2026 +0000
+
+    finals_eligibility v3: codex 092238 BLOCKING x2 fixed (merge-key docs no allowance, agent_tool only at tools[i]; skill dirs never get allowance), 56 tests, 5 checks re-run (verdicts unchanged)
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_014u5C9X4dmNqhoiSKe7TVpQ
+
+ eval/finals_eligibility.py                         |   60 +-
+ eval/tests/test_finals_eligibility.py              |   61 +
+ ops/codex/review-20261107T092238.log               | 1937 ++++++++++++++++++++
+ ops/codex/review-20261107T092238.md                |   47 +
+ ops/jobs/review-finals-elig2-light.status          |    2 +-
+ .../finals_eligibility_31b_v002_vs_31b_v002.json   |    2 +-
+ .../finals_eligibility_31b_v009_vs_31b_v002.json   |    2 +-
+ .../finals_eligibility_31b_v012_vs_31b_v002.json   |    2 +-
+ .../finals_eligibility_e4b_v002_vs_e4b_v002.json   |    2 +-
+ .../finals_eligibility_e4b_v002h_vs_e4b_v002.json  |    2 +-
+ 10 files changed, 2102 insertions(+), 15 deletions(-)
+eval/plan008_arm2_summary.py
+eval/plan007_arm1_summary.py
+eval/README_AGENT_EVAL.md
+eval/tool_timing.py
+eval/shell_error_causes.py
+eval/plan007_report.py
+eval/thinking_bound.py
+eval/plan005_armE_compare.py
+eval/finals_eligibility.py
+eval/plan007_blind_gate.py
+eval/repro/plan003_pipfb_v2.sh
+eval/repro/plan003_kernel_setup.py
+eval/repro/plan003_kernel_setup.md
+eval/repro/plan003_pipfb_v1.sh
+eval/plan008_arm2_empty_diag.py
+eval/checks/bundle_load_check.py
+eval/tag_gold_failures.py
+eval/tools/stock_subprocess_setup_timing.py
+eval/plan007_pinned/classify_rows_a208a023.py
+eval/plan007_pinned/classify_rows_d4cdf0f0.py
+eval/plan005_armF_compare.py
+eval/plan008_metrics.py
+eval/proctree.py
+eval/plan007_rev5_repro.py
+eval/trace_tool_errors.py
+eval/make_splits.py
+eval/kaggle/submit_kernel/verify_v2_outputs.sh
+eval/kaggle/submit_kernel/stage.py
+eval/kaggle/timing_summary.py
+eval/kaggle/agent_timing.py
+eval/kaggle/setup_check_summary.py
+eval/kaggle/vendor/trove_classifiers-2026.9.21.13-py3-none-any.whl
+eval/kaggle/vendor/shellingham-1.5.4-py2.py3-none-any.whl
+eval/kaggle/vendor/pathspec-1.1.1-py3-none-any.whl
+eval/kaggle/vendor/SHA256SUMS
+eval/kaggle/vendor/annotated_doc-0.0.5-py3-none-any.whl
+eval/kaggle/vendor/pytest_timeout-2.1.0-py3-none-any.whl
+eval/kaggle/classify_rows.py
+eval/kaggle/gold_calibration_metadata.json
+eval/kaggle/setup_check_push.sh
+eval/kaggle/stage_kernel.py
+eval/kaggle/timing_push.sh
+eval/kaggle/gold_calibration.py
+eval/kaggle/push.sh
+eval/run_agent_eval.py
+eval/plans/007-main-ids.txt
+eval/plans/008-smoke-ids.txt
+eval/plans/005.md
+eval/plans/002.md
+eval/plans/008.md
+eval/plans/001-timing-ids.txt
+eval/plans/009-smoke-ids.txt
+eval/plans/006.md
+eval/plans/007-repeat-guard.md
+eval/plans/007-arm1-ids.txt
+eval/plans/007.md
+eval/plans/004-setup-check-ids.txt
+eval/plans/003.md
+eval/plans/009.md
+eval/plans/009-main-ids.txt
+eval/plans/004-gpu-retime-ids.txt
+eval/plans/004.md
+eval/plans/007-smoke-ids.txt
+eval/plans/001.md
+eval/tests/test_submit_gate.py
+eval/tests/test_finals_eligibility.py
+eval/tests/test_plan007_rev5_repro.py
+eval/tests/test_pack.py
+eval/tests/test_setup_check.py
+eval/tests/test_kernel_probes.py
+eval/plan009_identity.py
+eval/sandbox_env.py
+eval/tests/test_classify_rows.py
+eval/tests/test_memguard.py
+eval/tests/test_agent_timing.py
+eval/tests/test_plan007_report.py
+eval/tests/guard_mock_test.sh
+eval/tests/test_sandbox_limits.py
+eval/tests/test_plan009_metrics.py
+eval/tests/test_eval_fixes.py
+eval/tests/test_plan008_metrics.py
+eval/tests/test_plan007_blind_gate.py
+eval/tests/test_run_agent_eval.py
+eval/tests/test_gold_calibration.py
+eval/tests/test_sandbox_deps.py
+eval/stub_openai.py
+eval/splits/holdout.txt
+eval/splits/MANIFEST.json
+eval/splits/dev.txt
+eval/splits/clean.txt
+
