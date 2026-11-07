@@ -21,6 +21,16 @@ def write_json(path, value):
 class Experiment:
     def __init__(self, tmp_path, monkeypatch):
         self.root = tmp_path
+        self.gold = tmp_path / 'tasks.jsonl'
+        self.gold.write_text('')
+        monkeypatch.setenv('PLAN008_TASKS_PATH', str(self.gold))
+        self.kernel_files = {}
+        def git_reader(sha, path):
+            if sha == 'unresolvable':
+                import subprocess
+                raise subprocess.CalledProcessError(128, ['git', 'show'])
+            return self.kernel_files.get((sha, path), path.encode())
+        monkeypatch.setattr(m, 'arm4_git_read', git_reader, raising=False)
         self.ids = [f'repo__{i:02}' for i in range(33)]
         ids = tmp_path / 'ids.txt'
         ids.write_text('\n'.join(self.ids) + '\n')
@@ -73,8 +83,12 @@ class Experiment:
                      agent_clock_seconds=200, finalization_seconds=10, patch_submitted=False,
                      test_files_edited=[], stray_files=[], wall_seconds=dict(total=300, verification=20),
                      sandbox_setup_seconds=80) for i in ids]
-        header = dict(_schema='synthetic', agent_yaml_sha256='a' * 64, bundle_sha256='b' * 64,
-                      kernel_code={'agent_path_sha256': 'c' * 64, 'verification_path_sha256': 'e' * 64})
+        # Exact real push-header key layout, without invented kernel_code* fields.
+        header = dict(_schema='kaggle_timing_v1', git_sha=directory.name, task_ids=ids,
+                      concurrency=1, created_utc='2026-11-07T00:00:00Z', caps={},
+                      bundle_sha256='b' * 64, agent_yaml_sha256='a' * 64,
+                      gpu_names=['L4'] * 4, gpu_count=4, mcp_import_ok=True,
+                      vllm_startup_seconds=1, platform_probe={}, fields=[])
         timing = directory / 'timing.jsonl'
         timing.write_text('\n'.join(map(json.dumps, [header, *rows, {'_vllm': {'startup_seconds': 1}}])) + '\n')
         paths = []
@@ -313,7 +327,8 @@ def test_aggregate_trace_summary_does_not_establish_no_overflow(experiment):
 
 @pytest.mark.parametrize('governing,expected', [(False, '2048-ADOPT'), (True, 'VETOED')])
 def test_s81_governing_and_literal_symmetrically(experiment, monkeypatch, governing, expected):
-    monkeypatch.setattr(m, 'gold_created_dirs', lambda iid, tasks_path=None: {'scripts'})
+    experiment.gold.write_text(json.dumps(dict(instance_id=experiment.ids[2],
+        patch='--- /dev/null\n+++ b/scripts/gold.py\n@@ -0,0 +1 @@\n+gold\n')) + '\n')
     for arm in ('arm4', 'arm3'):
         experiment.mutate(arm, lambda row, i: row.update(
             stray_files=['scripts/sub/file.py' if governing else 'scripts/file.py']) if i == 2 else None)
@@ -369,7 +384,7 @@ def test_bound_evidence_and_pairing(experiment, change):
     else:
         path = Path(experiment.dirs['arm4'][1]) / 'timing.jsonl'
         docs = [json.loads(line) for line in path.read_text().splitlines()]
-        docs[0]['kernel_code']['agent_path_sha256'] = 'f' * 64
+        experiment.kernel_files[(docs[0]['git_sha'], 'eval/kaggle/agent_timing.py')] = b'different'
         path.write_text('\n'.join(map(json.dumps, docs)) + '\n')
         experiment.mutate('arm4', lambda row, i: None)
     assert experiment.result()['decision'] == 'INVALID'
@@ -396,3 +411,145 @@ def test_duplicate_attempt_first_retained(experiment):
     assert duplicate['attempts'][0]['timeout'] and duplicate['attempts'][0]['empty_patch']
     assert not duplicate['attempts'][1]['timeout'] and not duplicate['attempts'][1]['empty_patch']
     assert result['decision'] == '2048-ADOPT'
+
+
+@pytest.mark.parametrize('arm', ['arm4', 'arm3'])
+def test_both_timeout_flags_required_bool(experiment, arm):
+    # Start with the previously unvalidated missing flag, then exercise both fields' types.
+    for field in ('agent_timeout_fired', 'timed_out'):
+        for value in ('delete', None, 0, 'false'):
+            def change(row, i):
+                if i == 16:
+                    row.update(timed_out=arm == 'arm3', agent_timeout_fired=False)
+                    if value == 'delete':
+                        row.pop(field)
+                    else:
+                        row[field] = value
+            experiment.mutate(arm, change)
+            result = experiment.result()
+            assert result['decision'] == 'INVALID'
+            assert 'missing row evidence' in result['decision_inputs']['invalid_reasons']
+            assert experiment.ids[16] in result['decision_inputs']['missing_evidence'][arm]
+
+
+def test_seventeenth_timeout_flag_deletion_cannot_adopt(experiment):
+    experiment.mutate('arm4', lambda row, i: row.update(agent_timeout_fired=True) if i == 16 else None)
+    assert experiment.result()['decision'] == '2048-NO-GAIN'
+    experiment.mutate('arm4', lambda row, i: row.pop('agent_timeout_fired') if i == 16 else None)
+    result = experiment.result()
+    assert result['decision'] == 'INVALID'
+    assert 'missing row evidence' in result['decision_inputs']['invalid_reasons']
+
+
+def change_header(experiment, arm, index, change, extra=False):
+    directory = experiment.dirs[arm][index]
+    path = Path(directory) / 'timing.jsonl'
+    documents = [json.loads(line) for line in path.read_text().splitlines()]
+    header = dict(documents[0])
+    change(header)
+    if extra:
+        documents.append(header)
+    else:
+        documents[0] = header
+    path.write_text('\n'.join(map(json.dumps, documents)) + '\n')
+    experiment.mutate(arm, lambda row, i: None)
+    if index == 0:
+        options = experiment.options[arm]
+        write_json(options['smoke_json'], m.arm3smoke_metrics(directory, experiment.classifiers[directory][0],
+            **{k: {directory: v[directory]} if isinstance(v, dict) else v
+               for k, v in options.items() if k != 'smoke_json'}))
+    if arm == 'arm3':
+        experiment.bind_base()
+
+
+def test_real_layout_different_commits_identical_files_match(experiment):
+    result = experiment.result()
+    assert result['decision'] == '2048-ADOPT'
+    environments = result['environment']
+    assert m.arm4_kernel_status(environments['arm4'], environments['arm3']) == 'match'
+    assert m.arm4_concurrency_status(environments['arm4'], environments['arm3']) == 'ok'
+    shas = []
+    for arm in ('arm4', 'arm3'):
+        for directory in experiment.dirs[arm]:
+            entry, = environments[arm]['kernel_code'][directory]
+            shas.append(entry['git_sha'])
+            assert set(entry['kernel_fingerprint']) == set(m.ARM4_KERNEL_PATHS)
+            assert environments[arm]['concurrency'][directory] == [1]
+    assert len(set(shas)) == 4
+
+
+@pytest.mark.parametrize('arm', ['arm4', 'arm3'])
+@pytest.mark.parametrize('index,extra', [(0, False), (1, False), (1, True)])
+@pytest.mark.parametrize('failure', ['different', 'delete', 'nonstring', 'unresolvable', 'missing_path'])
+def test_kernel_evidence_every_header(experiment, monkeypatch, arm, index, extra, failure):
+    import subprocess
+    def change(header):
+        if failure == 'delete':
+            header.pop('git_sha')
+        else:
+            header['git_sha'] = 123 if failure == 'nonstring' else 'unresolvable' if failure == 'unresolvable' else 'changed'
+    change_header(experiment, arm, index, change, extra)
+    reader = m.arm4_git_read
+    def read(sha, path):
+        if sha == 'changed' and path == m.ARM4_KERNEL_PATHS[0]:
+            if failure == 'missing_path':
+                raise subprocess.CalledProcessError(128, ['git', 'show'])
+            return b'changed agent code'
+        return reader(sha, path)
+    monkeypatch.setattr(m, 'arm4_git_read', read)
+    result = experiment.result()
+    assert result['decision'] == 'INVALID'
+    reason = ('pairing voided: kernel agent/verification path differs' if failure == 'different'
+              else 'kernel evidence missing')
+    assert reason in result['decision_inputs']['invalid_reasons']
+
+
+@pytest.mark.parametrize('arm', ['arm4', 'arm3'])
+@pytest.mark.parametrize('index,extra', [(0, False), (1, False), (1, True)])
+@pytest.mark.parametrize('value', [8, None, True, 1.0, '1', 'delete'])
+def test_concurrency_evidence_every_header(experiment, arm, index, extra, value):
+    def change(header):
+        if value == 'delete':
+            header.pop('concurrency')
+        else:
+            header['concurrency'] = value
+    change_header(experiment, arm, index, change, extra)
+    result = experiment.result()
+    assert result['decision'] == 'INVALID'
+    assert 'concurrency evidence missing or != 1' in result['decision_inputs']['invalid_reasons']
+
+
+def test_gold_provenance_changes_with_only_gold_bytes(experiment):
+    experiment.mutate('arm4', lambda row, i: row.update(stray_files=['scripts/new.py']) if i == 2 else None)
+    def write_gold(directory):
+        experiment.gold.write_text(json.dumps(dict(instance_id=experiment.ids[2],
+            patch=f'--- /dev/null\n+++ b/{directory}/gold.py\n@@ -0,0 +1 @@\n+gold\n')) + '\n')
+    write_gold('scripts')
+    before = experiment.result()
+    write_gold('other')
+    after = experiment.result()
+    key = str(experiment.gold.resolve())
+    assert before['decision'] == '2048-ADOPT'
+    assert after['decision'] == 'VETOED'
+    assert before['_schema']['input_shas'][key] != after['_schema']['input_shas'][key]
+    assert after['_schema']['input_shas'][key] == m.base.sha(experiment.gold)
+    assert {k: v for k, v in before['_schema']['input_shas'].items() if k != key} == {
+        k: v for k, v in after['_schema']['input_shas'].items() if k != key}
+
+
+def test_unreadable_gold_file_invalid(experiment):
+    experiment.gold.unlink()
+    result = experiment.result()
+    assert result['decision'] == 'INVALID'
+    assert 'gold tasks file unreadable' in result['decision_inputs']['invalid_reasons']
+
+
+def test_git_reader_uses_repo_root_and_raw_bytes(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    def run(command, **options):
+        assert command == ['git', 'show', 'abc123:eval/kaggle/agent_timing.py']
+        assert options == dict(cwd=ROOT, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return SimpleNamespace(stdout=b'raw bytes\r\n')
+    monkeypatch.setattr(subprocess, 'run', run)
+    assert m.arm4_git_read('abc123', 'eval/kaggle/agent_timing.py') == b'raw bytes\r\n'
