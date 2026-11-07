@@ -3,7 +3,7 @@
 - parent: e4b-v002 (dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad), SCORED public 0.05 at T=5.007 h (ref 58039259).
 - built from repo git SHA: parent commit 921ce90 (see the commit that adds this file).
 - change (EXACTLY one deleted line): prompts/system.md l.16 "- For documentation code tasks (e.g. FastAPI), edit executable code under `docs_src/`." (dec 057 no-repo-hint rule).
-  `diff -r bundles/e4b/v002 bundles/e4b/v002h` shows only that deleted line (+ this MANIFEST). grep -ri 'fastapi|docs_src' bundle = 0.
+  `diff -r bundles/e4b/v002 bundles/e4b/v002h` shows only that deleted line (+ this MANIFEST). grep -ri 'fastapi|docs_src' over the bundle EXCLUDING this MANIFEST.md (not in the zip) = 0; codex 063438 confirms 0 hits inside the zip.
 - unchanged: agent.yaml, configs/, sub_agents/, eval_config.yaml (cap 1.0, incl. its v002 header comment), so the timing bound is identical to v002 (619.4 min <= 660; scored T=5.007 h).
 - prompt-only: no Gate-5 smoke needed (dec 083 item 2).
 - status: UNVALIDATED locally; codex review pending.

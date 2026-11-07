@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 06:37Z (cycle 178; dec 083: Nov 8 = 31b-v009 CONDITIONAL; e4b-v002h fallback built). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 06:45Z (cycle 179; REPORT 022 NEEDS_DECISION: v009 Gate-2 BLOCKING empty-diff -> Nov 8 auth VOID unless waived; dec 083: Nov 8 = 31b-v009 CONDITIONAL; e4b-v002h fallback built). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -22,7 +22,7 @@
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
 - DEC 079: approve, nothing changes. On v002 final mail Director T (first final poll - 00:06:31Z), exact status, public score; fill json.
   ERROR/timeout -> mail AT ONCE before any slot. (Nov 8 repeat default SUPERSEDED by dec 083.) Dec 038 files rechecked OK 00:13Z.
-## Running jobs (06:37Z): memguard-light, lb-31b-v002-wait-light (PENDING 06:06Z), review-31b-v009-submit-light, review-e4b-v002h-light, submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
+## Running jobs (06:45Z): memguard-light, lb-31b-v002-wait-light (PENDING 06:06Z), submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
 - CODEX S81: review 060833 BLOCKING 1 (base stray evidence missing could still ON-ADOPT) -> fixed 71185a3 (safety_checks(): both arms need
   available stray evidence, zero governing for arm 3 only; +5 tests incl. unrounded wall-p90 gate; 1624 pass). Re-review s81b ops/codex/review-20261107T061229.md CLEAN (no blocking) -> arm-3 metrics allowed. Report must list amended arm-2 counts separately (S81.3).
 - DEC 081 (on 020, approve A w/ changes): (1) arm-3 SMOKE (v4) PASS results/plan009_arm3_smoke.json: thinking blocks [5,10]=15, timing PASS,
@@ -72,7 +72,10 @@
   (= e4b-v002 minus FastAPI/docs_src line; zip diff = 1 deleted line, same file set; load check == v002 results/bundle_load_check_e4b_v002h.json).
   Codex review job review-e4b-v002h-light. Kernel aniket0202/gemma-submit-e4b v2 output BYTE_IDENTICAL (same txt). Do NOT flip SUBMIT_KERNEL
   until authorized (Director: Nov 8 if v002 ERRORS, else Nov 9). Item 5: LB-noise repeat deferred.
+- GATE 2 DONE 06:36Z: v009 review 063339 BLOCKING 1 = empty diff on timeout/cap (12/33 arm1; shared by all bundles) -> report 022 (rec: waive for
+  d38c55c7). Non-blocking v009 prompt nits (pyproject protected; symbol-name search) -> next prompt revision, zip untouched. e4b-v002h review
+  063438: no artifact defect (only 'authorization pending'); MANIFEST grep claim fixed (sha unchanged 938d618c, pack PASS).
 ## Next 3
-1. On review jobs: read verdicts (BLOCKING -> fix/report); mail Director e4b-v002h review + kernel verify result.
+1. Await dec on 022. NO v009 submit at 00:00:30Z unless 022 waived (checklist (c) annotated). e4b-v002h awaits auth (dec 083 item 2).
 2. On 31b-v002 final: dec 079 item 2 FIRST (json, budget row, mail T/status/score); then dec 083 checklist (submit >= 11-08T00:00Z only).
 3. On arm-3 main land: quota/budget row, seal check, classifiers, arm3 metrics, report 021 (dec 082 item 1 table layout).
