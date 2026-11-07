@@ -21,8 +21,7 @@
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
 - DEC 079: approve, nothing changes. On v002 final mail Director T (first final poll - 00:06:31Z), exact status, public score; fill json.
-  ERROR/timeout -> mail AT ONCE before any slot. Nov 8 default if v002 PENDING at 12:00Z = e4b-v002 repeat (draft updated).
-  Dec 038 evidence check 00:13Z: items 1-4 files present + schema-headed (timing e4b/31b have decision_note; lb_e4b_v002 _schema).
+  ERROR/timeout -> mail AT ONCE before any slot. Nov 8 default if PENDING at 12:00Z = e4b-v002 repeat. Dec 038 files rechecked OK 00:13Z.
 ## Running jobs (00:14Z): memguard-light, lb-31b-v002-wait-light, passrate-31b-v011-arm2-wait-light.
 - ARM 2 (plan 008) PUSHED gemma-31b-passrate v3 00:08:09Z: 31b-v011-p8b (staged kernel verified = dist/31b-v011.zip 4f5b078a + MANIFEST.md),
   33 ids eval/plans/007-arm1-ids.txt, ONE session, --with-verification --no-stock-probe --seed-max 803, KERNEL_BUDGET 30000 s.
@@ -30,7 +29,6 @@
   run eval/plan008_metrics.py arm2 mode (B3 assert guard 9486a3b in place); D73.7 governs any chunk 2 (missing ids only).
   DONE: arm3 fix2 re-review 153229 CLEAN (F1-F3 resolved; 119 plan-009 + 91 legacy tests) -> eval/plan008_metrics.py arm3 modes CLEARED (main 7876239).
   arm3 CLI needs --identity-json --bundle --transport DIR=SHA --push-event DIR=EVENT (every dir) --smoke-json [--base-verdict-json].
-  DONE: identity 145500 CLEAN (1fd32d9) -> plan009_identity.py cleared. PLAN 009 rev 2 CLEAN (145128) = FINAL.
   v012/v013 review 144907 CLEAN. Arm-3 packed e5196a4: 31b-v012-p9a dist/31b-v012.zip sha256=78a8fd30389ec3acf58b44bc8743d750b496041f5c8d2b35790f0d913130ede5 (v009+think 4096);
   31b-v013-p9b dist/31b-v013.zip sha256=06eff226d661c0528105a14d4fe0b69f67a8fb84fc52e654a0d54b6bc59a5dbb (v011+think 4096); load checks PASS.
 - DEC 078: approve; nothing changes. No FYIs for routine clean reviews (fold into next report/STATE). Idle order: (a) arm-3 addendum
