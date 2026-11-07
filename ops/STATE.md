@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 09:16Z (cycle 185; DEC 088: dec 087 applies to e4b too (cap==H3 bound = zero margin), every e4b final candidate needs own COMPLETE score or knob-only <= diff vs COMPLETE e4b; DEC 087: finals rule = own score OR knob-only <= diff (mechanical check built); DEC 086: FINALS RULE 31B cap<=3.5 now MET + item-3 match rule; 31b-v002 SCORED 0.15 -> dec 083 (a) HOLDS; DEC 084+085: v009 Gate-2 item WAIVED (085 confirms, adds nothing, does NOT re-issue auth) -> Nov 8 = 31b-v009 CONDITIONAL (dec 083 a-f); e4b-v002h AUTHORIZED CONDITIONAL, slot after 31B). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 09:24Z (cycle 186; finals checker v2 0d3e3b4 after codex 091327 BLOCKING x5, re-review running; DEC 088: dec 087 applies to e4b too (cap==H3 bound = zero margin), every e4b final candidate needs own COMPLETE score or knob-only <= diff vs COMPLETE e4b; DEC 087: finals rule = own score OR knob-only <= diff (mechanical check built); DEC 086: FINALS RULE 31B cap<=3.5 now MET + item-3 match rule; 31b-v002 SCORED 0.15 -> dec 083 (a) HOLDS; DEC 084+085: v009 Gate-2 item WAIVED (085 confirms, adds nothing, does NOT re-issue auth) -> Nov 8 = 31b-v009 CONDITIONAL (dec 083 a-f); e4b-v002h AUTHORIZED CONDITIONAL, slot after 31B). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -19,7 +19,7 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (09:16Z): memguard-light, review-finals-elig-light (codex, dec 087 checker), submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
+## Running jobs (09:24Z): memguard-light, review-finals-elig2-light (codex re-review of checker v2 0d3e3b4), submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
 - CODEX S81: review 060833 BLOCKING 1 (base stray evidence missing could still ON-ADOPT) -> fixed 71185a3 (safety_checks(): both arms need
   available stray evidence, zero governing for arm 3 only; +5 tests incl. unrounded wall-p90 gate; 1624 pass). Re-review s81b ops/codex/review-20261107T061229.md CLEAN (no blocking) -> arm-3 metrics allowed. Report must list amended arm-2 counts separately (S81.3).
 - DEC 081 (on 020, approve A w/ changes): (1) arm-3 SMOKE (v4) PASS results/plan009_arm3_smoke.json: thinking blocks [5,10]=15, timing PASS,
@@ -55,7 +55,8 @@
   COMPLETE itself OR (b) differ from a COMPLETE bundle ONLY by <= cap/calls/turns/thinking/max_out, all else byte-identical. MECHANICAL:
   eval/finals_eligibility.py + ops/drafts/finals-checklist.md: v012, v009 vs v002 and e4b-v002h vs e4b-v002 all INELIGIBLE (system.md) -> each needs
   own score. DEC 088: e4b too (LoRA/prompt variants need own score by Nov 29).
-  Codex review-finals-elig-light: CLEAN -> journal only; BLOCKING -> fix, re-review, re-run 3 checks before relying. Dec 087 item 3: if report 021 shows v012 winning, propose v012 scored submit there for first free slot after e4b-v002h (Nov 9).
+  Codex 091327: BLOCKING x5 (false-ELIGIBLE paths) -> v2 strict byte/line check 0d3e3b4 (49 tests, suite 1673 pass), 3 checks re-run, verdicts
+  unchanged. Re-review review-finals-elig2-light: CLEAN -> journal only; BLOCKING -> fix, re-review, re-run checks before relying. Dec 087 item 3: if report 021 shows v012 winning, propose v012 scored submit there for first free slot after e4b-v002h (Nov 9).
 - TOPICS (Director mail 01:47Z, owner req): docs/TOPICS.md saved; on any topic status change (used now | planned | adjacent, not used) update its line + repo ref in the same cycle as the journal entry.
 - DEC 082 (approve, no reply): report 021 FIRST results table = pass rate + arm3-vs-arm1 TIMEOUT count + EMPTY count w/ paired discordants
   (not footnote). On land: quota AFTER + budget row FIRST, then classifiers/metrics per dec 081 i1; budget hit w/ missing ids -> D73.7, no top-up.
