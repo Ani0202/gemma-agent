@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Mechanical FINALS RULE check (dec 087 item 1, clause (b)), v2 (strict; codex review 091327).
+"""Mechanical FINALS RULE check (dec 087 item 1, clause (b)), v3 (strict; codex reviews 091327, 092238).
 
 A candidate final qualifies via a COMPLETE-scored reference bundle only if the two zips are
 byte-identical except for single-line value changes of these knobs, each <= the reference value:
   eval_config.yaml (zip root)   evaluation.max_time_minutes / max_tool_calls / max_turns
   agent config documents         generate_content_config.max_output_tokens /
   (agent.yaml + every sub-agent  generate_content_config.thinking_config.thinking_budget
-   reached via agent_tool         (inline, or in the file named by a top-level
-   config_path, recursively)      `generate_content_config: !include F`: max_output_tokens /
+   reached via tools[i].agent_tool (inline, or in the file named by a top-level
+   .config_path, recursively)     `generate_content_config: !include F`: max_output_tokens /
                                   thinking_config.thinking_budget at that file's top level)
 Rules (all conservative -> INELIGIBLE):
+- An agent doc using any YAML merge key (`<<`) gets no allowance and its sub-agents are not followed.
+- Files inside a skill directory (dir of any SKILL.md in either zip, or any path under a `skills`
+  key of an agent doc, root- or doc-relative) get no allowance even if also an include target.
 - Zip entries: unique names (also case-folded), normalized relative POSIX paths, regular files only
   (no directory entries, symlinks or other types, no encryption), no file/directory conflicts.
   The candidate and reference must have the same entry names.
@@ -44,9 +47,10 @@ import yaml
 
 EVAL_CONFIG = 'eval_config.yaml'
 ROOT_AGENT = 'agent.yaml'
-SCHEMA = 'finals_eligibility_v2'
+SCHEMA = 'finals_eligibility_v3'
 INT_TAG = 'tag:yaml.org,2002:int'
 FLOAT_TAG = 'tag:yaml.org,2002:float'
+MERGE_TAG = 'tag:yaml.org,2002:merge'
 # knob -> (value regex, minimum, allow_float, strict minimum)
 DOMAINS = {
     'max_time_minutes': (r'(?:0|[1-9][0-9]*)(?:\.[0-9]+)?', 0, True, True),
@@ -160,9 +164,33 @@ def resolve(target, containing, names):
     return cands.pop() if len(cands) == 1 else None
 
 
-def allowed_files(ref):
-    """{file: {path tuple: knob}} for files whose knob lines may change (derived from REFERENCE)."""
-    names, out, notes = set(ref), {}, []
+def has_merge_key(nodes):
+    """True if any mapping in the tree uses a YAML merge key (`<<`); such docs get no allowance."""
+    for _, node in nodes:
+        if isinstance(node, yaml.MappingNode):
+            for k, _v in node.value:
+                if k.tag == MERGE_TAG or (isinstance(k, yaml.ScalarNode) and k.value == '<<'):
+                    return True
+    return False
+
+
+def resolve_all(target, containing):
+    """Every plausible normalized resolution (root- and document-relative) of a path value."""
+    if not isinstance(target, str) or not target:
+        return set()
+    return {posixpath.normpath(posixpath.join(base, target)).rstrip('/')
+            for base in ('', posixpath.dirname(containing))}
+
+
+def under(name, root):
+    return root in ('', '.') or name == root or name.startswith(root + '/')
+
+
+def allowed_files(ref, other_names=()):
+    """{file: {path tuple: knob}} for files whose knob lines may change (derived from REFERENCE).
+    Files inside any skill directory (dir of a SKILL.md in either zip, or a path named under a
+    `skills` key of an agent doc) never get an allowance: skills must be byte-identical."""
+    names, out, notes, skill_refs = set(ref), {}, [], set()
     if EVAL_CONFIG in names:
         out[EVAL_CONFIG] = dict(EVAL_PATHS)
     todo, done = [ROOT_AGENT] if ROOT_AGENT in names else [], set()
@@ -177,9 +205,16 @@ def allowed_files(ref):
         except ValueError as e:
             notes.append(f'agent doc {doc} not analyzable, no allowance: {e}')
             continue
+        for path, node in nodes:
+            if 'skills' in path and isinstance(node, yaml.ScalarNode):
+                skill_refs.update(resolve_all(node.value, doc))
+        if has_merge_key(nodes):
+            notes.append(f'agent doc {doc} uses a YAML merge key, no allowance and no sub-agent discovery')
+            continue
         perms = out.setdefault(doc, {})
         for path, node in nodes:
-            if (len(path) >= 2 and path[-1] == 'config_path' and 'agent_tool' in path
+            if (len(path) == 4 and path[0] == 'tools' and isinstance(path[1], int)
+                    and path[2] == 'agent_tool' and path[3] == 'config_path'
                     and isinstance(node, yaml.ScalarNode)):
                 t = resolve(node.value, doc, names)
                 if t is None:
@@ -197,6 +232,13 @@ def allowed_files(ref):
                         notes.append(f'{doc}: gcc include {node.value!r} missing/ambiguous, no allowance')
                     else:
                         out.setdefault(t, {}).update(GCC_REL)
+    skill_roots = skill_refs | {posixpath.dirname(n) for n in names | set(other_names)
+                                if posixpath.basename(n).lower() == 'skill.md'}
+    for f in sorted(out):
+        hit = sorted(r for r in skill_roots if under(f, r))
+        if hit:
+            notes.append(f'{f}: inside skill dir {hit[0]!r}, no allowance (must be byte-identical)')
+            del out[f]
     return out, notes
 
 
@@ -276,7 +318,7 @@ def check(cand_zip, ref_zip):
     for name in sorted(set(ref) - set(cand)):
         violations.append({'file': name, 'path': [], 'reason': 'file only in reference'})
         files[name] = 'ONLY_REFERENCE'
-    allowed, notes = allowed_files(ref)
+    allowed, notes = allowed_files(ref, set(cand))
     for name in sorted(set(cand) & set(ref)):
         if cand[name] == ref[name]:
             files[name] = 'BYTE_IDENTICAL'

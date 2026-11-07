@@ -264,3 +264,64 @@ def test_real_v002_knob_decrease(tmp_path):
     bad = dict(files)
     bad['agent.yaml'] = b'instruction: "DIFFERENT PROMPT"\n' + bad['agent.yaml']
     assert fe.check(mkzip(tmp_path, 'c2.zip', bad), str(ref))['verdict'] == 'INELIGIBLE'
+
+
+# ---- v3 regressions from codex review ops/codex/review-20261107T092238.md ----
+
+def test_merge_shadowed_agent_tool_not_followed(tmp_path):  # BLOCKING 1
+    agent = AGENT.replace("""  - agent_tool:
+      config_path: sub_agents/sub.yaml
+""", """  - <<:
+      agent_tool:
+        config_path: skills/config.yaml
+    agent_tool:
+      config_path: sub_agents/sub.yaml
+""")
+    asset = 'generate_content_config:\n  max_output_tokens: 8192\n'
+    ref = {**BASE, 'agent.yaml': agent, 'skills/config.yaml': asset}
+    cand = {**ref, 'skills/config.yaml': asset.replace('8192', '1')}
+    r = fe.check(mkzip(tmp_path, 'c.zip', cand), mkzip(tmp_path, 'r.zip', ref))
+    assert r['verdict'] == 'INELIGIBLE'
+    assert 'skills/config.yaml' not in r['allowed_files']
+
+
+def test_merge_key_doc_gets_no_allowance(tmp_path):
+    sub = SUB + 'extra:\n  <<: {a: 1}\n'
+    ref = {**BASE, 'sub_agents/sub.yaml': sub}
+    cand = {**ref, 'sub_agents/sub.yaml': sub.replace('8192', '4096')}
+    assert fe.check(mkzip(tmp_path, 'c.zip', cand), mkzip(tmp_path, 'r.zip', ref))['verdict'] == 'INELIGIBLE'
+
+
+def test_agent_tool_outside_tools_list_not_followed(tmp_path):
+    agent = AGENT + 'meta:\n  agent_tool:\n    config_path: extra.yaml\n'
+    ref = {**BASE, 'agent.yaml': agent, 'extra.yaml': SUB}
+    cand = {**ref, 'extra.yaml': SUB.replace('8192', '4096')}
+    r = fe.check(mkzip(tmp_path, 'c.zip', cand), mkzip(tmp_path, 'r.zip', ref))
+    assert r['verdict'] == 'INELIGIBLE'
+
+
+@pytest.mark.parametrize('declare', [True, False])
+def test_shared_skill_resource_no_gcc_allowance(tmp_path, declare):  # BLOCKING 2
+    sub = SUB.split('generate_content_config:')[0] + 'generate_content_config: !include skills/x/references/sampling.yaml\n'
+    if declare:
+        sub += 'skills: [skills/x]\n'
+    ref = {**BASE, 'sub_agents/sub.yaml': sub, 'skills/x/SKILL.md': '---\nname: x\n---\nbody\n',
+           'skills/x/references/sampling.yaml': SAMPLING}
+    cand = {**ref, 'skills/x/references/sampling.yaml': SAMPLING.replace('8192', '4096')}
+    r = fe.check(mkzip(tmp_path, 'c.zip', cand), mkzip(tmp_path, 'r.zip', ref))
+    assert r['verdict'] == 'INELIGIBLE'
+    assert 'skills/x/references/sampling.yaml' not in r['allowed_files']
+
+
+def test_skill_declared_without_skill_md_still_excluded(tmp_path):
+    sub = SUB.split('generate_content_config:')[0] + 'generate_content_config: !include kit/s.yaml\nskills: [kit]\n'
+    ref = {**BASE, 'sub_agents/sub.yaml': sub, 'kit/s.yaml': SAMPLING}
+    cand = {**ref, 'kit/s.yaml': SAMPLING.replace('8192', '4096')}
+    assert fe.check(mkzip(tmp_path, 'c.zip', cand), mkzip(tmp_path, 'r.zip', ref))['verdict'] == 'INELIGIBLE'
+
+
+def test_non_skill_include_still_eligible(tmp_path):
+    ref = {**BASE, 'skills/y/SKILL.md': 'x\n'}
+    cand = {**ref, 'configs/sampling.yaml': SAMPLING.replace('8192', '4096')}
+    r = fe.check(mkzip(tmp_path, 'c.zip', cand), mkzip(tmp_path, 'r.zip', ref))
+    assert r['verdict'] == 'ELIGIBLE', r['violations']

@@ -1402,3 +1402,1940 @@ Follow `docs/KICKOFF.md`.
 
 Kaggle L4x4 gives about 15 h/week, reserved for exact-environment smoke tests and timing.
 
+exec
+/bin/bash -lc "nl -ba eval/finals_eligibility.py | sed -n '213,345p' && rg -n 'config_path|"'!include|class.*Config|GenerateContentConfig|max_time_minutes'"' eval bundles/31b/v002 bin/pack | head -100 && git diff 0d3e3b4 -- eval/finals_eligibility.py eval/tests/test_finals_eligibility.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+   213	def compare_allowed(name, cdata, rdata, perms, knobs, violations):
+   214	    def bad(reason, line=None):
+   215	        violations.append({'file': name, 'path': [] if line is None else [f'line {line}'], 'reason': reason})
+   216	
+   217	    cl, rl = cdata.splitlines(keepends=True), rdata.splitlines(keepends=True)
+   218	    if len(cl) != len(rl):
+   219	        return bad(f'line count {len(cl)} != reference {len(rl)}')
+   220	    changed = []
+   221	    for i, (c, r) in enumerate(zip(cl, rl)):
+   222	        if c == r:
+   223	            continue
+   224	        mc, mr = LINE_RE.match(c), LINE_RE.match(r)
+   225	        if not (mc and mr) or mc.group(1, 2, 3, 5) != mr.group(1, 2, 3, 5):
+   226	            return bad('non-knob line differs', i + 1)
+   227	        knob = mc.group(2).decode()
+   228	        if knob not in DOMAINS:
+   229	            return bad(f'key {knob!r} is not a knob', i + 1)
+   230	        changed.append((i, knob, mc.group(4).decode(), mr.group(4).decode()))
+   231	    if not changed:
+   232	        return None
+   233	    trees = {}
+   234	    for side, data in (('candidate', cdata), ('reference', rdata)):
+   235	        try:
+   236	            root = compose(data, f'{side} {name}')
+   237	            trees[side] = list(walk_paths(root)) if root is not None else []
+   238	        except ValueError as e:
+   239	            return bad(str(e))
+   240	    for i, knob, ctext, rtext in changed:
+   241	        for side, text in (('candidate', ctext), ('reference', rtext)):
+   242	            hits = [(p, n) for p, n in trees[side]
+   243	                    if isinstance(n, yaml.ScalarNode) and n.start_mark.line == i and n.value == text]
+   244	            if len(hits) != 1 or hits[0][1].style is not None or hits[0][1].tag not in (INT_TAG, FLOAT_TAG):
+   245	                return bad(f'{side} value {text!r} is not a single plain numeric scalar', i + 1)
+   246	            path = hits[0][0]
+   247	            same = [p for p, n in trees[side] if n is hits[0][1]]
+   248	            if any(perms.get(p) != knob for p in same):
+   249	                return bad(f'{side} {knob} at {["/".join(map(str, p)) for p in same]} is not an allowed path', i + 1)
+   250	        cv, rv = parse_value(knob, ctext), parse_value(knob, rtext)
+   251	        entry = {'file': name, 'path': list(path), 'knob': knob, 'candidate': ctext, 'reference': rtext}
+   252	        if cv is None or rv is None:
+   253	            entry['status'] = 'NOT_COMPARABLE'
+   254	            knobs.append(entry)
+   255	            bad(f'knob {knob} outside valid domain: {ctext!r} vs {rtext!r}', i + 1)
+   256	        elif cv <= rv:
+   257	            entry['status'] = 'EQUAL' if cv == rv else 'DECREASE'
+   258	            knobs.append(entry)
+   259	        else:
+   260	            entry['status'] = 'INCREASE'
+   261	            knobs.append(entry)
+   262	            bad(f'knob {knob} increased: {ctext} > {rtext}', i + 1)
+   263	    return None
+   264	
+   265	
+   266	def check(cand_zip, ref_zip):
+   267	    cand, cprob = read_zip(cand_zip)
+   268	    ref, rprob = read_zip(ref_zip)
+   269	    violations, knobs, files = [], [], {}
+   270	    for side, probs in (('candidate', cprob), ('reference', rprob)):
+   271	        for p in probs:
+   272	            violations.append({'file': f'<{side} zip>', 'path': [], 'reason': p})
+   273	    for name in sorted(set(cand) - set(ref)):
+   274	        violations.append({'file': name, 'path': [], 'reason': 'file only in candidate'})
+   275	        files[name] = 'ONLY_CANDIDATE'
+   276	    for name in sorted(set(ref) - set(cand)):
+   277	        violations.append({'file': name, 'path': [], 'reason': 'file only in reference'})
+   278	        files[name] = 'ONLY_REFERENCE'
+   279	    allowed, notes = allowed_files(ref)
+   280	    for name in sorted(set(cand) & set(ref)):
+   281	        if cand[name] == ref[name]:
+   282	            files[name] = 'BYTE_IDENTICAL'
+   283	            continue
+   284	        if name not in allowed:
+   285	            files[name] = 'DIFFERS'
+   286	            violations.append({'file': name, 'path': [], 'reason': 'not byte-identical (no knob allowance)'})
+   287	            continue
+   288	        before = len(violations)
+   289	        compare_allowed(name, cand[name], ref[name], allowed[name], knobs, violations)
+   290	        files[name] = 'DIFFERS' if len(violations) > before else 'KNOB_ONLY'
+   291	    return {'files': files, 'knobs': knobs, 'violations': violations,
+   292	            'allowed_files': {k: sorted('/'.join(map(str, p)) for p in v) for k, v in sorted(allowed.items())},
+   293	            'notes': notes, 'verdict': 'INELIGIBLE' if violations else 'ELIGIBLE'}
+   294	
+   295	
+   296	def check_reference_lb(lb_path, ref_sha):
+   297	    with open(lb_path) as f:
+   298	        lb = json.load(f)
+   299	    problems = []
+   300	    if lb.get('status') != 'COMPLETE':
+   301	        problems.append(f"reference lb status {lb.get('status')!r} != 'COMPLETE'")
+   302	    if lb.get('public_score') is None:
+   303	        problems.append('reference lb public_score missing')
+   304	    if lb.get('sha256') != ref_sha:
+   305	        problems.append(f"reference lb sha256 {lb.get('sha256')!r} != reference zip {ref_sha}")
+   306	    return {'path': lb_path, 'status': lb.get('status'), 'public_score': lb.get('public_score'),
+   307	            'submission_ref': lb.get('submission_ref'), 'problems': problems}
+   308	
+   309	
+   310	def main(argv=None):
+   311	    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+   312	    ap.add_argument('candidate')
+   313	    ap.add_argument('reference')
+   314	    ap.add_argument('--reference-lb')
+   315	    ap.add_argument('--out')
+   316	    a = ap.parse_args(argv)
+   317	    try:
+   318	        res = check(a.candidate, a.reference)
+   319	    except (OSError, zipfile.BadZipFile, ValueError) as e:
+   320	        print(f'ERROR: {e}', file=sys.stderr)
+   321	        return 2
+   322	    out = {'_schema': SCHEMA, 'rule': 'ops/decisions/087-20261107T090954-880-from-builder.md item 1 (b)',
+   323	           'candidate': {'zip': a.candidate, 'sha256': sha256_file(a.candidate)},
+   324	           'reference': {'zip': a.reference, 'sha256': sha256_file(a.reference)}, **res}
+   325	    if a.reference_lb:
+   326	        out['reference_lb'] = check_reference_lb(a.reference_lb, out['reference']['sha256'])
+   327	        if out['reference_lb']['problems']:
+   328	            out['verdict'] = 'INELIGIBLE'
+   329	    text = json.dumps(out, indent=1, default=repr)
+   330	    if a.out:
+   331	        with open(a.out, 'w') as f:
+   332	            f.write(text + '\n')
+   333	    print(f"{out['verdict']}: {a.candidate} vs {a.reference} "
+   334	          f"({len(out['violations'])} violations"
+   335	          f"{', ref-lb problems ' + str(len(out['reference_lb']['problems'])) if a.reference_lb else ''})")
+   336	    for v in out['violations'][:20]:
+   337	        print(f"  - {v['file']} {'/'.join(map(str, v['path']))}: {v['reason']}")
+   338	    return 0 if out['verdict'] == 'ELIGIBLE' else 1
+   339	
+   340	
+   341	if __name__ == '__main__':
+   342	    sys.exit(main())
+bin/pack:5:quoted/plain scalars, JSON flow collections, literal/folded blocks and !include.
+bin/pack:71:        if text.startswith('!include '):
+bin/pack:210:                require(path.suffix in {'.md', '.txt'}, f'unsupported !include target: {path}')
+bin/pack:219:                            f'cumulative !include size exceeds {MAX_YAML_BYTES} bytes: {path}')
+bin/pack:235:                    Loader.add_constructor('!include', lambda loader, node: include(loader.construct_scalar(node)))
+bin/pack:271:                if key == 'config_path':
+bin/pack:273:                    require(target.suffix in {'.yaml', '.yml'}, f'{label}: config_path must reference YAML')
+bin/pack:296:        require(len(active) <= MAX_DEPTH + 1, f'{where}: config_path depth exceeds {MAX_DEPTH}')
+bin/pack:301:        if 'config_path' in value:
+bin/pack:302:            require(not set(value) - {'config_path', 'skip_summarization'},
+bin/pack:304:            target = self.target(value['config_path'])
+bin/pack:305:            require(target not in active, f'config_path cycle: {target}')
+bin/pack:427:                    if key == 'config_path':
+bin/pack:443:            require(path not in active, f'config_path cycle: {path}')
+bin/pack:444:            require(len(active) <= MAX_DEPTH, f'config_path depth exceeds {MAX_DEPTH}')
+bin/pack:463:        cap = evaluation.get('max_time_minutes') if isinstance(evaluation, dict) else None
+bin/pack:465:                'evaluation.max_time_minutes: missing or invalid positive cap')
+bundles/31b/v002/eval_config.yaml:7:  max_time_minutes: 3.5
+bundles/31b/v002/MANIFEST.md:4:- changes (EXACTLY one setting + its comment): eval_config.yaml `evaluation.max_time_minutes` 4.0 -> 3.5, and the 3-line header comment.
+bundles/31b/v002/agent.yaml:3:instruction: !include prompts/system.md
+bundles/31b/v002/agent.yaml:15:      config_path: sub_agents/code_analyzer.yaml
+bundles/31b/v002/agent.yaml:17:generate_content_config: !include configs/sampling.yaml
+eval/checks/bundle_load_check.py:47:                     submission_dir=bundle, models=models, max_time_minutes=float(sec['max_time_minutes']),
+eval/finals_eligibility.py:6:  eval_config.yaml (zip root)   evaluation.max_time_minutes / max_tool_calls / max_turns
+eval/finals_eligibility.py:10:   config_path, recursively)      `generate_content_config: !include F`: max_output_tokens /
+eval/finals_eligibility.py:21:  max_time_minutes number > 0. No leading zeros, no sign, no exponent/underscore.
+eval/finals_eligibility.py:22:- Include / config_path targets are resolved both root-relative and relative to the containing
+eval/finals_eligibility.py:52:    'max_time_minutes': (r'(?:0|[1-9][0-9]*)(?:\.[0-9]+)?', 0, True, True),
+eval/finals_eligibility.py:58:EVAL_PATHS = {('evaluation', k): k for k in ('max_time_minutes', 'max_tool_calls', 'max_turns')}
+eval/finals_eligibility.py:152:    """Resolve an include/config_path value; None if missing or ambiguous."""
+eval/finals_eligibility.py:182:            if (len(path) >= 2 and path[-1] == 'config_path' and 'agent_tool' in path
+eval/finals_eligibility.py:186:                    notes.append(f'{doc}: config_path {node.value!r} missing/ambiguous')
+eval/finals_eligibility.py:194:                elif isinstance(node, yaml.ScalarNode) and node.tag == '!include':
+eval/plans/005.md:164:Bundle: 31b-v007-p5e = bundles/31b/v007 = 31b-v006-p5d with ONLY evaluation.max_time_minutes 4.0 -> 1.23 (+ comment lines in
+eval/kaggle/timing_summary.py:92:    cap = caps.get('max_time_minutes')
+eval/plans/008.md:158:  execution.py:86-90), each path classified by a python3 one-liner that reimplements verification.py `_is_protected_test_or_config_path`
+eval/kaggle/agent_timing.py:1012:    from swegemma.harness.verification import _is_protected_test_or_config_path
+eval/kaggle/agent_timing.py:1055:            if should_stop(time.monotonic()-started + (P1_DEADLINE_SECONDS + 30 if STOCK_PROBE else 0), caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+eval/kaggle/agent_timing.py:1060:            if STOCK_PROBE and should_stop(time.monotonic()-started, caps['max_time_minutes'], 0 if SKIP_VERIFICATION else caps['verification_timeout_seconds'], max([*totals, OBSERVED_MAX_SEED_SECONDS]), float(os.environ.get('KERNEL_BUDGET_SECONDS', KERNEL_BUDGET_SECONDS)), setup_reserve_seconds(SKIP_VERIFICATION)):
+eval/kaggle/agent_timing.py:1111:                **classify_patch(patch, task.repo, _is_protected_test_or_config_path, task.test_files),
+eval/kaggle/agent_timing.py:1211:              (vf, ('strip_protected_files_from_patch', '_is_protected_test_or_config_path')))
+eval/kaggle/agent_timing.py:1354:                        max_tool_calls=int(section.get('max_tool_calls', 100)), max_time_minutes=float(section.get('max_time_minutes', 60.0)), max_turns=int(turns) if turns is not None else None)
+eval/plans/006.md:8:## Bundle: 31b-v001 = 31b-v000 (repo a12f0b7) with ONLY eval_config max_time_minutes changed
+eval/plans/006.md:32:  Rule (i) under H3 (S 221.6): cap <= 1.23 min. **Cap for this run: 1.0 min** (31b-v001 = 31b-v000 + max_time_minutes 1.0,
+eval/plans/006.md:49:- Cap for this run: **4.0 min** (supersedes the addendum's 1.0). Bundle 31b-v001 = 31b-v000 + max_time_minutes 4.0 +
+eval/plans/007.md:14:  = 31b-v006-p5d (plan 005 arm D: thinking_budget 0, plan-005 arm-B prompt, no repo-named hint) with ONLY max_time_minutes 4.0 -> 3.5
+eval/run_agent_eval.py:301:            ('max_time_minutes', args.session_minutes, 5, nested('budget', 'time_minutes')),
+eval/run_agent_eval.py:322:    validate_caps([getattr(config, 'max_time_minutes', None), getattr(config, 'timeout_seconds', None),
+eval/run_agent_eval.py:336:    names = {f.name for f in dataclasses.fields(sc.EvalConfig)}
+eval/run_agent_eval.py:392:    from swegemma.harness.verification import _is_protected_test_or_config_path
+eval/run_agent_eval.py:534:                                       _is_protected_test_or_config_path, task.test_files,
+eval/tests/test_submit_gate.py:142:    from swegemma.harness.verification import _is_protected_test_or_config_path as prot
+eval/tests/test_finals_eligibility.py:14:instruction: !include prompts/system.md
+eval/tests/test_finals_eligibility.py:18:      config_path: sub_agents/sub.yaml
+eval/tests/test_finals_eligibility.py:19:generate_content_config: !include configs/sampling.yaml
+eval/tests/test_finals_eligibility.py:42:  max_time_minutes: 3.5
+eval/tests/test_finals_eligibility.py:79:    ('eval_config.yaml', 'max_time_minutes: 3.5', 'max_time_minutes: 3.0'),
+eval/tests/test_finals_eligibility.py:93:    ('eval_config.yaml', 'max_time_minutes: 3.5', 'max_time_minutes: 4.0'),
+eval/tests/test_finals_eligibility.py:95:    ('eval_config.yaml', 'max_time_minutes: 3.5', 'max_time_minutes: 0'),
+eval/tests/test_finals_eligibility.py:96:    ('eval_config.yaml', 'max_time_minutes: 3.5', 'max_time_minutes: 3.0  # note'),
+eval/tests/test_finals_eligibility.py:179:    sub = SUB.split('generate_content_config:')[0] + 'generate_content_config: !include sampling.yaml\n'
+eval/tests/test_finals_eligibility.py:189:    sub = SUB.split('generate_content_config:')[0] + 'generate_content_config: !include samp2.yaml\n'
+eval/tests/test_finals_eligibility.py:259:    files['eval_config.yaml'] = files['eval_config.yaml'].replace(b'max_time_minutes: 3.5', b'max_time_minutes: 3.0')
+eval/tests/test_agent_timing.py:107:    header = dict(_schema='kaggle_timing_v1', task_ids=['a', 'b'], caps={'max_time_minutes': cap})
+eval/tests/test_agent_timing.py:582:    vf._is_protected_test_or_config_path = lambda path: False
+eval/tests/test_agent_timing.py:637:                    dict(max_time_minutes=1.4, verification_timeout_seconds=300), totals))
+eval/tests/test_agent_timing.py:855:    header = dict(_schema='kaggle_timing_v1', task_ids=list(task_ids), caps={'max_time_minutes': 1.4},
+eval/tests/test_eval_fixes.py:442:    assert caps['max_time_minutes'] is None and caps['timeout_seconds'] is None
+eval/tests/test_eval_fixes.py:450:    assert runner.resolve_caps({}, _cap_args())['max_time_minutes'] == 5
+eval/tests/test_eval_fixes.py:452:    flat = dict(max_time_minutes=3, budget=dict(time_minutes=2))
+eval/tests/test_eval_fixes.py:453:    assert runner.resolve_caps(flat, _cap_args())['max_time_minutes'] == 3
+eval/tests/test_eval_fixes.py:454:    assert runner.resolve_caps(flat, _cap_args(session_minutes=4))['max_time_minutes'] == 4
+eval/tests/test_pack.py:35:    (root / 'eval_config.yaml').write_text('evaluation:\n  max_time_minutes: 5\n')
+eval/tests/test_pack.py:110:@pytest.mark.parametrize('field', ['instruction: !include', 'tools:\n  - agent_tool:\n      config_path:'])
+eval/tests/test_pack.py:122:    add(bundle, 'agent.yaml', f'name: main\nmodel: {MODEL}\ninstruction: !include prompts/system.md\ngenerate_content_config: !include configs/sampling.yaml\ntools:\n  - agent_tool:\n      config_path: sub_agents/child.yaml\n      skip_summarization: true\n')
+eval/tests/test_pack.py:145:    append(bundle, 'sub_agents:\n  - config_path: configs/child.yaml\n')
+eval/tests/test_pack.py:156:            append(bundle, 'global_instruction: !include prompts/bad.md\n')
+eval/tests/test_pack.py:186:    add(bundle, 'eval_config.yaml', f'evaluation:\n  max_time_minutes: {cap}\n')
+eval/tests/test_pack.py:202:    add(bundle, 'eval_config.yaml', 'evaluation:\n  max_time_minutes: 5.04\n')
+eval/tests/test_pack.py:219:    add(bundle, 'configs/a.yaml', 'config: !include a.yaml\n')
+eval/tests/test_pack.py:225:        add(bundle, f'configs/{index}.yaml', f'config: !include {index+1}.yaml\n' if index < 11 else '{}')
+eval/tests/test_pack.py:229:def test_config_path_cycle(bundle):
+eval/tests/test_pack.py:230:    append(bundle, 'sub_agents:\n  - config_path: agent.yaml\n')
+eval/tests/test_pack.py:293:    append(bundle, 'global_instruction: !include MANIFEST.md\n')
+eval/tests/test_pack.py:404:    add(bundle, 'eval_config.yaml', f'evaluation:\n  max_time_minutes: 5\n  {key}: {value}\n')
+eval/tests/test_pack.py:409:    add(bundle, 'eval_config.yaml', 'evaluation:\n  max_time_minutes: 5\n'
+eval/tests/test_pack.py:435:    reference = {'config_path': 'child.yaml'}
+eval/tests/test_pack.py:468:            config['sub_agents'] = [{'config_path': f'{index+1}.yaml'}]
+eval/tests/test_pack.py:472:    json_agent(bundle, sub_agents=[{'config_path': '2.yaml'}])
+eval/tests/test_pack.py:474:    json_agent(bundle, sub_agents=[{'config_path': '1.yaml'}])
+eval/tests/test_pack.py:488:    json_agent(bundle, sub_agents=[{'config_path': 'child.yaml'}] * 10)
+eval/tests/test_pack.py:492:    json_agent(bundle, instruction='x', sub_agents=[{'config_path': 'child.yaml'}] * 10)
+eval/tests/test_pack.py:520:    source = 'first: !include data.txt\nsecond: !include data.txt\n'
+eval/tests/test_pack.py:526:    invalid(bundle, 'cumulative !include')
+eval/tests/test_pack.py:531:    child = 'first: !include data.txt\nsecond: !include data.txt\n'
+eval/tests/test_pack.py:533:    parent = 'first: !include child.yaml\nsecond: !include child.yaml\n'
+eval/tests/test_pack.py:539:    invalid(bundle, 'cumulative !include')
+eval/tests/test_pack.py:570:    add(bundle, 'agent.yaml', f'name: main\nmodel: {MODEL}\ninstruction: !include prompt.txt\n')
+eval/tests/test_pack.py:591:    add(bundle, 'a.yaml', 'config_path: b.yaml\n')
+eval/tests/test_pack.py:592:    add(bundle, 'b.yaml', 'config_path: a.yaml\n')
+
+codex
+The five original reproductions are covered by the v2 regressions. I’m checking two remaining boundaries: whether a changed line is tied to the exact YAML scalar, and whether include/config-path discovery can grant permissions to content outside an agent’s generation settings.
+exec
+/bin/bash -lc "sed -n '150,330p' bin/pack && sed -n '380,470p' bin/pack && rg --files -g '*config*.py' -g '*loader*.py' vendor .venv /home/ubuntu/work/gemma 2>/dev/null | head -70" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+                        entry.update(extra)
+                    result.append(entry)
+                else:
+                    item, i = value(text, i+1, level)
+                    result.append(item)
+            else:
+                match = re.match(r'([^:]+):(?:\s(.*)|$)', text)
+                require(match is not None, f'invalid YAML mapping at line {i+1}')
+                key = scalar(match[1])
+                require(isinstance(key, str) and key not in result, 'invalid or duplicate YAML key')
+                result[key], i = value(match[2] or '', i+1, level)
+
+    start = next_line(0)
+    if start == len(lines):
+        return None
+    # A JSON document is also YAML.
+    if lines[start].lstrip().startswith(('{', '[')):
+        return scalar('\n'.join(lines[start:]))
+    require(indent(start) == 0, 'YAML document must begin at indentation zero')
+    result, end = block(start, 0)
+    require(next_line(end) == len(lines), 'trailing YAML content')
+    return result
+
+
+class Bundle:
+    def __init__(self, root):
+        self.root = Path(root).absolute()
+        self.files = []
+        self.cache = {}
+        self.loading = []
+        self.models = set()
+        self.expanded_bytes = {}
+        self.agent_count = 0
+        self.instruction_chars = 0
+        self.skill_count = 0
+        self.agent_documents = set()
+        self.linted = set()
+
+    def target(self, value, base=None):
+        safe_path(value)
+        path = (base or self.root) / value
+        require(path.is_relative_to(self.root), f'path outside bundle: {value}')
+        require(path.is_file(), f'missing reference target: {value}')
+        require(path != self.root / 'MANIFEST.md', 'MANIFEST.md cannot be referenced: excluded from ZIP')
+        require(path in self.files, f'reference is not a bundle file: {value}')
+        return path
+
+    def load(self, path):
+        require(path not in self.loading, f'YAML reference/include cycle: {path}')
+        require(len(self.loading) <= 10, f'include depth exceeds 10: {path}')
+        if path in self.cache:
+            return self.cache[path]
+        self.loading.append(path)
+        try:
+            require(path.stat().st_size <= MAX_YAML_BYTES,
+                    f'YAML/include size exceeds {MAX_YAML_BYTES} bytes: {path}')
+            expanded = path.stat().st_size
+            source = path.read_text(encoding='utf-8')
+            require('\0' not in source, f'null bytes in {path}')
+            if path.suffix not in {'.yaml', '.yml'}:
+                require(path.suffix in {'.md', '.txt'}, f'unsupported !include target: {path}')
+                result = source
+            else:
+                def include(value):
+                    nonlocal expanded
+                    target = self.target(value, path.parent)
+                    result = self.load(target)
+                    expanded += self.expanded_bytes[target]
+                    require(expanded <= MAX_YAML_BYTES,
+                            f'cumulative !include size exceeds {MAX_YAML_BYTES} bytes: {path}')
+                    return result
+                if yaml is None:
+                    result = minimal_yaml(source, include)
+                else:
+                    class Loader(yaml.SafeLoader):
+                        pass
+                    def mapping(loader, node):
+                        result = {}
+                        for key_node, value_node in node.value:
+                            key = loader.construct_object(key_node)
+                            require(isinstance(key, str) and key not in result,
+                                    f'invalid or duplicate YAML key in {path}')
+                            result[key] = loader.construct_object(value_node)
+                        return result
+                    Loader.add_constructor('tag:yaml.org,2002:map', mapping)
+                    Loader.add_constructor('!include', lambda loader, node: include(loader.construct_scalar(node)))
+                    result = yaml.load(source, Loader=Loader)
+            self.expanded_bytes[path] = expanded
+            self.cache[path] = result
+            return result
+        except (ValueError, UnicodeError) as exc:
+            raise Invalid(f'{path}: {exc}') from exc
+        except Exception as exc:
+            if yaml is not None and isinstance(exc, yaml.YAMLError):
+                raise Invalid(f'{path}: YAML parse failed: {exc}') from exc
+            raise
+        finally:
+            self.loading.pop()
+
+    def prompt(self, value, where):
+        if isinstance(value, str):
+            bad = set(re.findall(r'\{([A-Za-z_][\w.-]*\??)\}', value)) - {'problem_description'}
+            require(not bad, f'{where}: forbidden placeholder(s): {sorted(bad)}')
+
+    def walk(self, value, where, ancestors=(), agent=False):
+        if isinstance(value, str):
+            require('\0' not in value, f'{where}: null bytes in text')
+        if agent:
+            require(isinstance(value, (dict, list)), f'{where}: agent must be a mapping')
+        if isinstance(value, (dict, list)):
+            require(id(value) not in ancestors, f'{where}: recursive YAML alias')
+            ancestors = (*ancestors, id(value))
+            if id(value) in self.linted:
+                return
+            self.linted.add(id(value))
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                self.walk(item, f'{where}[{index}]', ancestors, agent)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                label = f'{where}.{key}'
+                if key == 'config_path':
+                    target = self.target(item)
+                    require(target.suffix in {'.yaml', '.yml'}, f'{label}: config_path must reference YAML')
+                    # Reference cycles are checked separately using the document graph.
+                    self.load(target)
+                elif key == 'adapter' and item is not None:
+                    require(isinstance(item, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', item)
+                            and item != '..', f'{label}: invalid adapter name')
+                    for filename in ('adapter_config.json', 'adapter_model.safetensors'):
+                        self.target(f'adapters/{item}/{filename}')
+                elif key == 'generate_content_config' and item is not None:
+                    require(isinstance(item, dict), f'{label}: must be a mapping')
+                    require(not item.keys() - GENERATION_FIELDS,
+                            f'{label}: forbidden or unknown fields: {sorted(item.keys() - GENERATION_FIELDS)}')
+                elif key == 'thinking_config':
+                    self.thinking(item, label)
+                elif key == 'max_output_tokens':
+                    require(type(item) is int and 1 <= item <= 32768, f'{label}: must be integer 1..32768')
+                if 'instruction' in key or 'prompt' in key:
+                    self.prompt(item, label)
+                self.walk(item, label, ancestors, key in {'sub_agents', 'agent_tool'})
+
+    def agent(self, value, where, depth=0, active=()):
+        """Count compiled occurrences, including repeated references and YAML aliases."""
+        require(depth <= MAX_DEPTH, f'{where}: agent depth exceeds {MAX_DEPTH}')
+        require(len(active) <= MAX_DEPTH + 1, f'{where}: config_path depth exceeds {MAX_DEPTH}')
+        require(isinstance(value, dict), f'{where}: agent must be a mapping')
+        if 'agent_tool' in value:
+            require(set(value) == {'agent_tool'}, f'{where}: invalid agent_tool wrapper')
+            return self.agent(value['agent_tool'], where + '.agent_tool', depth, active)
+        if 'config_path' in value:
+            require(not set(value) - {'config_path', 'skip_summarization'},
+                    f'{where}: invalid config reference')
+            target = self.target(value['config_path'])
+            require(target not in active, f'config_path cycle: {target}')
+            self.agent_documents.add(target)
+            return self.agent(self.load(target), str(target), depth, (*active, target))
+        self.agent_documents.update(path for path, doc in self.cache.items() if doc is value)
+        self.agent_count += 1
+        require(self.agent_count <= MAX_AGENTS, f'max_agents exceeds {MAX_AGENTS}')
+        name = value.get('name')
+        require(isinstance(name, str) and name.strip(), f'{where}: agent name required')
+        kind = value.get('agent_class', 'LlmAgent')
+        require(isinstance(kind, str) and kind in {'LlmAgent', 'SequentialAgent', 'ParallelAgent', 'LoopAgent'},
+                f'{where}: unsupported agent_class')
+        # Repository policy requires explicit identical models even on workflows.
+        model = value.get('model')
+        require(isinstance(model, str) and model in MODELS,
+                f'{where}: missing or disallowed model: {model!r}')
+        self.models.add(model)
+        chars = 0
+        for key in ('instruction', 'global_instruction', 'description'):
+            if key in value:
+                require(isinstance(value[key], str), f'{where}.{key}: must be text')
+                if key == 'description':
+                    require(len(value[key]) <= MAX_INSTRUCTION_CHARS,
+                            f'{where}: description too long')
+                else:
+                    chars += len(value[key])
+        require(chars <= MAX_INSTRUCTION_CHARS, f'{where}: instruction chars exceed {MAX_INSTRUCTION_CHARS}')
+        for directory, dirs, files in os.walk(self.root, followlinks=False):
+            for name in sorted(dirs + files):
+                path = Path(directory) / name
+                safe_path(path.relative_to(self.root).as_posix())
+                mode = path.lstat().st_mode
+                require(not stat.S_ISLNK(mode), f'symlink forbidden: {path}')
+                require(stat.S_ISDIR(mode) or stat.S_ISREG(mode), f'not a regular file: {path}')
+                if stat.S_ISREG(mode):
+                    require(path.suffix in EXTENSIONS, f'extension not allowed: {path}')
+                    if path == self.root / 'MANIFEST.md':
+                        continue
+                    total += path.stat().st_size
+                    require(total < LIMIT, f'unpacked size must be < {LIMIT} bytes')
+                    self.files.append(path)
+                    require(len(self.files) <= MAX_FILE_COUNT, f'max_file_count exceeds {MAX_FILE_COUNT}')
+                    if path.suffix in {'.yaml', '.yml'}:
+                        yaml_count += 1
+                        require(yaml_count <= MAX_YAML_FILES, f'max_yaml_files exceeds {MAX_YAML_FILES}')
+                        require(path.stat().st_size <= MAX_YAML_BYTES,
+                                f'YAML size exceeds {MAX_YAML_BYTES} bytes: {path}')
+        self.files.sort()
+        require(self.root / 'agent.yaml' in self.files, 'missing agent.yaml at bundle root')
+        require(len(ROOTS & {p.name for p in self.files if p.parent == self.root}) == 1, 'multiple root agent configs')
+        require(isinstance(self.load(self.root / 'agent.yaml'), dict), 'agent.yaml must be a mapping')
+        for path in self.files:
+            if path.suffix in {'.yaml', '.yml'}:
+                value = self.load(path)
+                self.walk(value, str(path), agent=path == self.root / 'agent.yaml')
+            elif path.suffix != '.safetensors':
+                source = path.read_text(encoding='utf-8')
+                require('\0' not in source, f'null bytes in {path}')
+                if 'prompts' in path.relative_to(self.root).parts:
+                    self.prompt(source, str(path))
+        root = self.root / 'agent.yaml'
+        self.agent_documents.add(root)
+        self.agent(self.load(root), str(root), active=(root,))
+        # Validate standalone agent declarations, but do not count referenced files twice.
+        # Visit referring documents before their dependencies.
+        def references(value, seen=None):
+            if seen is None:
+                seen = set()
+            if isinstance(value, (dict, list)):
+                if id(value) in seen:
+                    return
+                seen.add(id(value))
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key == 'config_path':
+                        yield self.target(item)
+                    else:
+                        yield from references(item, seen)
+            elif isinstance(value, list):
+                for item in value:
+                    yield from references(item, seen)
+        candidates = {}
+        for path, value in self.cache.items():
+            if isinstance(value, dict) and {'name', 'model', 'agent_class', 'instruction',
+                                            'global_instruction', 'tools', 'sub_agents'} & value.keys():
+                candidates[path] = value
+        done = set()
+        ordered = []
+
+        def visit(path, active=()):
+            require(path not in active, f'config_path cycle: {path}')
+            require(len(active) <= MAX_DEPTH, f'config_path depth exceeds {MAX_DEPTH}')
+            if path in done:
+                return
+            for target in references(self.load(path)):
+                require(isinstance(self.load(target), dict),
+                        f'agent config must be a mapping: {target}')
+                visit(target, (*active, path))
+            done.add(path)
+            ordered.append(path)
+
+        for path in list(self.cache):
+            visit(path)
+        for path in reversed(ordered):
+            if path in candidates and path not in self.agent_documents:
+                self.agent_documents.add(path)
+                self.agent(candidates[path], str(path), active=(path,))
+        require(len(self.models) == 1, f'models must be identical across all agents: {sorted(self.models)}')
+        config = self.load(self.target('eval_config.yaml'))
+        evaluation = config.get('evaluation') if isinstance(config, dict) else None
+        cap = evaluation.get('max_time_minutes') if isinstance(evaluation, dict) else None
+        require(type(cap) in (int, float) and math.isfinite(cap) and cap > 0,
+                'evaluation.max_time_minutes: missing or invalid positive cap')
+        require(cap * 125 + 30 <= 660, f'evaluation timing FAIL: {cap}*125+30 > 660 minutes')
+        for field in ('timeout_seconds', 'max_tool_calls', 'max_turns'):
+            if field in evaluation:
+                require(type(evaluation[field]) is int and evaluation[field] > 0,
+                        f'evaluation.{field}: must be a positive integer')
+
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import sys, importlib.util
+print(sys.version)
+for m in ('pytest','yaml','swegemma'):
+ s=importlib.util.find_spec(m)
+ print(m, s.origin if s else None)
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]
+pytest None
+yaml /usr/lib/python3/dist-packages/yaml/__init__.py
+swegemma None
+
+exec
+/bin/bash -lc "ls -a && rg -n 'RAM|memfd|pytest|BytesIO|mock_open' ops/codex/review-20261107T091327.log | tail -25 && rg --files /home/ubuntu/work/gemma -g '*schema*' -g '*config*.py' -g '*loader*.py' -g '"'!data/**'"' -g '"'!runs/**'"' | head -60" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+.
+..
+.claude
+.git
+.gitignore
+.pytest_cache
+AGENTS.md
+CLAUDE.md
+DIRECTOR.md
+README.md
+SETUP.md
+bin
+bundles
+config
+config.env
+data
+dist
+docs
+eval
+ops
+paper
+results
+runs
+setup_vm.sh
+1125:are streamed to avoid loading adapter weights into RAM. The command prints
+1310:for mod in ('yaml', 'pytest', 'google.adk', 'google.genai'):
+1319:pytest None
+1514:eval/README_AGENT_EVAL.md:68:No packages need installing for tests. If the harness venv lacks pytest, use the
+1516:eval/README_AGENT_EVAL.md:75:/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q
+1517:eval/README_AGENT_EVAL.md:76:RUN_AGENT_EVAL_E2E=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q -rs
+1708:No packages need installing for tests. If the harness venv lacks pytest, use the
+1715:/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q
+1716:RUN_AGENT_EVAL_E2E=1 /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -m pytest eval/tests -q -rs
+2072:    verification_timeout_seconds: int | None = 300  # Timeout for Phase 2 pytest verification
+2154: out=io.BytesIO()
+2215:/bin/bash -lc "sed -n '1,65p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py && sed -n '195,245p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py && rg -n '(time_minutes|budget.turns|budget.tool_calls)' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma/agent* /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/swegemma -g '*.py' | head -75 && rg --files /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages -g '*pytest*' | head -5" in /home/ubuntu/work/gemma
+2404:/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages/__pycache__/pytest_timeout.cpython-312-pytest-9.2.0.pyc
+2405:/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages/__pycache__/pytest_timeout.cpython-313-pytest-9.2.0.pyc
+2406:/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages/__pycache__/pytest_timeout.cpython-313.pyc
+2407:/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/__pycache__/pytester.cpython-312.pyc
+2408:/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/__pycache__/pytester.cpython-313.pyc
+2421:class MemoryStream(io.BytesIO):
+2439:  for mark in getattr(fn,'pytestmark',[]):
+2448:print(f'{count} existing test cases PASS (called directly; tmp_path/file I/O replaced with RAM-only storage)')
+2473:29 existing test cases PASS (called directly; tmp_path/file I/O replaced with RAM-only storage)
+2482: out=io.BytesIO()
+2524: out=io.BytesIO()
+2532: out=io.BytesIO()
+2569:Validation: the requested files match commit `aeb66ff`. All 29 existing test cases passed when called directly with RAM-backed file I/O because the sandbox is read-only. All 324 comparisons among the 18 actual `dist/` bundles completed without crashes.
+
+exec
+/bin/bash -lc "sed -n '2408,2449p' ops/codex/review-20261107T091327.log && rg -n 'include|config_path|safe_load|yaml.load' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission -g '*.py' && sed -n '1,120p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/lib/python3.13/site-packages/_pytest/__pycache__/pytester.cpython-313.pyc
+
+exec
+/bin/bash -lc "PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B - <<'PY'
+import contextlib, io, inspect, itertools, runpy
+from unittest.mock import patch
+mod=runpy.run_path('eval/tests/test_finals_eligibility.py')
+files={}
+class MemoryPath(str):
+ def __truediv__(self,name): return MemoryPath(str(self)+'/'+name)
+ def write_text(self,text): files[str(self)]=text.encode(); return len(text)
+ def read_text(self): return files[str(self)].decode()
+real_open=io.open
+class MemoryStream(io.BytesIO):
+ def __init__(self,path,mode):
+  self.path,self.mode=path,mode
+  if 'r' in mode and path not in files: raise FileNotFoundError(path)
+  super().__init__(b'' if 'w' in mode else files.get(path,b''))
+ def close(self):
+  if not self.closed and any(m in self.mode for m in 'wa+'): files[self.path]=self.getvalue()
+  super().close()
+def memory_open(path,mode='r',*args,**kwargs):
+ if isinstance(path,(str,MemoryPath)) and str(path).startswith('/__review_memory__/'):
+  stream=MemoryStream(str(path),mode)
+  return stream if 'b' in mode else io.TextIOWrapper(stream,encoding=kwargs.get('encoding') or 'utf-8')
+ return real_open(path,mode,*args,**kwargs)
+count=0
+with patch('builtins.open',memory_open),patch('io.open',memory_open),contextlib.redirect_stdout(io.StringIO()):
+ for name,fn in mod.items():
+  if not name.startswith('test_') or not inspect.isfunction(fn): continue
+  variants=[{}]
+  for mark in getattr(fn,'pytestmark',[]):
+   if mark.name"'!='"'parametrize': continue
+   names=mark.args[0].split(',');values=mark.args[1]
+   variants=[{**old,**dict(zip(names,v if isinstance(v,tuple) else (v,)))} for old in variants for v in values]
+  for params in variants:
+   count+=1
+   kwargs={'tmp_path':MemoryPath('/__review_memory__/case'+str(count)),**params}
+   if 'capsys' in inspect.signature(fn).parameters: kwargs['capsys']=None
+   fn(**kwargs)
+print(f'{count} existing test cases PASS (called directly; tmp_path/file I/O replaced with RAM-only storage)')
+PY" in /home/ubuntu/work/gemma
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:23:from ..yaml_loader import load_yaml
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:58:        PathTraversalError: If an AgentTool config_path escapes the submission root directory.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:91:    sub_path = ctx.resolve_sub_config_path(ref.config_path, error_prefix="AgentTool")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:108:                e, context_desc=f"AgentTool config ({ref.config_path})"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:81:    """Remove reasoning and reasoning_content from assistant messages when include_thoughts is False."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:93:def _extract_include_thoughts(config_or_request: Any) -> bool | None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:94:    """Extract ThinkingConfig.include_thoughts from an LlmRequest, GenerateContentConfig, or dict."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:112:        thinking_cfg.get("include_thoughts")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:114:        else getattr(thinking_cfg, "include_thoughts", None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:200:       ``include_thoughts`` is not ``False``).
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:204:    3. When ``include_thoughts`` is ``False``, removes ``Part(thought=True)`` from
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:274:            inc_thoughts = _extract_include_thoughts(llm_request)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:312:        orig_generate_async, "_adk_submission_include_thoughts_patched", False
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:319:            inc_thoughts = _extract_include_thoughts(llm_request)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:321:                inc_thoughts = self.__dict__.get("_adk_include_thoughts")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:333:        _patched_generate_content_async._adk_submission_include_thoughts_patched = True  # type: ignore[attr-defined]
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:350:            "_adk_submission_include_thoughts_patched",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:364:    thinking_level, thinking_budget, include_thoughts, and seed into
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:386:    include_thoughts: bool | None = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:392:            include_thoughts = thinking_cfg.get("include_thoughts")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:396:            include_thoughts = getattr(thinking_cfg, "include_thoughts", None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:414:        elif include_thoughts is False:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:416:        elif include_thoughts is True:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:419:    if enable_thinking is None and not has_valid_seed and include_thoughts is None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:426:    if isinstance(include_thoughts, bool):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:427:        cloned.__dict__["_adk_include_thoughts"] = include_thoughts
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/generation.py:429:        cloned.__dict__.pop("_adk_include_thoughts", None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:21:from .yaml_loader import set_active_limits_for_root
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:44:    config_path: Path
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:168:    config_path = find_root_config(root, yaml_files)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:172:        config_path=config_path,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:681:    from .yaml_loader import load_yaml
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:687:    root_config_path = find_root_config(root)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:693:    def _safe_load(path: Path) -> Any:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:726:            return ctx.resolve_sub_config_path(rel)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:735:            return ctx.resolve_sub_config_path(rel)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:748:            raw = _safe_load(cfg_path)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:768:                if isinstance(entry, dict) and "config_path" in entry:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:769:                    sub_cfg = _resolve_sub(cfg_path.parent, str(entry["config_path"]))
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:777:                    if isinstance(agent_tool, dict) and "config_path" in agent_tool:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:779:                            cfg_path.parent, str(agent_tool["config_path"])
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:783:    _traverse(root_config_path)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:796:                content = _safe_load(p)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/compiler.py:56:from .yaml_loader import clear_active_limits_for_root, load_yaml
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/compiler.py:133:        # 3. Load root YAML with sandboxed !include
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/compiler.py:134:        raw_config = load_yaml(submission.config_path, submission.root_dir, limits=limits)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:1:"""Sandboxed YAML loader with ``!include`` support.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:3:The ``!include`` tag resolves file paths **relative to the including
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:8:    - :func:`load_yaml`: Load a YAML file with sandboxed include support.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:23:# File extensions that !include may resolve to.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:47:def _resolve_include_path(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:52:    """Resolve a relative include path safely within the sandbox boundary.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:55:    file containing the ``!include`` tag), then sandboxed against ``root_dir``.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:58:        rel_path: The relative path specified in the ``!include`` tag.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:59:        current_dir: The directory of the file containing the ``!include`` tag.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:77:        error_prefix="!include",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:124:    """A ``yaml.SafeLoader`` subclass that resolves ``!include`` tags within a sandboxed root directory.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:132:        _depth: Current include nesting depth, used to enforce _MAX_INCLUDE_DEPTH.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:138:    _include_state: dict[str, int] = {}
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:142:        if self._include_state is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:143:            max_bytes = self._include_state.get(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:147:            count = self._include_state.get("composed_nodes", 0) + 1
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:148:            self._include_state["composed_nodes"] = count
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:155:    def include(self, node: yaml.Node) -> Any:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:156:        """Handle ``!include path/to/file`` tags during YAML parsing.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:165:            SubmissionValidationError: If include nesting depth exceeds ``_MAX_INCLUDE_DEPTH``, if the included file is not found, or if the file extension is disallowed.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:166:            LimitExceededError: If an included file or cumulative included bytes exceed ``max_yaml_size_bytes``.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:167:            PathTraversalError: If the include path attempts to escape the submission root directory.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:168:            yaml.YAMLError: If an included YAML file is malformed.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:171:        abs_path = _resolve_include_path(rel_path, self._current_dir, self._root_dir)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:174:        max_bytes = self._include_state.get(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:182:        if self._include_state:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:183:            self._include_state["total_bytes"] = (
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:184:                self._include_state.get("total_bytes", 0) + file_size
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:186:            if self._include_state["total_bytes"] > max_bytes:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:188:                    f"Cumulative YAML/!include size ({self._include_state['total_bytes']:,} bytes) "
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:197:                    f"!include nesting too deep (max {_MAX_INCLUDE_DEPTH}): {rel_path}"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:199:            # Nested YAML: resolve relative to the *included* file's dir
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:201:                self._include_state["has_anchors"] = 1
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:205:                include_state=self._include_state,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:208:            data = yaml.load(content, Loader=loader_cls)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:222:    include_state: dict[str, int] | None = None,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:228:        current_dir: The directory of the file being loaded. ``!include``
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:230:        include_state: Optional shared dictionary tracking cumulative included bytes.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:237:    if include_state is None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:239:        include_state = {
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:249:    BoundLoader._include_state = include_state
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:250:    BoundLoader.add_constructor("!include", BoundLoader.include)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:259:    """Load a YAML file with sandboxed ``!include`` support.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:261:    ``!include`` paths are resolved relative to the directory of ``path``,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:267:        limits: Optional submission limits to enforce on YAML and !include byte sizes.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:273:        SubmissionValidationError: If the loaded YAML is not a top-level mapping, if an included file is not found, or if include nesting is too deep.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:274:        LimitExceededError: If the YAML file, cumulative !include files, or anchor expansion exceeds ``max_yaml_size_bytes``.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:275:        PathTraversalError: If ``path`` or any included file path escapes ``root_dir``.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:276:        yaml.YAMLError: If the YAML file or any included YAML file is malformed.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:301:    include_state = {"total_bytes": file_size, "max_bytes": max_bytes}
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:305:        include_state=include_state,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py:308:    data = yaml.load(raw_text, Loader=loader_cls)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:108:                msg = f"Sub-agent config_path escapes submission directory: {path}"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:110:                msg = f"AgentTool config_path escapes submission directory: {path}"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:111:            elif error_prefix == "!include":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:112:                msg = f"!include target is a symlink: {path}"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:122:                if error_prefix == "!include":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:123:                    msg = f"!include path contains a symlink component: {parent.name}"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:138:            msg = f"Sub-agent config_path escapes submission directory: {path}"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:140:            msg = f"AgentTool config_path escapes submission directory: {path}"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:141:        elif error_prefix == "!include":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:142:            msg = f"!include path escapes submission directory: {path}"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:155:        elif error_prefix == "!include":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:156:            msg = f"!include file not found: {path}"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:169:            if error_prefix == "!include":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/paths.py:170:                msg = f"!include does not support '{resolved_target.suffix}' files (allowed: {allowed_str}): {path}"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:85:        include_contents=config.include_contents,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/sub_agents.py:14:from ..yaml_loader import load_yaml
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/sub_agents.py:25:        refs: A list of sub-agent reference objects containing config_path attributes, or None.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/sub_agents.py:34:        PathTraversalError: If a sub-agent config_path escapes the submission root directory.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/sub_agents.py:57:            sub_path = ctx.resolve_sub_config_path(ref.config_path, error_prefix="Sub-agent")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/sub_agents.py:64:                    e, context_desc=f"sub-agent config ({ref.config_path})"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:41:# Sub-agent reference — config_path only, no code references
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:49:    to reference child agents. Only ``config_path`` is supported; the standard ADK ``code`` field
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:51:    The ``config_path`` field is strictly validated to prevent path traversal attacks.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:56:    config_path: str = Field(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:61:    @field_validator("config_path")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:88:    The ``config_path`` field is strictly validated to prevent path traversal attacks.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:97:    config_path: str = Field(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:103:    @field_validator("config_path")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:131:              config_path: sub_agents/summarizer.yaml
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:162:        include_thoughts (Optional[bool]): Whether to include the raw reasoning thoughts in the
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:170:    include_thoughts: bool | None = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:265:        include_contents (Literal["default", "none"]): Controls whether input contents are included in the prompt. Defaults to "default".
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:281:        description="Agent instruction text — inline or resolved from !include."
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py:284:    include_contents: Literal["default", "none"] = "default"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/context.py:98:    def resolve_sub_config_path(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/context.py:100:        config_path: str,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/context.py:106:        ensure_no_traversal_components(config_path, context=f"in {error_prefix}")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/context.py:108:        candidate = cur_dir / config_path
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/context.py:115:            target_path = config_path
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/limits.py:161:            or cumulative !include expansion. Defaults to 52,428,800 (50 MiB).
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/limits.py:185:    max_yaml_size_bytes: int = 50 * 1024 * 1024  # 50 MiB per YAML / cumulative !include
+"""Restricted Pydantic schema for sandboxed agent configurations.
+
+This module defines the Pydantic models used to parse and validate agent YAML
+configurations submitted by participants. To ensure sandboxed execution, these models
+mirror the standard ADK configuration structure but **replace all ``CodeConfig``-based
+fields** with safe string-reference alternatives (e.g., file paths or registry keys).
+
+Primary Models:
+    * :class:`SandboxedLlmAgentConfig`: Configuration for LLM-backed agents.
+    * :class:`SandboxedSequentialAgentConfig`: Configuration for sequential multi-agent workflows.
+    * :class:`SandboxedParallelAgentConfig`: Configuration for parallel multi-agent workflows.
+    * :class:`SandboxedLoopAgentConfig`: Configuration for iterative loop workflows.
+    * :class:`SandboxedAgentConfig`: Root discriminated union model for parsing arbitrary agent configs.
+
+Security & Validation:
+    All file path references (such as sub-agent configs and skill directories) are strictly
+    validated against path traversal attacks (e.g., absolute paths or ``..`` directory climbing).
+    Generation parameters are parsed permissively here and subsequently enforced by
+    :class:`~adk_submission.limits.GenerationConstraints` during compilation.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Annotated, Any, Literal
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    RootModel,
+    Tag,
+    ValidationInfo,
+    field_validator,
+)
+
+from .paths import ensure_no_traversal_components
+
+# ---------------------------------------------------------------------------
+# Sub-agent reference — config_path only, no code references
+# ---------------------------------------------------------------------------
+
+
+class SubAgentRef(BaseModel):
+    """Reference to a sub-agent's YAML configuration file.
+
+    This model is used within multi-agent workflows (Sequential, Parallel, Loop, and LLM sub-agents)
+    to reference child agents. Only ``config_path`` is supported; the standard ADK ``code`` field
+    (which resolves arbitrary Python imports) is intentionally excluded to prevent unsandboxed code execution.
+    The ``config_path`` field is strictly validated to prevent path traversal attacks.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    config_path: str = Field(
+        description="Relative path to the sub-agent's YAML config within "
+        "the submission directory."
+    )
+
+    @field_validator("config_path")
+    @classmethod
+    def validate_no_path_traversal(cls, v: str) -> str:
+        """Validate that the configuration path does not attempt directory traversal.
+
+        Args:
+            v (str): The relative file path to validate.
+
+        Returns:
+            str: The unmodified file path if validation succeeds.
+
+        Raises:
+            PathTraversalError: If the path contains traversal components.
+        """
+        ensure_no_traversal_components(v)
+        return v
+
+
+# ---------------------------------------------------------------------------
+# Agent-as-tool reference
+# ---------------------------------------------------------------------------
+
+
+class AgentToolRef(BaseModel):
+    """Reference to an agent that should be wrapped and invoked as an ``AgentTool``.
+
+    Allows an LLM agent to call another agent as a tool during its execution.
+    The ``config_path`` field is strictly validated to prevent path traversal attacks.
+
+    Attributes:
+        skip_summarization (bool): If True, the raw output of the tool-agent is returned directly
+            to the calling LLM without intermediate summarization. Defaults to False.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    config_path: str = Field(
+        description="Relative path to the agent's YAML config within "
+        "the submission directory."
+    )
+    skip_summarization: bool = False
+
+    @field_validator("config_path")
+    @classmethod
+    def validate_no_path_traversal(cls, v: str) -> str:
+        """Validate that the tool agent configuration path does not attempt directory traversal.
+
+        Args:
+            v (str): The relative file path to validate.
+
+        Returns:
+            str: The unmodified file path if validation succeeds.
+
+        Raises:
+            PathTraversalError: If the path contains traversal components.
+        """
+        ensure_no_traversal_components(v)
+        return v
+
+
+
+exec
+/bin/bash -lc "PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B - <<'PY'
+import contextlib, io, inspect, itertools, runpy
+from pathlib import Path
+from unittest.mock import patch
+mod=runpy.run_path('eval/tests/test_finals_eligibility.py')
+files={}
+class MemoryPath(str):
+ def __truediv__(self,name): return MemoryPath(str(self)+'/'+name)
+ def write_text(self,text): files[str(self)]=text.encode(); return len(text)
+ def read_text(self): return files[str(self)].decode()
+real_open=io.open
+class MemoryStream(io.BytesIO):
+ def __init__(self,path,mode):
+  self.path,self.mode=path,mode
+  if 'r' in mode and path not in files: raise FileNotFoundError(path)
+  super().__init__(b'' if 'w' in mode else files.get(path,b''))
+ def close(self):
+  if not self.closed and any(m in self.mode for m in 'wa+'): files[self.path]=self.getvalue()
+  super().close()
+def memory_open(path,mode='r',*args,**kwargs):
+ if isinstance(path,(str,MemoryPath)) and str(path).startswith('/__review_memory__/'):
+  stream=MemoryStream(str(path),mode)
+  return stream if 'b' in mode else io.TextIOWrapper(stream,encoding=kwargs.get('encoding') or 'utf-8')
+ return real_open(path,mode,*args,**kwargs)
+count=0
+with patch('builtins.open',memory_open),patch('io.open',memory_open),contextlib.redirect_stdout(io.StringIO()):
+ for name,fn in mod.items():
+  if not name.startswith('test_') or not inspect.isfunction(fn): continue
+  variants=[{}]
+  for mark in getattr(fn,'pytestmark',[]):
+   if mark.name "'!= '"'parametrize': continue
+   names=mark.args[0].split(','); values=mark.args[1]
+   variants=[{**old,**dict(zip(names,v if isinstance(v,tuple) else (v,)))} for old in variants for v in values]
+  for params in variants:
+   count+=1
+   kwargs={'tmp_path':MemoryPath('/__review_memory__/case'+str(count)),**params}
+   if 'capsys' in inspect.signature(fn).parameters: kwargs['capsys']=None
+   fn(**kwargs)
+print(f'{count} existing test cases PASS (direct invocation, RAM-backed I/O)')
+fe=mod['fe']; paths=sorted(Path('dist').glob('*.zip')); verdicts={}; crashes=[]
+for c,r in itertools.product(paths,repeat=2):
+ try:
+  res=fe.check(c,r); verdicts[res['verdict']]=verdicts.get(res['verdict'],0)+1
+ except Exception as e: crashes.append((str(c),str(r),repr(e)))
+print('dist comparisons',len(paths)**2,'verdicts',verdicts,'crashes',crashes)
+PY" in /home/ubuntu/work/gemma
+ succeeded in 760ms:
+49 existing test cases PASS (direct invocation, RAM-backed I/O)
+dist comparisons 324 verdicts {'ELIGIBLE': 23, 'INELIGIBLE': 301} crashes []
+
+exec
+/bin/bash -lc "sed -n '145,242p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py && sed -n '240,340p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/schema.py && sed -n '120,240p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/yaml_loader.py && sed -n '90,132p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/context.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+def _reject_bool_nan_inf(v: Any, field_name: str) -> Any:
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        raise ValueError(f"{field_name} cannot be a boolean")
+    if isinstance(v, (int, float)) and (math.isnan(v) or math.isinf(v)):
+        raise ValueError(f"{field_name} must be a finite number, got {v!r}")
+    return v
+
+
+class ThinkingConfig(BaseModel):
+    """Thinking configuration for supported LLMs (e.g., reasoning models).
+
+    Attributes:
+        thinking_budget (Optional[int]): The token budget allocated for the model's internal
+            reasoning/thinking process. Must be greater than or equal to 0 (0 disables thinking).
+            Defaults to None.
+        include_thoughts (Optional[bool]): Whether to include the raw reasoning thoughts in the
+            final model output. Defaults to None.
+        thinking_level (Optional[str]): Presets for model thinking level (e.g., 'MINIMAL', 'LOW', 'MEDIUM', 'HIGH'). Defaults to None.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    thinking_budget: int | None = Field(default=None, ge=0)
+    include_thoughts: bool | None = None
+    thinking_level: str | None = None
+
+    @field_validator("thinking_budget", mode="before")
+    @classmethod
+    def _validate_thinking_budget(cls, v: Any) -> Any:
+        return _reject_bool_nan_inf(v, "thinking_budget")
+
+
+class GenerateContentConfig(BaseModel):
+    """Generation parameters — validated against organizer constraints at compile time.
+
+    This schema is intentionally permissive: it defines the *universe* of parameters a submission
+    could set. Actual restrictions and bounding checks are applied by
+    :class:`~adk_submission.limits.GenerationConstraints` during compilation.
+
+    Fields that are **never** settable by submissions (``safety_settings``, ``tools``,
+    ``system_instruction``, ``response_schema``) are hard-excluded from this schema.
+
+    Attributes:
+        temperature (Optional[float]): Sampling temperature. Must be >= 0.0. Defaults to None.
+        top_p (Optional[float]): Nucleus sampling threshold. Must be between 0.0 and 1.0 inclusive. Defaults to None.
+        top_k (Optional[int]): Top-k sampling cutoff. Must be >= 1. Defaults to None.
+        max_output_tokens (Optional[int]): Maximum number of tokens to generate. Must be >= 1. Defaults to None.
+        stop_sequences (Optional[list[str]]): List of strings that stop generation when encountered. Defaults to None.
+        presence_penalty (Optional[float]): Penalty for repeated tokens based on presence. Defaults to None.
+        frequency_penalty (Optional[float]): Penalty for repeated tokens based on frequency. Defaults to None.
+        response_mime_type (Optional[str]): Expected MIME type for the model response (e.g., 'application/json'). Defaults to None.
+        seed (Optional[int]): Random seed for deterministic generation. Defaults to None.
+        thinking_config (Optional[ThinkingConfig]): Configuration for model reasoning/thinking. Defaults to None.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    temperature: float | None = Field(default=None, ge=0.0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    stop_sequences: list[str] | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    response_mime_type: str | None = None
+    seed: int | None = None
+    thinking_config: ThinkingConfig | None = None
+
+    @field_validator(
+        "temperature",
+        "top_p",
+        "top_k",
+        "max_output_tokens",
+        "presence_penalty",
+        "frequency_penalty",
+        "seed",
+        mode="before",
+    )
+    @classmethod
+    def _validate_numeric_fields(cls, v: Any, info: ValidationInfo) -> Any:
+        return _reject_bool_nan_inf(v, info.field_name or "numeric_field")
+
+
+# ---------------------------------------------------------------------------
+# Agent configs — shared base + specialized subclasses
+# ---------------------------------------------------------------------------
+
+
+class _BaseAgentFields(BaseModel):
+    """Fields shared by all agent configuration types.
+
+    Not part of the public API — use the concrete subclasses below.
+
+    Attributes:
+        name (str): The unique identifying name of the agent.
+        description (str): Optional description of the agent's purpose. Defaults to an empty string.
+    Attributes:
+        name (str): The unique identifying name of the agent.
+        description (str): Optional description of the agent's purpose. Defaults to an empty string.
+        before_agent_callbacks (Optional[list[str]]): List of callback names to execute before the agent runs.
+        after_agent_callbacks (Optional[list[str]]): List of callback names to execute after the agent completes.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    description: str = ""
+
+    # Callbacks available on every agent type
+    before_agent_callbacks: list[str] | None = None
+    after_agent_callbacks: list[str] | None = None
+
+
+class SandboxedLlmAgentConfig(_BaseAgentFields):
+    """Restricted ``LlmAgent`` configuration — replaces all code references with safe strings.
+
+    Attributes:
+        agent_class (Literal["LlmAgent"]): Literal identifier for the agent class. Defaults to "LlmAgent".
+        model (Optional[str]): The model alias or name to be used by the agent. Defaults to None.
+        adapter (Optional[str]): Name of a discovered adapter from adapters/ to attach to the base model. Defaults to None.
+        output_key (Optional[str]): Key under which the agent's output is stored in the state. Defaults to None.
+        include_contents (Literal["default", "none"]): Controls whether input contents are included in the prompt. Defaults to "default".
+        disallow_transfer_to_parent (Optional[bool]): If True, prevents the agent from transferring control back to its parent. Defaults to None.
+        disallow_transfer_to_peers (Optional[bool]): If True, prevents the agent from transferring control to peer agents. Defaults to None.
+        tools (Optional[list[str | AgentToolEntry]]): List of tool names (strings) or wrapped agent tools (:class:`AgentToolEntry`). Defaults to None.
+        sub_agents (Optional[list[SubAgentRef]]): List of sub-agents managed by this LLM agent. Defaults to None.
+        generate_content_config (Optional[GenerateContentConfig]): Permissive generation parameters for the LLM. Defaults to None.
+        before_model_callbacks (Optional[list[str]]): List of callback names to execute before model generation. Defaults to None.
+        after_model_callbacks (Optional[list[str]]): List of callback names to execute after model generation. Defaults to None.
+        before_tool_callbacks (Optional[list[str]]): List of callback names to execute before a tool is called. Defaults to None.
+        after_tool_callbacks (Optional[list[str]]): List of callback names to execute after a tool completes. Defaults to None.
+    """
+
+    agent_class: Literal["LlmAgent"] = "LlmAgent"
+    model: str | None = None
+    adapter: str | None = None
+    instruction: str = Field(
+        description="Agent instruction text — inline or resolved from !include."
+    )
+    output_key: str | None = None
+    include_contents: Literal["default", "none"] = "default"
+    disallow_transfer_to_parent: bool | None = None
+    disallow_transfer_to_peers: bool | None = None
+    tools: list[str | AgentToolEntry] | None = None
+    skills: list[str] | None = Field(
+        default=None,
+        description="List of relative paths to skill directories within the submission archive.",
+    )
+    sub_agents: list[SubAgentRef] | None = None
+    generate_content_config: GenerateContentConfig | None = None
+
+    # LLM-specific callbacks
+    before_model_callbacks: list[str] | None = None
+    after_model_callbacks: list[str] | None = None
+    before_tool_callbacks: list[str] | None = None
+    after_tool_callbacks: list[str] | None = None
+
+    @field_validator("agent_class", mode="before")
+    @classmethod
+    def _default_null_agent_class(cls, v: Any) -> Any:
+        return "LlmAgent" if v is None else v
+
+    @field_validator("skills")
+    @classmethod
+    def validate_skills_paths(cls, v: list[str] | None) -> list[str] | None:
+        """Validate that skill directory paths do not attempt directory traversal.
+
+        Args:
+            v (Optional[list[str]]): List of relative skill directory paths to validate.
+
+        Returns:
+            Optional[list[str]]: The unmodified list of skill paths if validation succeeds.
+
+        Raises:
+            PathTraversalError: If any path contains traversal components.
+        """
+        if v is not None:
+            for p in v:
+                ensure_no_traversal_components(p, context="in skill")
+        return v
+
+
+class SandboxedSequentialAgentConfig(_BaseAgentFields):
+    """Restricted ``SequentialAgent`` configuration for running sub-agents in sequential order.
+
+    Attributes:
+        agent_class (Literal["SequentialAgent"]): Literal identifier for the agent class.
+        sub_agents (list[SubAgentRef]): Ordered list of sub-agent references to execute sequentially.
+    """
+
+    agent_class: Literal["SequentialAgent"]
+    sub_agents: list[SubAgentRef]
+
+
+class SandboxedParallelAgentConfig(_BaseAgentFields):
+    """Restricted ``ParallelAgent`` configuration for running sub-agents concurrently.
+
+    return total_chars
+
+
+class SandboxedYamlLoader(yaml.SafeLoader):
+    """A ``yaml.SafeLoader`` subclass that resolves ``!include`` tags within a sandboxed root directory.
+
+    **Do not instantiate directly** — use :func:`make_sandboxed_loader`
+    or :func:`load_yaml` instead.
+
+    Attributes:
+        _root_dir: The submission root directory (sandbox boundary), set dynamically by make_sandboxed_loader.
+        _current_dir: The directory of the file being loaded, set dynamically by make_sandboxed_loader.
+        _depth: Current include nesting depth, used to enforce _MAX_INCLUDE_DEPTH.
+    """
+
+    _root_dir: Path  # set by make_sandboxed_loader
+    _current_dir: Path  # set by make_sandboxed_loader
+    _depth: int = 0
+    _include_state: dict[str, int] = {}
+
+    def compose_node(self, parent: yaml.Node | None, index: Any) -> yaml.Node | None:
+        """Track composed YAML nodes during parsing."""
+        if self._include_state is not None:
+            max_bytes = self._include_state.get(
+                "max_bytes", SubmissionLimits().max_yaml_size_bytes
+            )
+            max_nodes = max(max_bytes // 8, 10_000)
+            count = self._include_state.get("composed_nodes", 0) + 1
+            self._include_state["composed_nodes"] = count
+            if count > max_nodes:
+                raise LimitExceededError(
+                    f"YAML node composition count ({count:,}) exceeds limit ({max_nodes:,})"
+                )
+        return super().compose_node(parent, index)
+
+    def include(self, node: yaml.Node) -> Any:
+        """Handle ``!include path/to/file`` tags during YAML parsing.
+
+        Args:
+            node: The YAML scalar node containing the relative file path.
+
+        Returns:
+            The parsed YAML content (if a .yaml or .yml file) or the raw text string (if a .md or .txt file).
+
+        Raises:
+            SubmissionValidationError: If include nesting depth exceeds ``_MAX_INCLUDE_DEPTH``, if the included file is not found, or if the file extension is disallowed.
+            LimitExceededError: If an included file or cumulative included bytes exceed ``max_yaml_size_bytes``.
+            PathTraversalError: If the include path attempts to escape the submission root directory.
+            yaml.YAMLError: If an included YAML file is malformed.
+        """
+        rel_path: str = self.construct_scalar(node)  # type: ignore[arg-type]
+        abs_path = _resolve_include_path(rel_path, self._current_dir, self._root_dir)
+
+        file_size = abs_path.stat().st_size
+        max_bytes = self._include_state.get(
+            "max_bytes", SubmissionLimits().max_yaml_size_bytes
+        )
+        if file_size > max_bytes:
+            raise LimitExceededError(
+                f"Included file '{rel_path}' size {file_size:,} bytes "
+                f"exceeds limit of {max_bytes:,} bytes"
+            )
+        if self._include_state:
+            self._include_state["total_bytes"] = (
+                self._include_state.get("total_bytes", 0) + file_size
+            )
+            if self._include_state["total_bytes"] > max_bytes:
+                raise LimitExceededError(
+                    f"Cumulative YAML/!include size ({self._include_state['total_bytes']:,} bytes) "
+                    f"exceeds limit of {max_bytes:,} bytes"
+                )
+
+        content = abs_path.read_text(encoding="utf-8")
+
+        if abs_path.suffix.lower() in _INCLUDABLE_YAML_EXTENSIONS:
+            if self._depth >= _MAX_INCLUDE_DEPTH:
+                raise SubmissionValidationError(
+                    f"!include nesting too deep (max {_MAX_INCLUDE_DEPTH}): {rel_path}"
+                )
+            # Nested YAML: resolve relative to the *included* file's dir
+            if "&" in content or "*" in content:
+                self._include_state["has_anchors"] = 1
+            loader_cls = make_sandboxed_loader(
+                self._root_dir,
+                current_dir=abs_path.parent,
+                include_state=self._include_state,
+            )
+            loader_cls._depth = self._depth + 1
+            data = yaml.load(content, Loader=loader_cls)
+            max_expanded = max_bytes
+            if "&" in content and "*" in content:
+                max_expanded = min(max_expanded, max(file_size * 20, 65_536))
+            _measure_expanded_size(data, max_expanded)
+            return data
+
+        # .md, .txt → raw string
+        return content
+
+
+def make_sandboxed_loader(
+    root_dir: Path,
+    current_dir: Path | None = None,
+    include_state: dict[str, int] | None = None,
+) -> type[SandboxedYamlLoader]:
+    """Create a loader class bound to a root and current directory.
+
+    Args:
+        root_dir: The submission root directory (sandbox boundary).
+        current_dir: The directory of the file being loaded. ``!include``
+            paths are resolved relative to this. Defaults to ``root_dir``.
+        include_state: Optional shared dictionary tracking cumulative included bytes.
+
+    Returns:
+        A dynamically created subclass of :class:`SandboxedYamlLoader` bound to the specified root and current directories.
+        Each call returns a **new subclass** so that different directories don't interfere with each other.
+    """
+    resolved_root = Path(root_dir).resolve()
+    if include_state is None:
+        active_limits = _ACTIVE_LIMITS_BY_ROOT.get(resolved_root) or SubmissionLimits()
+        include_state = {
+            "total_bytes": 0,
+        """Validate instruction length against per-agent and total limits."""
+        text = (
+            "x" * instruction_or_len
+            if isinstance(instruction_or_len, int)
+            else str(instruction_or_len)
+        )
+        check_instruction_length(text, agent_name, self)
+
+    def resolve_sub_config_path(
+        self,
+        config_path: str,
+        error_prefix: str = "Sub-agent",
+    ) -> Path:
+        """Resolve a relative sub-agent or AgentTool config path within the sandbox."""
+        from .paths import ensure_no_traversal_components, validate_sandboxed_path
+
+        ensure_no_traversal_components(config_path, context=f"in {error_prefix}")
+        cur_dir = Path(self.current_dir).resolve() if self.current_dir is not None else self.root_dir
+        candidate = cur_dir / config_path
+        if cur_dir != self.root_dir and (candidate.exists() or candidate.is_symlink()):
+            try:
+                target_path: Any = str(candidate.relative_to(self.root_dir))
+            except ValueError:
+                target_path = candidate
+        else:
+            target_path = config_path
+        return validate_sandboxed_path(
+            path=target_path,
+            base_dir=self.root_dir,
+            allow_relative=True,
+            must_exist=True,
+            allow_symlinks=False,
+            allowed_extensions={".yaml", ".yml"},
+            error_prefix=error_prefix,
+        )
+
+
+def check_instruction_length(
+    instruction: str,
+    agent_name: str,
+    ctx: CompilationContext,
+) -> None:
+    """Enforce per-agent and cumulative total instruction character limits.
+
+codex
+All 49 tests passed using RAM-backed I/O, and all 324 comparisons among the 18 `dist/` bundles completed without crashes. I’m now testing YAML merge overrides: discovery walks raw nodes, which may include a `config_path` that the harness discards during merging.
+exec
+/bin/bash -lc "python3 -B - <<'PY'
+import io,sys,zipfile,yaml
+sys.path.insert(0,'eval'); import finals_eligibility as f
+
+def z(files):
+ s=io.BytesIO()
+ with zipfile.ZipFile(s,'w') as a:
+  for k,v in files.items(): a.writestr(k,v)
+ s.seek(0); return s
+with zipfile.ZipFile('dist/31b-v002.zip') as a: base={n:a.read(n) for n in a.namelist()}
+agent=base['agent.yaml'].decode()
+print(agent)
+# A merged default is overridden by the existing real agent_tool entry.
+ref=dict(base)
+ref['agent.yaml']=agent.replace('  - agent_tool:', '  - <<:\\n      agent_tool:\\n        config_path: skills/config.yaml\\n    agent_tool:')
+ref['skills/config.yaml']='generate_content_config:\\n  max_output_tokens: 8192\\n'
+cand={**ref,'skills/config.yaml':ref['skills/config.yaml'].replace('8192','1')}
+r=f.check(z(cand),z(ref))
+print('SHADOWED CONFIG PATH:',r)
+class L(yaml.SafeLoader): pass
+L.add_constructor('"'!include'"',lambda loader,node: loader.construct_scalar(node))
+print('EFFECTIVE TOOLS:',yaml.load(ref['agent.yaml'],Loader=L)['tools'])
+# A shared GCC include imported by a merge is copied into other non-knob paths.
+PY" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+name: swe_baseline_agent
+model: gemma-4-31b-it-qat-w4a16-ct
+instruction: !include prompts/system.md
+tools:
+  - run_command
+  - read_file
+  - edit_file
+  - write_file
+  - get_status
+  - submit_patch
+  - get_code_neighbors
+  - search_similar_code
+  - get_code_subgraph
+  - agent_tool:
+      config_path: sub_agents/code_analyzer.yaml
+      skip_summarization: true
+generate_content_config: !include configs/sampling.yaml
+
+SHADOWED CONFIG PATH: {'files': {'agent.yaml': 'BYTE_IDENTICAL', 'configs/sampling.yaml': 'BYTE_IDENTICAL', 'eval_config.yaml': 'BYTE_IDENTICAL', 'prompts/analyzer.md': 'BYTE_IDENTICAL', 'prompts/system.md': 'BYTE_IDENTICAL', 'skills/config.yaml': 'KNOB_ONLY', 'sub_agents/code_analyzer.yaml': 'BYTE_IDENTICAL'}, 'knobs': [{'file': 'skills/config.yaml', 'path': ['generate_content_config', 'max_output_tokens'], 'knob': 'max_output_tokens', 'candidate': '1', 'reference': '8192', 'status': 'DECREASE'}], 'violations': [], 'allowed_files': {'agent.yaml': [], 'configs/sampling.yaml': ['max_output_tokens', 'thinking_config/thinking_budget'], 'eval_config.yaml': ['evaluation/max_time_minutes', 'evaluation/max_tool_calls', 'evaluation/max_turns'], 'skills/config.yaml': ['generate_content_config/max_output_tokens', 'generate_content_config/thinking_config/thinking_budget'], 'sub_agents/code_analyzer.yaml': ['generate_content_config/max_output_tokens', 'generate_content_config/thinking_config/thinking_budget']}, 'notes': [], 'verdict': 'ELIGIBLE'}
+EFFECTIVE TOOLS: ['run_command', 'read_file', 'edit_file', 'write_file', 'get_status', 'submit_patch', 'get_code_neighbors', 'search_similar_code', 'get_code_subgraph', {'agent_tool': {'config_path': 'sub_agents/code_analyzer.yaml', 'skip_summarization': True}}]
+
+exec
+/bin/bash -lc "PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B - <<'PY'
+import io,sys,zipfile,yaml,posixpath
+from pathlib import Path
+sys.path.insert(0,'eval'); import finals_eligibility as fe
+from adk_submission.schema import SandboxedLlmAgentConfig
+from adk_submission.yaml_loader import make_sandboxed_loader
+
+def z(files):
+ s=io.BytesIO()
+ with zipfile.ZipFile(s,'w') as a:
+  for k,v in files.items(): a.writestr(k,v)
+ s.seek(0); return s
+with zipfile.ZipFile('dist/31b-v002.zip') as a: base={n:a.read(n).decode() for n in a.namelist()}
+# Use the actual harness loader's merge handling; substitute only include file reads.
+def load(files,name):
+ L=make_sandboxed_loader(Path('/__review_memory__'))
+ def include(loader,node):
+  target=posixpath.normpath(posixpath.join(posixpath.dirname(name),loader.construct_scalar(node)))
+  return load(files,target) if target.endswith(('.yaml','.yml')) else files[target]
+ L.add_constructor('"'!include'"',include)
+ return yaml.load(files[name],Loader=L)
+ref={**base,'skills/config.yaml':'generate_content_config:\\n  max_output_tokens: 8192\\n'}
+ref['agent.yaml']=base['agent.yaml'].replace('  - agent_tool:', '  - <<:\\n      agent_tool:\\n        config_path: skills/config.yaml\\n    agent_tool:')
+effective=load(ref,'agent.yaml')
+print('shadowed agent_tool reference is schema-valid:', bool(SandboxedLlmAgentConfig.model_validate(effective)))
+print('effective root config unchanged:', effective==load(base,'agent.yaml'))
+cand={**ref,'skills/config.yaml':ref['skills/config.yaml'].replace('8192','1')}
+print('unrelated asset change verdict:',fe.check(z(cand),z(ref))['verdict'])
+# Shared source is both a generation configuration and a skill resource.
+ref={**base,'skills/x/SKILL.md':'---\\nname: x\\ndescription: example\\n---\\nRead the config.yaml resource.\\n','skills/x/config.yaml':base['configs/sampling.yaml']}
+ref['agent.yaml']=base['agent.yaml'].replace('configs/sampling.yaml','skills/x/config.yaml')+'skills: [skills/x]\\n'
+cand={**ref,'skills/x/config.yaml':ref['skills/x/config.yaml'].replace('max_output_tokens: 8192','max_output_tokens: 4096')}
+print('shared skill/gcc reference schema-valid:',bool(SandboxedLlmAgentConfig.model_validate(load(ref,'agent.yaml'))))
+print('shared skill asset change:',fe.check(z(cand),z(ref)))
+# Non-blocking conservative rejections.
+for title,change in [('flow GCC', lambda s:s.replace('max_output_tokens: 8192','max_output_tokens: 4096'))]:
+ ref={**base,'configs/sampling.yaml':'{temperature: 0.2, max_output_tokens: 8192, thinking_config: {thinking_budget: 4096}}\\n'}
+ cand={**ref,'configs/sampling.yaml':change(ref['configs/sampling.yaml'])}
+ print(title,fe.check(z(cand),z(ref))['verdict'])
+# YAML multiline scalar-looking prompt lines must not receive generation allowances.
+for style in ('|','>','\"'):
+ p='instruction: '+style+'\\n  max_output_tokens: 8192\\n'+('  \"\\n' if style=='\"' else '')
+ ref={**base,'agent.yaml':base['agent.yaml'].replace('instruction: "'!include prompts/system.md'"\\n',p)}
+ cand={**ref,'agent.yaml':ref['agent.yaml'].replace('  max_output_tokens: 8192','  max_output_tokens: 4096')}
+ print('multiline',style,fe.check(z(cand),z(ref))['verdict'])
+PY" in /home/ubuntu/work/gemma
+ succeeded in 841ms:
+shadowed agent_tool reference is schema-valid: True
+effective root config unchanged: True
+unrelated asset change verdict: ELIGIBLE
+shared skill/gcc reference schema-valid: True
+shared skill asset change: {'files': {'agent.yaml': 'BYTE_IDENTICAL', 'configs/sampling.yaml': 'BYTE_IDENTICAL', 'eval_config.yaml': 'BYTE_IDENTICAL', 'prompts/analyzer.md': 'BYTE_IDENTICAL', 'prompts/system.md': 'BYTE_IDENTICAL', 'skills/x/SKILL.md': 'BYTE_IDENTICAL', 'skills/x/config.yaml': 'KNOB_ONLY', 'sub_agents/code_analyzer.yaml': 'BYTE_IDENTICAL'}, 'knobs': [{'file': 'skills/x/config.yaml', 'path': ['max_output_tokens'], 'knob': 'max_output_tokens', 'candidate': '4096', 'reference': '8192', 'status': 'DECREASE'}], 'violations': [], 'allowed_files': {'agent.yaml': [], 'eval_config.yaml': ['evaluation/max_time_minutes', 'evaluation/max_tool_calls', 'evaluation/max_turns'], 'skills/x/config.yaml': ['max_output_tokens', 'thinking_config/thinking_budget'], 'sub_agents/code_analyzer.yaml': ['generate_content_config/max_output_tokens', 'generate_content_config/thinking_config/thinking_budget']}, 'notes': [], 'verdict': 'ELIGIBLE'}
+flow GCC INELIGIBLE
+multiline | INELIGIBLE
+multiline > INELIGIBLE
+multiline " INELIGIBLE
+
+exec
+/bin/bash -lc "rg -n 'skill|resource' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py && rg -n 'SKILL.md|resources|list_resources|load_resource' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission -g '*.py' | head -80 && nl -ba eval/finals_eligibility.py | sed -n '151,210p'" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:22:from ..resolvers.tools import resolve_skills, resolve_tool_item
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:40:    Resolves tools, skills (via SkillToolset), models, callbacks, sub-agents,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:41:    and generation configurations while enforcing instruction, description, and skill limits.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:52:        LimitExceededError: If instruction length, description length, or cumulative skill count limits are exceeded.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:53:        PathTraversalError: If a referenced skill path escapes the submission root directory.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:54:        SubmissionValidationError: If a skill directory is missing or fails to load.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:67:    skill_toolset = resolve_skills(config, ctx, tools=tools)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:68:    if skill_toolset is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/builders/llm.py:69:        tools.append(skill_toolset)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:1:"""Tool and skill resolution for agents."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:12:from google.adk.tools.skill_toolset import SkillToolset
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:32:def _get_skill_toolset_cls(ctx: CompilationContext | None = None) -> Any:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:33:    if ctx is not None and ctx.agent_factory and ctx.agent_factory.skill_toolset_cls is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:34:        return ctx.agent_factory.skill_toolset_cls
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:129:def resolve_skills(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:134:    """Resolve skills declared by an LLM agent into a SkillToolset.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:138:        ctx: The compilation context tracking cumulative skill counts and registries.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:142:        A SkillToolset instance if skills were declared, or None.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:145:        LimitExceededError: If the cumulative skill count, skill byte size, or instruction length exceeds configured limits.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:146:        PathTraversalError: If a skill reference escapes the sandbox boundary.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:147:        SkillNotFoundError: If a skill reference is missing from a provided SkillRegistry.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:148:        SubmissionValidationError: If loading a skill directory fails.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:150:    if not config.skills:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:153:    ctx.total_skills_count += len(config.skills)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:154:    if ctx.total_skills_count > ctx.limits.max_skills:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:156:            f"Agent '{config.name}': cumulative skills count ({ctx.total_skills_count}) "
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:157:            f"exceeds submission limit of {ctx.limits.max_skills}"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:160:    loaded_skills = []
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:161:    for skill_ref in config.skills:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:162:        skill_path: Path | None = None
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:163:        if ctx.skill_registry is not None:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:165:                skill_ref,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:166:                Path(skill_ref).name,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:167:                Path(skill_ref).name.replace("_", "-"),
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:168:                skill_ref.strip("/").replace("/", "-").replace("_", "-"),
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:171:                (k for k in cand_keys if k in ctx.skill_registry),
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:175:                skill = ctx.skill_registry.get(matched_key)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:178:                    ctx.skill_registry.list_skills()
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:179:                    if hasattr(ctx.skill_registry, "list_skills")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:180:                    else ctx.skill_registry.list_available()
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:182:                raise SkillNotFoundError(skill_ref, available=avail)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:183:            loaded_skills.append(skill)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:185:            skill_path = validate_sandboxed_path(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:186:                path=skill_ref,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:193:            skill_size = 0
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:194:            for child in sorted(skill_path.rglob("*")):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:207:                    skill_size += child.stat().st_size
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:208:            if skill_size > ctx.limits.max_skill_size_bytes:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:210:                    f"Skill '{skill_ref}' size {skill_size:,} bytes "
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:211:                    f"exceeds limit of {ctx.limits.max_skill_size_bytes:,} bytes"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:214:                from google.adk.skills import load_skill_from_dir
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:216:                skill = load_skill_from_dir(skill_path)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:217:                loaded_skills.append(skill)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:220:                    f"Failed to load skill '{skill_ref}': {e}"
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:223:        skill_instructions = getattr(skill, "instructions", None)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:224:        if isinstance(skill_instructions, str):
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:225:            inst_len = len(skill_instructions)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:226:        elif skill_path is not None and (skill_path / "SKILL.md").is_file():
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:228:                (skill_path / "SKILL.md").read_text(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:236:            ctx.check_instruction_length(inst_len, f"skill:{skill_ref}")  # type: ignore[attr-defined]
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:238:            check_instruction_length("x" * inst_len, f"skill:{skill_ref}", ctx)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:253:    skill_toolset_cls = _get_skill_toolset_cls(ctx)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:255:        return skill_toolset_cls(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:256:            skills=loaded_skills,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:269:    "_get_skill_toolset_cls",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:270:    "resolve_skills",
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:226:        elif skill_path is not None and (skill_path / "SKILL.md").is_file():
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/resolvers/tools.py:228:                (skill_path / "SKILL.md").read_text(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:5:and ADK skills (directories containing SKILL.md). Discovered assets are catalogued into
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:156:        if sf.name == "SKILL.md":
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:508:    of a ``SKILL.md`` file. If multiple skill directories share the same folder name, their
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:517:    """Absolute path to the skill directory containing the ``SKILL.md`` file."""
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:568:    Scans the submission directory tree for any directory containing a ``SKILL.md`` file.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/adk_submission/discovery.py:598:    for p in sorted(root.rglob("SKILL.md")):
+   151	def resolve(target, containing, names):
+   152	    """Resolve an include/config_path value; None if missing or ambiguous."""
+   153	    if not isinstance(target, str) or not target:
+   154	        return None
+   155	    cands = set()
+   156	    for base in ('', posixpath.dirname(containing)):
+   157	        p = posixpath.normpath(posixpath.join(base, target))
+   158	        if p in names:
+   159	            cands.add(p)
+   160	    return cands.pop() if len(cands) == 1 else None
+   161	
+   162	
+   163	def allowed_files(ref):
+   164	    """{file: {path tuple: knob}} for files whose knob lines may change (derived from REFERENCE)."""
+   165	    names, out, notes = set(ref), {}, []
+   166	    if EVAL_CONFIG in names:
+   167	        out[EVAL_CONFIG] = dict(EVAL_PATHS)
+   168	    todo, done = [ROOT_AGENT] if ROOT_AGENT in names else [], set()
+   169	    while todo:
+   170	        doc = todo.pop()
+   171	        if doc in done:
+   172	            continue
+   173	        done.add(doc)
+   174	        try:
+   175	            root = compose(ref[doc], doc)
+   176	            nodes = list(walk_paths(root)) if root is not None else []
+   177	        except ValueError as e:
+   178	            notes.append(f'agent doc {doc} not analyzable, no allowance: {e}')
+   179	            continue
+   180	        perms = out.setdefault(doc, {})
+   181	        for path, node in nodes:
+   182	            if (len(path) >= 2 and path[-1] == 'config_path' and 'agent_tool' in path
+   183	                    and isinstance(node, yaml.ScalarNode)):
+   184	                t = resolve(node.value, doc, names)
+   185	                if t is None:
+   186	                    notes.append(f'{doc}: config_path {node.value!r} missing/ambiguous')
+   187	                else:
+   188	                    todo.append(t)
+   189	        for path, node in nodes:
+   190	            if path == ('generate_content_config',):
+   191	                if isinstance(node, yaml.MappingNode):
+   192	                    for rel, knob in GCC_REL.items():
+   193	                        perms[('generate_content_config',) + rel] = knob
+   194	                elif isinstance(node, yaml.ScalarNode) and node.tag == '!include':
+   195	                    t = resolve(node.value, doc, names)
+   196	                    if t is None:
+   197	                        notes.append(f'{doc}: gcc include {node.value!r} missing/ambiguous, no allowance')
+   198	                    else:
+   199	                        out.setdefault(t, {}).update(GCC_REL)
+   200	    return out, notes
+   201	
+   202	
+   203	def parse_value(knob, text):
+   204	    pat, lo, allow_float, strict = DOMAINS[knob]
+   205	    if not re.fullmatch(pat, text):
+   206	        return None
+   207	    v = float(text) if allow_float else int(text)
+   208	    if (strict and v <= lo) or v < lo:
+   209	        return None
+   210	    return v
+
+exec
+/bin/bash -lc "rg -n 'def load_skill_from_dir|references|resources' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills -g '*.py' | head -80 && sed -n '120,210p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py:234:  references = _load_dir(skill_dir / "references")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py:238:  resources = models.Resources(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py:239:      references=references,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py:247:      resources=resources,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py:440:    references = _load_zip_dir("references")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py:444:    resources = models.Resources(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py:445:        references=references,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py:453:        resources=resources,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py:519:  only need the skill metadata without loading instructions or resources.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py:752:  references = _load_files_in_dir("references")
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py:756:  resources = models.Resources(
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py:757:      references=references,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py:765:      resources=resources,
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/models.py:153:      references: Additional markdown files with instructions, workflows, or
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/models.py:160:  references: dict[str, str | bytes] = {}
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/models.py:173:    return self.references.get(reference_id)
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/models.py:197:  def list_references(self) -> list[str]:
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/models.py:199:    return list(self.references.keys())
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/models.py:211:  """Complete skill representation including frontmatter, instructions, and resources.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/models.py:222:      resources: L3 skill content: additional instructions, assets, and scripts.
+/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/models.py:227:  resources: Resources = Resources()
+  Args:
+    raw_scripts: Mapping of relative path to raw script content.
+
+  Returns:
+    Mapping of relative path to `Script`, omitting any script that is not
+    UTF-8 text, since `Script.src` holds source code.
+  """
+  scripts = {}
+  for name, src in raw_scripts.items():
+    if isinstance(src, bytes):
+      try:
+        src = src.decode("utf-8")
+      except UnicodeDecodeError:
+        logging.warning("Skipping non-UTF-8 skill script '%s'.", name)
+        continue
+    scripts[name] = models.Script(src=src)
+  return scripts
+
+
+def _parse_skill_md_content(content: str) -> tuple[dict, str]:
+  """Parse SKILL.md from raw content string.
+
+  Args:
+    content: The string content of SKILL.md.
+
+  Returns:
+    Tuple of (parsed_frontmatter_dict, body_string).
+
+  Raises:
+    ValueError: If SKILL.md is invalid.
+  """
+  if not content.startswith("---"):
+    raise ValueError("SKILL.md must start with YAML frontmatter (---)")
+
+  parts = content.split("---", 2)
+  if len(parts) < 3:
+    raise ValueError("SKILL.md frontmatter not properly closed with ---")
+
+  frontmatter_str = parts[1]
+  body = parts[2].strip()
+
+  try:
+    parsed = yaml.safe_load(frontmatter_str)
+  except yaml.YAMLError as e:
+    raise ValueError(f"Invalid YAML in frontmatter: {e}") from e
+
+  if not isinstance(parsed, dict):
+    raise ValueError("SKILL.md frontmatter must be a YAML mapping")
+
+  return parsed, body
+
+
+def _parse_skill_md(
+    skill_dir: pathlib.Path,
+) -> tuple[dict, str, pathlib.Path]:
+  """Parse SKILL.md from a skill directory.
+
+  Args:
+    skill_dir: Resolved path to the skill directory.
+
+  Returns:
+    Tuple of (parsed_frontmatter_dict, body_string, skill_md_path).
+
+  Raises:
+    FileNotFoundError: If the directory or SKILL.md is not found.
+    ValueError: If SKILL.md is invalid.
+  """
+  if not skill_dir.is_dir():
+    raise FileNotFoundError(f"Skill directory '{skill_dir}' not found.")
+
+  skill_md = None
+  for name in ("SKILL.md", "skill.md"):
+    path = skill_dir / name
+    if path.exists():
+      skill_md = path
+      break
+
+  if skill_md is None:
+    raise FileNotFoundError(f"SKILL.md not found in '{skill_dir}'.")
+
+  content = skill_md.read_text(encoding="utf-8")
+  parsed, body = _parse_skill_md_content(content)
+
+  return parsed, body, skill_md
+
+
+def _load_skill_from_dir(skill_dir: Union[str, pathlib.Path]) -> models.Skill:
+  """Load a complete skill from a directory.
+
+  Args:
+    skill_dir: Path to the skill directory.
+
+exec
+/bin/bash -lc "sed -n '210,252p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py && sed -n '285,335p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py && sed -n '400,456p' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py && rg -n '"'^def .*skill'"' /home/ubuntu/gemma-local/venv/lib/python3.13/site-packages/google/adk/skills/_utils.py" in /home/ubuntu/work/gemma
+ succeeded in 0ms:
+    skill_dir: Path to the skill directory.
+
+  Returns:
+    Skill object with all components loaded.
+
+  Raises:
+    FileNotFoundError: If the skill directory or SKILL.md is not found.
+    ValueError: If SKILL.md is invalid or the skill name does not match
+      the directory name.
+  """
+  skill_dir = pathlib.Path(skill_dir).resolve()
+
+  parsed, body, skill_md = _parse_skill_md(skill_dir)
+
+  # Use model_validate to handle aliases like allowed-tools
+  frontmatter = models.Frontmatter.model_validate(parsed)
+
+  # Validate that skill name matches the directory name
+  if skill_dir.name != frontmatter.name:
+    raise ValueError(
+        f"Skill name '{frontmatter.name}' does not match directory"
+        f" name '{skill_dir.name}'."
+    )
+
+  references = _load_dir(skill_dir / "references")
+  assets = _load_dir(skill_dir / "assets")
+  scripts = _build_scripts(_load_dir(skill_dir / "scripts"))
+
+  resources = models.Resources(
+      references=references,
+      assets=assets,
+      scripts=scripts,
+  )
+
+  skill = models.Skill(
+      frontmatter=frontmatter,
+      instructions=body,
+      resources=resources,
+  )
+  skill._uri = skill_dir.as_uri()
+  return skill
+
+
+
+  return skills
+
+
+def _read_zip_member(
+    z: zipfile.ZipFile,
+    member: Union[str, zipfile.ZipInfo],
+    budget: int,
+) -> tuple[bytes, int]:
+  """Read one archive member in fixed steps, against a byte budget.
+
+  A member can expand to far more than its central-directory entry declares,
+  but zipfile truncates the read to the declared size, so the caller's cap on
+  the declared total is what bounds the bytes returned. Reading in fixed steps
+  keeps the decompressor's transient buffer small while that happens; the
+  budget is defense in depth behind the declared-size cap.
+
+  Args:
+    z: The open archive.
+    member: The name or entry to read.
+    budget: How many more bytes may be decompressed from this archive.
+
+  Returns:
+    The member's bytes, and the budget remaining after reading it.
+
+  Raises:
+    KeyError: If the archive has no such member.
+    ValueError: If the member expands past the budget, or the archive is
+      malformed.
+  """
+  chunks = []
+  try:
+    with z.open(member) as f:
+      while True:
+        chunk = f.read(_ZIP_READ_CHUNK_BYTES)
+        if not chunk:
+          break
+        budget -= len(chunk)
+        if budget < 0:
+          raise ValueError(
+              "Skill archive is too large decompressed: it expands past the"
+              f" limit of {_MAX_ZIP_UNCOMPRESSED_BYTES} bytes."
+          )
+        chunks.append(chunk)
+  except zipfile.BadZipFile as e:
+    raise ValueError(f"Skill archive is malformed: {e}") from e
+  return b"".join(chunks), budget
+
+
+def _load_skill_from_zip_bytes(zip_bytes: bytes) -> models.Skill:
+  """Load a complete skill directly from in-memory zip file bytes.
+    parsed, body = _parse_skill_md_content(skill_md_content)
+    skill_name = parsed.get("name")
+    if not skill_name:
+      raise ValueError("SKILL.md frontmatter must contain 'name'")
+    if (
+        not isinstance(skill_name, str)
+        or pathlib.Path(skill_name).name != skill_name
+    ):
+      raise ValueError(f"Invalid skill name in SKILL.md: {skill_name}")
+
+    frontmatter = models.Frontmatter.model_validate(parsed)
+
+    # Helper to load files under a directory prefix inside the zip
+    def _load_zip_dir(prefix: str) -> dict[str, Union[str, bytes]]:
+      nonlocal budget
+      result: dict[str, Union[str, bytes]] = {}
+      if not prefix.endswith("/"):
+        prefix += "/"
+      for info in z.infolist():
+        if info.is_dir():
+          continue
+        if info.filename.startswith(prefix):
+          # Avoid cache files or similar
+          if "__pycache__" in info.filename:
+            continue
+          relative_path = info.filename[len(prefix) :]
+          if not relative_path:
+            continue
+          normalized = _validate_relative_resource_path(relative_path)
+          if normalized in result:
+            raise ValueError(
+                f"Duplicate normalized path detected: {normalized!r}"
+            )
+          data, budget = _read_zip_member(z, info, budget)
+          try:
+            result[normalized] = data.decode("utf-8")
+          except UnicodeDecodeError:
+            result[normalized] = data
+      return result
+
+    references = _load_zip_dir("references")
+    assets = _load_zip_dir("assets")
+    scripts = _build_scripts(_load_zip_dir("scripts"))
+
+    resources = models.Resources(
+        references=references,
+        assets=assets,
+        scripts=scripts,
+    )
+
+    skill = models.Skill(
+        frontmatter=frontmatter,
+        instructions=body,
+        resources=resources,
+    )
+    return skill
+
+139:def _parse_skill_md_content(content: str) -> tuple[dict, str]:
+172:def _parse_skill_md(
+206:def _load_skill_from_dir(skill_dir: Union[str, pathlib.Path]) -> models.Skill:
+253:def _load_skills_from_dir(
+334:def _load_skill_from_zip_bytes(zip_bytes: bytes) -> models.Skill:
+458:def _validate_skill_dir(
+513:def _read_skill_properties(
+536:def _list_skills_in_dir(
+592:def _list_skills_in_gcs_dir(
+666:def _load_skill_from_gcs_dir(
+
+exec
+/bin/bash -lc "PYTHONPATH=/home/ubuntu/gemma-local/venv/lib/python3.13/site-packages LITELLM_LOCAL_MODEL_COST_MAP=True /home/ubuntu/gemma-local/pyimg/cpython-3.13-linux-x86_64-gnu/bin/python3 -B - <<'PY'
+import io,sys,zipfile,yaml,posixpath
+from pathlib import Path
+sys.path.insert(0,'eval'); import finals_eligibility as f
+from adk_submission.schema import SandboxedLlmAgentConfig
+from adk_submission.yaml_loader import make_sandboxed_loader
+from google.adk.skills._utils import _load_skill_from_zip_bytes
+
+def z(files):
+ s=io.BytesIO()
+ with zipfile.ZipFile(s,'w') as a:
+  for k,v in files.items(): a.writestr(k,v)
+ s.seek(0); return s
+with zipfile.ZipFile('dist/31b-v002.zip') as a: base={n:a.read(n).decode() for n in a.namelist()}
+def load(files,name):
+ L=make_sandboxed_loader(Path('/__review_memory__'))
+ def include(loader,node):
+  target=posixpath.normpath(posixpath.join(posixpath.dirname(name),loader.construct_scalar(node)))
+  return load(files,target) if target.endswith(('.yaml','.yml')) else files[target]
+ L.add_constructor('"'!include'"',include)
+ return yaml.load(files[name],Loader=L)
+p='skills/x/references/sampling.yaml'
+ref={**base,p:base['configs/sampling.yaml'],'skills/x/SKILL.md':'---\\nname: x\\ndescription: Example skill\\n---\\nRead references/sampling.yaml and follow its values.\\n'}
+ref['agent.yaml']=base['agent.yaml'].replace('configs/sampling.yaml',p)+'skills: [skills/x]\\n'
+cand={**ref,p:ref[p].replace('max_output_tokens: 8192','max_output_tokens: 4096')}
+print('shared skill/gcc schema-valid',bool(SandboxedLlmAgentConfig.model_validate(load(ref,'agent.yaml'))))
+rs=_load_skill_from_zip_bytes(z({k.removeprefix('skills/x/'):v for k,v in ref.items() if k.startswith('skills/x/')}).getvalue())
+cs=_load_skill_from_zip_bytes(z({k.removeprefix('skills/x/'):v for k,v in cand.items() if k.startswith('skills/x/')}).getvalue())
+print('ADK skill resource changed',rs.resources.references "'!= cs.resources.references)
+print('"'shared skill verdict',f.check(z(cand),z(ref))['verdict'])
+# Targeted probes, independent of the existing regression suite.
+checks=[]
+def probe(label, ref, cand, expect):
+ r=f.check(z(cand),z(ref)); assert r['verdict']==expect,(label,r); checks.append((label,expect))
+for style in ('|','>','\"'):
+ p='instruction: '+style+'\\n  max_output_tokens: 8192\\n'+('  \"\\n' if style=='\"' else '')
+ ref={**base,'agent.yaml':base['agent.yaml'].replace('instruction: "'!include prompts/system.md'"\\n',p)}
+ probe('multiline '+style,ref,{**ref,'agent.yaml':ref['agent.yaml'].replace('  max_output_tokens: 8192','  max_output_tokens: 4096')},'INELIGIBLE')
+ref={**base,'configs/sampling.yaml':'{temperature: 0.2, max_output_tokens: 8192}\\n'}
+probe('flow decrease',ref,{**ref,'configs/sampling.yaml':ref['configs/sampling.yaml'].replace('8192','4096')},'INELIGIBLE')
+ref={**base,'configs/sampling.yaml':'max_output_tokens: 8192\\nthinking_config: "'!include thinking.yaml'"\\n','configs/thinking.yaml':'thinking_budget: 4096\\n'}
+probe('nested thinking include decrease',ref,{**ref,'configs/thinking.yaml':'thinking_budget: 2048\\n'},'INELIGIBLE')
+ref={**base,'configs/sampling.yaml':'max_output_tokens: 8192\\nthinking_config:\\n  <<: {thinking_budget: 4096}\\n'}
+probe('merged budget decrease',ref,{**ref,'configs/sampling.yaml':ref['configs/sampling.yaml'].replace('4096','2048')},'INELIGIBLE')
+ref={**base,'configs/sampling.yaml':'max_output_tokens: &n 8192\\nthinking_config:\\n  thinking_budget: *n\\n'}
+probe('aliased knobs decrease',ref,{**ref,'configs/sampling.yaml':ref['configs/sampling.yaml'].replace('8192','4096')},'INELIGIBLE')
+for text in ('0','-1','1.5','true','.nan','.inf','1e4','0x1000','04096','1_024'):
+ probe('token domain '+text,base,{**base,'configs/sampling.yaml':base['configs/sampling.yaml'].replace('max_output_tokens: 8192','max_output_tokens: '+text)},'INELIGIBLE')
+print('additional probes passed',len(checks),checks)
+PY" in /home/ubuntu/work/gemma
+ succeeded in 838ms:
+shared skill/gcc schema-valid True
+ADK skill resource changed True
+shared skill verdict ELIGIBLE
+additional probes passed 17 [('multiline |', 'INELIGIBLE'), ('multiline >', 'INELIGIBLE'), ('multiline "', 'INELIGIBLE'), ('flow decrease', 'INELIGIBLE'), ('nested thinking include decrease', 'INELIGIBLE'), ('merged budget decrease', 'INELIGIBLE'), ('aliased knobs decrease', 'INELIGIBLE'), ('token domain 0', 'INELIGIBLE'), ('token domain -1', 'INELIGIBLE'), ('token domain 1.5', 'INELIGIBLE'), ('token domain true', 'INELIGIBLE'), ('token domain .nan', 'INELIGIBLE'), ('token domain .inf', 'INELIGIBLE'), ('token domain 1e4', 'INELIGIBLE'), ('token domain 0x1000', 'INELIGIBLE'), ('token domain 04096', 'INELIGIBLE'), ('token domain 1_024', 'INELIGIBLE')]
+
+codex
+I reproduced two false-ELIGIBLE paths: an overridden merge entry authorizes an unrelated YAML asset, and a generation include can also be a skill resource whose bytes change. The original regressions pass; these cases are missing from the suite. The additional scalar, alias, flow-style, and numeric probes produced no other false-ELIGIBLE results.
+codex
+1. **BLOCKING: Overridden merge entries authorize unrelated files.** Discovery accepts any raw path containing `agent_tool` at [finals_eligibility.py:182](/home/ubuntu/work/gemma/eval/finals_eligibility.py:182), including entries discarded by YAML merging.
+
+   Reproduced using a v002-derived reference with this unchanged tool entry:
+
+   ```yaml
+   - <<:
+       agent_tool:
+         config_path: skills/config.yaml
+     agent_tool:
+       config_path: sub_agents/code_analyzer.yaml
+       skip_summarization: true
+   ```
+
+   The harness resolves this to the original v002 tool configuration; its schema accepts it. Nevertheless, the checker follows the shadowed `skills/config.yaml`. Changing that unrelated asset’s `generate_content_config.max_output_tokens` from `8192` to `1` returns **ELIGIBLE**, with zero violations.
+
+   Grant permissions only through effective agent references at verified structural locations. Conservatively ignoring merge branches would also close this reproduction. Prior BLOCKING 1 is therefore **not fully closed**.
+
+2. **BLOCKING: Generation includes bypass byte identity for shared skill resources.** [finals_eligibility.py:199](/home/ubuntu/work/gemma/eval/finals_eligibility.py:199) grants permissions without checking whether the target also belongs to a skill.
+
+   Reproduced with an unchanged, schema-valid agent declaring:
+
+   ```yaml
+   generate_content_config: !include skills/x/references/sampling.yaml
+   skills: [skills/x]
+   ```
+
+   Both bundles contain a valid `skills/x/SKILL.md`. Lowering `max_output_tokens` inside the shared resource from `8192` to `4096` returns **ELIGIBLE**. Loading both skills through the installed ADK confirms their resource contents differ.
+
+   Decision 087 explicitly requires byte-identical skills. Discover skill directories and enforce byte identity for their contents before granting generation exceptions, including files with both roles.
+
+**Non-blocking**
+
+- Valid decreases using nested `thinking_config: !include`, flow mappings, or aliases remain conservatively **INELIGIBLE**. Discovery only supports whole-generation includes at [finals_eligibility.py:194](/home/ubuntu/work/gemma/eval/finals_eligibility.py:194); the line matcher at [line 224](/home/ubuntu/work/gemma/eval/finals_eligibility.py:224) rejects flow and anchored changes. These are false-INELIGIBLE cases under your criterion.
+
+The five prior findings resolve as follows:
+
+| Prior BLOCKING | Re-review result |
+|---|---|
+| 1. Arbitrary generation namespaces | Original reproduction fixed; merge discovery still bypasses the restriction, as above. [Regression](/home/ubuntu/work/gemma/eval/tests/test_finals_eligibility.py:164) |
+| 2. Wrong relative include target | Fixed for the reported reproduction: ambiguous targets receive no allowance; unambiguous document-relative targets work. [Regressions](/home/ubuntu/work/gemma/eval/tests/test_finals_eligibility.py:178) |
+| 3. Lossy YAML comparisons | All original reproductions fixed: asset comments, duplicate instructions, and typed keys. Shared skill resources remain an uncovered exception above. [Regressions](/home/ubuntu/work/gemma/eval/tests/test_finals_eligibility.py:196) |
+| 4. ZIP entries/types discarded | Original duplicate, symlink, and directory-conflict reproductions fixed. [Regressions](/home/ubuntu/work/gemma/eval/tests/test_finals_eligibility.py:222) |
+| 5. Invalid numeric decreases | Fixed for zero/fractional token limits and fractional/negative thinking budgets. [Domain enforcement](/home/ubuntu/work/gemma/eval/finals_eligibility.py:203) |
+
+The reviewed files match commit `0d3e3b4`. All **49 existing test cases passed**, invoked directly with RAM-backed I/O because the sandbox prohibits filesystem writes. All **324 comparisons among the 18 actual `dist/` bundles completed without crashes**. Seventeen additional scalar, flow, merge, alias, and numeric probes found no further false-ELIGIBLE paths. No files were edited.
+
+**Questions:** None.
+tokens used
+77,940
