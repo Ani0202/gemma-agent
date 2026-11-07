@@ -19,7 +19,7 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (09:09Z): memguard-light, submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
+## Running jobs (09:14Z): memguard-light, review-finals-elig-light (codex, dec 087 checker), submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
 - CODEX S81: review 060833 BLOCKING 1 (base stray evidence missing could still ON-ADOPT) -> fixed 71185a3 (safety_checks(): both arms need
   available stray evidence, zero governing for arm 3 only; +5 tests incl. unrounded wall-p90 gate; 1624 pass). Re-review s81b ops/codex/review-20261107T061229.md CLEAN (no blocking) -> arm-3 metrics allowed. Report must list amended arm-2 counts separately (S81.3).
 - DEC 081 (on 020, approve A w/ changes): (1) arm-3 SMOKE (v4) PASS results/plan009_arm3_smoke.json: thinking blocks [5,10]=15, timing PASS,
