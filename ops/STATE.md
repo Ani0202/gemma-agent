@@ -1,4 +1,4 @@
-# STATE: snapshot 2026-11-07 00:09Z (cycle 167; 31b-v002 SUBMITTED + arm 2 pushed). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 00:14Z (cycle 168; dec 079 approve, waiting jobs). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
@@ -20,7 +20,10 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-## Running jobs (00:09Z): memguard-light, lb-31b-v002-wait-light, passrate-31b-v011-arm2-wait-light.
+- DEC 079: approve, nothing changes. On v002 final mail Director T (first final poll - 00:06:31Z), exact status, public score; fill json.
+  ERROR/timeout -> mail AT ONCE before any slot. Nov 8 default if v002 PENDING at 12:00Z = e4b-v002 repeat (draft updated).
+  Dec 038 evidence check 00:13Z: items 1-4 files present + schema-headed (timing e4b/31b have decision_note; lb_e4b_v002 _schema).
+## Running jobs (00:14Z): memguard-light, lb-31b-v002-wait-light, passrate-31b-v011-arm2-wait-light.
 - ARM 2 (plan 008) PUSHED gemma-31b-passrate v3 00:08:09Z: 31b-v011-p8b (staged kernel verified = dist/31b-v011.zip 4f5b078a + MANIFEST.md),
   33 ids eval/plans/007-arm1-ids.txt, ONE session, --with-verification --no-stock-probe --seed-max 803, KERNEL_BUDGET 30000 s.
   Quota BEFORE 0.00 h (00:08:06Z). On COMPLETE: waiter downloads to runs/31b-v011-p8b-arm2 + SEAL.sha256; log quota AFTER in ops/budget/kaggle.md;

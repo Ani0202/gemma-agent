@@ -28,3 +28,5 @@ Fill the two unknowns, pick the matching row, and send a 1-paragraph proposal. E
   number can say about any later bundle. 0.05 is near the floor (~6/120), so an e4b repeat says little about noise at higher scores.
 - Not proposed: e4b-v003 for Nov 8 (not packed and no smoke). Proposal: pack + review e4b-v003 on CPU Nov 7, smoke it when quota
   allows, aim for a Nov 9-10 slot (validated well before Nov 29 per the FINALS RULE).
+- DEC 079 item 3 (00:09Z Nov 7): if U1 still PENDING at 12:00Z, DEFAULT = e4b-v002 repeat (matrix row 3). Pre-req at submit time:
+  reverse config commit SUBMIT_KERNEL -> e4b kernel (config.env currently = aniket0202/gemma-submit-31b, cefb420), grep-journaled.
