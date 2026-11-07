@@ -1,13 +1,12 @@
-# STATE: snapshot 2026-11-07 07:00Z (cycle 181; DEC 084+085: v009 Gate-2 item WAIVED (085 confirms, adds nothing, does NOT re-issue auth) -> Nov 8 = 31b-v009 CONDITIONAL (dec 083 a-f); e4b-v002h AUTHORIZED CONDITIONAL, slot after 31B). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
+# STATE: snapshot 2026-11-07 09:09Z (cycle 182; 31b-v002 SCORED 0.15 -> dec 083 (a) HOLDS; DEC 084+085: v009 Gate-2 item WAIVED (085 confirms, adds nothing, does NOT re-issue auth) -> Nov 8 = 31b-v009 CONDITIONAL (dec 083 a-f); e4b-v002h AUTHORIZED CONDITIONAL, slot after 31B). Rewrite each cycle, ≤80 lines (dec 017). History: ops/journal.md.
 ## Best bundles (none validated; runtime budget still unverified, codex BLOCKING)
 - v000 (repo a12f0b7, static OK): 31b dist/31b-v000.zip 4a23e14a...efae161; e4b dist/e4b-v000.zip cc647bfb...6940e2
 - e4b-v002 (v001 + cap 1.0 + max_output_tokens 8192 x2): dist/e4b-v002.zip sha256=60c0074684ef4f9aa9cd8744d08fa29a37f3b94fc893541a8b96ceed54944dad
   SUBMITTED 2026-11-06T00:11:23Z ref 58039259; SCORED public 0.05 (COMPLETE; first final poll 05:11:49Z, T=5.007 h). results/lb_e4b_v002.json filled,
   budget row updated, Director FYI'd. No runtime fields from CLI. E4B validator acceptance VERIFIED. Next e4b submit: next UTC day at earliest. Guard v6 applied b9caae4 (dry checks rc=3 x2).
 - 31b-v002 (v001-t4 + cap 3.5): dist/31b-v002.zip sha256=e56a05e5701fa16a8dbbabb304d98f63a465511cefbb28d65850ea5ce086ec88
-  SUBMITTED 2026-11-07T00:06:31Z ref 58072907 (dec 055 ALL conds held: window open; e4b COMPLETE 0.05; T=5.007 h <= 6.0 PASS;
-  config commit cefb420 SUBMIT_KERNEL=aniket0202/gemma-submit-31b, kernel v1; veto journaled pre-submit). results/lb_31b_v002.json (PENDING);
-  waiter lb-31b-v002-wait-light -> results/lb_31b_v002.polls.csv. On final: fill json (status, score, completed window), budget row, Director FYI.
+  SUBMITTED 2026-11-07T00:06:31Z ref 58072907 (dec 055). SCORED public 0.15 (COMPLETE; first final poll 09:06:53Z, T=9.006 h,
+  bracket (8.506, 9.006] h). results/lb_31b_v002.json filled, budget row added, Director FYI'd 09:08Z (dec 079 item 2 DONE). Waiter done.
   Validation submit: expect weak LB, don't act alone; write-up notes FastAPI-hint caveat (dec 060). config.env SUBMIT_KERNEL now = 31b kernel:
   next e4b submit needs the reverse config commit first. Next submit slot: 2026-11-08 UTC (ledger blocks same-day).
 - CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 12B/E2B validator
@@ -22,7 +21,7 @@
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
 - DEC 079: approve, nothing changes. On v002 final mail Director T (first final poll - 00:06:31Z), exact status, public score; fill json.
   ERROR/timeout -> mail AT ONCE before any slot. (Nov 8 repeat default SUPERSEDED by dec 083.) Dec 038 files rechecked OK 00:13Z.
-## Running jobs (06:45Z): memguard-light, lb-31b-v002-wait-light (PENDING 06:06Z), submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
+## Running jobs (09:09Z): memguard-light, submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
 - CODEX S81: review 060833 BLOCKING 1 (base stray evidence missing could still ON-ADOPT) -> fixed 71185a3 (safety_checks(): both arms need
   available stray evidence, zero governing for arm 3 only; +5 tests incl. unrounded wall-p90 gate; 1624 pass). Re-review s81b ops/codex/review-20261107T061229.md CLEAN (no blocking) -> arm-3 metrics allowed. Report must list amended arm-2 counts separately (S81.3).
 - DEC 081 (on 020, approve A w/ changes): (1) arm-3 SMOKE (v4) PASS results/plan009_arm3_smoke.json: thinking blocks [5,10]=15, timing PASS,
@@ -74,7 +73,7 @@
 - DEC 084 item 3: e4b-v002h AUTHORIZED CONDITIONAL, checklist ops/drafts/submit-e4b-v002h-checklist.md (first UTC day: nothing pending,
   no other submit that day, AND (31b-v009 VOID or already submitted on an earlier day & not pending); reverse SUBMIT_KERNEL commit + kernel recheck first).
 ## Next 3
-1. Nov 8 00:00:30Z (submit-window-nov8-light): if 58072907 COMPLETE w/ score -> run ops/drafts/nov8-submit-31b-v009-checklist.md (waiver+Gate-4 journal first).
-   If 58072907 ERROR/timeout -> mail Director AT ONCE; v009 VOID; e4b-v002h takes the slot via its checklist. If still PENDING -> wait (auth carries).
-2. On 31b-v002 final: dec 079 item 2 FIRST (json, budget row, mail T/status/score). e4b-v002h: day after 31b-v009 submitted & not pending.
+1. Nov 8 00:00:30Z (submit-window-nov8-light): 58072907 COMPLETE 0.15 so (a) holds -> run ops/drafts/nov8-submit-31b-v009-checklist.md
+   (re-verify (a) with `kaggle competitions submissions` right before; waiver + Gate-4 journal lines first; then lb_31b_v009.json + waiter).
+2. e4b-v002h: Nov 9 at earliest (day after 31b-v009 submitted & not pending), reverse SUBMIT_KERNEL commit + kernel recheck first.
 3. On arm-3 main land: quota/budget row, seal check, classifiers, arm3 metrics, report 021 (dec 082 item 1 table layout) = next decision Director needs.
