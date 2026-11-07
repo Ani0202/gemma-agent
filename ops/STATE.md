@@ -6,7 +6,7 @@
   budget row updated, Director FYI'd. No runtime fields from CLI. E4B validator acceptance VERIFIED. Next e4b submit: next UTC day at earliest. Guard v6 applied b9caae4 (dry checks rc=3 x2).
 - 31b-v002 (v001-t4 + cap 3.5): dist/31b-v002.zip sha256=e56a05e5701fa16a8dbbabb304d98f63a465511cefbb28d65850ea5ce086ec88
   SUBMITTED 2026-11-07T00:06:31Z ref 58072907 (dec 055). SCORED public 0.15 (COMPLETE; first final poll 09:06:53Z, T=9.006 h,
-  bracket (8.506, 9.006] h). results/lb_31b_v002.json filled, budget row added, Director FYI'd 09:08Z (dec 079 item 2 DONE). Waiter done.
+  bracket (8.506, 9.006] h). json + budget row filled, Director FYI 09:08Z (dec 079 DONE). Waiter done. Dec 061(i) moot.
   Validation submit: expect weak LB, don't act alone; write-up notes FastAPI-hint caveat (dec 060). config.env SUBMIT_KERNEL now = 31b kernel:
   next e4b submit needs the reverse config commit first. Next submit slot: 2026-11-08 UTC (ledger blocks same-day).
 - CHECKLIST (dec 041 item 6): every Phase-0 [verify] in docs/COMPETITION.md is verified or listed open. OPEN: l.37 12B/E2B validator
@@ -19,8 +19,6 @@
 - Watchdog must be running: `bin/job status memguard-light` (fix6 deployed 23:37Z; stop = bin/job kill); if dead: `bin/job start memguard-light -- bin/memguard` (dec 024: always -light). Heavy jobs one at a time (waiters/memguard/codex exempt). Check `tail ops/logs/memguard.log` for KILL lines. No heavy job unless memguard runs.
 - DEC 060: v004 full-arm-B-prompt deviation ACCEPTED provisionally (report 014 covered a-c); quoting line UNSCREENED. Nov 7 31B
   submit write-up must note v002 LB = ONLY result carrying the FastAPI hint caveat. Repeat metric added to plan 007 (Addendum).
-- DEC 079: approve, nothing changes. On v002 final mail Director T (first final poll - 00:06:31Z), exact status, public score; fill json.
-  ERROR/timeout -> mail AT ONCE before any slot. (Nov 8 repeat default SUPERSEDED by dec 083.) Dec 038 files rechecked OK 00:13Z.
 ## Running jobs (09:09Z): memguard-light, submit-window-nov8-light, passrate-31b-v012-main-wait-light (kernel v5 pushed 06:27:20Z -> runs/31b-v012-p9a-main, sealed on download).
 - CODEX S81: review 060833 BLOCKING 1 (base stray evidence missing could still ON-ADOPT) -> fixed 71185a3 (safety_checks(): both arms need
   available stray evidence, zero governing for arm 3 only; +5 tests incl. unrounded wall-p90 gate; 1624 pass). Re-review s81b ops/codex/review-20261107T061229.md CLEAN (no blocking) -> arm-3 metrics allowed. Report must list amended arm-2 counts separately (S81.3).
@@ -44,7 +42,7 @@
 - PLAN 008 / 31b-v010-p8 (DONE, report 019/020): pre-reg eval/plans/008.md; prompt-level repeat guard + in-bundle submit_patch gate; NOT ship-eligible.
 - PLAN 007 PRE-REG eval/plans/007.md (e547980): arm 1 = 31b-v009-p7a1 (v006 + cap 3.5; dist/31b-v009.zip d38c55c7..., pack PASS),
   33 dev fixed order eval/plans/007-arm1-ids.txt, --with-verification --no-stock-probe, slug aniket0202/gemma-31b-passrate.
-- DEC 061: (i) v002 ERROR/timeout -> CAP-BOUND binds; (ii) v004 CPU draft, no slot. Item 6: arm E/F results schema-headed; dec 038 evidence by Nov 9 23:59Z.
+- DEC 061: (ii) v004 CPU draft, no slot. Item 6: arm E/F results schema-headed; dec 038 evidence by Nov 9 23:59Z.
 - DEC 057: no new bundle carries a repo-named hint; v000-v002 (both tracks) carry the FastAPI hint -> reports must say so. 31b-v004 CPU DRAFT 50537e1d (v007+quoting), no slot.
 - GCP $0 (project gemma-agent-839566; only l4x1 spot + cpu8 usable, dec 003). Owner policy: Kaggle first (dec 001). Kaggle GPU week of 11-07: 11.89/30 h at 06:26Z (arm 2 + arm-3 smoke done; 18.11 h left; arm-3 main est ~11 h). Log: ops/budget/kaggle.md. Resets 2026-11-14T00:00Z.
 ## Live caveats (dec 078: no FYIs for routine clean reviews; dec 022 timing (cap+S)x125+30<=660; dec 032 item 8 pending; forum: Builder posts nothing, dec 035). Standing: kernel Dockerfile.public only, no PIP_*, setup_calls logged (dec 027); -light = waiters/asks/reviews (dec 024); LORO weak (dec 014). - DEC 038 (paper, due Nov 12; evidence by Nov 9 23:59Z): (1) DONE results/failure_taxonomy_e4b_v001_v5.json (timeout 4, ok 2, ctx-ovf 1, test-edit 1);
